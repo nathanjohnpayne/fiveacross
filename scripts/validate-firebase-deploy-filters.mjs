@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import {
   cp,
   lstat,
@@ -4390,7 +4390,8 @@ function selectorNamesConfiguredCodebase(selector, inventory) {
  * whose surface this parse cannot prove maps to `null` and stays conservative:
  * no local `source` (kit, `remoteSource`; a kit's instances are keyed under
  * `UNINVENTORIED_CODEBASE`), an explicit non-Node `runtime` (its surface is not
- * a TypeScript index), a `prefix` (the CLI renames every service), any
+ * a TypeScript index), a `prefix` (the CLI renames every service; the export
+ * guard also refuses any Functions release then), any
  * `predeploy` hook in the project, in any codebase or target, other than a
  * codebase's own compile step into its entry, or any hook at all when one
  * Functions source directory is or lies inside another
@@ -4572,6 +4573,7 @@ function predeployOnlyCompiles(predeploy, scripts, sourceDir) {
     // the shell expand the operands onto another file, such as the entry.
     if (!/^[A-Za-z0-9_.@+-]+(?:\/[A-Za-z0-9_.@+-]+)*$/.test(file)) return false;
     if (file.split("/").some((segment) => segment === "." || segment === "..")) return false;
+    if (!copyDestinationIsItself(sourceDir, file)) return false;
     const extension = posix.extname(file);
     const stem = file.slice(0, file.length - extension.length);
     return !(TSC_OUTPUT_SOURCES[extension] ?? []).some((input) => existsSync(resolve(sourceDir, "src", stem + input)));
@@ -4579,10 +4581,49 @@ function predeployOnlyCompiles(predeploy, scripts, sourceDir) {
 }
 
 /**
+ * Whether `cp` onto `lib/<file>` writes that file and no other: `lib/` and
+ * each existing directory below it on the way resolve to the same place under
+ * the source directory's real path (no symlink), and an existing destination
+ * is a regular file with one link. `cp` follows a symlinked destination and
+ * writes through a hard link, so either could replace the compiled entry
+ * after `tsc` wrote it. A path that cannot be inspected fails closed.
+ */
+function copyDestinationIsItself(sourceDir, file) {
+  try {
+    const directories = ["lib", ...file.split("/").slice(0, -1)];
+    let lexical = sourceDir;
+    let canonical = realpathSync(sourceDir);
+    for (const directory of directories) {
+      lexical = resolve(lexical, directory);
+      canonical = resolve(canonical, directory);
+      if (!lstatExists(lexical)) break;
+      if (realpathSync(lexical) !== canonical) return false;
+    }
+    const destination = resolve(sourceDir, "lib", file);
+    if (!lstatExists(destination)) return true;
+    const stats = lstatSync(destination);
+    return stats.isFile() && stats.nlink === 1;
+  } catch {
+    return false;
+  }
+}
+
+// `existsSync` follows symlinks, so a dangling one reads as absent.
+function lstatExists(path) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Whether a bare `tsc` run in `sourceDir` (npm runs the script there) compiles
  * `src/index.ts` to `lib/index.js`: its `tsconfig.json` parses without error,
- * includes the index, emits (no `noEmit` or `outFile`), and maps the index to
- * that output. The mapping also keeps every output under `lib/`, since the
+ * includes the index, emits (no `noEmit` or `outFile`), rebuilds every output
+ * (no `incremental`, `composite` or `tsBuildInfoFile`, which could leave a
+ * stale entry in place), and maps the index to that output. The mapping also keeps every output under `lib/`, since the
  * common root of the inputs is then `src/`, so the build cannot write into
  * another codebase.
  */
@@ -4594,6 +4635,9 @@ function tscCompilesIndexToEntry(sourceDir) {
     if (read.error) return false;
     const parsed = ts.parseJsonConfigFileContent(read.config, ts.sys, sourceDir, undefined, configFile);
     if (parsed.errors.length > 0 || parsed.options.noEmit || parsed.options.outFile || parsed.options.out) return false;
+    // An incremental build skips inputs its build info calls current, so a
+    // stale or replaced `lib/index.js` can survive the compile.
+    if (parsed.options.incremental || parsed.options.composite || parsed.options.tsBuildInfoFile) return false;
     const index = resolve(sourceDir, "src", "index.ts");
     if (!parsed.fileNames.some((fileName) => resolve(fileName) === index)) return false;
     const outputs = ts.getOutputFileNames(parsed, index, !ts.sys.useCaseSensitiveFileNames);
@@ -4698,7 +4742,8 @@ async function protectedServiceInventory(configSource, configPath, table) {
       continue;
     }
     // A non-Node runtime, or a `prefix` (the CLI renames every service, so
-    // the family's fixed service names are not what it publishes), is opaque.
+    // the family's fixed service names are not what it publishes, and
+    // `assertEveryHttpsExportFamilied` refuses any Functions release), is opaque.
     if (
       (typeof functionsConfig.runtime === "string" && !functionsConfig.runtime.startsWith("nodejs")) ||
       (typeof functionsConfig.prefix === "string" && functionsConfig.prefix !== "")
@@ -4858,13 +4903,25 @@ function namedSelectorCodebase(selector) {
  * The export guard (#1277): a Functions deploy whose index exports an
  * onCall/onRequest function that no Cloud Run invoker family reconciles would
  * publish it unreachable, so it is refused, naming the export, before anything
- * is built. See `callable-invoker-families.mjs`.
+ * is built. See `callable-invoker-families.mjs`. So is any Functions deploy of
+ * a project with a `prefix` codebase, whose services no family can name.
  */
 function assertEveryHttpsExportFamilied(configSource, configPath) {
   const functionsConfigs = Array.isArray(configSource.functions)
     ? configSource.functions
     : [configSource.functions];
   for (const functionsConfig of functionsConfigs) {
+    // `prefix` makes the CLI publish every endpoint of the codebase under a
+    // renamed service (`build.js` applies it to each id), and every invoker
+    // wrapper reconciles fixed service names, so a callable it publishes would
+    // answer an HTML 403 whatever the inventory says (#1282).
+    if (functionsConfig && typeof functionsConfig.prefix === "string" && functionsConfig.prefix !== "") {
+      const codebase = typeof functionsConfig.codebase === "string" && functionsConfig.codebase ? functionsConfig.codebase : "default";
+      throw new UnfamiliedHttpsExportError(
+        `the Functions codebase ${codebase} sets prefix "${functionsConfig.prefix}", which renames the Cloud Run service of every function it publishes, and no invoker family reconciles a renamed service, so this deploy could publish an onCall/onRequest function answering an HTML 403. ` +
+          "Remove the prefix, or teach the invoker families and their scripts/set-*-invoker.sh wrappers the prefixed service names first",
+      );
+    }
     if (!functionsConfig || typeof functionsConfig.source !== "string") continue;
     const indexPath = resolve(dirname(configPath), functionsConfig.source, "src", "index.ts");
     if (!existsSync(indexPath)) continue;

@@ -209,10 +209,21 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
           nested: { predeploy: [compile], scripts: { build: "tsc" }, exportsUnlock: false },
           // ops is lexically separate but a symlink into the default's lib/.
           symlinked: { predeploy: [compile], scripts: { build: "tsc" }, exportsUnlock: false },
+          // The copy's destination is a symlink to the compiled entry.
+          "copy-through-symlink": {
+            predeploy: [compile],
+            scripts: { build: "tsc && cp src/contract.cjs lib/contract.cjs" },
+            exportsUnlock: false,
+          },
+          // An incremental build can leave a stale entry in place.
+          incremental: { predeploy: [compile], scripts: { build: "tsc" }, exportsUnlock: false },
         }[variant];
         await nodeSource(resolve(fixture, "ops"));
         await writeFile(resolve(fixture, "ops", "package.json"), JSON.stringify({ main: "lib/index.js", scripts }));
-        const compilerOptions = variant === "root-dir" ? { rootDir: ".", outDir: "lib" } : { rootDir: "src", outDir: "lib" };
+        const compilerOptions =
+          variant === "root-dir"
+            ? { rootDir: ".", outDir: "lib" }
+            : { rootDir: "src", outDir: "lib", ...(variant === "incremental" ? { incremental: true } : {}) };
         if (variant === "no-tsconfig") {
           await rm(resolve(fixture, "ops", "tsconfig.json"));
         } else {
@@ -251,6 +262,12 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
           await nodeSource(resolve(fixture, "functions", "ops"));
           await writeFile(resolve(fixture, "functions", "ops", "package.json"), JSON.stringify({ main: "lib/index.js", scripts }));
           await writeFile(resolve(fixture, "functions", "ops", "src", "index.ts"), "export const unrelated = 1;\n");
+        }
+        if (variant === "copy-through-symlink") {
+          await writeFile(resolve(fixture, "ops", "src", "contract.cjs"), "exports.unlockDayNow = 1;\n");
+          await mkdir(resolve(fixture, "ops", "lib"), { recursive: true });
+          await writeFile(resolve(fixture, "ops", "lib", "index.js"), "exports.unrelated = 1;\n");
+          await symlink("index.js", resolve(fixture, "ops", "lib", "contract.cjs"));
         }
         if (variant === "compile-string-mirror-copy") {
           await writeFile(resolve(fixture, "ops", "src", "contract.cjs"), "module.exports = {};\n");
@@ -640,8 +657,8 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     ["ts-default-and-object-assign-ops", ["--only", "functions:ops"], unknown, unknown],
     ["ts-default-and-bracket-module-ops", ["--only", "functions:ops"], unknown, unknown],
     ["ts-default-and-export-equals-ops", ["--only", "functions:ops"], unknown, unknown],
-    // An entry point other than the index build, a destructured export, and a
-    // service-renaming `prefix` each make the source index unauthoritative.
+    // An entry point other than the index build and a destructured export each
+    // make the source index unauthoritative.
     ["ops-variant-main", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-binding", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-import-alias", ["--only", "functions:ops"], unknown, unknown],
@@ -735,7 +752,6 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       { selected: false, conservative: false, strict: "" },
       { selected: true, conservative: false, strict: "mint" },
     ]),
-    ["ops-variant-prefix", ["--only", "functions:ops"], unknown, unknown],
     // A non-Node runtime's surface is not its TypeScript index, even if one exists.
     ["ts-default-and-python-ops", ["--only", "functions:ops"], unknown, unknown],
     ["ts-default-and-python-ops", ["--only", "functions"], unknown, unknown],
@@ -757,6 +773,8 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       "glob-copy",
       "nested",
       "symlinked",
+      "copy-through-symlink",
+      "incremental",
     ].map((variant) => [
       `ops-hook-${variant}`,
       ["--only", "functions:ops"],
@@ -798,6 +816,19 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       eventInvitationsStrictServices: invitation.strict,
     });
   });
+
+  // `prefix` renames every service the codebase publishes, which no invoker
+  // family can reconcile, so any Functions release is refused before a build.
+  it.each([["--only", "functions:ops"], ["--only", "functions"], []])(
+    "refuses a Functions release when a codebase sets prefix (%j)",
+    async (...args) => {
+      await expect(
+        withUnindexedCodebase("ops-variant-prefix", (configPath) =>
+          classifyFirebaseDeployRequest(["fiveacross", ...args], { defaultConfigPath: configPath }),
+        ),
+      ).rejects.toThrow(/sets prefix "tenant"/);
+    },
+  );
 });
 
 describe("admin-callables deploy scope (#1277)", () => {
