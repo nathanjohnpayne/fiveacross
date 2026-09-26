@@ -4905,7 +4905,11 @@ async function protectedServiceInventory(configSource, configPath, table) {
       } catch {
         main = null;
       }
-      if (typeof main !== "string" || posix.normalize(main.replaceAll("\\", "/")) !== "lib/index.js") {
+      // The entry must resolve to `<source>/lib/index.js` on this host: a
+      // backslash is a path separator only on Windows, and elsewhere names a
+      // different file (`lib\index.js`).
+      const entry = typeof main === "string" ? resolve(sourceDir, main) : null;
+      if (entry !== resolve(sourceDir, "lib", "index.js")) {
         services.set(codebase, null);
         continue;
       }

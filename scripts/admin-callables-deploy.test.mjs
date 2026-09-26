@@ -971,6 +971,24 @@ describe("admin-callables deploy scope (#1277)", () => {
     expect(result).toMatchObject(expected);
   });
 
+  it("leaves a codebase uninventoried when its entry is a backslash path that is not lib/index.js here", async () => {
+    // On POSIX `lib\index.js` is one file name, not `lib/index.js`, so the
+    // source index does not describe the entry the SDK loads.
+    const result = await withIndex(["export const unrelated = 1;"], async (configPath) => {
+      await writeFile(
+        resolve(dirname(configPath), "functions", "package.json"),
+        JSON.stringify({ main: "lib\\index.js" }),
+      );
+      return classifyFirebaseDeployRequest(["fiveacross"], { defaultConfigPath: configPath });
+    });
+
+    expect(result).toMatchObject({
+      adminCallablesInvokerSelected: true,
+      adminCallablesInvokerConservative: true,
+      adminCallablesStrictServices: "",
+    });
+  });
+
   it("does not select the family for a codebase that exports neither callable", async () => {
     const result = await withIndex(["export const unrelated = 1;"], (configPath) =>
       classifyFirebaseDeployRequest(["fiveacross"], { defaultConfigPath: configPath }),
