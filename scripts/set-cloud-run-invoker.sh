@@ -19,8 +19,10 @@ set -euo pipefail
 #
 # A `firebase deploy --only functions` can reset this — it may re-try the
 # rejected allUsers binding and report a partial failure, leaving the service
-# unreachable. Re-run the per-endpoint wrapper AFTER every Functions deploy to
-# restore the reachable state. Idempotent: if the invoker IAM check is already
+# unreachable. Re-run the per-endpoint wrapper after a Functions deploy that
+# could have released its callable (deploy.sh runs the wrappers itself for the
+# families a deploy selects; this is the manual repair path) to restore the
+# reachable state. Idempotent: if the invoker IAM check is already
 # disabled it no-ops.
 #
 # This script is not meant to be invoked directly for a specific endpoint —
