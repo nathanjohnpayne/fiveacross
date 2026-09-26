@@ -6,7 +6,13 @@ import { cp, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/pro
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkBuiltArtifact, codebasePrefixes, httpsEndpointIds, prefixedEndpointIds } from "./check-callable-families-predeploy.mjs";
+import {
+  checkBuiltArtifact,
+  codebasePrefixes,
+  guardCodebaseArgs,
+  httpsEndpointIds,
+  prefixedEndpointIds,
+} from "./check-callable-families-predeploy.mjs";
 import { CALLABLE_INVOKER_FAMILIES, httpsFunctionExports, unfamiliedHttpsNames } from "./callable-invoker-families.mjs";
 
 // The guard reads a BUILT artifact through the discovery `firebase deploy`
@@ -166,6 +172,39 @@ describe("the Functions predeploy export guard (#1283)", () => {
     expect(await check(fixture)).toMatchObject({ ok: true });
   });
 
+  it("checks only the prefix of the config the hook runs for when two configs share the source (#1329)", BUILDS, async () => {
+    // `--only functions:default` runs the predeploy hook for the default config
+    // alone, so the unselected beta config's `beta-unlockDayNow` is not released
+    // and must not be checked; the beta config's own hook checks it.
+    const fixture = await codebase({ "lib/index.js": cjs("exports.unlockDayNow = onCall(async () => 1);") });
+    await writeFile(
+      join(fixture.root, "firebase.json"),
+      JSON.stringify({
+        functions: [
+          { source: "functions", codebase: "default" },
+          { source: "functions", codebase: "beta", prefix: "beta" },
+        ],
+      }),
+    );
+    const scoped = (codebase) =>
+      checkBuiltArtifact({ sourceDir: fixture.functionsDir, projectDir: fixture.root, projectId: PROJECT, codebase });
+    expect(await scoped("default")).toMatchObject({ ok: true });
+    const beta = await scoped("beta");
+    expect(beta.ok).toBe(false);
+    expect(beta.message).toMatch(/deploys beta-unlockDayNow, an onCall/);
+    const unnamed = await scoped(undefined);
+    expect(unnamed.ok).toBe(false);
+    expect(unnamed.message).toMatch(/share .* under different prefixes \(default, beta\)/);
+
+    // As the hook: `--codebase <name>` after the source directory selects the config.
+    const env = { ...process.env, GCLOUD_PROJECT: PROJECT, PROJECT_DIR: fixture.root };
+    const hook = await run(process.execPath, [SCRIPT, fixture.functionsDir, "--codebase", "default"], { cwd: fixture.root, env });
+    expect(hook.code, hook.stderr).toBe(0);
+    const bad = await run(process.execPath, [SCRIPT, fixture.functionsDir, "--codebase"], { cwd: fixture.root, env });
+    expect(bad.code).toBe(1);
+    expect(bad.stderr).toMatch(/run it as a Functions predeploy hook/);
+  });
+
   it("refuses, rather than reads as unprefixed, a firebase.json whose Functions config it cannot read (#1328)", BUILDS, async () => {
     const fixture = await codebase({ "lib/index.js": cjs("exports.unlockDayNow = onCall(async () => 1);") });
     await writeFile(join(fixture.root, "firebase.json"), JSON.stringify({ functions: "missing.config.json" }));
@@ -272,7 +311,7 @@ describe("the Functions predeploy export guard (#1283)", () => {
 });
 
 describe("codebasePrefixes / prefixedEndpointIds (#1328)", () => {
-  it("reads every prefix firebase.json gives the source directory, as prepare.js applies them", async () => {
+  it("reads the prefixes firebase.json gives the source directory, as prepare.js applies them", async () => {
     const root = await mkdtemp(join(tmpdir(), "callable-families-prefixes-"));
     fixtures.push(root);
     const sourceDir = join(root, "functions");
@@ -289,12 +328,54 @@ describe("codebasePrefixes / prefixedEndpointIds (#1328)", () => {
         ],
       }),
     );
-    expect(codebasePrefixes({ sourceDir, projectDir: root }).sort()).toEqual(["", "beta", "kit-one"]);
+    // Several configs share the source under different prefixes, and a scoped
+    // deploy runs the hook for the selected one only (#1329): the hook names its
+    // codebase, and only that config's prefixes apply.
+    expect(codebasePrefixes({ sourceDir, projectDir: root, codebase: "default" })).toEqual([""]);
+    expect(codebasePrefixes({ sourceDir, projectDir: root, codebase: "beta" })).toEqual(["beta"]);
+    expect(codebasePrefixes({ sourceDir, projectDir: root, codebase: "one" })).toEqual(["kit-one"]);
+    // Fail closed: unnamed, the configs sharing the source are ambiguous, and a
+    // name no config sharing the source carries is refused.
+    expect(() => codebasePrefixes({ sourceDir, projectDir: root })).toThrow(
+      /3 Functions configs share .*functions under different prefixes \(default, beta, kit sample\).*--codebase/,
+    );
+    expect(() => codebasePrefixes({ sourceDir, projectDir: root, codebase: "other" })).toThrow(/no Functions config .* codebase "other"/);
+    // The `--codebase` each config's own guard entry passes is bound to that
+    // config (Codex P1 on #1333): a beta hook copied from the default config's
+    // entry, still naming default, would check the unprefixed ids and pass while
+    // beta-* went unchecked, so every invocation refuses.
+    const guard = (name) => `node scripts/check-callable-families-predeploy.mjs "$RESOURCE_DIR" --codebase ${name}`;
+    const wired = (betaName) => [
+      { source: "functions", codebase: "default", predeploy: ["npm run build", guard("default")] },
+      { source: "functions", codebase: "beta", prefix: "beta", predeploy: guard(betaName) },
+    ];
+    await writeFile(join(root, "firebase.json"), JSON.stringify({ functions: wired("beta") }));
+    expect(codebasePrefixes({ sourceDir, projectDir: root, codebase: "default" })).toEqual([""]);
+    expect(codebasePrefixes({ sourceDir, projectDir: root, codebase: "beta" })).toEqual(["beta"]);
+    await writeFile(join(root, "firebase.json"), JSON.stringify({ functions: wired('"default"') }));
+    for (const codebase of ["default", "beta", undefined]) {
+      expect(() => codebasePrefixes({ sourceDir, projectDir: root, codebase }), String(codebase)).toThrow(
+        /config beta runs the export guard with --codebase "default", which is not that config/,
+      );
+    }
+    expect(guardCodebaseArgs(["npm run build", guard("a"), "node other.mjs --codebase b", `${guard("'c'")} && ${guard("d")}`])).toEqual([
+      "a",
+      "c",
+      "d",
+    ]);
+    // Another command in the same shell string is not the guard (CodeRabbit on
+    // #1333): only the guard invocation's own `--codebase` counts.
+    expect(guardCodebaseArgs(`${guard("default")} && echo --codebase beta; x --codebase=y | z\n${guard('"e"')}`)).toEqual([
+      "default",
+      "e",
+    ]);
     // A source directory no config names is unprefixed.
     expect(codebasePrefixes({ sourceDir: join(root, "elsewhere"), projectDir: root })).toEqual([""]);
     // A config with no source deploys the CLI default functions/.
     await writeFile(join(root, "firebase.json"), JSON.stringify({ functions: { prefix: "solo" } }));
     expect(codebasePrefixes({ sourceDir, projectDir: root })).toEqual(["solo"]);
+    // Single codebase: naming it changes nothing.
+    expect(codebasePrefixes({ sourceDir, projectDir: root, codebase: "default" })).toEqual(["solo"]);
     // An import-path `functions` key is materialized from the file it names, as
     // the deploy's own Config does (Codex P2 / CodeRabbit P1 on #1328).
     await writeFile(join(root, "functions.config.json"), JSON.stringify({ source: "functions", prefix: "imported" }));

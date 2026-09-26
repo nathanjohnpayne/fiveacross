@@ -25,8 +25,13 @@
 // The ids checked are the ids the deploy publishes: `prepare.js` renames every
 // discovered endpoint `<prefix>-<id>` when the codebase sets a `prefix` (and
 // `kit-<instance>-<id>` for a kit), so the same renaming is applied here, read
-// from the project's firebase.json for every Functions config whose source is
-// this directory.
+// from the project's firebase.json for the Functions config this hook runs for.
+// firebase-tools runs a config's predeploy chain once per selected config but
+// tells the hook only the source directory (#1329), so when several configs
+// share this directory under different prefixes each config's hook entry names
+// its codebase (or kit instance) with `--codebase <name>`, and an unnamed hook
+// refuses rather than guess or check the union. A config whose own entry names
+// a sibling config refuses too, so a copied hook cannot check the wrong prefix.
 //
 // Discovery runs with the environment `prepare.js` builds for it, from what a
 // hook can know: the source directory's `.env` and `.env.<project id>` files,
@@ -63,9 +68,12 @@ export function httpsEndpointIds(discovered) {
  * The endpoint-id prefixes `firebase deploy` gives the codebase at `sourceDir`,
  * from `projectDir`'s firebase.json: `prepare.js` applies `applyEndpointPrefix`
  * after discovery, with a config's `prefix`, or `kit-<instance>` for each
- * instance of a kit. `""` is no prefix. Every Functions config whose source is
- * `sourceDir` contributes (firebase-tools allows one source under several
- * prefixes); a directory no config names is unprefixed.
+ * instance of a kit. `""` is no prefix. A directory no config names is
+ * unprefixed. firebase-tools allows one source under several configs, and a
+ * scoped deploy runs the hook only for the selected ones (#1329), so
+ * `codebase` (a codebase name, `default` when a config sets none, or a kit
+ * instance) selects the config the hook runs for. Unnamed, the configs sharing
+ * the source must agree on their prefixes, or this throws naming them.
  *
  * The config is read as the deploy (and the classifier) reads it, through
  * firebase-tools' own `Config`, so a `functions` key that is an import path is
@@ -73,7 +81,7 @@ export function httpsEndpointIds(discovered) {
  * recognise throws, and the caller refuses: an unreadable shape is never taken
  * to mean "no prefix".
  */
-export function codebasePrefixes({ sourceDir, projectDir }) {
+export function codebasePrefixes({ sourceDir, projectDir, codebase }) {
   const configFile = join(projectDir, "firebase.json");
   if (!existsSync(configFile)) return [""];
   const config = new Config(JSON.parse(readFileSync(configFile, "utf8")), {
@@ -84,7 +92,7 @@ export function codebasePrefixes({ sourceDir, projectDir }) {
   const functions = config.get("functions");
   const unrecognised = (entry) =>
     new Error(`firebase.json has a Functions config the export guard does not recognise: ${JSON.stringify(entry)}`);
-  const prefixes = new Set();
+  const sharing = [];
   for (const entry of functions === undefined ? [] : [functions].flat()) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw unrecognised(entry);
     if (entry.source !== undefined && typeof entry.source !== "string") throw unrecognised(entry);
@@ -93,14 +101,70 @@ export function codebasePrefixes({ sourceDir, projectDir }) {
     // with neither to the CLI's `functions/`.
     if (entry.source === undefined && entry.remoteSource !== undefined) continue;
     if (resolve(projectDir, entry.source ?? "functions") !== resolve(sourceDir)) continue;
+    let shared;
     if (isKitConfig(entry)) {
       if (!entry.instances || typeof entry.instances !== "object" || Array.isArray(entry.instances)) throw unrecognised(entry);
-      for (const instance of Object.keys(entry.instances)) prefixes.add(addKitPrefix(instance));
+      const instances = Object.keys(entry.instances);
+      shared = { label: `kit ${entry.kit}`, names: instances, prefixes: instances.map(addKitPrefix) };
     } else {
-      prefixes.add(entry.prefix ?? "");
+      const name = entry.codebase ?? "default";
+      shared = { label: name, names: [name], prefixes: [entry.prefix ?? ""] };
+    }
+    // firebase-tools never tells the hook which config it runs for, so the
+    // `--codebase` a config's own predeploy entry passes is bound to that config
+    // here: a hook copied from a sibling config that still names the sibling
+    // would check the sibling's prefixes and pass while this config's ids went
+    // unchecked (Codex P1 on #1333), so it refuses instead.
+    if (entry.predeploy !== undefined && typeof entry.predeploy !== "string" && !Array.isArray(entry.predeploy)) {
+      throw unrecognised(entry);
+    }
+    for (const named of guardCodebaseArgs(entry.predeploy)) {
+      if (!shared.names.includes(named)) {
+        throw new Error(
+          `the predeploy entry of the Functions config ${shared.label} runs the export guard with --codebase "${named}", ` +
+            "which is not that config; each config's guard entry must name its own codebase",
+        );
+      }
+    }
+    sharing.push(shared);
+  }
+  if (codebase !== undefined) {
+    const selected = sharing.find(({ names }) => names.includes(codebase));
+    if (!selected) {
+      throw new Error(`firebase.json has no Functions config for ${sourceDir} with codebase "${codebase}"`);
+    }
+    return selected.prefixes;
+  }
+  if (sharing.length === 0) return [""];
+  const distinct = new Set(sharing.map(({ prefixes }) => JSON.stringify([...prefixes].sort())));
+  if (distinct.size > 1) {
+    throw new Error(
+      `${sharing.length} Functions configs share ${sourceDir} under different prefixes (${sharing.map(({ label }) => label).join(", ")}), ` +
+        "and the hook does not say which one it runs for; pass --codebase <name> after the source directory in each config's predeploy entry",
+    );
+  }
+  return sharing[0].prefixes;
+}
+
+/**
+ * The `--codebase` values a Functions config's `predeploy` passes to this
+ * guard: every name after `--codebase`, bare or quoted, in a shell command that
+ * runs `check-callable-families-predeploy.mjs`. firebase-tools runs each hook
+ * through a shell, so a hook string is split at `&&`, `||`, `;`, `|` and
+ * newlines first, and another command's `--codebase` is not the guard's.
+ */
+export function guardCodebaseArgs(predeploy) {
+  const named = [];
+  for (const hook of predeploy === undefined ? [] : [predeploy].flat()) {
+    if (typeof hook !== "string") continue;
+    for (const command of hook.split(/&&|\|\||[;|\n]/)) {
+      if (!command.includes("check-callable-families-predeploy.mjs")) continue;
+      for (const match of command.matchAll(/--codebase(?:\s+|=)(?:"([^"]*)"|'([^']*)'|(\S+))/g)) {
+        named.push(match[1] ?? match[2] ?? match[3]);
+      }
     }
   }
-  return prefixes.size > 0 ? [...prefixes] : [""];
+  return named;
 }
 
 /** `ids` as the deploy publishes them under each of `prefixes`, sorted. */
@@ -136,11 +200,11 @@ export async function discoverBuiltEndpoints({ sourceDir, projectDir, projectId 
  * The guard's verdict for one built codebase: `{ ok, message }`. Never throws;
  * a discovery that fails is a refusal.
  */
-export async function checkBuiltArtifact({ sourceDir, projectDir, projectId }) {
+export async function checkBuiltArtifact({ sourceDir, projectDir, projectId, codebase }) {
   let discovered;
   let prefixes;
   try {
-    prefixes = codebasePrefixes({ sourceDir, projectDir });
+    prefixes = codebasePrefixes({ sourceDir, projectDir, codebase });
     discovered = await discoverBuiltEndpoints({ sourceDir, projectDir, projectId });
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -170,21 +234,26 @@ export async function checkBuiltArtifact({ sourceDir, projectDir, projectId }) {
 }
 
 async function main() {
-  const sourceArg = process.argv[2] ?? process.env.RESOURCE_DIR;
+  // `<source dir> [--codebase <name>]`; anything else is a miswired hook.
+  const [first, ...rest] = process.argv.slice(2);
+  const sourceArg = first ?? process.env.RESOURCE_DIR;
   const projectId = process.env.GCLOUD_PROJECT;
+  const wellFormed = rest.length === 0 || (rest.length === 2 && rest[0] === "--codebase" && rest[1] !== "");
   let verdict;
-  if (!sourceArg || !projectId) {
+  if (!sourceArg || sourceArg.startsWith("--") || !projectId || !wellFormed) {
     verdict = {
       ok: false,
       message:
         "✗ HTTPS export guard: run it as a Functions predeploy hook, with the built source directory as its argument " +
-        '(node scripts/check-callable-families-predeploy.mjs "$RESOURCE_DIR") and GCLOUD_PROJECT set by firebase deploy.',
+        '(node scripts/check-callable-families-predeploy.mjs "$RESOURCE_DIR", optionally followed by --codebase <name>) ' +
+        "and GCLOUD_PROJECT set by firebase deploy.",
     };
   } else {
     verdict = await checkBuiltArtifact({
       sourceDir: resolve(sourceArg),
       projectDir: resolve(process.env.PROJECT_DIR ?? process.cwd()),
       projectId,
+      codebase: rest[1],
     });
   }
   // Exit explicitly, once the verdict is written: the runtime delegate's
