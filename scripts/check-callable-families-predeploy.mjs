@@ -148,15 +148,20 @@ export function codebasePrefixes({ sourceDir, projectDir, codebase }) {
 
 /**
  * The `--codebase` values a Functions config's `predeploy` passes to this
- * guard: every name after `--codebase` in a hook command that runs
- * `check-callable-families-predeploy.mjs`, bare or quoted.
+ * guard: every name after `--codebase`, bare or quoted, in a shell command that
+ * runs `check-callable-families-predeploy.mjs`. firebase-tools runs each hook
+ * through a shell, so a hook string is split at `&&`, `||`, `;`, `|` and
+ * newlines first, and another command's `--codebase` is not the guard's.
  */
 export function guardCodebaseArgs(predeploy) {
   const named = [];
-  for (const command of predeploy === undefined ? [] : [predeploy].flat()) {
-    if (typeof command !== "string" || !command.includes("check-callable-families-predeploy.mjs")) continue;
-    for (const match of command.matchAll(/--codebase(?:\s+|=)(?:"([^"]*)"|'([^']*)'|([^\s;&|]+))/g)) {
-      named.push(match[1] ?? match[2] ?? match[3]);
+  for (const hook of predeploy === undefined ? [] : [predeploy].flat()) {
+    if (typeof hook !== "string") continue;
+    for (const command of hook.split(/&&|\|\||[;|\n]/)) {
+      if (!command.includes("check-callable-families-predeploy.mjs")) continue;
+      for (const match of command.matchAll(/--codebase(?:\s+|=)(?:"([^"]*)"|'([^']*)'|(\S+))/g)) {
+        named.push(match[1] ?? match[2] ?? match[3]);
+      }
     }
   }
   return named;

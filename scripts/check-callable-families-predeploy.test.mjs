@@ -363,6 +363,12 @@ describe("codebasePrefixes / prefixedEndpointIds (#1328)", () => {
       "c",
       "d",
     ]);
+    // Another command in the same shell string is not the guard (CodeRabbit on
+    // #1333): only the guard invocation's own `--codebase` counts.
+    expect(guardCodebaseArgs(`${guard("default")} && echo --codebase beta; x --codebase=y | z\n${guard('"e"')}`)).toEqual([
+      "default",
+      "e",
+    ]);
     // A source directory no config names is unprefixed.
     expect(codebasePrefixes({ sourceDir: join(root, "elsewhere"), projectDir: root })).toEqual([""]);
     // A config with no source deploys the CLI default functions/.
