@@ -30,7 +30,8 @@
 // tells the hook only the source directory (#1329), so when several configs
 // share this directory under different prefixes each config's hook entry names
 // its codebase (or kit instance) with `--codebase <name>`, and an unnamed hook
-// refuses rather than guess or check the union.
+// refuses rather than guess or check the union. A config whose own entry names
+// a sibling config refuses too, so a copied hook cannot check the wrong prefix.
 //
 // Discovery runs with the environment `prepare.js` builds for it, from what a
 // hook can know: the source directory's `.env` and `.env.<project id>` files,
@@ -100,14 +101,32 @@ export function codebasePrefixes({ sourceDir, projectDir, codebase }) {
     // with neither to the CLI's `functions/`.
     if (entry.source === undefined && entry.remoteSource !== undefined) continue;
     if (resolve(projectDir, entry.source ?? "functions") !== resolve(sourceDir)) continue;
+    let shared;
     if (isKitConfig(entry)) {
       if (!entry.instances || typeof entry.instances !== "object" || Array.isArray(entry.instances)) throw unrecognised(entry);
       const instances = Object.keys(entry.instances);
-      sharing.push({ label: `kit ${entry.kit}`, names: instances, prefixes: instances.map(addKitPrefix) });
+      shared = { label: `kit ${entry.kit}`, names: instances, prefixes: instances.map(addKitPrefix) };
     } else {
       const name = entry.codebase ?? "default";
-      sharing.push({ label: name, names: [name], prefixes: [entry.prefix ?? ""] });
+      shared = { label: name, names: [name], prefixes: [entry.prefix ?? ""] };
     }
+    // firebase-tools never tells the hook which config it runs for, so the
+    // `--codebase` a config's own predeploy entry passes is bound to that config
+    // here: a hook copied from a sibling config that still names the sibling
+    // would check the sibling's prefixes and pass while this config's ids went
+    // unchecked (Codex P1 on #1333), so it refuses instead.
+    if (entry.predeploy !== undefined && typeof entry.predeploy !== "string" && !Array.isArray(entry.predeploy)) {
+      throw unrecognised(entry);
+    }
+    for (const named of guardCodebaseArgs(entry.predeploy)) {
+      if (!shared.names.includes(named)) {
+        throw new Error(
+          `the predeploy entry of the Functions config ${shared.label} runs the export guard with --codebase "${named}", ` +
+            "which is not that config; each config's guard entry must name its own codebase",
+        );
+      }
+    }
+    sharing.push(shared);
   }
   if (codebase !== undefined) {
     const selected = sharing.find(({ names }) => names.includes(codebase));
@@ -125,6 +144,22 @@ export function codebasePrefixes({ sourceDir, projectDir, codebase }) {
     );
   }
   return sharing[0].prefixes;
+}
+
+/**
+ * The `--codebase` values a Functions config's `predeploy` passes to this
+ * guard: every name after `--codebase` in a hook command that runs
+ * `check-callable-families-predeploy.mjs`, bare or quoted.
+ */
+export function guardCodebaseArgs(predeploy) {
+  const named = [];
+  for (const command of predeploy === undefined ? [] : [predeploy].flat()) {
+    if (typeof command !== "string" || !command.includes("check-callable-families-predeploy.mjs")) continue;
+    for (const match of command.matchAll(/--codebase(?:\s+|=)(?:"([^"]*)"|'([^']*)'|([^\s;&|]+))/g)) {
+      named.push(match[1] ?? match[2] ?? match[3]);
+    }
+  }
+  return named;
 }
 
 /** `ids` as the deploy publishes them under each of `prefixes`, sorted. */

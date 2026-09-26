@@ -6,7 +6,13 @@ import { cp, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/pro
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkBuiltArtifact, codebasePrefixes, httpsEndpointIds, prefixedEndpointIds } from "./check-callable-families-predeploy.mjs";
+import {
+  checkBuiltArtifact,
+  codebasePrefixes,
+  guardCodebaseArgs,
+  httpsEndpointIds,
+  prefixedEndpointIds,
+} from "./check-callable-families-predeploy.mjs";
 import { CALLABLE_INVOKER_FAMILIES, httpsFunctionExports, unfamiliedHttpsNames } from "./callable-invoker-families.mjs";
 
 // The guard reads a BUILT artifact through the discovery `firebase deploy`
@@ -334,6 +340,29 @@ describe("codebasePrefixes / prefixedEndpointIds (#1328)", () => {
       /3 Functions configs share .*functions under different prefixes \(default, beta, kit sample\).*--codebase/,
     );
     expect(() => codebasePrefixes({ sourceDir, projectDir: root, codebase: "other" })).toThrow(/no Functions config .* codebase "other"/);
+    // The `--codebase` each config's own guard entry passes is bound to that
+    // config (Codex P1 on #1333): a beta hook copied from the default config's
+    // entry, still naming default, would check the unprefixed ids and pass while
+    // beta-* went unchecked, so every invocation refuses.
+    const guard = (name) => `node scripts/check-callable-families-predeploy.mjs "$RESOURCE_DIR" --codebase ${name}`;
+    const wired = (betaName) => [
+      { source: "functions", codebase: "default", predeploy: ["npm run build", guard("default")] },
+      { source: "functions", codebase: "beta", prefix: "beta", predeploy: guard(betaName) },
+    ];
+    await writeFile(join(root, "firebase.json"), JSON.stringify({ functions: wired("beta") }));
+    expect(codebasePrefixes({ sourceDir, projectDir: root, codebase: "default" })).toEqual([""]);
+    expect(codebasePrefixes({ sourceDir, projectDir: root, codebase: "beta" })).toEqual(["beta"]);
+    await writeFile(join(root, "firebase.json"), JSON.stringify({ functions: wired('"default"') }));
+    for (const codebase of ["default", "beta", undefined]) {
+      expect(() => codebasePrefixes({ sourceDir, projectDir: root, codebase }), String(codebase)).toThrow(
+        /config beta runs the export guard with --codebase "default", which is not that config/,
+      );
+    }
+    expect(guardCodebaseArgs(["npm run build", guard("a"), "node other.mjs --codebase b", `${guard("'c'")} && ${guard("d")}`])).toEqual([
+      "a",
+      "c",
+      "d",
+    ]);
     // A source directory no config names is unprefixed.
     expect(codebasePrefixes({ sourceDir: join(root, "elsewhere"), projectDir: root })).toEqual([""]);
     // A config with no source deploys the CLI default functions/.
