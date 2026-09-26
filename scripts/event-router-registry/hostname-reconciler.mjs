@@ -545,6 +545,8 @@ function candidateCondition(candidate, mirror) {
   if (source.eventId !== mirror.eventId || source.slug !== mirror.slug) return 'repointed';
   if ([source, ROOT_HOSTS.get(host) ?? source].some((s) => s.edition !== mirror.edition)) return 'edition-mismatch';
   if (source.status !== 'active') return source.status;
+  // A held recovery lock means an exact-host WAF block contains the host.
+  if (candidate.row.flags.includes('locked')) return 'locked';
   return CONVERGED_STATES.has(candidate.row.state) ? 'serving' : 'not-edge-converged';
 }
 
@@ -559,10 +561,10 @@ function candidateCondition(candidate, mirror) {
  *
  * A home is a non-mirror host whose source is an `active` route for the
  * mirror's Event, host Edition and slug (the proof's three) and whose
- * classification is converged. A finding lists every host in the listing
- * that was or could be that home: any non-mirror host whose source or ledger
- * names the Event, the Event subdomain labelled with the mirror's slug, and
- * every non-mirror root host of the mirror's Edition.
+ * classification is converged, with no recovery lock held. A finding lists
+ * every host in the listing that was or could be that home: any non-mirror
+ * host whose source or ledger names the Event, the Event subdomain labelled
+ * with the mirror's slug, and every non-mirror root host of its Edition.
  */
 function auditMirrorReplacements(entries, rows) {
   const hosts = entries.map((entry, index) => {

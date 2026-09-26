@@ -1066,6 +1066,14 @@ describe('brand-mirror replacement audit (#1295)', () => {
     expect(audit.findings[0].candidates).toEqual([expect.objectContaining({ condition: 'edition-mismatch' })]);
   });
 
+  it('accepts no home whose recovery lock is held, because a WAF block contains it', async () => {
+    const locked = { ...host(HOST, hostnameDocument()), audit: auditPage({ recoveryLock: HELD_LOCK }) };
+    const audit = await auditOf(mirror(), locked);
+    expect(audit.findings[0].candidates).toEqual([
+      expect.objectContaining({ host: HOST, condition: 'locked', state: 'already-correct' }),
+    ]);
+  });
+
   it('reports findings without refusing, and still refuses an unreadable audit page', async () => {
     const report = await reconcileHostnameReplicas(
       input(),
