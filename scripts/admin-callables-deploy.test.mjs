@@ -380,6 +380,19 @@ describe("single-service invoker families across Functions codebases (#1299)", (
     expect(await withCodebases(TWO_CODEBASES, args)).toMatchObject({ functionsAttempted: true, ...fields(bug, email, auth) });
   });
 
+  it("keeps only the exchange half strict when the selected codebase exports exchange alone", async () => {
+    const ops = {
+      codebase: "ops",
+      source: "ops",
+      index: [OPS_SINGLES[0], "export const submitBugReport = onCall(async () => 1);", "export const exchangeAuthHandoff = onCall(async () => 1);"],
+    };
+    expect(await withCodebases([UNRELATED, ops], ["--only", "functions:ops"])).toMatchObject({
+      authHandoffInvokerSelected: true,
+      authHandoffInvokerConservative: false,
+      authHandoffStrictHalf: "exchange",
+    });
+  });
+
   it("keeps both auth-handoff halves strict when the selected codebase exports both", async () => {
     const ops = { codebase: "ops", source: "ops", index: [...OPS_SINGLES, "export const exchangeAuthHandoff = onCall(async () => 1);"] };
     expect(await withCodebases([UNRELATED, ops], ["--only", "functions:ops"])).toMatchObject(fields("S", "-", "S"));
