@@ -10,10 +10,15 @@ import { classifyFirebaseDeployRequest } from "./validate-firebase-deploy-filter
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 // A Node Functions source: `src/` plus the `package.json` whose presence makes
-// the CLI pick the Node runtime, with the conventional `lib/index.js` entry.
+// the CLI pick the Node runtime, with the conventional `lib/index.js` entry,
+// and the `tsconfig.json` that compiles `src/index.ts` to it.
 async function nodeSource(dir) {
   await mkdir(resolve(dir, "src"), { recursive: true });
   await writeFile(resolve(dir, "package.json"), JSON.stringify({ main: "lib/index.js" }));
+  await writeFile(
+    resolve(dir, "tsconfig.json"),
+    JSON.stringify({ compilerOptions: { rootDir: "src", outDir: "lib" }, include: ["src"] }),
+  );
 }
 
 async function classify(args) {
@@ -198,28 +203,45 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
           // tsc compiles a root index.ts, not src/index.ts, to lib/index.js.
           "root-dir": { predeploy: [compile], scripts: { build: "tsc" }, exportsUnlock: false },
           "no-tsconfig": { predeploy: [compile], scripts: { build: "tsc" }, exportsUnlock: false },
+          // The shell expands the operands onto the compiled entry.
+          "glob-copy": { predeploy: [compile], scripts: { build: "tsc && cp src/*.js lib/*.js" }, exportsUnlock: false },
+          // ops lives inside the default codebase, whose compile can write into it.
+          nested: { predeploy: [compile], scripts: { build: "tsc" }, exportsUnlock: false },
         }[variant];
         await nodeSource(resolve(fixture, "ops"));
         await writeFile(resolve(fixture, "ops", "package.json"), JSON.stringify({ main: "lib/index.js", scripts }));
         const compilerOptions = variant === "root-dir" ? { rootDir: ".", outDir: "lib" } : { rootDir: "src", outDir: "lib" };
-        if (variant !== "no-tsconfig") {
+        if (variant === "no-tsconfig") {
+          await rm(resolve(fixture, "ops", "tsconfig.json"));
+        } else {
           await writeFile(
             resolve(fixture, "ops", "tsconfig.json"),
             JSON.stringify({ compilerOptions, include: variant === "root-dir" ? ["index.ts", "src"] : ["src"] }),
           );
         }
         const defaultConfig =
-          variant === "default-generator" ? { source: "functions", predeploy: ["node generate-ops.js"] } : { source: "functions" };
+          variant === "default-generator"
+            ? { source: "functions", predeploy: ["node generate-ops.js"] }
+            : variant === "nested"
+              ? { source: "functions", predeploy: [compile] }
+              : { source: "functions" };
         await writeFile(
           resolve(fixture, "firebase.json"),
           JSON.stringify({
-            functions: [defaultConfig, { source: "ops", codebase: "ops", predeploy }],
+            functions: [defaultConfig, { source: variant === "nested" ? "functions/ops" : "ops", codebase: "ops", predeploy }],
             ...(variant === "hosting-generator" ? { hosting: { public: "dist", predeploy: ["node generate-ops.js"] } } : {}),
           }),
         );
         await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export const unrelated = 1;\n");
         await writeFile(resolve(fixture, "ops", "src", "index.ts"), exportsUnlock ? header + callable : "export const unrelated = 1;\n");
         if (variant === "root-dir") await writeFile(resolve(fixture, "ops", "index.ts"), header + callable);
+        if (variant === "glob-copy") await writeFile(resolve(fixture, "ops", "src", "index.js"), "exports.unlockDayNow = 1;\n");
+        if (variant === "nested") {
+          await writeFile(resolve(fixture, "functions", "package.json"), JSON.stringify({ main: "lib/index.js", scripts }));
+          await nodeSource(resolve(fixture, "functions", "ops"));
+          await writeFile(resolve(fixture, "functions", "ops", "package.json"), JSON.stringify({ main: "lib/index.js", scripts }));
+          await writeFile(resolve(fixture, "functions", "ops", "src", "index.ts"), "export const unrelated = 1;\n");
+        }
         if (variant === "compile-string-mirror-copy") {
           await writeFile(resolve(fixture, "ops", "src", "contract.cjs"), "module.exports = {};\n");
         } else if (variant === "index-copy") {
@@ -348,6 +370,8 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
             header + callable + "declare const approvePrompts: unknown;\nexport { approvePrompts };\n",
           );
         } else if (variant === "star-ambient-clause") {
+          // `export { f }` of `declare function f` emits `exports.f = f`, a
+          // read of the runtime binding, so it stays a value.
           await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export * from './admin';\n");
           await writeFile(
             resolve(fixture, "ops", "src", "admin.ts"),
@@ -455,6 +479,20 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
           await writeFile(
             resolve(fixture, "ops", "src", "index.ts"),
             header + callable + `namespace approvePrompts { ${member} }\nexport { approvePrompts };\n`,
+          );
+        } else if (variant === "root-dir-no-hook") {
+          // With no hook, tsc's configuration still decides which index is the entry.
+          await writeFile(
+            resolve(fixture, "ops", "tsconfig.json"),
+            JSON.stringify({ compilerOptions: { rootDir: ".", outDir: "lib" }, include: ["index.ts", "src"] }),
+          );
+          await writeFile(resolve(fixture, "ops", "index.ts"), header + callable);
+          await writeFile(resolve(fixture, "ops", "src", "index.ts"), "export const unrelated = 1;\n");
+        } else if (variant === "const-enum-namespace-clause") {
+          // A namespace of const enums is erased unless compiler options preserve them.
+          await writeFile(
+            resolve(fixture, "ops", "src", "index.ts"),
+            header + callable + "namespace approvePrompts { const enum Kind { A } }\nexport { approvePrompts };\n",
           );
         } else if (variant === "const-enum-clause") {
           // A const enum is erased unless compiler options preserve it.
@@ -618,7 +656,6 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       "star-interface-clause",
       "interface-clause",
       "ambient-clause",
-      "star-ambient-clause",
       "type-reexport",
       "star-type-reexport",
       "star-hop-type-reexport",
@@ -639,7 +676,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       "value-reexport",
       "default-value-import",
       "merged-import-value",
-      "cyclic-type-reexport",
+      "star-ambient-clause",
       "ambient-default-reexport",
       "ambient-function-default-reexport",
       "value-namespace-clause",
@@ -660,6 +697,10 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     ["ops-variant-import-alias-clause", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-reexported-import-alias", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-const-enum-clause", ["--only", "functions:ops"], unknown, unknown],
+    ["ops-variant-const-enum-namespace-clause", ["--only", "functions:ops"], unknown, unknown],
+    // A type-only lookup that loops through re-exports is not decided.
+    ["ops-variant-cyclic-type-reexport", ["--only", "functions:ops"], unknown, unknown],
+    ["ops-variant-root-dir-no-hook", ["--only", "functions:ops"], unknown, unknown],
     // Codebase precedence holds for an imported functions config too.
     ...["inline-config-unlock-codebase", "imported-config-unlock-codebase"].map((layout) => [
       layout,
@@ -686,6 +727,8 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       "hosting-generator",
       "root-dir",
       "no-tsconfig",
+      "glob-copy",
+      "nested",
     ].map((variant) => [
       `ops-hook-${variant}`,
       ["--only", "functions:ops"],

@@ -2732,8 +2732,10 @@ else
 fi
 
 # An exact scope is strict only for a service its codebase exports (#1282), so
-# 25b and 25c deploy from a fixture index that exports all three (and, like the
-# admin cases, skip the params check that index has no .env for).
+# 25b and 25c deploy from a fixture index that exports all three, with the
+# tsconfig.json that compiles it to the lib/index.js entry (an index tsc does
+# not compile to the entry is uninventoried), and, like the admin cases, skip
+# the params check that index has no .env for.
 init_invitation_fixture() {
   local repo="$1" name
   init_fixture_repo "$repo"
@@ -2745,7 +2747,8 @@ init_invitation_fixture() {
     done
   } >"$repo/functions/src/index.ts"
   printf '%s\n' '{"name":"fixture-functions","private":true,"main":"lib/index.js"}' >"$repo/functions/package.json"
-  (cd "$repo" && git add functions/src/index.ts functions/package.json && git commit --quiet -m "invitation callables")
+  printf '%s\n' '{"compilerOptions":{"rootDir":"src","outDir":"lib"},"include":["src"]}' >"$repo/functions/tsconfig.json"
+  (cd "$repo" && git add functions/src/index.ts functions/package.json functions/tsconfig.json && git commit --quiet -m "invitation callables")
 }
 
 REPO25B="$WORKDIR/case25b-event-invitation-unselected-missing"
@@ -3823,6 +3826,8 @@ fi
 # approvePrompts may be absent after publish while a selected unlockDayNow may
 # not; and an onCall/onRequest export that belongs to no family fails the
 # classification, naming the export, before anything is built or published.
+# The fixture carries the tsconfig.json that compiles its index to the entry,
+# without which the index is uninventoried and nothing is strict (#1282).
 # ---------------------------------------------------------------------------
 init_admin_fixture() {
   local repo="$1"
@@ -3835,7 +3840,8 @@ init_admin_fixture() {
     for line in "$@"; do printf '%s\n' "$line"; done
   } >"$repo/functions/src/index.ts"
   printf '%s\n' '{"name":"fixture-functions","private":true,"main":"lib/index.js"}' >"$repo/functions/package.json"
-  (cd "$repo" && git add functions/src/index.ts functions/package.json && git commit --quiet -m "admin callable")
+  printf '%s\n' '{"compilerOptions":{"rootDir":"src","outDir":"lib"},"include":["src"]}' >"$repo/functions/tsconfig.json"
+  (cd "$repo" && git add functions/src/index.ts functions/package.json functions/tsconfig.json && git commit --quiet -m "admin callable")
 }
 
 run_admin_case() {

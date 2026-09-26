@@ -174,11 +174,13 @@ const ADMIN_CALLABLE_EXPORTS = Object.freeze([
 // The local names a module declares with no runtime value: an interface, a
 // type alias, an `import type` binding (including `import type x =
 // require(...)`), a namespace holding only types, or an ambient `declare`
-// declaration, with no value declaration of the same name. `export { name }`
-// of such a binding publishes nothing callable (a type is erased; an ambient
-// binding is at most an `undefined` property), so it must not become strict.
-// `export default name` of an ambient binding is different: TypeScript emits a
-// read of it, so `ambient(name)` lets that caller keep it a value. A name
+// declaration other than a function, with no value declaration of the same
+// name. `export { name }` of such a binding publishes nothing callable (a type
+// is erased; an ambient binding is at most an `undefined` property), so it
+// must not become strict. An ambient function is a value: TypeScript emits
+// `exports.name = name`, a read of whatever the runtime supplies. So is
+// `export default name` of any ambient binding, which `ambient(name)` lets
+// that caller keep a value. A name
 // whose emit depends on what it names or on compiler options (`import x =
 // a.b`, `const enum`) is `unclassified(name)`, and the walks raise
 // `UnmodelledExportError` for its export. Any value declaration of the name (a
@@ -212,6 +214,11 @@ function localTypeOnlyNames(sourceFile, file = null, walk = newExportWalk()) {
         addBindingNames(declaration.name, ambient ? types : values);
         addBindingNames(declaration.name, ambient ? ambientValues : localValues);
       }
+    } else if (ambient && ts.isFunctionDeclaration(statement) && statement.name) {
+      // `export { f }` of `declare function f` emits `exports.f = f`, a read
+      // of whatever the runtime supplies, unlike any other ambient binding.
+      values.add(statement.name.text);
+      localValues.add(statement.name.text);
     } else if (ambient && statement.name && ts.isIdentifier(statement.name)) {
       types.add(statement.name.text);
       ambientValues.add(statement.name.text);
@@ -281,8 +288,7 @@ function localTypeOnlyNames(sourceFile, file = null, walk = newExportWalk()) {
 // What TypeScript emits for a non-ambient function, class, enum, namespace or
 // `import name = ...` declaration: "value", "type" (erased, no runtime
 // binding) or "unknown". `import type name = require(...)` is erased. A
-// namespace holding only interfaces, type aliases and such namespaces is not
-// instantiated, so it is erased too. An `import name = a.b` alias is emitted
+// namespace is classified by `namespaceEmits`. An `import name = a.b` alias is emitted
 // only when the entity it names is a value, which a namespace member
 // (`declare namespace Types { interface Foo {} }`) need not be, and a `const
 // enum` is erased unless compiler options preserve it, so both are unknown.
@@ -294,23 +300,29 @@ function declarationEmits(statement) {
   if (ts.isEnumDeclaration(statement)) {
     return statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ConstKeyword) ? "unknown" : "value";
   }
-  if (ts.isModuleDeclaration(statement)) return namespaceIsInstantiated(statement) ? "value" : "type";
+  if (ts.isModuleDeclaration(statement)) return namespaceEmits(statement);
   return "value";
 }
 
-function namespaceIsInstantiated(declaration) {
+// TypeScript's module instance state: a namespace of interfaces, type aliases
+// and such namespaces is erased ("type"); one that also holds a `const enum`,
+// directly or in a nested namespace, is emitted only when compiler options
+// preserve const enums ("unknown"); anything else is instantiated ("value").
+function namespaceEmits(declaration) {
   const body = declaration.body;
-  if (!body) return false;
-  if (ts.isModuleDeclaration(body)) return namespaceIsInstantiated(body);
-  if (!ts.isModuleBlock(body)) return true;
-  return body.statements.some(
-    (statement) =>
-      !(
-        ts.isInterfaceDeclaration(statement) ||
-        ts.isTypeAliasDeclaration(statement) ||
-        (ts.isModuleDeclaration(statement) && !namespaceIsInstantiated(statement))
-      ),
-  );
+  if (!body) return "type";
+  if (ts.isModuleDeclaration(body)) return namespaceEmits(body);
+  if (!ts.isModuleBlock(body)) return "value";
+  let emits = "type";
+  for (const statement of body.statements) {
+    if (ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement)) continue;
+    let member = "value";
+    if (ts.isModuleDeclaration(statement)) member = namespaceEmits(statement);
+    else if (ts.isEnumDeclaration(statement) && declarationEmits(statement) === "unknown") member = "unknown";
+    if (member === "value") return "value";
+    if (member === "unknown") emits = "unknown";
+  }
+  return emits;
 }
 
 // Raised by the export walks for an export they cannot classify as a value or
@@ -324,8 +336,9 @@ class UnmodelledExportError extends Error {}
 // and star-name collections (`star\0file`) currently on the call path, each
 // with its depth. Every recursion between the walks passes through one of the
 // two, so a re-export cycle ends at its first repeated key: a type-only lookup
-// is then not proven type-only (a value), and a star collection adds nothing,
-// since the frame already collecting that module adds its names. `done` keeps
+// then raises `UnmodelledExportError` (whether the cycle erases the name is
+// not decided here), and a star collection adds nothing, since the frame
+// already collecting that module adds its names. `done` keeps
 // each finished answer for every later path that reaches the same key, so a
 // module shared by many re-export paths is analysed once, not once per path.
 // An answer that ended a cycle at a key above its own frame (`low`, the
@@ -392,10 +405,17 @@ function parsedExportModule(file, walk) {
 // would otherwise shadow it. A re-export TypeScript can only erase (`export { T as x } from
 // './types'` of an interface) emits no property at all. A module that cannot
 // be read, a package, or a star it cannot resolve is not proven type-only, so
-// its name stays a value, as does a lookup that re-enters itself through a
-// re-export cycle (`walk`, see `newExportWalk`).
+// its name stays a value. A lookup that re-enters itself through a re-export
+// cycle raises `UnmodelledExportError` (`walk`, see `newExportWalk`).
 function moduleExportIsTypeOnly(file, name, walk = newExportWalk()) {
-  return exportWalkFrame(walk, `type\0${file}\0${name}`, () => false, () => exportIsTypeOnlyIn(file, name, walk));
+  return exportWalkFrame(
+    walk,
+    `type\0${file}\0${name}`,
+    () => {
+      throw new UnmodelledExportError(`a re-export cycle through ${name}`);
+    },
+    () => exportIsTypeOnlyIn(file, name, walk),
+  );
 }
 
 function exportIsTypeOnlyIn(file, name, walk) {
@@ -4337,21 +4357,26 @@ function selectorNamesConfiguredCodebase(selector, inventory) {
  * `UNINVENTORIED_CODEBASE`), an explicit non-Node `runtime` (its surface is not
  * a TypeScript index), a `prefix` (the CLI renames every service), any
  * `predeploy` hook in the project, in any codebase or target, other than a
- * codebase's own compile step into its entry (`everyPredeployHookOnlyCompiles`,
- * `predeployOnlyCompiles`), whether or not the index exists yet (a hook runs
- * before Functions prepare loads the source and can generate or rewrite it), a
- * source directory that does not exist yet under any `predeploy` hook, a
+ * codebase's own compile step into its entry, or any hook at all when one
+ * Functions source directory is or lies inside another
+ * (`everyPredeployHookOnlyCompiles`, `predeployOnlyCompiles`), whether or not
+ * the index exists yet (a hook runs before Functions prepare loads the source
+ * and can generate or rewrite it), a source directory that does not exist yet
+ * under any `predeploy` hook, a
  * source directory carrying a `functions.yaml` manifest (it decides discovery
  * before the index loads), a source directory with no `package.json` (the CLI
  * then infers a non-Node runtime), a `package.json` that is unreadable,
  * invalid, or names a `main` other than `lib/index.js`, a source directory
- * with no `src/index.ts`, an index, or a local module it reaches through
- * `export *`, that `referencesCommonJsExports` flags (a CommonJS `exports`,
- * `module` or top-level `this` reference, an `export =` or `export default`,
- * or an exported declaration the walk in `protectedServicesFromSource` does
- * not model), or an export the walks cannot classify as a value or a type
- * (`UnmodelledExportError`: an exported `import name = a.b` alias or `const
- * enum`).
+ * with no `src/index.ts`, a `tsconfig.json` that does not compile
+ * `src/index.ts` to `lib/index.js` (`tscCompilesIndexToEntry`, with or without
+ * a hook), an index, or a local module it reaches through `export *`, that
+ * `referencesCommonJsExports` flags (a CommonJS `exports`, `module` or
+ * top-level `this` reference, an `export =` or `export default`, or an
+ * exported declaration the walk in `protectedServicesFromSource` does not
+ * model), or an export the walks cannot classify as a value or a type
+ * (`UnmodelledExportError`: an exported `import name = a.b` alias, `const
+ * enum` or namespace of types and const enums, or a type-only lookup that
+ * loops back on itself through re-exports).
  */
 const UNINVENTORIED_CODEBASE = Symbol("uninventoried codebase");
 /**
@@ -4486,8 +4511,9 @@ const TSC_OUTPUT_SOURCES = Object.freeze({ ".js": [".ts", ".tsx"], ".cjs": [".ct
  * entry. Every hook runs before Functions prepare loads the source, so the
  * index is the surface the CLI discovers only when each hook is the generated
  * compile hook, and the `build` script it runs is `tsc`, optionally followed by
- * copies `cp src/<file> lib/<file>` of one relative path, none onto a file tsc
- * emits from a TypeScript source there, with no `prebuild` or `postbuild`
+ * copies `cp src/<file> lib/<file>` of one literal relative path (no glob,
+ * quote, variable or other shell expansion), none onto a file tsc emits from a
+ * TypeScript source there, with no `prebuild` or `postbuild`
  * script (npm runs both around `build`), and the source directory's
  * `tsconfig.json` compiles `src/index.ts` to `lib/index.js`
  * (`tscCompilesIndexToEntry`). Any other hook, build step or output layout can
@@ -4506,7 +4532,10 @@ function predeployOnlyCompiles(predeploy, scripts, sourceDir) {
     const match = /^cp src\/(\S+) lib\/(\S+)$/.exec(step);
     if (!match || match[1] !== match[2]) return false;
     const file = match[1];
-    if (file.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) return false;
+    // Only a literal path: a glob, quote, variable, brace or escape would let
+    // the shell expand the operands onto another file, such as the entry.
+    if (!/^[A-Za-z0-9_.@+-]+(?:\/[A-Za-z0-9_.@+-]+)*$/.test(file)) return false;
+    if (file.split("/").some((segment) => segment === "." || segment === "..")) return false;
     const extension = posix.extname(file);
     const stem = file.slice(0, file.length - extension.length);
     return !(TSC_OUTPUT_SOURCES[extension] ?? []).some((input) => existsSync(resolve(sourceDir, "src", stem + input)));
@@ -4546,19 +4575,28 @@ function tscCompilesIndexToEntry(sourceDir) {
  * (`relevantFunctionsConfigs`), and a hook can write anywhere in the project.
  * So one hook that is not a compile step, in any Functions codebase or any
  * other target (whether or not this deploy selects it), leaves every codebase
- * uninventoried, not only its own.
+ * uninventoried, not only its own. So does any hook when one Functions source
+ * directory is, or lies inside, another: a compile step then writes into the
+ * other codebase (a parent's `lib/` holding a nested codebase's source).
  */
 async function everyPredeployHookOnlyCompiles(configSource, configPath) {
   const hasHooks = (config) => {
     const predeploy = config?.predeploy;
     return Array.isArray(predeploy) ? predeploy.length > 0 : predeploy != null && predeploy !== "";
   };
+  const functionsConfigs = Array.isArray(configSource.functions) ? configSource.functions : [configSource.functions];
+  const sourceDirs = functionsConfigs
+    .filter((config) => config && typeof config === "object" && typeof config.source === "string")
+    .map((config) => resolve(dirname(configPath), config.source));
+  const overlapping = sourceDirs.some((dir, index) =>
+    sourceDirs.some((other, otherIndex) => otherIndex !== index && (dir === other || dir.startsWith(other + sep))),
+  );
   for (const target of VALID_DEPLOY_TARGETS) {
     const raw = configSource[target];
     if (raw === undefined || raw === null) continue;
     for (const config of Array.isArray(raw) ? raw : [raw]) {
       if (!config || typeof config !== "object" || !hasHooks(config)) continue;
-      if (target !== "functions" || typeof config.source !== "string") return false;
+      if (overlapping || target !== "functions" || typeof config.source !== "string") return false;
       const sourceDir = resolve(dirname(configPath), config.source);
       let scripts = null;
       try {
@@ -4683,6 +4721,13 @@ async function protectedServiceInventory(configSource, configPath, table) {
       throw error;
     }
     if (services.get(codebase) === null) continue;
+    // With or without a hook, `src/index.ts` describes the deployed entry only
+    // when the codebase's compiler configuration compiles it to `lib/index.js`
+    // (an externally compiled root `index.ts` could be the entry instead).
+    if (!tscCompilesIndexToEntry(sourceDir)) {
+      services.set(codebase, null);
+      continue;
+    }
     if (referencesCommonJsExports(source) || (await starReexportsOpaqueModule(sourcePath, source))) {
       services.set(codebase, null);
       continue;

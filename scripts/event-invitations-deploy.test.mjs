@@ -9,10 +9,15 @@ import { classifyFirebaseDeployRequest } from "./validate-firebase-deploy-filter
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 // A Node Functions source: `src/` plus the `package.json` whose presence makes
-// the CLI pick the Node runtime, with the conventional `lib/index.js` entry.
+// the CLI pick the Node runtime, with the conventional `lib/index.js` entry,
+// and the `tsconfig.json` that compiles `src/index.ts` to it.
 async function nodeSource(dir) {
   await mkdir(resolve(dir, "src"), { recursive: true });
   await writeFile(resolve(dir, "package.json"), JSON.stringify({ main: "lib/index.js" }));
+  await writeFile(
+    resolve(dir, "tsconfig.json"),
+    JSON.stringify({ compilerOptions: { rootDir: "src", outDir: "lib" }, include: ["src"] }),
+  );
 }
 
 async function classify(args) {
