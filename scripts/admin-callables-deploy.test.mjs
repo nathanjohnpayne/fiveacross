@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -207,6 +207,8 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
           "glob-copy": { predeploy: [compile], scripts: { build: "tsc && cp src/*.js lib/*.js" }, exportsUnlock: false },
           // ops lives inside the default codebase, whose compile can write into it.
           nested: { predeploy: [compile], scripts: { build: "tsc" }, exportsUnlock: false },
+          // ops is lexically separate but a symlink into the default's lib/.
+          symlinked: { predeploy: [compile], scripts: { build: "tsc" }, exportsUnlock: false },
         }[variant];
         await nodeSource(resolve(fixture, "ops"));
         await writeFile(resolve(fixture, "ops", "package.json"), JSON.stringify({ main: "lib/index.js", scripts }));
@@ -222,7 +224,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
         const defaultConfig =
           variant === "default-generator"
             ? { source: "functions", predeploy: ["node generate-ops.js"] }
-            : variant === "nested"
+            : variant === "nested" || variant === "symlinked"
               ? { source: "functions", predeploy: [compile] }
               : { source: "functions" };
         await writeFile(
@@ -236,6 +238,14 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
         await writeFile(resolve(fixture, "ops", "src", "index.ts"), exportsUnlock ? header + callable : "export const unrelated = 1;\n");
         if (variant === "root-dir") await writeFile(resolve(fixture, "ops", "index.ts"), header + callable);
         if (variant === "glob-copy") await writeFile(resolve(fixture, "ops", "src", "index.js"), "exports.unlockDayNow = 1;\n");
+        if (variant === "symlinked") {
+          await writeFile(resolve(fixture, "functions", "package.json"), JSON.stringify({ main: "lib/index.js", scripts }));
+          await rm(resolve(fixture, "ops"), { recursive: true, force: true });
+          await nodeSource(resolve(fixture, "functions", "lib"));
+          await writeFile(resolve(fixture, "functions", "lib", "package.json"), JSON.stringify({ main: "lib/index.js", scripts }));
+          await writeFile(resolve(fixture, "functions", "lib", "src", "index.ts"), "export const unrelated = 1;\n");
+          await symlink(resolve(fixture, "functions", "lib"), resolve(fixture, "ops"));
+        }
         if (variant === "nested") {
           await writeFile(resolve(fixture, "functions", "package.json"), JSON.stringify({ main: "lib/index.js", scripts }));
           await nodeSource(resolve(fixture, "functions", "ops"));
@@ -480,6 +490,21 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
             resolve(fixture, "ops", "src", "index.ts"),
             header + callable + `namespace approvePrompts { ${member} }\nexport { approvePrompts };\n`,
           );
+        } else if (variant === "type-star-hop") {
+          // `export type *` re-exports its target's names as types only.
+          await writeFile(
+            resolve(fixture, "ops", "src", "index.ts"),
+            header + callable + "export { T as approvePrompts } from './middle';\n",
+          );
+          await writeFile(resolve(fixture, "ops", "src", "middle.ts"), "export type * from './types';\n");
+          await writeFile(resolve(fixture, "ops", "src", "types.ts"), "export interface T { value: string }\n");
+        } else if (variant === "declaration-file-reexport") {
+          // A local declaration file is not a TypeScript source the walk reads.
+          await writeFile(
+            resolve(fixture, "ops", "src", "index.ts"),
+            header + callable + "export { T as approvePrompts } from './types';\n",
+          );
+          await writeFile(resolve(fixture, "ops", "src", "types.d.ts"), "export interface T { value: string }\n");
         } else if (variant === "root-dir-no-hook") {
           // With no hook, tsc's configuration still decides which index is the entry.
           await writeFile(
@@ -666,6 +691,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       "diamond-type-reexport",
       "star-type-import-equals",
       "type-namespace-clause",
+      "type-star-hop",
     ].map((variant) => [
       `ops-variant-${variant}`,
       ["--only", "functions:ops"],
@@ -701,6 +727,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     // A type-only lookup that loops through re-exports is not decided.
     ["ops-variant-cyclic-type-reexport", ["--only", "functions:ops"], unknown, unknown],
     ["ops-variant-root-dir-no-hook", ["--only", "functions:ops"], unknown, unknown],
+    ["ops-variant-declaration-file-reexport", ["--only", "functions:ops"], unknown, unknown],
     // Codebase precedence holds for an imported functions config too.
     ...["inline-config-unlock-codebase", "imported-config-unlock-codebase"].map((layout) => [
       layout,
@@ -729,6 +756,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       "no-tsconfig",
       "glob-copy",
       "nested",
+      "symlinked",
     ].map((variant) => [
       `ops-hook-${variant}`,
       ["--only", "functions:ops"],

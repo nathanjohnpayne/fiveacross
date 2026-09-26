@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import {
   cp,
   lstat,
@@ -277,7 +277,7 @@ function localTypeOnlyNames(sourceFile, file = null, walk = newExportWalk()) {
       if (!file || !imports.has(name) || localValues.has(name)) return false;
       if (!importedTypeOnly.has(name)) {
         const [specifier, imported] = imports.get(name);
-        const target = resolveModule(file, specifier);
+        const target = resolveExportModule(file, specifier);
         importedTypeOnly.set(name, Boolean(target) && moduleExportIsTypeOnly(target, imported, walk));
       }
       return importedTypeOnly.get(name);
@@ -329,6 +329,29 @@ function namespaceEmits(declaration) {
 // a type (a binding `declarationEmits` calls unknown); the inventory then
 // records the codebase as uninventoried.
 class UnmodelledExportError extends Error {}
+
+// The TypeScript source a module specifier names, for the type-only walks. A
+// local (relative) module the resolver cannot map to one but that exists in
+// another form (a declaration file, a JavaScript module) may export a name as
+// a type or as a value, so it raises `UnmodelledExportError`. A package, or a
+// local module with no file at all (which fails the build itself), resolves
+// to `null`, which the walks keep a value.
+const OTHER_LOCAL_MODULE_EXTENSIONS = Object.freeze([
+  ".d.ts", ".d.cts", ".d.mts", ".cts", ".mts", ".js", ".cjs", ".mjs", ".jsx",
+]);
+function resolveExportModule(file, specifier) {
+  const target = resolveModule(file, specifier);
+  if (target || !specifier.startsWith(".")) return target;
+  const base = resolve(dirname(file), specifier.replace(/\.(?:c|m)?js$/, ""));
+  const candidates = OTHER_LOCAL_MODULE_EXTENSIONS.flatMap((extension) => [
+    `${base}${extension}`,
+    resolve(base, `index${extension}`),
+  ]);
+  if (candidates.some((candidate) => existsSync(candidate))) {
+    throw new UnmodelledExportError(`the local module ${specifier}, which is not a TypeScript source`);
+  }
+  return null;
+}
 
 // One traversal's state for the mutually recursive export walks
 // (`localTypeOnlyNames`, `moduleExportIsTypeOnly`, `exportElementIsValue`,
@@ -402,11 +425,14 @@ function parsedExportModule(file, walk) {
 // export whose emit cannot be decided (see `declarationEmits`) raises
 // `UnmodelledExportError`. A name the module does not export directly is
 // looked up through its local `export *` targets, where a local declaration
-// would otherwise shadow it. A re-export TypeScript can only erase (`export { T as x } from
+// would otherwise shadow it, and a name only an `export type *` can supply is
+// a type. A re-export TypeScript can only erase (`export { T as x } from
 // './types'` of an interface) emits no property at all. A module that cannot
 // be read, a package, or a star it cannot resolve is not proven type-only, so
-// its name stays a value. A lookup that re-enters itself through a re-export
-// cycle raises `UnmodelledExportError` (`walk`, see `newExportWalk`).
+// its name stays a value, but a local module that exists only as a
+// declaration file or JavaScript raises `UnmodelledExportError`
+// (`resolveExportModule`), as does a lookup that re-enters itself through a
+// re-export cycle (`walk`, see `newExportWalk`).
 function moduleExportIsTypeOnly(file, name, walk = newExportWalk()) {
   return exportWalkFrame(
     walk,
@@ -429,6 +455,7 @@ function exportIsTypeOnlyIn(file, name, walk) {
   let typeSeen = false;
   let valueSeen = false;
   const stars = [];
+  let typeStars = 0;
   const declaredNames = (statement) => {
     if (ts.isVariableStatement(statement)) {
       const names = [];
@@ -482,13 +509,17 @@ function exportIsTypeOnlyIn(file, name, walk) {
     }
     if (!ts.isExportDeclaration(statement)) continue;
     if (!statement.exportClause) {
-      if (statement.isTypeOnly) continue;
-      stars.push(statement);
+      if (statement.isTypeOnly) typeStars += 1;
+      else stars.push(statement);
       continue;
     }
     if (!ts.isNamedExports(statement.exportClause)) {
-      // `export * as ns from` binds a namespace object, a value.
-      if (statement.exportClause.name.text === name && !statement.isTypeOnly) valueSeen = true;
+      // `export * as ns from` binds a namespace object, a value; `export type
+      // * as ns from` binds only a type.
+      if (statement.exportClause.name.text === name) {
+        if (statement.isTypeOnly) typeSeen = true;
+        else valueSeen = true;
+      }
       continue;
     }
     for (const element of statement.exportClause.elements) {
@@ -501,12 +532,16 @@ function exportIsTypeOnlyIn(file, name, walk) {
   if (typeSeen) return true;
   let starTypeOnly = false;
   for (const statement of stars) {
-    const target = ts.isStringLiteral(statement.moduleSpecifier) ? resolveModule(file, statement.moduleSpecifier.text) : null;
+    const target = ts.isStringLiteral(statement.moduleSpecifier)
+      ? resolveExportModule(file, statement.moduleSpecifier.text)
+      : null;
     if (!target) return false;
     if (starExportedNames(target, walk).has(name)) return false;
     if (moduleExportIsTypeOnly(target, name, walk)) starTypeOnly = true;
   }
-  return starTypeOnly;
+  // `export type * from` re-exports every name of its target as a type only,
+  // so a name no runtime star carries reaches this module, if at all, as a type.
+  return starTypeOnly || typeStars > 0;
 }
 
 // Whether a named export element publishes a runtime value: a local
@@ -521,7 +556,7 @@ function exportElementIsValue(statement, element, typeOnlyNames, file = null, wa
     return !typeOnlyNames.has(local);
   }
   if (!file || !ts.isStringLiteral(statement.moduleSpecifier)) return true;
-  const target = resolveModule(file, statement.moduleSpecifier.text);
+  const target = resolveExportModule(file, statement.moduleSpecifier.text);
   return !(target && moduleExportIsTypeOnly(target, local, walk));
 }
 
@@ -4375,8 +4410,9 @@ function selectorNamesConfiguredCodebase(selector, inventory) {
  * exported declaration the walk in `protectedServicesFromSource` does not
  * model), or an export the walks cannot classify as a value or a type
  * (`UnmodelledExportError`: an exported `import name = a.b` alias, `const
- * enum` or namespace of types and const enums, or a type-only lookup that
- * loops back on itself through re-exports).
+ * enum` or namespace of types and const enums, a name looked up through a
+ * local module that exists only as a declaration file or JavaScript, or a
+ * type-only lookup that loops back on itself through re-exports).
  */
 const UNINVENTORIED_CODEBASE = Symbol("uninventoried codebase");
 /**
@@ -4576,8 +4612,10 @@ function tscCompilesIndexToEntry(sourceDir) {
  * So one hook that is not a compile step, in any Functions codebase or any
  * other target (whether or not this deploy selects it), leaves every codebase
  * uninventoried, not only its own. So does any hook when one Functions source
- * directory is, or lies inside, another: a compile step then writes into the
- * other codebase (a parent's `lib/` holding a nested codebase's source).
+ * directory or its `lib/` is, or lies inside, another codebase's, compared as
+ * canonical real paths so a symlink cannot hide it: a compile step then writes
+ * into the other codebase (a parent's `lib/` holding a nested codebase's
+ * source).
  */
 async function everyPredeployHookOnlyCompiles(configSource, configPath) {
   const hasHooks = (config) => {
@@ -4585,12 +4623,32 @@ async function everyPredeployHookOnlyCompiles(configSource, configPath) {
     return Array.isArray(predeploy) ? predeploy.length > 0 : predeploy != null && predeploy !== "";
   };
   const functionsConfigs = Array.isArray(configSource.functions) ? configSource.functions : [configSource.functions];
-  const sourceDirs = functionsConfigs
+  // Each codebase's source directory and its `lib/`, as canonical real paths:
+  // a symlink can make lexically separate paths one tree. A path that exists
+  // but cannot be resolved fails closed.
+  const canonical = (path) => {
+    if (!existsSync(path)) return path;
+    try {
+      return realpathSync(path);
+    } catch {
+      return null;
+    }
+  };
+  const codebaseTrees = functionsConfigs
     .filter((config) => config && typeof config === "object" && typeof config.source === "string")
-    .map((config) => resolve(dirname(configPath), config.source));
-  const overlapping = sourceDirs.some((dir, index) =>
-    sourceDirs.some((other, otherIndex) => otherIndex !== index && (dir === other || dir.startsWith(other + sep))),
-  );
+    .map((config) => {
+      const sourceDir = resolve(dirname(configPath), config.source);
+      return [canonical(sourceDir), canonical(resolve(sourceDir, "lib"))];
+    });
+  const within = (path, root) => path === root || path.startsWith(root + sep);
+  const overlapping =
+    codebaseTrees.some((paths) => paths.includes(null)) ||
+    codebaseTrees.some((paths, index) =>
+      codebaseTrees.some(
+        (others, otherIndex) =>
+          otherIndex !== index && paths.some((path) => others.some((other) => within(path, other))),
+      ),
+    );
   for (const target of VALID_DEPLOY_TARGETS) {
     const raw = configSource[target];
     if (raw === undefined || raw === null) continue;
