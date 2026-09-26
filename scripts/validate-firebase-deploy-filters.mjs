@@ -3578,7 +3578,8 @@ async function discoverCodebaseInProbe({
  * any one selected codebase is uncertainty in all of them (Phase 4b, runs 6 and
  * 7 on #1107). It has to be decided here, over the whole selected set, because
  * the explicit protected-callable branches in `classifyInvokerScope` answer
- * from the selector alone and never consult another codebase's inventory.
+ * from the selector and its own codebase's source index (#1282) and never
+ * consult another codebase's inventory.
  *
  * Only SELECTED codebases count. A codebase this deploy does not load runs no
  * code and can rewrite nothing, which is why `endpointMatchesFilter`'s
@@ -3927,8 +3928,8 @@ async function selectorIsProvableSingleEndpoint(selector, inventory) {
  * Codebase precedence, checked BEFORE any endpoint-name branch. The pinned CLI
  * resolves a bare `functions:<name>` whose name is a CONFIGURED codebase to
  * that codebase's entire surface (`functionsDeployHelper.js:43-53`), even when
- * the same string is also the id of a protected endpoint. Such a surface may
- * carry any protected callable, so the caller treats it as an unfamiliar group.
+ * the same string is also the id of a protected endpoint. The caller answers it
+ * as that whole codebase (#1282), never as the endpoint.
  */
 function selectorNamesConfiguredCodebase(selector, inventory) {
   if (!selector.startsWith("functions:")) return false;
@@ -3936,32 +3937,62 @@ function selectorNamesConfiguredCodebase(selector, inventory) {
   return tail !== "" && !tail.includes(":") && inventory.codebaseNames.has(tail);
 }
 
+/**
+ * One invoker family's protected callables KEYED BY FUNCTIONS CODEBASE (#1282):
+ * the explicit `codebase`, or `default`, mapped to the services its
+ * `src/index.ts` exports under `protectedServicesFromSource` (the rule the
+ * unkeyed union used), in table order. `null` is an unknown surface, never a
+ * refusal (the predeploy hook reads the built artifact, #1283): a kit or
+ * `remoteSource` codebase, an index that cannot be read, or one the advisory
+ * scan cannot follow. A missing source directory has nothing to publish unless
+ * a `predeploy` hook, which runs first, could create it.
+ */
 async function protectedServiceInventory(configSource, configPath, table) {
   const functionsConfigs = Array.isArray(configSource.functions)
     ? configSource.functions
     : [configSource.functions];
-  const services = new Set();
+  const inventory = new Map();
   for (const functionsConfig of functionsConfigs) {
-    if (!functionsConfig || typeof functionsConfig.source !== "string") continue;
-    const sourcePath = resolve(
-      dirname(configPath),
-      functionsConfig.source,
-      "src",
-      "index.ts",
-    );
-    let source;
-    try {
-      source = await readFile(sourcePath, "utf8");
-    } catch (error) {
-      if (error && typeof error === "object" && error.code === "ENOENT") continue;
-      throw error;
+    if (!functionsConfig || typeof functionsConfig !== "object") continue;
+    if ("kit" in functionsConfig) {
+      for (const instance of Object.keys(functionsConfig.instances ?? {})) inventory.set(instance, null);
+      continue;
     }
-    for (const service of protectedServicesFromSource(source, table, sourcePath))
-      services.add(service);
+    const codebase =
+      typeof functionsConfig.codebase === "string" && functionsConfig.codebase ? functionsConfig.codebase : "default";
+    if (typeof functionsConfig.source !== "string") {
+      inventory.set(codebase, null);
+      continue;
+    }
+    const sourceDir = resolve(dirname(configPath), functionsConfig.source);
+    if (!existsSync(sourceDir) && predeploySteps(functionsConfig.predeploy)?.length === 0) {
+      inventory.set(codebase, []);
+      continue;
+    }
+    const sourcePath = resolve(sourceDir, "src", "index.ts");
+    try {
+      inventory.set(codebase, protectedServicesFromSource(await readFile(sourcePath, "utf8"), table, sourcePath));
+    } catch {
+      inventory.set(codebase, null);
+    }
   }
-  return table.map(([, service]) => service).filter(
-    (service) => services.has(service),
-  );
+  return inventory;
+}
+
+/**
+ * A family's inventory as `classifyInvokerScope` reads it: `union` answers a
+ * scope that releases every codebase, `complete` whether every configured
+ * codebase was inventoried, and `of(codebase)` one codebase's services, `null`
+ * when it is uninventoried or not configured. A plain list is the default's.
+ */
+function familyInventory(inventory, table) {
+  const byCodebase = inventory instanceof Map ? inventory : new Map([["default", [...inventory]]]);
+  const values = [...byCodebase.values()];
+  return {
+    union: table.map(([, service]) => service).filter((service) => values.some((found) => found?.includes(service))),
+    complete: !values.includes(null),
+    of: (codebase) => byCodebase.get(codebase) ?? null,
+  };
 }
 
 /**
@@ -4161,28 +4192,28 @@ export async function classifyInvokerScope(
   pinnedOwnershipUnknown = false,
   exportedAdminCallableServices = [],
 ) {
-  const exportedInvitationServices = new Set(exportedEventInvitationServices);
-  const exportedAdminServices = new Set(exportedAdminCallableServices);
-  const exportedAdminCsv = ADMIN_CALLABLE_EXPORTS.map(([, service]) => service)
-    .filter((service) => exportedAdminServices.has(service))
-    .join(",");
-  const exportedInvitationCsv = EVENT_INVITATION_EXPORTS.map(
-    ([, service]) => service,
-  )
-    .filter((service) => exportedInvitationServices.has(service))
-    .join(",");
+  // Per Functions codebase (#1282). A scope that releases every codebase reads
+  // the union (Q3), and an uninventoried codebase in it keeps both families
+  // selected with every service not in the union allowed absent.
+  const invitations = familyInventory(exportedEventInvitationServices, EVENT_INVITATION_EXPORTS);
+  const admins = familyInventory(exportedAdminCallableServices, ADMIN_CALLABLE_EXPORTS);
+  const everyCodebaseInventoried = invitations.complete && admins.complete;
+  const exportedInvitationCsv = invitations.union.join(",");
+  const exportedAdminCsv = admins.union.join(",");
+  const allInvitationsSelected = exportedInvitationCsv !== "" || !everyCodebaseInventoried;
+  const allAdminsSelected = exportedAdminCsv !== "" || !everyCodebaseInventoried;
   let functionsAttempted = true;
   let hostingAttempted = true;
   let bugReportInvokerSelected = true;
   let emailUnsubscribeInvokerSelected = true;
   let authHandoffInvokerSelected = true;
-  let eventInvitationsInvokerSelected = exportedInvitationServices.size > 0;
-  let adminCallablesInvokerSelected = exportedAdminServices.size > 0;
+  let eventInvitationsInvokerSelected = allInvitationsSelected;
+  let adminCallablesInvokerSelected = allAdminsSelected;
   let bugReportInvokerConservative = false;
   let emailUnsubscribeInvokerConservative = false;
   let authHandoffInvokerConservative = false;
-  let eventInvitationsInvokerConservative = false;
-  let adminCallablesInvokerConservative = false;
+  let eventInvitationsInvokerConservative = allInvitationsSelected && exportedInvitationCsv === "";
+  let adminCallablesInvokerConservative = allAdminsSelected && exportedAdminCsv === "";
   let authHandoffStrictHalf = "";
   let eventInvitationsStrictServices = exportedInvitationCsv;
   let adminCallablesStrictServices = exportedAdminCsv;
@@ -4197,28 +4228,58 @@ export async function classifyInvokerScope(
     adminCallablesInvokerSelected = false;
     let mintNamed = false;
     let exchangeNamed = false;
-    let fullEventInvitationScopeNamed = false;
-    let unknownFunctionsSelectorNamed = false;
-    const namedEventInvitationServices = new Set();
-    let fullAdminScopeNamed = false;
-    const namedAdminServices = new Set();
-    // An unfamiliar Functions selector may release anything, so every invoker
-    // not already selected by an explicit branch turns conservative.
-    const selectEveryInvokerConservatively = () => {
+    // The services each multi-service family's selectors prove released.
+    const strictInvitationServices = new Set();
+    const strictAdminServices = new Set();
+    // The bug-report, email-unsubscribe and auth-handoff families are not
+    // scoped by codebase (#1299): an unfamiliar selector or any non-default
+    // codebase may release them, so each not already selected turns
+    // conservative.
+    const selectUnscopedInvokersConservatively = () => {
       functionsAttempted = true;
-      unknownFunctionsSelectorNamed = true;
       if (!bugReportInvokerSelected) bugReportInvokerConservative = true;
       if (!emailUnsubscribeInvokerSelected)
         emailUnsubscribeInvokerConservative = true;
       if (!authHandoffInvokerSelected) authHandoffInvokerConservative = true;
-      if (!eventInvitationsInvokerSelected)
-        eventInvitationsInvokerConservative = true;
-      if (!adminCallablesInvokerSelected) adminCallablesInvokerConservative = true;
       bugReportInvokerSelected = true;
       emailUnsubscribeInvokerSelected = true;
       authHandoffInvokerSelected = true;
+    };
+    // An unfamiliar Functions selector may release anything, so every invoker
+    // not already selected by an explicit branch turns conservative.
+    const selectEveryInvokerConservatively = () => {
+      selectUnscopedInvokersConservatively();
       eventInvitationsInvokerSelected = true;
       adminCallablesInvokerSelected = true;
+    };
+    // A whole-codebase scope (Q1), or every codebase for `null` (Q3): the
+    // services that surface exports are strict, and one this parse could not
+    // inventory keeps both families selected with nothing proven.
+    const releaseProtectedCallables = (codebase) => {
+      const invitationServices = codebase === null ? invitations.union : invitations.of(codebase);
+      const adminServices = codebase === null ? admins.union : admins.of(codebase);
+      const unknown = invitationServices === null || adminServices === null || (codebase === null && !everyCodebaseInventoried);
+      for (const service of invitationServices ?? []) strictInvitationServices.add(service);
+      for (const service of adminServices ?? []) strictAdminServices.add(service);
+      if (unknown || invitationServices.length > 0) eventInvitationsInvokerSelected = true;
+      if (unknown || adminServices.length > 0) adminCallablesInvokerSelected = true;
+    };
+    // A named protected callable selects its family, and is strict only when
+    // the codebase its selector resolves to exports it (Q2): the one named in
+    // `functions:<codebase>:<id>`, else `default` (precedence is checked first).
+    const exportedByResolvedCodebase = (family, selector, service) => {
+      const fragments = selector.slice("functions:".length).split(":");
+      return family.of(fragments.length === 2 ? fragments[0] : "default")?.includes(service) === true;
+    };
+    const nameInvitation = (selector, service) => {
+      functionsAttempted = true;
+      eventInvitationsInvokerSelected = true;
+      if (exportedByResolvedCodebase(invitations, selector, service)) strictInvitationServices.add(service);
+    };
+    const nameAdmin = (selector, service) => {
+      functionsAttempted = true;
+      adminCallablesInvokerSelected = true;
+      if (exportedByResolvedCodebase(admins, selector, service)) strictAdminServices.add(service);
     };
 
     // `only` arrives already widened for pinned Hosting rewrites
@@ -4231,24 +4292,20 @@ export async function classifyInvokerScope(
         bugReportInvokerSelected = true;
         emailUnsubscribeInvokerSelected = true;
         authHandoffInvokerSelected = true;
-        eventInvitationsInvokerSelected = exportedInvitationServices.size > 0;
         mintNamed = true;
         exchangeNamed = true;
-        fullEventInvitationScopeNamed = true;
-        adminCallablesInvokerSelected = exportedAdminServices.size > 0;
-        fullAdminScopeNamed = true;
         bugReportInvokerConservative = false;
         emailUnsubscribeInvokerConservative = false;
         authHandoffInvokerConservative = false;
-        eventInvitationsInvokerConservative = false;
-        adminCallablesInvokerConservative = false;
+        releaseProtectedCallables(selector === "functions" ? null : "default");
       } else if (
         selectorNamesConfiguredCodebase(selector, singleEndpointExports)
       ) {
         // A configured codebase that happens to share a protected endpoint's
         // name deploys its whole surface, not that endpoint: precedence must
         // win before the name branches below can read it as one callable.
-        selectEveryInvokerConservatively();
+        selectUnscopedInvokersConservatively();
+        releaseProtectedCallables(selector.slice("functions:".length));
       } else if (/^functions:(?:[^:]+:)?submitBugReport$/.test(selector)) {
         functionsAttempted = true;
         bugReportInvokerSelected = true;
@@ -4266,29 +4323,19 @@ export async function classifyInvokerScope(
         authHandoffInvokerSelected = true;
         exchangeNamed = true;
       } else if (/^functions:(?:[^:]+:)?mintEventInvitation$/.test(selector)) {
-        functionsAttempted = true;
-        eventInvitationsInvokerSelected = true;
-        namedEventInvitationServices.add("mint");
+        nameInvitation(selector, "mint");
       } else if (
         /^functions:(?:[^:]+:)?redeemEventInvitation$/.test(selector)
       ) {
-        functionsAttempted = true;
-        eventInvitationsInvokerSelected = true;
-        namedEventInvitationServices.add("redeem");
+        nameInvitation(selector, "redeem");
       } else if (
         /^functions:(?:[^:]+:)?revokeEventInvitation$/.test(selector)
       ) {
-        functionsAttempted = true;
-        eventInvitationsInvokerSelected = true;
-        namedEventInvitationServices.add("revoke");
+        nameInvitation(selector, "revoke");
       } else if (/^functions:(?:[^:]+:)?unlockDayNow$/.test(selector)) {
-        functionsAttempted = true;
-        adminCallablesInvokerSelected = true;
-        namedAdminServices.add("unlock");
+        nameAdmin(selector, "unlock");
       } else if (/^functions:(?:[^:]+:)?approvePrompts$/.test(selector)) {
-        functionsAttempted = true;
-        adminCallablesInvokerSelected = true;
-        namedAdminServices.add("approve");
+        nameAdmin(selector, "approve");
       } else if (selector.startsWith("functions:")) {
         functionsAttempted = true;
         // `functions:[codebase:]name` — a DOTTED tail is a group path
@@ -4322,42 +4369,20 @@ export async function classifyInvokerScope(
       }
     }
 
-    if (eventInvitationsInvokerSelected) {
-      if (fullEventInvitationScopeNamed) {
-        eventInvitationsInvokerConservative = false;
-        eventInvitationsStrictServices = exportedInvitationCsv;
-      } else if (namedEventInvitationServices.size > 0) {
-        // An explicit endpoint name is a fact even when another unfamiliar
-        // selector appears in the same request. Keep every explicitly named
-        // service strict and tolerate absence only for its unselected peers.
-        eventInvitationsInvokerConservative = false;
-        eventInvitationsStrictServices = ["mint", "redeem", "revoke"]
-          .filter((service) => namedEventInvitationServices.has(service))
-          .join(",");
-      } else {
-        eventInvitationsInvokerConservative = unknownFunctionsSelectorNamed;
-        eventInvitationsStrictServices = "";
-      }
-    } else {
-      eventInvitationsStrictServices = "";
-    }
-
-    // The same rule for the admin callables: named services stay strict, their
-    // unnamed peer may be absent, and an unfamiliar selector alone is lenient.
-    if (!adminCallablesInvokerSelected) {
-      adminCallablesStrictServices = "";
-    } else if (fullAdminScopeNamed) {
-      adminCallablesInvokerConservative = false;
-      adminCallablesStrictServices = exportedAdminCsv;
-    } else if (namedAdminServices.size > 0) {
-      adminCallablesInvokerConservative = false;
-      adminCallablesStrictServices = ADMIN_CALLABLE_EXPORTS.map(([, service]) => service)
-        .filter((service) => namedAdminServices.has(service))
-        .join(",");
-    } else {
-      adminCallablesInvokerConservative = unknownFunctionsSelectorNamed;
-      adminCallablesStrictServices = "";
-    }
+    // A proven service is a fact even when an unfamiliar selector appears in
+    // the same request: it stays strict and only its peers may be absent. A
+    // selected family with nothing proven is lenient, because deploy.sh has no
+    // non-conservative form with an empty strict set.
+    const strictCsv = (table, strict) =>
+      table.map(([, service]) => service).filter((service) => strict.has(service)).join(",");
+    eventInvitationsStrictServices = eventInvitationsInvokerSelected
+      ? strictCsv(EVENT_INVITATION_EXPORTS, strictInvitationServices)
+      : "";
+    eventInvitationsInvokerConservative = eventInvitationsInvokerSelected && eventInvitationsStrictServices === "";
+    adminCallablesStrictServices = adminCallablesInvokerSelected
+      ? strictCsv(ADMIN_CALLABLE_EXPORTS, strictAdminServices)
+      : "";
+    adminCallablesInvokerConservative = adminCallablesInvokerSelected && adminCallablesStrictServices === "";
   } else if (exceptTargets) {
     for (const selector of exceptTargets.split(",")) {
       if (selector === "hosting") hostingAttempted = false;
@@ -4388,9 +4413,11 @@ export async function classifyInvokerScope(
       bugReportInvokerSelected = true;
       emailUnsubscribeInvokerSelected = true;
       authHandoffInvokerSelected = true;
-      eventInvitationsInvokerSelected = exportedInvitationServices.size > 0;
+      eventInvitationsInvokerSelected = allInvitationsSelected;
+      eventInvitationsInvokerConservative = allInvitationsSelected && exportedInvitationCsv === "";
       eventInvitationsStrictServices = exportedInvitationCsv;
-      adminCallablesInvokerSelected = exportedAdminServices.size > 0;
+      adminCallablesInvokerSelected = allAdminsSelected;
+      adminCallablesInvokerConservative = allAdminsSelected && exportedAdminCsv === "";
       adminCallablesStrictServices = exportedAdminCsv;
     }
   }

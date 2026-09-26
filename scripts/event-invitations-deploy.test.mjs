@@ -14,6 +14,29 @@ async function classify(args) {
   });
 }
 
+// One `functions` config per entry (#1282): `codebase` (omitted for the
+// default codebase), `source`, and the `src/index.ts` lines.
+async function classifyCodebases(codebases, args) {
+  const fixture = await mkdtemp(join(tmpdir(), "event-invitation-codebases-"));
+  try {
+    for (const { source, index } of codebases) {
+      await mkdir(resolve(fixture, source, "src"), { recursive: true });
+      await writeFile(resolve(fixture, source, "src", "index.ts"), index.join("\n"));
+    }
+    const configs = codebases.map(({ codebase, source }) => (codebase ? { source, codebase } : { source }));
+    await writeFile(resolve(fixture, "firebase.json"), JSON.stringify({ functions: configs }));
+    return await classifyFirebaseDeployRequest(["fiveacross", ...args], {
+      defaultConfigPath: resolve(fixture, "firebase.json"),
+    });
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+}
+
+const EXPORTS_ALL = [
+  { source: "functions", index: ["mint", "redeem", "revoke"].map((verb) => `export const ${verb}EventInvitation = 1;`) },
+];
+
 describe("event-invitation deploy scope", () => {
   it("does not claim services that the real Functions index does not export", async () => {
     const source = await readFile(
@@ -141,7 +164,7 @@ describe("event-invitation deploy scope", () => {
   ])(
     "keeps only explicitly selected services strict for %s",
     async (only, strict) => {
-      const result = await classify(["--only", only]);
+      const result = await classifyCodebases(EXPORTS_ALL, ["--only", only]);
 
       expect(result).toMatchObject({
         eventInvitationsInvokerSelected: true,
@@ -157,7 +180,7 @@ describe("event-invitation deploy scope", () => {
   ])(
     "keeps an exact endpoint strict alongside an unfamiliar selector (%s)",
     async (only) => {
-      const result = await classify(["--only", only]);
+      const result = await classifyCodebases(EXPORTS_ALL, ["--only", only]);
 
       expect(result).toMatchObject({
         eventInvitationsInvokerSelected: true,
@@ -167,8 +190,15 @@ describe("event-invitation deploy scope", () => {
     },
   );
 
-  it("treats an unfamiliar Functions selector as an allow-missing probe", async () => {
-    const result = await classify(["--only", "functions:someGroup"]);
+  // A named service the resolved codebase does not export drops out of the
+  // strict set (#1282), and a whole scope with nothing exported beside an
+  // unfamiliar selector proves nothing either.
+  it.each([
+    "functions:someGroup",
+    "functions:mintEventInvitation",
+    "functions:default,functions:someGroup",
+  ])("treats %s against the real index as an allow-missing probe", async (only) => {
+    const result = await classify(["--only", only]);
 
     expect(result).toMatchObject({
       eventInvitationsInvokerSelected: true,
@@ -199,6 +229,35 @@ describe("event-invitation deploy scope", () => {
       eventInvitationsInvokerSelected: false,
       eventInvitationsInvokerConservative: false,
       eventInvitationsStrictServices: "",
+    });
+  });
+});
+
+describe("event-invitation deploy scope across Functions codebases (#1282)", () => {
+  // Only the non-default `invites` codebase exports protected callables.
+  const TWO_CODEBASES = [
+    { source: "functions", index: ["export const unrelated = 1;"] },
+    { codebase: "invites", source: "invites", index: ["mint", "redeem"].map((verb) => `export const ${verb}EventInvitation = 1;`) },
+  ];
+
+  // [only, selected, conservative, strict]; no `--only` at all is `null`.
+  it.each([
+    [null, true, false, "mint,redeem"],
+    ["functions", true, false, "mint,redeem"],
+    ["functions:default", false, false, ""],
+    ["functions:invites", true, false, "mint,redeem"],
+    ["functions:mintEventInvitation", true, true, ""],
+    ["functions:invites:mintEventInvitation", true, false, "mint"],
+    ["functions:invites:revokeEventInvitation", true, true, ""],
+    ["functions:default,functions:invites:redeemEventInvitation", true, false, "redeem"],
+  ])("marks strict only what the selected codebase exports (%s)", async (only, selected, conservative, strict) => {
+    const result = await classifyCodebases(TWO_CODEBASES, only === null ? [] : ["--only", only]);
+
+    expect(result).toMatchObject({
+      functionsAttempted: true,
+      eventInvitationsInvokerSelected: selected,
+      eventInvitationsInvokerConservative: conservative,
+      eventInvitationsStrictServices: strict,
     });
   });
 });
