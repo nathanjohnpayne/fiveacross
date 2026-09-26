@@ -4014,6 +4014,14 @@ function warnUnfamiliedHttpsExports(configSource, configPath) {
  * skip the guard, and it is refused before anything is built. A named target
  * already refuses every `-c/--config`; this closes the same door for a plain
  * `deploy.sh` run whose deploy may release Functions.
+ *
+ * The same FILE is not enough: firebase-tools takes the project directory from
+ * the `-c` path as given (`detectProjectRoot`), and runs the relative
+ * `node scripts/...` hook from there, so a symlink to firebase.json planted in
+ * another directory would run that directory's `scripts/` instead (CodeRabbit
+ * P1 on #1328). The selected config must also sit in the default's directory.
+ * Both are compared by real path, so the logical `$PWD` `deploy.sh` passes and
+ * the physical cwd a relative `-c` resolves against still agree.
  */
 async function assertFunctionsDeployUsesDefaultConfig(configPath, defaultConfigPath) {
   const real = async (path) => {
@@ -4023,7 +4031,9 @@ async function assertFunctionsDeployUsesDefaultConfig(configPath, defaultConfigP
       return resolve(path);
     }
   };
-  if ((await real(configPath)) === (await real(defaultConfigPath))) return;
+  const sameFile = (await real(configPath)) === (await real(defaultConfigPath));
+  const sameDirectory = (await real(dirname(resolve(configPath)))) === (await real(dirname(resolve(defaultConfigPath))));
+  if (sameFile && sameDirectory) return;
   throw new Error(
     `-c/--config ${configPath} replaces the default ${resolve(defaultConfigPath)}, whose Functions predeploy chain runs the HTTPS export guard ` +
       "(scripts/check-callable-families-predeploy.mjs), so a deploy that may release Functions cannot use it. " +

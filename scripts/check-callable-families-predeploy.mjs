@@ -49,6 +49,7 @@ const { getRuntimeChoice } = require("firebase-tools/lib/deploy/functions/runtim
 const functionsEnv = require("firebase-tools/lib/functions/env");
 const { isCallableTriggered, isHttpsTriggered } = require("firebase-tools/lib/deploy/functions/build");
 const { addKitPrefix, isKitConfig } = require("firebase-tools/lib/functions/projectConfig");
+const { Config } = require("firebase-tools/lib/config");
 
 /** The ids of a discovered build's endpoints that serve HTTPS (onRequest or onCall), sorted. */
 export function httpsEndpointIds(discovered) {
@@ -65,20 +66,38 @@ export function httpsEndpointIds(discovered) {
  * instance of a kit. `""` is no prefix. Every Functions config whose source is
  * `sourceDir` contributes (firebase-tools allows one source under several
  * prefixes); a directory no config names is unprefixed.
+ *
+ * The config is read as the deploy (and the classifier) reads it, through
+ * firebase-tools' own `Config`, so a `functions` key that is an import path is
+ * materialized from the file it names. A Functions config the guard does not
+ * recognise throws, and the caller refuses: an unreadable shape is never taken
+ * to mean "no prefix".
  */
 export function codebasePrefixes({ sourceDir, projectDir }) {
   const configFile = join(projectDir, "firebase.json");
   if (!existsSync(configFile)) return [""];
-  const { functions } = JSON.parse(readFileSync(configFile, "utf8")) ?? {};
+  const config = new Config(JSON.parse(readFileSync(configFile, "utf8")), {
+    projectDir,
+    cwd: projectDir,
+    configPath: "firebase.json",
+  });
+  const functions = config.get("functions");
+  const unrecognised = (entry) =>
+    new Error(`firebase.json has a Functions config the export guard does not recognise: ${JSON.stringify(entry)}`);
   const prefixes = new Set();
-  for (const config of [functions ?? []].flat()) {
-    if (!config || typeof config !== "object") continue;
-    const source = typeof config.source === "string" ? config.source : "functions";
-    if (resolve(projectDir, source) !== resolve(sourceDir)) continue;
-    if (isKitConfig(config)) {
-      for (const instance of Object.keys(config.instances ?? {})) prefixes.add(addKitPrefix(instance));
+  for (const entry of functions === undefined ? [] : [functions].flat()) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw unrecognised(entry);
+    if (entry.source !== undefined && typeof entry.source !== "string") throw unrecognised(entry);
+    if (entry.prefix !== undefined && typeof entry.prefix !== "string") throw unrecognised(entry);
+    // A remote codebase has no local source; `Config` defaults only a codebase
+    // with neither to the CLI's `functions/`.
+    if (entry.source === undefined && entry.remoteSource !== undefined) continue;
+    if (resolve(projectDir, entry.source ?? "functions") !== resolve(sourceDir)) continue;
+    if (isKitConfig(entry)) {
+      if (!entry.instances || typeof entry.instances !== "object" || Array.isArray(entry.instances)) throw unrecognised(entry);
+      for (const instance of Object.keys(entry.instances)) prefixes.add(addKitPrefix(instance));
     } else {
-      prefixes.add(typeof config.prefix === "string" ? config.prefix : "");
+      prefixes.add(entry.prefix ?? "");
     }
   }
   return prefixes.size > 0 ? [...prefixes] : [""];

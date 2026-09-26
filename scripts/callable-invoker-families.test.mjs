@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -184,6 +184,18 @@ describe("callable invoker families (#1277)", () => {
         classifyFirebaseDeployRequest(["fiveacross", ...spelling, "--only", "functions"], { defaultConfigPath }),
       ).rejects.toThrow(/replaces the default .*firebase\.json.*HTTPS export guard.*cannot use it/);
     }
+    // The same file reached from another directory is refused too: Firebase
+    // takes the project directory from the -c path, and would run that
+    // directory's scripts/ as the guard (CodeRabbit P1 on #1328).
+    const planted = await mkdtemp(join(tmpdir(), "callable-families-planted-"));
+    fixtures.push(planted);
+    await symlink(defaultConfigPath, join(planted, "firebase.json"));
+    await expect(
+      classifyFirebaseDeployRequest(["fiveacross", "--config", join(planted, "firebase.json"), "--only", "functions"], {
+        defaultConfigPath,
+      }),
+    ).rejects.toThrow(/replaces the default .*HTTPS export guard.*cannot use it/);
+
     // Controls: the same file as the default passes, and so does an alternate
     // config whose deploy releases no Functions.
     const same = await classifyFirebaseDeployRequest(["fiveacross", "--config", defaultConfigPath, "--only", "functions"], {

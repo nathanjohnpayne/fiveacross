@@ -166,6 +166,14 @@ describe("the Functions predeploy export guard (#1283)", () => {
     expect(await check(fixture)).toMatchObject({ ok: true });
   });
 
+  it("refuses, rather than reads as unprefixed, a firebase.json whose Functions config it cannot read (#1328)", BUILDS, async () => {
+    const fixture = await codebase({ "lib/index.js": cjs("exports.unlockDayNow = onCall(async () => 1);") });
+    await writeFile(join(fixture.root, "firebase.json"), JSON.stringify({ functions: "missing.config.json" }));
+    const verdict = await check(fixture);
+    expect(verdict.ok).toBe(false);
+    expect(verdict.message).toMatch(/could not discover what the built Functions artifact .* deploys — .*missing\.config\.json/);
+  });
+
   it("counts only HTTPS and callable triggers", BUILDS, async () => {
     const fixture = await codebase({
       "lib/index.js": [
@@ -287,6 +295,17 @@ describe("codebasePrefixes / prefixedEndpointIds (#1328)", () => {
     // A config with no source deploys the CLI default functions/.
     await writeFile(join(root, "firebase.json"), JSON.stringify({ functions: { prefix: "solo" } }));
     expect(codebasePrefixes({ sourceDir, projectDir: root })).toEqual(["solo"]);
+    // An import-path `functions` key is materialized from the file it names, as
+    // the deploy's own Config does (Codex P2 / CodeRabbit P1 on #1328).
+    await writeFile(join(root, "functions.config.json"), JSON.stringify({ source: "functions", prefix: "imported" }));
+    await writeFile(join(root, "firebase.json"), JSON.stringify({ functions: "functions.config.json" }));
+    expect(codebasePrefixes({ sourceDir, projectDir: root })).toEqual(["imported"]);
+    // Fail closed: an import that is missing, and shapes the guard does not
+    // recognise, throw rather than read as unprefixed.
+    for (const functions of ["missing.json", [42], [{ source: "functions", prefix: 7 }], [{ source: ["functions"] }]]) {
+      await writeFile(join(root, "firebase.json"), JSON.stringify({ functions }));
+      expect(() => codebasePrefixes({ sourceDir, projectDir: root }), JSON.stringify(functions)).toThrow();
+    }
 
     expect(prefixedEndpointIds(["b", "a"], ["", "beta"])).toEqual(["a", "b", "beta-a", "beta-b"]);
   });
