@@ -193,6 +193,7 @@ function localTypeOnlyNames(sourceFile, file = null, walk = newExportWalk()) {
   const values = new Set();
   const localValues = new Set();
   const ambientValues = new Set();
+  const aliases = new Set();
   const imports = new Map();
   const addBindingNames = (name, bucket) => {
     if (ts.isIdentifier(name)) bucket.add(name.text);
@@ -221,6 +222,7 @@ function localTypeOnlyNames(sourceFile, file = null, walk = newExportWalk()) {
     ) {
       values.add(statement.name.text);
       localValues.add(statement.name.text);
+      if (isEntityImportAlias(statement)) aliases.add(statement.name.text);
     } else if (ts.isImportDeclaration(statement) && statement.importClause) {
       const clause = statement.importClause;
       const bucket = clause.isTypeOnly ? types : values;
@@ -249,6 +251,10 @@ function localTypeOnlyNames(sourceFile, file = null, walk = newExportWalk()) {
     ambient(name) {
       return types.has(name) && ambientValues.has(name);
     },
+    // Whether `name` is an `import name = a.b` alias (see `isEntityImportAlias`).
+    alias(name) {
+      return aliases.has(name);
+    },
     has(name) {
       if (types.has(name)) return true;
       if (!file || !imports.has(name) || localValues.has(name)) return false;
@@ -261,6 +267,19 @@ function localTypeOnlyNames(sourceFile, file = null, walk = newExportWalk()) {
     },
   };
 }
+
+// An `import name = a.b` alias of an entity (not `import name = require(...)`):
+// TypeScript emits it only when the entity it names is a value, and a namespace
+// member (`declare namespace Types { interface Foo {} }`) can be a type, so
+// the walks cannot say whether exporting the alias publishes anything.
+function isEntityImportAlias(statement) {
+  return ts.isImportEqualsDeclaration(statement) && !ts.isExternalModuleReference(statement.moduleReference);
+}
+
+// Raised by the export walks for an export they cannot classify as a value or
+// a type (an export of an `isEntityImportAlias` binding); the inventory then
+// records the codebase as uninventoried.
+class UnmodelledExportError extends Error {}
 
 // One traversal's state for the mutually recursive export walks
 // (`localTypeOnlyNames`, `moduleExportIsTypeOnly`, `exportElementIsValue`,
@@ -369,6 +388,7 @@ function exportIsTypeOnlyIn(file, name, walk) {
       // `export default interface T` exports `default`, not `T`.
       const exportsDefault = modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword);
       if (exportsDefault ? name !== "default" : !declaredNames(statement).includes(name)) continue;
+      if (isEntityImportAlias(statement)) throw new UnmodelledExportError(`export import ${name}`);
       const erased =
         ts.isInterfaceDeclaration(statement) ||
         ts.isTypeAliasDeclaration(statement) ||
@@ -386,6 +406,9 @@ function exportIsTypeOnlyIn(file, name, walk) {
       if (statement.isExportEquals) valueSeen = true;
       else if (name === "default") {
         const expression = statement.expression;
+        if (ts.isIdentifier(expression) && typeOnlyNames.alias(expression.text)) {
+          throw new UnmodelledExportError(`export default of the import alias ${expression.text}`);
+        }
         if (ts.isIdentifier(expression) && typeOnlyNames.has(expression.text) && !typeOnlyNames.ambient(expression.text)) {
           typeSeen = true;
         } else valueSeen = true;
@@ -428,7 +451,10 @@ function exportIsTypeOnlyIn(file, name, walk) {
 function exportElementIsValue(statement, element, typeOnlyNames, file = null, walk = newExportWalk()) {
   if (element.isTypeOnly) return false;
   const local = (element.propertyName ?? element.name).text;
-  if (!statement.moduleSpecifier) return !typeOnlyNames.has(local);
+  if (!statement.moduleSpecifier) {
+    if (typeOnlyNames.alias(local)) throw new UnmodelledExportError(`export of the import alias ${local}`);
+    return !typeOnlyNames.has(local);
+  }
   if (!file || !ts.isStringLiteral(statement.moduleSpecifier)) return true;
   const target = resolveModule(file, statement.moduleSpecifier.text);
   return !(target && moduleExportIsTypeOnly(target, local, walk));
@@ -4264,18 +4290,21 @@ function selectorNamesConfiguredCodebase(selector, inventory) {
  * whose surface this parse cannot prove maps to `null` and stays conservative:
  * no local `source` (kit, `remoteSource`; a kit's instances are keyed under
  * `UNINVENTORIED_CODEBASE`), an explicit non-Node `runtime` (its surface is not
- * a TypeScript index), a `prefix` (the CLI renames every service), a source
- * directory that does not exist yet under a `predeploy` hook (which can
- * generate it), a source
- * directory carrying a `functions.yaml` manifest (it decides discovery before
- * the index loads), a source directory with no `package.json` (the CLI then
- * infers a non-Node runtime), a
- * `package.json` that is unreadable, invalid, or names a `main` other than
- * `lib/index.js`, a source directory with no `src/index.ts`, or an index, or a
- * local module it reaches through `export *`, that `referencesCommonJsExports`
- * flags: a CommonJS `exports`, `module` or top-level `this` reference, an
- * `export =` or `export default`, or an exported declaration the walk in
- * `protectedServicesFromSource` does not model.
+ * a TypeScript index), a `prefix` (the CLI renames every service), a
+ * `predeploy` hook other than the codebase's own compile step
+ * (`predeployOnlyCompiles`), whether or not its index exists yet (a hook runs
+ * before Functions prepare loads the source and can generate or rewrite it), a
+ * source directory that does not exist yet under any `predeploy` hook, a
+ * source directory carrying a `functions.yaml` manifest (it decides discovery
+ * before the index loads), a source directory with no `package.json` (the CLI
+ * then infers a non-Node runtime), a `package.json` that is unreadable,
+ * invalid, or names a `main` other than `lib/index.js`, a source directory
+ * with no `src/index.ts`, an index, or a local module it reaches through
+ * `export *`, that `referencesCommonJsExports` flags (a CommonJS `exports`,
+ * `module` or top-level `this` reference, an `export =` or `export default`,
+ * or an exported declaration the walk in `protectedServicesFromSource` does
+ * not model), or an export the walks cannot classify as a value or a type
+ * (`UnmodelledExportError`: an exported `import name = a.b` alias).
  */
 const UNINVENTORIED_CODEBASE = Symbol("uninventoried codebase");
 /**
@@ -4550,10 +4579,17 @@ async function protectedServiceInventory(configSource, configPath, table) {
       services.set(codebase, null);
       continue;
     }
+    let exported;
+    try {
+      exported = protectedServicesFromSource(source, table, sourcePath);
+    } catch (error) {
+      if (!(error instanceof UnmodelledExportError)) throw error;
+      services.set(codebase, null);
+      continue;
+    }
     const found = services.get(codebase) ?? new Set();
     services.set(codebase, found);
-    for (const service of protectedServicesFromSource(source, table, sourcePath))
-      found.add(service);
+    for (const service of exported) found.add(service);
   }
   const inventory = new Map();
   for (const [codebase, found] of services) {

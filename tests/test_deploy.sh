@@ -2701,10 +2701,12 @@ fi
 # ---------------------------------------------------------------------------
 # Cases 25a-25c (#803): event-invitation callables share one reconciliation
 # wrapper, but full deploys must derive their strict inventory from the actual
-# Functions exports. Exact Firebase scopes keep only the services they named
-# strict. The read-only precheck always tolerates first-deploy absence; after
-# publish, an absent unselected peer is valid while an absent selected service
-# is the published-but-403 failure this guard must surface.
+# Functions exports. An exact Firebase scope keeps a service it names strict
+# only when the codebase it resolves to exports that service (#1282); one it
+# does not is an allow-missing probe. The read-only precheck always tolerates
+# first-deploy absence; after publish, an absent unselected or unexported peer
+# is valid while an absent strict service is the published-but-403 failure
+# this guard must surface.
 # ---------------------------------------------------------------------------
 REPO25A="$WORKDIR/case25a-event-invitation-full"
 init_fixture_repo "$REPO25A"

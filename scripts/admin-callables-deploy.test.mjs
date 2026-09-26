@@ -405,6 +405,22 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
               ? "declare const handler: unknown;\nexport default handler;\n"
               : "declare function handler(): void;\nexport default handler;\n",
           );
+        } else if (variant === "import-alias-clause" || variant === "reexported-import-alias") {
+          // `import Foo = Types.Foo` of a namespace interface is erased, of a
+          // namespace value is emitted; the walk cannot tell which.
+          const alias = "declare namespace Types { interface Foo { value: string } }\nimport Foo = Types.Foo;\n";
+          if (variant === "import-alias-clause") {
+            await writeFile(
+              resolve(fixture, "ops", "src", "index.ts"),
+              header + callable + alias + "export { Foo as approvePrompts };\n",
+            );
+          } else {
+            await writeFile(
+              resolve(fixture, "ops", "src", "index.ts"),
+              header + callable + "export { Foo as approvePrompts } from './admin';\n",
+            );
+            await writeFile(resolve(fixture, "ops", "src", "admin.ts"), alias + "export { Foo };\n");
+          }
         } else if (variant === "diamond-type-reexport") {
           // Twenty layers of two local stars into one shared module reach the
           // interface along 2^20 paths; each module is analysed once.
@@ -596,6 +612,9 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       { selected: false, conservative: false, strict: "" },
     ],
     ["ops-variant-functions-yaml", ["--only", "functions:ops"], unknown, unknown],
+    // An exported `import Foo = Types.Foo` alias may be a type or a value.
+    ["ops-variant-import-alias-clause", ["--only", "functions:ops"], unknown, unknown],
+    ["ops-variant-reexported-import-alias", ["--only", "functions:ops"], unknown, unknown],
     // Codebase precedence holds for an imported functions config too.
     ...["inline-config-unlock-codebase", "imported-config-unlock-codebase"].map((layout) => [
       layout,
