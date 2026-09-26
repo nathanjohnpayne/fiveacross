@@ -71,10 +71,11 @@ export const DEPLOY_TARGETS = Object.freeze({
     // skip off, scripts/deploy-target.mjs pins readiness into deploy.sh: after
     // every pre-build guard, deploy.sh repeats that permission proof before
     // BUILD_CMD/Firebase for each Hosting or handoff-callable scope, and the
-    // post-Functions handoff repair runs on every deploy (--skip-invoker is
-    // refused for this target). The readiness apply still ABORTS BEFORE
-    // BUILDING on a PERMISSION_DENIED, so a revoked grant fails the deploy
-    // closed rather than releasing a client against 403ing callables.
+    // post-Functions handoff repair runs whenever the selected scope could
+    // release a handoff callable (per-codebase selection, #1282 and #1299;
+    // --skip-invoker is refused for this target). The readiness apply still
+    // ABORTS BEFORE BUILDING on a PERMISSION_DENIED, so a revoked grant fails
+    // the deploy closed rather than releasing a client against 403ing callables.
     skipInvokerReconcile: false,
   }),
 });

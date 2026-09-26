@@ -306,10 +306,11 @@ function analyzeModule(file, results, visited) {
       changed = true;
     }
   }
-  // An exported variable this scan did not classify is unread unless it is a
-  // `const` whose value provably builds no endpoint (a function, a literal, an
-  // array or object literal): `https['onCall'](...)`, a call through a local
-  // alias or any other callee it cannot read is unknown, never empty (#1299).
+  // An exported variable or default this scan did not classify is unread
+  // unless it is a `const` whose value provably builds no endpoint (a function,
+  // a literal, an array or object literal): `https['onCall'](...)`, a call
+  // through a local alias or any other callee it cannot read is unknown, never
+  // empty (#1299).
   const inert = (node) =>
     isFunctionNode(node) ||
     ts.isClassExpression(node) ||
@@ -319,6 +320,11 @@ function analyzeModule(file, results, visited) {
     ts.isTemplateExpression(node) ||
     [ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword, ts.SyntaxKind.NullKeyword].includes(node.kind);
   for (const statement of source.statements) {
+    // `export default <expression>` is the binding `default`, which a named
+    // re-export can rename (`export { default as x } from './leaf'`).
+    if (ts.isExportAssignment(statement) && !statement.isExportEquals && !localHttps.has("default") && !localBuilders.has("default")) {
+      if (!inert(unwrap(statement.expression))) analysis.unread.add("default");
+    }
     if (!ts.isVariableStatement(statement) || !isExported(statement)) continue;
     const constant = Boolean(statement.declarationList.flags & ts.NodeFlags.Const);
     for (const { name, initializer } of statement.declarationList.declarations) {

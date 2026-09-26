@@ -428,6 +428,18 @@ describe("single-service invoker families across Functions codebases (#1299)", (
       "callables.ts": [V2, "const mint = https['onCall'](async () => 1);", "export { mint as mintAuthHandoff };"],
     },
     "a package re-export": { "handoff.ts": ["export { mintAuthHandoff } from 'handoff-package';"] },
+    "an unclassified default renamed by a re-export": {
+      "handoff.ts": ["export { default as mintAuthHandoff } from './leaf';"],
+      "leaf.ts": [V2, "export default https['onCall'](async () => 1);"],
+    },
+    "a default of an unclassified binding renamed by a re-export": {
+      "handoff.ts": ["export { default as mintAuthHandoff } from './leaf';"],
+      "leaf.ts": [V2, "const mint = https['onCall'](async () => 1);", "export default mint;"],
+    },
+    "an unclassified default imported and re-exported": {
+      "handoff.ts": ["import mint from './leaf';", "export { mint as mintAuthHandoff };"],
+      "leaf.ts": [V2, "export default https['onCall'](async () => 1);"],
+    },
   };
   const ALL_CONSERVATIVE = { ...BOTH_FAMILIES_CONSERVATIVE, ...fields("C", "C", "C") };
   const starCases = Object.entries(UNREAD_HANDOFF).flatMap(([form, modules]) => [
@@ -450,6 +462,19 @@ describe("single-service invoker families across Functions codebases (#1299)", (
       "export const emailUnsubscribe = 'inert';",
     ];
     const codebases = [{ source: "functions", index: ["export * from './handoff';"], modules: { "handoff.ts": handoff } }];
+    expect(await withCodebases(codebases, ["--only", "functions:default"])).toMatchObject({
+      ...fields("-", "-", "mint"),
+      eventInvitationsInvokerSelected: false,
+      adminCallablesInvokerSelected: false,
+    });
+  });
+
+  it("keeps a classified default renamed behind a local star strict", async () => {
+    const modules = {
+      "handoff.ts": ["export { default as mintAuthHandoff } from './leaf';"],
+      "leaf.ts": ["import { onCall } from 'firebase-functions/v2/https';", "export default onCall(async () => 1);"],
+    };
+    const codebases = [{ source: "functions", index: ["export * from './handoff';"], modules }];
     expect(await withCodebases(codebases, ["--only", "functions:default"])).toMatchObject({
       ...fields("-", "-", "mint"),
       eventInvitationsInvokerSelected: false,
