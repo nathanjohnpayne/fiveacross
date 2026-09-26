@@ -6,7 +6,7 @@ import { cp, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/pro
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkBuiltArtifact, httpsEndpointIds } from "./check-callable-families-predeploy.mjs";
+import { checkBuiltArtifact, codebasePrefixes, httpsEndpointIds, prefixedEndpointIds } from "./check-callable-families-predeploy.mjs";
 import { CALLABLE_INVOKER_FAMILIES, httpsFunctionExports, unfamiliedHttpsNames } from "./callable-invoker-families.mjs";
 
 // The guard reads a BUILT artifact through the discovery `firebase deploy`
@@ -81,6 +81,8 @@ describe("the Functions predeploy export guard (#1283)", () => {
     await symlink(SHARED_MODULES, join(functionsDir, "node_modules"), "junction");
     // The Functions source imports shared types from the app (`../../src/domainTypes`).
     await symlink(join(repoRoot, "src"), join(root, "src"), "junction");
+    // The real firebase.json, so the ids are checked with its codebase prefixes.
+    await cp(join(repoRoot, "firebase.json"), join(root, "firebase.json"));
     const build = await run("npm", ["--prefix", functionsDir, "run", "build"], { cwd: root });
     expect(build.code, build.stdout + build.stderr).toBe(0);
 
@@ -148,6 +150,20 @@ describe("the Functions predeploy export guard (#1283)", () => {
     const verdict = await check(fixture);
     expect(verdict.ok).toBe(false);
     expect(verdict.message).toMatch(/deploys destructured, endpoint, an onCall/);
+  });
+
+  it("checks the prefixed id the deploy publishes when the codebase sets a prefix (#1328)", BUILDS, async () => {
+    // prepare.js renames every endpoint `<prefix>-<id>` after discovery, so a
+    // familied export name deploys as an id no invoker family reconciles.
+    const fixture = await codebase({ "lib/index.js": cjs("exports.unlockDayNow = onCall(async () => 1);") });
+    await writeFile(join(fixture.root, "firebase.json"), JSON.stringify({ functions: { source: "functions", prefix: "admin" } }));
+    const verdict = await check(fixture);
+    expect(verdict.ok).toBe(false);
+    expect(verdict.message).toMatch(/deploys admin-unlockDayNow, an onCall/);
+
+    // Control: the same artifact with no prefix passes.
+    await writeFile(join(fixture.root, "firebase.json"), JSON.stringify({ functions: { source: "functions" } }));
+    expect(await check(fixture)).toMatchObject({ ok: true });
   });
 
   it("counts only HTTPS and callable triggers", BUILDS, async () => {
@@ -244,6 +260,35 @@ describe("the Functions predeploy export guard (#1283)", () => {
     // firebase-tools' cross-env-shell silently drops a hook whose text carries
     // `NAME=`, so the guard must never grow one.
     for (const hook of hooks) expect(hook).not.toMatch(/\w+=/);
+  });
+});
+
+describe("codebasePrefixes / prefixedEndpointIds (#1328)", () => {
+  it("reads every prefix firebase.json gives the source directory, as prepare.js applies them", async () => {
+    const root = await mkdtemp(join(tmpdir(), "callable-families-prefixes-"));
+    fixtures.push(root);
+    const sourceDir = join(root, "functions");
+    // No firebase.json: unprefixed.
+    expect(codebasePrefixes({ sourceDir, projectDir: root })).toEqual([""]);
+    await writeFile(
+      join(root, "firebase.json"),
+      JSON.stringify({
+        functions: [
+          { source: "functions", codebase: "default" },
+          { source: "functions", codebase: "beta", prefix: "beta" },
+          { source: "other", codebase: "other", prefix: "other" },
+          { kit: "sample", source: "functions", instances: { one: "config/one" } },
+        ],
+      }),
+    );
+    expect(codebasePrefixes({ sourceDir, projectDir: root }).sort()).toEqual(["", "beta", "kit-one"]);
+    // A source directory no config names is unprefixed.
+    expect(codebasePrefixes({ sourceDir: join(root, "elsewhere"), projectDir: root })).toEqual([""]);
+    // A config with no source deploys the CLI default functions/.
+    await writeFile(join(root, "firebase.json"), JSON.stringify({ functions: { prefix: "solo" } }));
+    expect(codebasePrefixes({ sourceDir, projectDir: root })).toEqual(["solo"]);
+
+    expect(prefixedEndpointIds(["b", "a"], ["", "beta"])).toEqual(["a", "b", "beta-a", "beta-b"]);
   });
 });
 

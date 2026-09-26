@@ -167,6 +167,35 @@ describe("callable invoker families (#1277)", () => {
     expect(warnings.text).toMatch(/check-callable-families-predeploy\.mjs/);
   });
 
+  it("refuses a -c/--config other than the default for a deploy that may release Functions (#1283, #1328)", async () => {
+    // The guard is a hook of the default config's Functions predeploy chain; an
+    // alternate config replaces that chain, so it must not carry a Functions
+    // release past the guard.
+    const root = await fixture({
+      "index.ts": "import { onCall } from 'firebase-functions/v2/https';\nexport const unlockDayNow = onCall(async () => 1);\n",
+    });
+    const defaultConfigPath = resolve(root, "firebase.json");
+    const other = resolve(root, "other.firebase.json");
+    await writeFile(other, JSON.stringify({ functions: { source: "functions" }, firestore: { rules: "firestore.rules" } }));
+    await writeFile(resolve(root, "firestore.rules"), "rules_version = '2';\n");
+
+    for (const spelling of [["--config", other], [`--config=${other}`], ["-c", other]]) {
+      await expect(
+        classifyFirebaseDeployRequest(["fiveacross", ...spelling, "--only", "functions"], { defaultConfigPath }),
+      ).rejects.toThrow(/replaces the default .*firebase\.json.*HTTPS export guard.*cannot use it/);
+    }
+    // Controls: the same file as the default passes, and so does an alternate
+    // config whose deploy releases no Functions.
+    const same = await classifyFirebaseDeployRequest(["fiveacross", "--config", defaultConfigPath, "--only", "functions"], {
+      defaultConfigPath,
+    });
+    expect(same.functionsAttempted).toBe(true);
+    const away = await classifyFirebaseDeployRequest(["fiveacross", "--config", other, "--only", "firestore"], {
+      defaultConfigPath,
+    });
+    expect(away.functionsAttempted).toBe(false);
+  });
+
   it("follows default exports through default imports and named re-exports", async () => {
     const root = await fixture({
       "index.ts": [

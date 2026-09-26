@@ -22,16 +22,24 @@
 // deploy's own discovery of the same artifact would have to answer for the
 // release to go ahead.
 //
+// The ids checked are the ids the deploy publishes: `prepare.js` renames every
+// discovered endpoint `<prefix>-<id>` when the codebase sets a `prefix` (and
+// `kit-<instance>-<id>` for a kit), so the same renaming is applied here, read
+// from the project's firebase.json for every Functions config whose source is
+// this directory.
+//
 // Discovery runs with the environment `prepare.js` builds for it, from what a
 // hook can know: the source directory's `.env` and `.env.<project id>` files,
 // FIREBASE_CONFIG carrying the project id alone (the rest comes from the
 // deploy's authenticated lookup), and no legacy runtime config. A codebase
 // `configDir`, a `.env.<alias>` file and the fetched config values are not
 // mirrored; an artifact whose HTTPS endpoint set depends on them is the
-// residual.
-import { realpathSync } from "node:fs";
+// residual. So is a `firebase deploy --config <other file>` run by hand: the
+// prefixes are read from firebase.json, and `deploy.sh` refuses any other
+// config for a deploy that may release Functions.
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { unfamiliedHttpsNames } from "./callable-invoker-families.mjs";
 
@@ -40,6 +48,7 @@ const { Delegate } = require("firebase-tools/lib/deploy/functions/runtimes/node"
 const { getRuntimeChoice } = require("firebase-tools/lib/deploy/functions/runtimes/node/parseRuntimeAndValidateSDK");
 const functionsEnv = require("firebase-tools/lib/functions/env");
 const { isCallableTriggered, isHttpsTriggered } = require("firebase-tools/lib/deploy/functions/build");
+const { addKitPrefix, isKitConfig } = require("firebase-tools/lib/functions/projectConfig");
 
 /** The ids of a discovered build's endpoints that serve HTTPS (onRequest or onCall), sorted. */
 export function httpsEndpointIds(discovered) {
@@ -47,6 +56,39 @@ export function httpsEndpointIds(discovered) {
     .filter(([, endpoint]) => isHttpsTriggered(endpoint) || isCallableTriggered(endpoint))
     .map(([id]) => id)
     .sort();
+}
+
+/**
+ * The endpoint-id prefixes `firebase deploy` gives the codebase at `sourceDir`,
+ * from `projectDir`'s firebase.json: `prepare.js` applies `applyEndpointPrefix`
+ * after discovery, with a config's `prefix`, or `kit-<instance>` for each
+ * instance of a kit. `""` is no prefix. Every Functions config whose source is
+ * `sourceDir` contributes (firebase-tools allows one source under several
+ * prefixes); a directory no config names is unprefixed.
+ */
+export function codebasePrefixes({ sourceDir, projectDir }) {
+  const configFile = join(projectDir, "firebase.json");
+  if (!existsSync(configFile)) return [""];
+  const { functions } = JSON.parse(readFileSync(configFile, "utf8")) ?? {};
+  const prefixes = new Set();
+  for (const config of [functions ?? []].flat()) {
+    if (!config || typeof config !== "object") continue;
+    const source = typeof config.source === "string" ? config.source : "functions";
+    if (resolve(projectDir, source) !== resolve(sourceDir)) continue;
+    if (isKitConfig(config)) {
+      for (const instance of Object.keys(config.instances ?? {})) prefixes.add(addKitPrefix(instance));
+    } else {
+      prefixes.add(typeof config.prefix === "string" ? config.prefix : "");
+    }
+  }
+  return prefixes.size > 0 ? [...prefixes] : [""];
+}
+
+/** `ids` as the deploy publishes them under each of `prefixes`, sorted. */
+export function prefixedEndpointIds(ids, prefixes) {
+  const published = new Set();
+  for (const prefix of prefixes) for (const id of ids) published.add(prefix ? `${prefix}-${id}` : id);
+  return [...published].sort();
 }
 
 /**
@@ -77,7 +119,9 @@ export async function discoverBuiltEndpoints({ sourceDir, projectDir, projectId 
  */
 export async function checkBuiltArtifact({ sourceDir, projectDir, projectId }) {
   let discovered;
+  let prefixes;
   try {
+    prefixes = codebasePrefixes({ sourceDir, projectDir });
     discovered = await discoverBuiltEndpoints({ sourceDir, projectDir, projectId });
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -88,7 +132,7 @@ export async function checkBuiltArtifact({ sourceDir, projectDir, projectId }) {
         "Nothing has been released.",
     };
   }
-  const endpoints = httpsEndpointIds(discovered);
+  const endpoints = prefixedEndpointIds(httpsEndpointIds(discovered), prefixes);
   const unfamilied = unfamiliedHttpsNames(endpoints);
   if (unfamilied.length > 0) {
     return {

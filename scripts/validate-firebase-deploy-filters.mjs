@@ -4006,6 +4006,32 @@ function warnUnfamiliedHttpsExports(configSource, configPath) {
 }
 
 /**
+ * The export guard's wiring (#1283; Phase 4b P1 on #1328): the authoritative
+ * check is a hook of the Functions `predeploy` chain in the DEFAULT config,
+ * this repository's firebase.json, which `deploy.sh` names and a vitest case
+ * pins. A `-c/--config` naming any other file replaces that chain with whatever
+ * the other file declares, so a deploy that may release Functions under it could
+ * skip the guard, and it is refused before anything is built. A named target
+ * already refuses every `-c/--config`; this closes the same door for a plain
+ * `deploy.sh` run whose deploy may release Functions.
+ */
+async function assertFunctionsDeployUsesDefaultConfig(configPath, defaultConfigPath) {
+  const real = async (path) => {
+    try {
+      return await realpath(path);
+    } catch {
+      return resolve(path);
+    }
+  };
+  if ((await real(configPath)) === (await real(defaultConfigPath))) return;
+  throw new Error(
+    `-c/--config ${configPath} replaces the default ${resolve(defaultConfigPath)}, whose Functions predeploy chain runs the HTTPS export guard ` +
+      "(scripts/check-callable-families-predeploy.mjs), so a deploy that may release Functions cannot use it. " +
+      "Deploy Functions with the default config, or scope this deploy away from Functions",
+  );
+}
+
+/**
  * The function ids that Hosting will ADD to this deploy on its own: every
  * rewrite of a deployed Hosting config whose `function` is an object carrying
  * `pinTag` (Codex P1, round 13 on #1107). The pinned CLI runs
@@ -4511,7 +4537,10 @@ export async function classifyFirebaseDeployRequest(
   const functionsMayRelease = (
     await classifyInvokerScope(effectiveOnly, exceptTargets, [], undefined, pinned.ids, pinned.ownershipUnknown)
   ).functionsAttempted;
-  if (functionsMayRelease) warnUnfamiliedHttpsExports(deployConfig.data, configPath);
+  if (functionsMayRelease) {
+    await assertFunctionsDeployUsesDefaultConfig(configPath, defaultConfigPath);
+    warnUnfamiliedHttpsExports(deployConfig.data, configPath);
+  }
   const singleEndpointExports = await singleEndpointInventory(
     configSource,
     configPath,
