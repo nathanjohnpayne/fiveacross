@@ -6,9 +6,15 @@
 // adds to a Gen2 HTTPS function, so an HTTPS export that no family wrapper
 // reconciles is published unreachable: an unauthenticated request gets Google's
 // HTML 403 instead of the function's own answer (a callable's 401 JSON, or an
-// onRequest endpoint's application response). unlockDayNow shipped that way. The deploy classifier (`validate-firebase-deploy-filters.mjs`) therefore
-// refuses any Functions deploy whose index exports an HTTPS function that is in
-// neither table below, naming the export, before anything is built.
+// onRequest endpoint's application response). unlockDayNow shipped that way.
+//
+// The tables below are enforced from the BUILT artifact (#1283): the Functions
+// predeploy hook `check-callable-families-predeploy.mjs` asks the SDK's own
+// discovery what the just-built codebase deploys and stops `firebase deploy`,
+// naming the endpoint, when an HTTPS endpoint is in neither table. The syntax
+// scan in this file is advisory only: the deploy classifier
+// (`validate-firebase-deploy-filters.mjs`) runs it before anything is built and
+// warns, never refuses, because no syntactic scan is complete over TypeScript.
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
@@ -315,16 +321,25 @@ function analyzeModule(file, results, visited) {
       ? analyzeModule(target, results, visited)
       : { https: localHttps, factories: localBuilders, groups: localGroups, opaque: false };
     if (!statement.exportClause) {
-      for (const name of upstream.https) analysis.https.add(name);
-      for (const name of upstream.factories) analysis.factories.add(name);
-      for (const [name, members] of upstream.groups) analysis.groups.set(name, members);
+      // `export *` never forwards the module's `default` export, nor the
+      // `default-<member>` names this scan flattened out of a default-exported
+      // group (#1286).
+      const forwarded = (name) => name !== "default" && !name.startsWith("default-");
+      for (const name of upstream.https) if (forwarded(name)) analysis.https.add(name);
+      for (const name of upstream.factories) if (forwarded(name)) analysis.factories.add(name);
+      for (const [name, members] of upstream.groups) if (forwarded(name)) analysis.groups.set(name, members);
       if (upstream.opaque) analysis.opaque = true;
       continue;
     }
     // `export * as admin from './admin'` deploys admin's endpoints as a
-    // Firebase group, named `admin-<export>`.
+    // Firebase group, named `admin-<export>`, and is recorded as the group
+    // `admin` so a later `import { admin }` or `export { admin as x } from`
+    // keeps its members (#1285).
     if (ts.isNamespaceExport(statement.exportClause)) {
-      for (const name of upstream.https) analysis.https.add(`${statement.exportClause.name.text}-${name}`);
+      const group = statement.exportClause.name.text;
+      const members = [...upstream.https];
+      analysis.groups.set(group, members);
+      for (const name of members) analysis.https.add(`${group}-${name}`);
       continue;
     }
     if (!ts.isNamedExports(statement.exportClause)) continue;
@@ -381,10 +396,15 @@ export function httpsExportGraph(file) {
   return { https: analysis.https, opaque: analysis.opaque };
 }
 
-/** HTTPS exports of `indexFile` that no invoker family reconciles. */
-export function unfamiliedHttpsExports(indexFile) {
+/** The names in `names` that are in no invoker family and not private, sorted. */
+export function unfamiliedHttpsNames(names) {
   const familied = new Set(CALLABLE_INVOKER_FAMILIES.flatMap((family) => family.exports));
-  return [...httpsFunctionExports(indexFile)]
+  return [...names]
     .filter((name) => !familied.has(name) && !Object.hasOwn(PRIVATE_HTTPS_EXPORTS, name))
     .sort();
+}
+
+/** HTTPS exports of `indexFile` that no invoker family reconciles, by the syntax scan. */
+export function unfamiliedHttpsExports(indexFile) {
+  return unfamiliedHttpsNames(httpsFunctionExports(indexFile));
 }

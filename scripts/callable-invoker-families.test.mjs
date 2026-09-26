@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -19,6 +19,17 @@ const fixtures = [];
 afterEach(async () => {
   await Promise.all(fixtures.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
+
+/** Run `action`, capturing what it writes through console.error (the classifier's warning channel). */
+async function capturingWarnings(action) {
+  const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const result = await action();
+    return { result, text: spy.mock.calls.map((call) => call.join(" ")).join("\n") };
+  } finally {
+    spy.mockRestore();
+  }
+}
 
 async function fixture(files) {
   const root = await mkdtemp(join(tmpdir(), "callable-families-"));
@@ -137,7 +148,7 @@ describe("callable invoker families (#1277)", () => {
     ]);
   });
 
-  it("fails the deploy classification, naming the export, for an unfamilied callable", async () => {
+  it("warns, naming the export, but never refuses the classification for an unfamilied callable (#1283)", async () => {
     const root = await fixture({
       "index.ts": [
         "import { onCall } from 'firebase-functions/v2/https';",
@@ -146,11 +157,14 @@ describe("callable invoker families (#1277)", () => {
       ].join("\n"),
     });
 
-    await expect(
+    const warnings = await capturingWarnings(() =>
       classifyFirebaseDeployRequest(["fiveacross", "--only", "functions"], {
         defaultConfigPath: resolve(root, "firebase.json"),
       }),
-    ).rejects.toThrow(/brandNewCallable.*belongs to no Cloud Run invoker family/);
+    );
+    expect(warnings.result.functionsAttempted).toBe(true);
+    expect(warnings.text).toMatch(/advisory, syntax only.*brandNewCallable.*belongs to no Cloud Run invoker family/);
+    expect(warnings.text).toMatch(/check-callable-families-predeploy\.mjs/);
   });
 
   it("follows default exports through default imports and named re-exports", async () => {
@@ -246,11 +260,50 @@ describe("callable invoker families (#1277)", () => {
     });
     await writeFile(resolve(root, "firebase.json"), JSON.stringify({ functions: {} }));
 
-    await expect(
+    const warnings = await capturingWarnings(() =>
       classifyFirebaseDeployRequest(["fiveacross", "--only", "functions"], {
         defaultConfigPath: resolve(root, "firebase.json"),
       }),
-    ).rejects.toThrow(/brandNewCallable.*belongs to no Cloud Run invoker family/);
+    );
+    expect(warnings.text).toMatch(/brandNewCallable.*belongs to no Cloud Run invoker family/);
+  });
+
+  it("carries a namespace export as a group through a named import and a named re-export (#1285)", async () => {
+    const root = await fixture({
+      "index.ts": [
+        "import { admin } from './bridge';",
+        "export { admin };",
+        "export { admin as grouped } from './bridge';",
+      ].join("\n"),
+      "bridge.ts": "export * as admin from './endpoints';\n",
+      "endpoints.ts": [
+        "import { onCall } from 'firebase-functions/v2/https';",
+        "export const unlockDayNow = onCall(async () => 1);",
+      ].join("\n"),
+    });
+
+    expect([...httpsFunctionExports(resolve(root, "functions", "src", "index.ts"))].sort()).toEqual([
+      "admin-unlockDayNow",
+      "grouped-unlockDayNow",
+    ]);
+  });
+
+  it("does not forward a default export through export * (#1286)", async () => {
+    const root = await fixture({
+      "index.ts": "export * from './endpoint';\nexport * from './groups';\n",
+      "endpoint.ts": [
+        "import { onCall } from 'firebase-functions/v2/https';",
+        "export default onCall(async () => 1);",
+        "export const named = onCall(async () => 1);",
+      ].join("\n"),
+      "groups.ts": [
+        "import { onCall } from 'firebase-functions/v2/https';",
+        "const inner = onCall(async () => 1);",
+        "export default { inner };",
+      ].join("\n"),
+    });
+
+    expect([...httpsFunctionExports(resolve(root, "functions", "src", "index.ts"))].sort()).toEqual(["named"]);
   });
 
   it("follows builder aliases, factory aliases and factories across an import cycle", async () => {
