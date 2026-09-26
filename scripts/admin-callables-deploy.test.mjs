@@ -639,6 +639,9 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
   }
 
   const unknown = { selected: true, conservative: true, strict: "" };
+  // A whole-codebase selector keeps both families selected; one with nothing
+  // its source proves exported reconciles every service allowed absent.
+  const noneProven = { selected: true, conservative: true, strict: "" };
   it.each([
     ["ts-default-and-py", ["--only", "functions:py"], unknown, unknown],
     ["js-default", ["--only", "functions:default"], unknown, unknown],
@@ -678,20 +681,20 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       "ops-variant-star-declare",
       ["--only", "functions:ops"],
       { selected: true, conservative: false, strict: "unlock" },
-      { selected: false, conservative: false, strict: "" },
+      noneProven,
     ],
     // A name exported behind a local star is exported whatever the graph traces.
     ...["star-later-assignment", "star-destructured-clause", "star-package-named"].map((variant) => [
       `ops-variant-${variant}`,
       ["--only", "functions:ops"],
       { selected: true, conservative: false, strict: "unlock" },
-      { selected: false, conservative: false, strict: "" },
+      noneProven,
     ]),
     [
       "ops-variant-star-declared",
       ["--only", "functions:ops"],
       { selected: true, conservative: false, strict: "unlock" },
-      { selected: false, conservative: false, strict: "" },
+      noneProven,
     ],
     // A local type-only or ambient binding in a named export clause publishes nothing.
     ...[
@@ -713,7 +716,7 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       `ops-variant-${variant}`,
       ["--only", "functions:ops"],
       { selected: true, conservative: false, strict: "unlock" },
-      { selected: false, conservative: false, strict: "" },
+      noneProven,
     ]),
     ...[
       "value-reexport",
@@ -727,13 +730,13 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       `ops-variant-${variant}`,
       ["--only", "functions:ops"],
       { selected: true, conservative: false, strict: "unlock,approve" },
-      { selected: false, conservative: false, strict: "" },
+      noneProven,
     ]),
     [
       "ops-variant-interface-merged-value",
       ["--only", "functions:ops"],
       { selected: true, conservative: false, strict: "unlock,approve" },
-      { selected: false, conservative: false, strict: "" },
+      noneProven,
     ],
     ["ops-variant-functions-yaml", ["--only", "functions:ops"], unknown, unknown],
     // An exported `import Foo = Types.Foo` alias may be a type or a value.
@@ -749,14 +752,15 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     ...["inline-config-unlock-codebase", "imported-config-unlock-codebase"].map((layout) => [
       layout,
       ["--only", "functions:unlockDayNow"],
-      { selected: false, conservative: false, strict: "" },
+      noneProven,
       { selected: true, conservative: false, strict: "mint" },
     ]),
     // A non-Node runtime's surface is not its TypeScript index, even if one exists.
     ["ts-default-and-python-ops", ["--only", "functions:ops"], unknown, unknown],
     ["ts-default-and-python-ops", ["--only", "functions"], unknown, unknown],
     // A source directory a predeploy hook may generate has an unknown surface;
-    // a missing one with no hook publishes nothing.
+    // a missing one with no hook publishes nothing, so its selector proves
+    // nothing strict (and still reconciles both families, absence allowed).
     ["ts-default-and-generated-ops", ["--only", "functions:ops"], unknown, unknown],
     ["ts-default-and-generated-ops", ["--only", "functions"], unknown, unknown],
     // So does an existing index whose hook can generate or rewrite it before
@@ -785,13 +789,13 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       `ops-hook-${variant}`,
       ["--only", "functions:ops"],
       { selected: true, conservative: false, strict: "unlock" },
-      { selected: false, conservative: false, strict: "" },
+      noneProven,
     ]),
     [
       "ts-default-and-missing-ops",
       ["--only", "functions:ops"],
-      { selected: false, conservative: false, strict: "" },
-      { selected: false, conservative: false, strict: "" },
+      noneProven,
+      noneProven,
     ],
     ["ts-default-unlock-and-py", ["--only", "functions"], { selected: true, conservative: false, strict: "unlock" }, unknown],
     ["ts-default-unlock-and-py", [], { selected: true, conservative: false, strict: "unlock" }, unknown],

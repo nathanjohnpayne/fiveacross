@@ -5201,13 +5201,19 @@ export async function classifyInvokerScope(
         // A configured codebase that happens to share a protected endpoint's
         // name deploys its whole surface, not that endpoint: precedence must
         // win before the name branches below can read it as one callable.
-        // An inventoried codebase gets `functions:default`'s answer (#1282).
+        // An inventoried codebase gets `functions:default`'s strict set
+        // (#1282), but both families stay selected, as they were before
+        // #1282 for any codebase selector: every service its source does not
+        // prove exported is reconciled if present and allowed absent, so a
+        // callable only the built artifact reveals (#1283) still gets its
+        // invoker repair rather than a silently skipped family.
         const codebase = selector.slice("functions:".length);
         const codebaseInvitations = invitations.of(codebase);
         const codebaseAdmins = admins.of(codebase);
         if (codebaseInvitations && codebaseAdmins) {
           selectUnscopedInvokersConservatively();
           releaseKnownSurface(codebaseInvitations, codebaseAdmins);
+          selectFamiliesForUnknownSurface();
         } else {
           selectEveryInvokerConservatively();
         }

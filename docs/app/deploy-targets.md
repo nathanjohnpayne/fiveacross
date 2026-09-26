@@ -127,7 +127,7 @@ Both projects enforce Domain Restricted Sharing, which rejects the `allUsers` in
 
 A multi-service family (event invitations, admin callables) derives its strict set per Functions codebase from what each codebase's index exports (#1282). A strict service that is missing after publish fails the deploy, while an unexported or unselected peer (such as `approveprompts` before #1275 deploys) is tolerated. By scope:
 
-- **Whole codebase** (`--only functions:default` or `--only functions:<codebase>`): strict for exactly the family's services that codebase exports.
+- **Whole codebase** (`--only functions:default` or `--only functions:<codebase>`): strict for exactly the family's services that codebase exports. `functions:default` selects a family only when it has such a service, as before #1282. Any other codebase selector keeps both families selected, as it always did, and reconciles every service not proven exported with absence allowed. A callable that only the built artifact reveals (#1283) therefore still gets its invoker repair.
 - **All codebases** (bare `--only functions`, or no `--only`): strict for the union across codebases.
 - **Exact callable** (`--only functions:[<codebase>:]<name>`): strict for that service only when the codebase it resolves to exports it. A selected family with nothing strict is reconciled with every service allowed to be absent.
 - **Uninventoried codebase**: a codebase whose surface its TypeScript index cannot prove. A whole-codebase or all-codebase scope that releases it also selects both families, with every service not proven exported allowed to be absent; an exact callable selector into it selects only that callable's family, with nothing strict. A codebase is uninventoried when it is any of:
