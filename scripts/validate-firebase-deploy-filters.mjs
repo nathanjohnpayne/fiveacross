@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import {
   cp,
   lstat,
@@ -171,22 +171,99 @@ const ADMIN_CALLABLE_EXPORTS = Object.freeze([
   ["approvePrompts", "approve"],
 ]);
 
+const parseModule = (name, source) =>
+  ts.createSourceFile(name, source, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+
+/**
+ * Whether `sourceFile` can reach its module's exports object in a way the scan
+ * below does not read (#1282). That scan reads only top-level ESM `export`
+ * declarations of identifiers, functions and classes, and `export {...}` /
+ * `export *`. Every other route is detected, never parsed: a destructured
+ * export, `export =`, `export import`, and any reference to CommonJS `exports`
+ * or `module` or to a top-level `this` (`module.exports` once compiled), such
+ * as `exports.x = ...`, `exports[name] = ...`, `module.exports = ...`,
+ * `Object.assign(exports, ...)` or `Object.defineProperty(exports, ...)`. A
+ * local binding named `exports` or `module` counts as well, because telling it
+ * apart would take scope analysis.
+ */
+function exportsOutsideEsmForms(sourceFile) {
+  for (const statement of sourceFile.statements) {
+    const exported = statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword);
+    if (ts.isVariableStatement(statement) && exported) {
+      if (statement.declarationList.declarations.some((declaration) => !ts.isIdentifier(declaration.name))) return true;
+    } else if (ts.isExportAssignment(statement) && statement.isExportEquals) {
+      return true;
+    } else if (ts.isImportEqualsDeclaration(statement) && exported) {
+      return true;
+    }
+  }
+  // A property, member or label name spelled `exports` or `module` is not a
+  // reference to the binding.
+  const isName = (node, parent) =>
+    (ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+    (ts.isQualifiedName(parent) && parent.right === node) ||
+    (ts.isBindingElement(parent) && parent.propertyName === node) ||
+    ts.isImportSpecifier(parent) ||
+    ts.isExportSpecifier(parent) ||
+    ((ts.isLabeledStatement(parent) || ts.isBreakOrContinueStatement(parent)) && parent.label === node) ||
+    ((ts.isPropertyAssignment(parent) ||
+      ts.isPropertyDeclaration(parent) ||
+      ts.isPropertySignature(parent) ||
+      ts.isMethodDeclaration(parent) ||
+      ts.isMethodSignature(parent) ||
+      ts.isGetAccessorDeclaration(parent) ||
+      ts.isSetAccessorDeclaration(parent) ||
+      ts.isEnumMember(parent)) &&
+      parent.name === node);
+  let found = false;
+  // `thisBound`: inside a function or class, where `this` is not the module's.
+  const visit = (node, parent, thisBound) => {
+    if (found || (ts.isTypeNode(node) && !ts.isExpressionWithTypeArguments(node))) return;
+    if (
+      (node.kind === ts.SyntaxKind.ThisKeyword && !thisBound) ||
+      (ts.isIdentifier(node) && (node.text === "exports" || node.text === "module") && !isName(node, parent))
+    ) {
+      found = true;
+      return;
+    }
+    const bindsThis = ts.isClassLike(node) || (ts.isFunctionLike(node) && !ts.isArrowFunction(node));
+    ts.forEachChild(node, (child) => visit(child, node, thisBound || bindsThis));
+  };
+  visit(sourceFile, undefined, false);
+  return found;
+}
+
+// Whether any module `file` re-exports through a local `export *`, directly or
+// through further local stars, reaches its exports object outside the ESM
+// forms: the compiled star copies whatever that object holds. A module that
+// cannot be read throws, and the caller treats the index as uninventoried.
+function localStarLeavesEsmForms(file, sourceFile, seen = new Set([file])) {
+  for (const statement of sourceFile.statements) {
+    if (!ts.isExportDeclaration(statement) || statement.isTypeOnly || statement.exportClause) continue;
+    if (!statement.moduleSpecifier || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
+    const target = resolveModule(file, statement.moduleSpecifier.text);
+    if (!target || seen.has(target)) continue;
+    seen.add(target);
+    const targetFile = parseModule(target, readFileSync(target, "utf8"));
+    if (exportsOutsideEsmForms(targetFile) || localStarLeavesEsmForms(target, targetFile, seen)) return true;
+  }
+  return false;
+}
+
 // `sourcePath`, when given, lets a star re-export of a local module that
 // exists be resolved through the module graph (`httpsExportGraph`) to the
 // names it really exports, so one unexported peer does not become strict. A
 // star of a package or of a module that cannot be resolved, here or anywhere
-// behind a local star, still widens to every protected callable.
+// behind a local star, still widens to every protected callable. An index that
+// reaches its exports object outside the ESM forms read here, itself or behind
+// a local star, is unknown (`null`, #1282): see `exportsOutsideEsmForms`.
 function protectedServicesFromSource(source, table, sourcePath = null) {
   const exportedNames = new Set();
   let hasRuntimeExportStar = false;
   let hasLocalExportStar = false;
-  const sourceFile = ts.createSourceFile(
-    "index.ts",
-    source,
-    ts.ScriptTarget.Latest,
-    false,
-    ts.ScriptKind.TS,
-  );
+  const sourceFile = parseModule("index.ts", source);
+  if (exportsOutsideEsmForms(sourceFile)) return null;
+  if (sourcePath && localStarLeavesEsmForms(sourcePath, sourceFile)) return null;
   for (const statement of sourceFile.statements) {
     const exported = statement.modifiers?.some(
       (modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
@@ -3943,9 +4020,11 @@ function selectorNamesConfiguredCodebase(selector, inventory) {
  * `src/index.ts` exports under `protectedServicesFromSource` (the rule the
  * unkeyed union used), in table order. `null` is an unknown surface, never a
  * refusal (the predeploy hook reads the built artifact, #1283): a kit or
- * `remoteSource` codebase, an index that cannot be read, or one the advisory
- * scan cannot follow. A missing source directory has nothing to publish unless
- * a `predeploy` hook, which runs first, could create it.
+ * `remoteSource` codebase, an index that cannot be read, one the advisory scan
+ * cannot follow, or one that reaches its exports object outside the ESM forms
+ * the scan reads (`exportsOutsideEsmForms`). A missing source directory has
+ * nothing to publish unless a `predeploy` hook, which runs first, could create
+ * it.
  */
 async function protectedServiceInventory(configSource, configPath, table) {
   const functionsConfigs = Array.isArray(configSource.functions)

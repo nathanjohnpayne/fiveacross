@@ -201,14 +201,18 @@ describe("admin-callables deploy scope (#1277)", () => {
 
 // One `functions` config per entry (#1282): `codebase` (omitted for the default
 // codebase), `source`, and the `src/index.ts` lines. With no `index` the source
-// directory has no TypeScript index; each of `dirs` is an unreadable module.
+// directory has no TypeScript index; each of `dirs` is an unreadable module, and
+// `modules` maps a further `src/` file name to its lines.
 async function withCodebases(codebases, args) {
   const fixture = await mkdtemp(join(tmpdir(), "admin-callable-codebases-"));
   try {
-    for (const { source, index, dirs = [] } of codebases) {
+    for (const { source, index, dirs = [], modules = {} } of codebases) {
       await mkdir(resolve(fixture, source, "src"), { recursive: true });
       if (index) await writeFile(resolve(fixture, source, "src", "index.ts"), index.join("\n"));
       for (const dir of dirs) await mkdir(resolve(fixture, source, "src", dir));
+      for (const [name, lines] of Object.entries(modules)) {
+        await writeFile(resolve(fixture, source, "src", name), lines.join("\n"));
+      }
     }
     const configs = codebases.map(({ codebase, source }) => (codebase ? { source, codebase } : { source }));
     await writeFile(resolve(fixture, "firebase.json"), JSON.stringify({ functions: configs }));
@@ -269,6 +273,54 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     [UNFOLLOWABLE, ["--only", "functions:default"]],
   ])("keeps both families selected conservatively for an uninventoried codebase (%#)", async (codebases, args) => {
     expect(await withCodebases(codebases, args)).toMatchObject(BOTH_FAMILIES_CONSERVATIVE);
+  });
+
+  // The scan reads only ESM export declarations. An index that reaches its
+  // exports object any other way, itself or behind a local star, is unknown
+  // rather than empty, so its codebase keeps both families selected
+  // conservatively instead of skipping the wrapper for a callable it publishes.
+  const ON_CALL = "import { onCall } from 'firebase-functions/v2/https';";
+  const CJS_ADMIN = ["import { onCall } from 'firebase-functions/v2/https';", "exports.unlockDayNow = onCall(async () => 1);"];
+  it.each([
+    ["Object.assign(exports, ...)", [ON_CALL, "Object.assign(exports, { unlockDayNow: onCall(async () => 1) });"]],
+    ["exports.x = onCall(...)", [ON_CALL, "exports.unlockDayNow = onCall(async () => 1);"]],
+    ["module.exports = {...}", [ON_CALL, "module.exports = { unlockDayNow: onCall(async () => 1) };"]],
+    ["Object.defineProperty(exports, ...)", [ON_CALL, "Object.defineProperty(exports, 'unlockDayNow', { enumerable: true, value: onCall(async () => 1) });"]],
+    ["a computed member export", [ON_CALL, "const name = 'unlockDayNow';", "exports[name] = onCall(async () => 1);"]],
+    ["a top-level this", [ON_CALL, "(this as any).unlockDayNow = onCall(async () => 1);"]],
+    ["export =", [ON_CALL, "export = { unlockDayNow: onCall(async () => 1) };"]],
+    ["a destructured export", [ON_CALL, "export const { unlockDayNow } = { unlockDayNow: onCall(async () => 1) };"]],
+    ["export import", ["export import unlockDayNow = require('./admin');"]],
+  ])("keeps both families selected conservatively for an index exporting through %s", async (_form, index) => {
+    const ops = { codebase: "ops", source: "ops", index };
+    expect(await withCodebases([UNRELATED, ops], ["--only", "functions:ops"])).toMatchObject(BOTH_FAMILIES_CONSERVATIVE);
+  });
+
+  it.each([
+    [[{ source: "functions", index: CJS_ADMIN }], ["--only", "functions:default"]],
+    [[{ source: "functions", index: CJS_ADMIN }], []],
+    [[{ source: "functions", index: ["export * from './admin';"], modules: { "admin.ts": CJS_ADMIN } }], ["--only", "functions:default"]],
+  ])("treats CommonJS exports in the default codebase, or behind a local star, as unknown (%#)", async (codebases, args) => {
+    expect(await withCodebases(codebases, args)).toMatchObject(BOTH_FAMILIES_CONSERVATIVE);
+  });
+
+  it("keeps an index inventoried when exports, module and this appear only where they are not the module's", async () => {
+    const ops = {
+      codebase: "ops",
+      source: "ops",
+      index: [
+        "const box = { exports: 1, module: 2 };",
+        "export const size = box.exports + box.module;",
+        "export function self(this: unknown) { return this; }",
+        "export class Holder { value = this; }",
+      ],
+    };
+    expect(await withCodebases([UNRELATED, ops], ["--only", "functions:ops"])).toMatchObject({
+      eventInvitationsInvokerSelected: false,
+      adminCallablesInvokerSelected: false,
+      adminCallablesInvokerConservative: false,
+      adminCallablesStrictServices: "",
+    });
   });
 
   it("answers functions:default from its own inventory beside an uninventoried codebase", async () => {
