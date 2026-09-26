@@ -61,6 +61,7 @@ import {
   cloneDocumentValue,
   deriveCanonicalProjection,
   isCanonicalRevision,
+  isBrandMirror,
   isRecord,
   isReservedClassHost,
   nextRevision,
@@ -117,11 +118,6 @@ const OWNER_RESTRICTED_FIELDS = new Set(['canonicalHost', 'isCanonical', 'previe
  * refuses the host rather than offering a second door around it.
  */
 const ARCHIVE_ONLY_ROOT_HOSTS = new Set(['gaycruisebingo.com']);
-
-/** A brand mirror: a root host whose retired flagship leaves `not-found`. */
-function isBrandMirror(host) {
-  return ROOT_HOSTS.has(host) && !DOORWAY_ROOT_HOSTS.has(host);
-}
 
 /**
  * § D1: "Brand mirrors ... get no doorway at all." The derivation accepts

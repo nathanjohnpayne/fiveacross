@@ -73,9 +73,9 @@ export const DOORWAY_ROOT_HOSTS = new Set(['fiveacross.app', 'vacaybingo.com', '
 
 /**
  * A brand mirror: a root host whose retired flagship leaves `not-found`
- * rather than a doorway. Exported so the reconciler's replacement audit
- * (#1295) classifies mirrors by the same two tables the lifecycle helper's
- * § D1 replacement proof reads, rather than by a second host list.
+ * rather than a doorway. The one predicate for the class: the lifecycle
+ * helper's § D1 rules and the reconciler's replacement audit (#1295) both
+ * import it, so neither keeps a second host list or a second copy (#1326).
  */
 export function isBrandMirror(host) {
   return ROOT_HOSTS.has(host) && !DOORWAY_ROOT_HOSTS.has(host);
