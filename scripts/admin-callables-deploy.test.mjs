@@ -27,7 +27,7 @@ async function classify(args) {
   });
 }
 
-async function withIndex(lines, run) {
+async function withIndex(lines, run, modules = {}) {
   const fixture = await mkdtemp(join(tmpdir(), "admin-callable-exports-"));
   try {
     await nodeSource(resolve(fixture, "functions"));
@@ -36,6 +36,9 @@ async function withIndex(lines, run) {
       JSON.stringify({ functions: { source: "functions" } }),
     );
     await writeFile(resolve(fixture, "functions", "src", "index.ts"), lines.join("\n"));
+    for (const [name, contents] of Object.entries(modules)) {
+      await writeFile(resolve(fixture, "functions", "src", name), contents);
+    }
     return await run(resolve(fixture, "firebase.json"));
   } finally {
     await rm(fixture, { recursive: true, force: true });
@@ -930,6 +933,42 @@ describe("admin-callables deploy scope (#1277)", () => {
       adminCallablesInvokerConservative: false,
       adminCallablesStrictServices: "unlock,approve",
     });
+  });
+
+  // A name the pre-#1282 rule counted as exported keeps the family selected
+  // even where the type analysis cannot prove it a value, so a callable
+  // TypeScript does emit is always reconciled (Phase 4b run on 845de7ea).
+  const onCall = "import { onCall } from 'firebase-functions/v2/https';";
+  it.each([
+    [
+      "an ambient export assigned at runtime",
+      [onCall, "export declare let unlockDayNow: unknown;", "unlockDayNow = onCall(async () => 1);"],
+      {},
+      { adminCallablesInvokerSelected: true, adminCallablesInvokerConservative: true, adminCallablesStrictServices: "" },
+    ],
+    [
+      "a var hoisted out of a module-level block over a same-named interface",
+      [onCall, "interface unlockDayNow { value: string }", "if (true) { var unlockDayNow = onCall(async () => 1); }", "export { unlockDayNow };"],
+      {},
+      { adminCallablesInvokerSelected: true, adminCallablesInvokerConservative: false, adminCallablesStrictServices: "unlock" },
+    ],
+    [
+      "a .cjs re-export that TypeScript resolves to the .cts source",
+      ["export { unlockDayNow } from './admin.cjs';"],
+      {
+        "admin.ts": "export interface unlockDayNow { value: string }\n",
+        "admin.cts": `${onCall}\nexport const unlockDayNow = onCall(async () => 1);\n`,
+      },
+      { adminCallablesInvokerSelected: true, adminCallablesInvokerConservative: false, adminCallablesStrictServices: "unlock" },
+    ],
+  ])("keeps the family selected for %s", async (_label, lines, modules, expected) => {
+    const result = await withIndex(
+      lines,
+      (configPath) => classifyFirebaseDeployRequest(["fiveacross"], { defaultConfigPath: configPath }),
+      modules,
+    );
+
+    expect(result).toMatchObject(expected);
   });
 
   it("does not select the family for a codebase that exports neither callable", async () => {

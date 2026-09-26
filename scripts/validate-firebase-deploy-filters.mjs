@@ -206,6 +206,14 @@ function localTypeOnlyNames(sourceFile, file = null, walk = newExportWalk()) {
     else for (const element of name.elements) if (!ts.isOmittedExpression(element)) addBindingNames(element.name, bucket);
   };
   for (const statement of sourceFile.statements) {
+    // A `var` inside a module-level block, branch, loop or `try` is hoisted to
+    // module scope, so it is a value declaration of its name too.
+    if (!ts.isVariableStatement(statement)) {
+      for (const name of hoistedVarNames(statement)) {
+        values.add(name);
+        localValues.add(name);
+      }
+    }
     const ambient = statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword) ?? false;
     if (ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement)) {
       types.add(statement.name.text);
@@ -285,6 +293,34 @@ function localTypeOnlyNames(sourceFile, file = null, walk = newExportWalk()) {
   };
 }
 
+// The `var` bindings a module-level statement declares inside nested blocks,
+// branches, loops, `try`, `switch` and labels, which JavaScript hoists to the
+// enclosing function or module scope; a function, class or namespace body
+// starts its own scope and is not entered.
+function hoistedVarNames(statement) {
+  const names = [];
+  if (ts.isFunctionLike(statement) || ts.isClassLike(statement) || ts.isModuleDeclaration(statement)) return names;
+  const addBinding = (name) => {
+    if (ts.isIdentifier(name)) names.push(name.text);
+    else for (const element of name.elements) if (!ts.isOmittedExpression(element)) addBinding(element.name);
+  };
+  const visit = (node) => {
+    if (
+      ts.isFunctionLike(node) ||
+      ts.isClassLike(node) ||
+      ts.isModuleDeclaration(node)
+    ) {
+      return;
+    }
+    if (ts.isVariableDeclarationList(node) && (node.flags & ts.NodeFlags.BlockScoped) === 0) {
+      for (const declaration of node.declarations) addBinding(declaration.name);
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(statement, visit);
+  return names;
+}
+
 // What TypeScript emits for a non-ambient function, class, enum, namespace or
 // `import name = ...` declaration: "value", "type" (erased, no runtime
 // binding) or "unknown". `import type name = require(...)` is erased. A
@@ -340,10 +376,17 @@ const OTHER_LOCAL_MODULE_EXTENSIONS = Object.freeze([
   ".d.ts", ".d.cts", ".d.mts", ".cts", ".mts", ".js", ".cjs", ".mjs", ".jsx",
 ]);
 function resolveExportModule(file, specifier) {
-  const target = resolveModule(file, specifier);
+  // TypeScript resolves `./x.cjs` to `x.cts` and `./x.mjs` to `x.mts`, never to
+  // `x.ts`, which `resolveModule` would pick.
+  const flavour = /\.([cm])js$/.exec(specifier);
+  if (flavour && specifier.startsWith(".")) {
+    const source = resolve(dirname(file), specifier.replace(/\.[cm]js$/, `.${flavour[1]}ts`));
+    if (existsSync(source)) return source;
+  }
+  const target = flavour ? null : resolveModule(file, specifier);
   if (target || !specifier.startsWith(".")) return target;
   const base = resolve(dirname(file), specifier.replace(/\.(?:c|m)?js$/, ""));
-  const candidates = OTHER_LOCAL_MODULE_EXTENSIONS.flatMap((extension) => [
+  const candidates = [".ts", ".tsx", ...OTHER_LOCAL_MODULE_EXTENSIONS].flatMap((extension) => [
     `${base}${extension}`,
     resolve(base, `index${extension}`),
   ]);
@@ -603,6 +646,72 @@ function collectStarExportedNames(file, walk, names) {
   }
 }
 
+// The names a statement exports under the rule that held before #1282: every
+// export-modified variable (identifier binding), function or class, ambient or
+// not, every export-clause element not marked type-only, and an `export * as
+// ns` that is not type-only. The walks may still prove such a name erased; it
+// is then only mentioned (see `protectedServicesFromSource`).
+function mentionedExportNames(statement) {
+  const names = [];
+  const modifiers = statement.modifiers ?? [];
+  const exported = modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword);
+  const exportsDefault = modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.DefaultKeyword);
+  if (exported && !exportsDefault) {
+    if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name)) names.push(declaration.name.text);
+      }
+    } else if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) && statement.name) {
+      names.push(statement.name.text);
+    }
+  }
+  if (ts.isExportDeclaration(statement) && !statement.isTypeOnly && statement.exportClause) {
+    if (ts.isNamedExports(statement.exportClause)) {
+      for (const element of statement.exportClause.elements) if (!element.isTypeOnly) names.push(element.name.text);
+    } else {
+      names.push(statement.exportClause.name.text);
+    }
+  }
+  return names;
+}
+
+// The names the local modules behind an `export *` mention
+// (`mentionedExportNames`), through further local stars that are not
+// type-only; each module is read once, and one that cannot be read adds
+// nothing (the index's opacity checks answer for it).
+function starMentionedNames(file, names = new Set(), seen = new Set()) {
+  if (seen.has(file)) return names;
+  seen.add(file);
+  let sourceFile;
+  try {
+    sourceFile = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+  } catch {
+    return names;
+  }
+  for (const statement of sourceFile.statements) {
+    for (const name of mentionedExportNames(statement)) names.add(name);
+    if (
+      ts.isExportDeclaration(statement) &&
+      !statement.isTypeOnly &&
+      !statement.exportClause &&
+      statement.moduleSpecifier &&
+      ts.isStringLiteral(statement.moduleSpecifier)
+    ) {
+      const target = resolveModule(file, statement.moduleSpecifier.text);
+      if (target) starMentionedNames(target, names, seen);
+    }
+  }
+  return names;
+}
+
+// The protected services the index exports, as `strict` (proven runtime
+// values) and `mentioned` (`strict` plus every name the pre-#1282 rule counted
+// as exported, `mentionedExportNames`). Only `strict` becomes the strict set;
+// `mentioned` keeps a family selected, reconciling each such service if it is
+// present, so a name the type analysis judges erased but TypeScript emits
+// (a runtime assignment to an ambient export, a hoisted `var`, a module the
+// resolver maps differently) never loses the invoker repair main gave it.
+//
 // `sourcePath`, when given, lets a star re-export of a local module that
 // exists be resolved through the module graph (`httpsExportGraph`) and the
 // names it exports (`starExportedNames`), so one unexported peer does not
@@ -611,6 +720,7 @@ function collectStarExportedNames(file, walk, names) {
 // callable.
 function protectedServicesFromSource(source, table, sourcePath = null) {
   const exportedNames = new Set();
+  const mentionedNames = new Set();
   let hasRuntimeExportStar = false;
   let hasLocalExportStar = false;
   const sourceFile = ts.createSourceFile(
@@ -625,6 +735,7 @@ function protectedServicesFromSource(source, table, sourcePath = null) {
   const walk = newExportWalk();
   const typeOnlyNames = localTypeOnlyNames(sourceFile, sourcePath, walk);
   for (const statement of sourceFile.statements) {
+    for (const name of mentionedExportNames(statement)) mentionedNames.add(name);
     const exported =
       statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) &&
       !statement.modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword);
@@ -670,15 +781,18 @@ function protectedServicesFromSource(source, table, sourcePath = null) {
       if (!ts.isExportDeclaration(statement) || statement.isTypeOnly || statement.exportClause) continue;
       const specifier = statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier) ? statement.moduleSpecifier.text : "";
       const target = resolveModule(sourcePath, specifier);
-      if (target) for (const name of starExportedNames(target, walk)) starNames.add(name);
+      if (target) {
+        for (const name of starExportedNames(target, walk)) starNames.add(name);
+        starMentionedNames(target, mentionedNames);
+      }
     }
     for (const [exportName] of table) {
       if (graph.opaque || graph.https.has(exportName) || starNames.has(exportName)) exportedNames.add(exportName);
     }
   }
-  return table.filter(([exportName]) =>
-    exportedNames.has(exportName),
-  ).map(([, service]) => service);
+  for (const name of exportedNames) mentionedNames.add(name);
+  const services = (names) => table.filter(([exportName]) => names.has(exportName)).map(([, service]) => service);
+  return { strict: services(exportedNames), mentioned: services(mentionedNames) };
 }
 
 /**
@@ -4817,7 +4931,7 @@ async function protectedServiceInventory(configSource, configPath, table) {
         if (hasPredeploy || existsSync(resolve(dirname(configPath), functionsConfig.source))) {
           services.set(codebase, null);
         } else if (!services.has(codebase)) {
-          services.set(codebase, new Set());
+          services.set(codebase, { strict: new Set(), mentioned: new Set() });
         }
         continue;
       }
@@ -4843,17 +4957,22 @@ async function protectedServiceInventory(configSource, configPath, table) {
       services.set(codebase, null);
       continue;
     }
-    const found = services.get(codebase) ?? new Set();
+    const found = services.get(codebase) ?? { strict: new Set(), mentioned: new Set() };
     services.set(codebase, found);
-    for (const service of exported) found.add(service);
+    for (const service of exported.strict) found.strict.add(service);
+    for (const service of exported.mentioned) found.mentioned.add(service);
   }
+  const order = table.map(([, service]) => service);
   const inventory = new Map();
   for (const [codebase, found] of services) {
     inventory.set(
       codebase,
       found === null
         ? null
-        : table.map(([, service]) => service).filter((service) => found.has(service)),
+        : {
+            strict: order.filter((service) => found.strict.has(service)),
+            mentioned: order.filter((service) => found.mentioned.has(service)),
+          },
     );
   }
   return inventory;
@@ -4863,28 +4982,45 @@ async function protectedServiceInventory(configSource, configPath, table) {
  * `union` answers a selector releasing every codebase, and `complete` says
  * whether every local codebase was inventoried (a `null` entry is a codebase
  * with no readable index, whose surface is unknown); `of(codebase)` answers
- * one codebase, `null` when it has no usable entry. A plain list (a caller
- * with no codebase ownership) is taken as every codebase's export list.
+ * one codebase, `null` when it has no usable entry. `mentionedUnion` and
+ * `mentionedOf` answer the same for the mentioned services
+ * (`protectedServicesFromSource`), which select a family without making it
+ * strict. A plain list (a caller with no codebase ownership) is taken as every
+ * codebase's export list, strict and mentioned.
  */
 function familyInventory(inventory, table) {
   const order = table.map(([, service]) => service);
   const inOrder = (services) => order.filter((service) => services.has(service));
   if (!(inventory instanceof Map)) {
     const all = inOrder(new Set(inventory ?? []));
-    return { union: all, complete: true, of: () => all };
+    return { union: all, mentionedUnion: all, complete: true, of: () => all, mentionedOf: () => all };
   }
   const all = new Set();
+  const mentioned = new Set();
   let complete = true;
-  for (const services of inventory.values()) {
-    if (services === null) complete = false;
-    else for (const service of services) all.add(service);
+  for (const entry of inventory.values()) {
+    if (entry === null) {
+      complete = false;
+      continue;
+    }
+    for (const service of entry.strict) all.add(service);
+    for (const service of entry.mentioned) mentioned.add(service);
   }
+  const entryOf = (codebase) => {
+    const entry = inventory.get(codebase);
+    return entry && typeof entry === "object" ? entry : null;
+  };
   return {
     union: inOrder(all),
+    mentionedUnion: inOrder(mentioned),
     complete,
     of: (codebase) => {
-      const services = inventory.get(codebase);
-      return Array.isArray(services) ? inOrder(new Set(services)) : null;
+      const entry = entryOf(codebase);
+      return entry ? inOrder(new Set(entry.strict)) : null;
+    },
+    mentionedOf: (codebase) => {
+      const entry = entryOf(codebase);
+      return entry ? inOrder(new Set(entry.mentioned)) : null;
     },
   };
 }
@@ -5066,10 +5202,14 @@ export async function classifyInvokerScope(
   const exportedInvitationCsv = invitations.union.join(",");
   // A deploy of every codebase selects a family its inventory proves exported,
   // and also, conservatively, one an uninventoried codebase might export.
-  const wholeInvitationsSelected = invitations.union.length > 0 || !invitations.complete;
-  const wholeInvitationsConservative = invitations.union.length === 0 && !invitations.complete;
-  const wholeAdminsSelected = admins.union.length > 0 || !admins.complete;
-  const wholeAdminsConservative = admins.union.length === 0 && !admins.complete;
+  // A family the index only mentions (`protectedServicesFromSource`) is
+  // selected too, with nothing strict it did not prove.
+  const wholeInvitationsSelected =
+    invitations.union.length > 0 || invitations.mentionedUnion.length > 0 || !invitations.complete;
+  const wholeInvitationsConservative =
+    invitations.union.length === 0 && (invitations.mentionedUnion.length > 0 || !invitations.complete);
+  const wholeAdminsSelected = admins.union.length > 0 || admins.mentionedUnion.length > 0 || !admins.complete;
+  const wholeAdminsConservative = admins.union.length === 0 && (admins.mentionedUnion.length > 0 || !admins.complete);
   let functionsAttempted = true;
   let hostingAttempted = true;
   let bugReportInvokerSelected = true;
@@ -5131,15 +5271,21 @@ export async function classifyInvokerScope(
     };
     // A selector that releases a KNOWN surface — one inventoried codebase, or
     // every codebase — releases exactly the protected callables that surface
-    // exports: those are strict, and a family is selected only when it has one.
-    const releaseKnownSurface = (invitationServices, adminServices) => {
+    // exports: those are strict, and a family is selected when it has one or
+    // the surface mentions one (`protectedServicesFromSource`).
+    const releaseKnownSurface = (
+      invitationServices,
+      adminServices,
+      invitationMentions = invitationServices,
+      adminMentions = adminServices,
+    ) => {
       functionsAttempted = true;
       invitationScopeKnown = true;
       adminScopeKnown = true;
       for (const service of invitationServices) strictInvitationServices.add(service);
       for (const service of adminServices) strictAdminServices.add(service);
-      if (invitationServices.length > 0) eventInvitationsInvokerSelected = true;
-      if (adminServices.length > 0) adminCallablesInvokerSelected = true;
+      if (invitationServices.length > 0 || invitationMentions.length > 0) eventInvitationsInvokerSelected = true;
+      if (adminServices.length > 0 || adminMentions.length > 0) adminCallablesInvokerSelected = true;
     };
     // A selector that releases a surface this script cannot inventory selects
     // both families conservatively: nothing is proven strict, and every
@@ -5190,10 +5336,15 @@ export async function classifyInvokerScope(
         // A default codebase with no inventory entry (no local `source`, or
         // no `src/index.ts`) has an unknown surface, not an empty one.
         if (selector === "functions") {
-          releaseKnownSurface(invitations.union, admins.union);
+          releaseKnownSurface(invitations.union, admins.union, invitations.mentionedUnion, admins.mentionedUnion);
           if (!invitations.complete || !admins.complete) selectFamiliesForUnknownSurface();
         } else if (invitations.of("default") && admins.of("default"))
-          releaseKnownSurface(invitations.of("default"), admins.of("default"));
+          releaseKnownSurface(
+            invitations.of("default"),
+            admins.of("default"),
+            invitations.mentionedOf("default"),
+            admins.mentionedOf("default"),
+          );
         else selectFamiliesForUnknownSurface();
       } else if (
         selectorNamesConfiguredCodebase(selector, singleEndpointExports)
