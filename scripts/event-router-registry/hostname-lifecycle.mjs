@@ -21,11 +21,12 @@
  * host — and `deriveCanonicalProjection` refuses any other value, so no
  * mutation of an existing host can turn the capability on or off. Publishing it
  * is therefore a provisioning decision, and among the ordinary intents the
- * deployment barrier sits on `provision` and on the two doorway go-live
- * writes: the doorway `convert-to-root` and an `update` moving a marker
- * `not-found` -> `doorway`. Neither publishes a capability; each makes a
- * doorway serve, whose service-worker retirement the same record attests (the
- * two repair intents take it too). Converting a host between a route and a root marker is
+ * deployment barrier sits on `provision` and on the three doorway go-live
+ * writes: the doorway `convert-to-root`, an `update` moving a marker
+ * `not-found` -> `doorway`, and an `archive` whose root conversion yields a
+ * doorway (#1296). None publishes a capability; each makes a doorway serve,
+ * whose service-worker retirement the same record attests (the two repair
+ * intents take it too). Converting a host between a route and a root marker is
  * never an `update`, which refuses it by name rather than letting the
  * derivation report a malformed document: the archive interlock,
  * `convert-to-root` and `convert-to-route` (#1251) are the only conversions.
@@ -1005,9 +1006,12 @@ function requireCompleteMappingSet(mapped, hosts) {
 /**
  * The archive interlock from `specs/path-addressing-and-root.md` § D8: every
  * Event mapping, the `apexPath` field on whichever mapping becomes the archive
- * address, the mirror-root conversion to the non-serving `root: 'not-found'`
- * marker, and `EventDoc.status` all move in ONE transaction. Nothing observes a
+ * address, each root host's conversion to its class marker (a brand mirror's
+ * non-serving `root: 'not-found'`, a canonical apex's `root: 'doorway'`), and
+ * `EventDoc.status` all move in ONE transaction. Nothing observes a
  * half-archived Event, and no active Event becomes reachable at an apex path.
+ * A doorway conversion is a doorway go-live, so it takes the deployment-barrier
+ * record (`pathCapabilityBarrier`) the doorway `convert-to-root` takes.
  *
  * The `apexPath` half is not optional. An archive with no target named would
  * retire the Event without activating the address that replaces it, which
@@ -1015,7 +1019,7 @@ function requireCompleteMappingSet(mapped, hosts) {
  * anything.
  */
 async function planArchive(input, transaction, clock, buffer, revisions, projections) {
-  exactKeys(
+  boundedKeys(
     input,
     [
       'schemaVersion',
@@ -1028,6 +1032,7 @@ async function planArchive(input, transaction, clock, buffer, revisions, project
       'apexPathHost',
       'mirrorRootConversions',
     ],
+    ['pathCapabilityBarrier'],
     'invalid-input',
   );
   const { eventId, mappings, apexPathHost, mirrorRootConversions } = input;
@@ -1126,6 +1131,7 @@ async function planArchive(input, transaction, clock, buffer, revisions, project
     ledgerWrite(buffer, host, nextRevision(stored.revision), desired, clock.stamp, revisions, projections, stored.revision);
   }
 
+  let doorwayConversion = false;
   for (const entry of mirrorRootConversions) {
     exactKeys(entry, ['host', 'root'], 'invalid-input');
     const { host, root } = entry;
@@ -1151,6 +1157,7 @@ async function planArchive(input, transaction, clock, buffer, revisions, project
     if (root !== (DOORWAY_ROOT_HOSTS.has(host) ? 'doorway' : 'not-found')) {
       refuse('root-marker-ineligible');
     }
+    if (root === 'doorway') doorwayConversion = true;
     // The marker retains the host's path capability and its Edition and keeps
     // no Event field at all, so `/` is not-found while `/<slug>` can still
     // resolve other mirrored Events.
@@ -1158,6 +1165,24 @@ async function planArchive(input, transaction, clock, buffer, revisions, project
     const desired = project(() => deriveCanonicalProjection(host, document));
     buffer.set(`hostnames/${host}`, document);
     ledgerWrite(buffer, host, nextRevision(stored.revision), desired, clock.stamp, revisions, projections, stored.revision);
+  }
+
+  // A doorway this transaction writes SERVES as soon as its revision converges,
+  // exactly as the doorway `convert-to-root` does, and at a root the retired
+  // Event's service worker controlled. § D1 requires the forced advancement
+  // and precache retirement the deployment-barrier record attests before that
+  // doorway is treated as supported, so the archive takes the same record
+  // under the same refusals (#1296). `gaycruisebingo.com` carries no
+  // `pathNamespace` and takes it all the same: its Event's root-scoped worker
+  // is retired the same way, and by the owner's decision there is one record
+  // for every doorway rather than a GCB-specific attestation. An archive that
+  // writes no doorway refuses the record as `invalid-input`, as every other
+  // intent that has no use for it does.
+  if (doorwayConversion) {
+    if ((input.pathCapabilityBarrier ?? null) === null) refuse('doorway-requires-deployment-barrier');
+    project(() => validatePathCapabilityBarrier(input.pathCapabilityBarrier, clock.iso));
+  } else if (Object.hasOwn(input, 'pathCapabilityBarrier')) {
+    refuse('invalid-input');
   }
 
   buffer.update(`events/${eventId}`, { status: 'archived' });

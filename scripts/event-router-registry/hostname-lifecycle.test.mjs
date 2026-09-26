@@ -1320,6 +1320,9 @@ describe('archive', () => {
       }),
       'events/bodega-bay-2026': { status: 'active', admins: ['nathan'] },
     });
+    // A doorway conversion is a doorway go-live and carries the deployment
+    // barrier (#1296); a not-found one refuses the record. The class refusal
+    // comes first, so the refused arm is about the marker either way.
     const input = (root) =>
       mutation({
         intent: 'archive',
@@ -1327,6 +1330,7 @@ describe('archive', () => {
         mappings: [HOST],
         apexPathHost: HOST,
         mirrorRootConversions: [{ host, root }],
+        ...(root === 'doorway' ? { pathCapabilityBarrier: BARRIER } : {}),
       });
     expect(await refusal(input(refused), store(seed()).dependencies)).toBe('root-marker-ineligible');
 
@@ -1338,6 +1342,101 @@ describe('archive', () => {
       root: allowed,
       edition,
       pathNamespace,
+    });
+  });
+
+  // A doorway the archive writes SERVES as soon as its revision converges, at
+  // a root the retired Event's service worker controlled, so the archive takes
+  // the same deployment-barrier record the doorway `convert-to-root` and the
+  // `not-found` -> `doorway` update take (#1296). The GCB apex carries no
+  // `pathNamespace` and takes exactly the same record: one attestation for
+  // every doorway, by the owner's decision, and no GCB-specific one.
+  describe('the deployment barrier on a doorway conversion', () => {
+    const doorwaySeed = (host, edition, pathNamespace) => ({
+      ...converged(HOST, '4', hostnameDocument()),
+      ...converged(host, '6', { eventId: 'bodega-bay-2026', edition, status: 'active', slug: 'bodega-bay', pathNamespace }),
+      'events/bodega-bay-2026': { status: 'active', admins: ['nathan'] },
+    });
+    const doorwayArchive = (host, extra = {}) =>
+      mutation({
+        intent: 'archive',
+        eventId: 'bodega-bay-2026',
+        mappings: [HOST],
+        apexPathHost: HOST,
+        mirrorRootConversions: [{ host, root: 'doorway' }],
+        ...extra,
+      });
+
+    it.each([
+      ['the GCB apex, which carries no pathNamespace', 'gaycruisebingo.com', 'gcb', null],
+      ['a Namespace-bearing doorway apex', APEX, 'vacay', 'vacaybingo.com'],
+    ])('refuses %s without an armed record and leaves every document standing', async (_why, host, edition, pathNamespace) => {
+      for (const [extra, code] of [
+        [{}, 'doorway-requires-deployment-barrier'],
+        [{ pathCapabilityBarrier: null }, 'doorway-requires-deployment-barrier'],
+        [{ pathCapabilityBarrier: { ...BARRIER, armedAt: '2026-09-21T00:00:00.000Z' } }, 'path-capability-barrier'],
+        [{ pathCapabilityBarrier: { ...BARRIER, resolutionCacheSchemaVersion: 0 } }, 'path-capability-barrier'],
+        [{ pathCapabilityBarrier: { ...BARRIER, note: 'gcb' } }, 'path-capability-barrier'],
+      ]) {
+        const { docs, dependencies } = store(doorwaySeed(host, edition, pathNamespace));
+        expect(await refusal(doorwayArchive(host, extra), dependencies)).toBe(code);
+        expect(docs.get(`hostnames/${host}`)).toMatchObject({ eventId: 'bodega-bay-2026', status: 'active' });
+        expect(docs.get(`routerReplicas/${host}`).revision).toBe('6');
+        expect(docs.get(`hostnames/${HOST}`).status).toBe('active');
+        expect(docs.get('events/bodega-bay-2026').status).toBe('active');
+      }
+
+      const { docs, dependencies } = store(doorwaySeed(host, edition, pathNamespace));
+      await applyHostnameMutation(doorwayArchive(host, { pathCapabilityBarrier: BARRIER }), dependencies);
+      expect(docs.get(`hostnames/${host}`)).toEqual({ root: 'doorway', edition, pathNamespace });
+      expect(docs.get('events/bodega-bay-2026').status).toBe('archived');
+    });
+
+    it('refuses the record on an archive whose conversions yield no doorway', async () => {
+      for (const pathCapabilityBarrier of [BARRIER, null]) {
+        const { docs, dependencies } = store(flagship());
+        expect(await refusal(archiveInput({ pathCapabilityBarrier }), dependencies)).toBe('invalid-input');
+        expect(docs.get(`hostnames/${MIRROR}`)).toMatchObject({ status: 'active' });
+        expect(docs.get('events/bodega-bay-2026').status).toBe('active');
+      }
+      // An archive with no root conversion at all has no doorway either.
+      const plain = store({
+        ...converged(HOST, '4', hostnameDocument()),
+        'events/bodega-bay-2026': { status: 'active' },
+      });
+      expect(
+        await refusal(
+          archiveInput({ mappings: [HOST], mirrorRootConversions: [], pathCapabilityBarrier: BARRIER }),
+          plain.dependencies,
+        ),
+      ).toBe('invalid-input');
+    });
+
+    it('takes one record for an archive that converts a doorway and a mirror together', async () => {
+      const seed = {
+        ...flagship(),
+        ...converged('gaycruisebingo.com', '6', {
+          eventId: 'bodega-bay-2026',
+          edition: 'gcb',
+          status: 'active',
+          slug: 'bodega-bay',
+          pathNamespace: null,
+        }),
+      };
+      const conversions = [
+        { host: MIRROR, root: 'not-found' },
+        { host: 'gaycruisebingo.com', root: 'doorway' },
+      ];
+      expect(await refusal(archiveInput({ mirrorRootConversions: conversions }), store(seed).dependencies)).toBe(
+        'doorway-requires-deployment-barrier',
+      );
+      const { docs, dependencies } = store(seed);
+      await applyHostnameMutation(
+        archiveInput({ mirrorRootConversions: conversions, pathCapabilityBarrier: BARRIER }),
+        dependencies,
+      );
+      expect(docs.get('hostnames/gaycruisebingo.com')).toEqual({ root: 'doorway', edition: 'gcb', pathNamespace: null });
+      expect(docs.get(`hostnames/${MIRROR}`).root).toBe('not-found');
     });
   });
 
