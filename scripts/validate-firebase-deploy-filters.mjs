@@ -175,7 +175,9 @@ const ADMIN_CALLABLE_EXPORTS = Object.freeze([
 // type alias, an `import type` binding, or an ambient `declare` declaration,
 // with no value declaration of the same name. `export { name }` of such a
 // binding publishes nothing callable (a type is erased; an ambient binding is
-// at most an `undefined` property), so it must not become strict. Any value
+// at most an `undefined` property), so it must not become strict. `export
+// default name` of an ambient binding is different: TypeScript emits a read of
+// it, so `ambient(name)` lets that caller keep it a value. Any value
 // declaration of the name (a variable, function, class, enum, namespace or a
 // value import) keeps it, since declaration merging then exports the value.
 // A value import is itself type-only when the local module it names (resolved
@@ -190,6 +192,7 @@ function localTypeOnlyNames(sourceFile, file = null, walk = newExportWalk()) {
   const types = new Set();
   const values = new Set();
   const localValues = new Set();
+  const ambientValues = new Set();
   const imports = new Map();
   const addBindingNames = (name, bucket) => {
     if (ts.isIdentifier(name)) bucket.add(name.text);
@@ -202,10 +205,11 @@ function localTypeOnlyNames(sourceFile, file = null, walk = newExportWalk()) {
     } else if (ts.isVariableStatement(statement)) {
       for (const declaration of statement.declarationList.declarations) {
         addBindingNames(declaration.name, ambient ? types : values);
-        if (!ambient) addBindingNames(declaration.name, localValues);
+        addBindingNames(declaration.name, ambient ? ambientValues : localValues);
       }
     } else if (ambient && statement.name && ts.isIdentifier(statement.name)) {
       types.add(statement.name.text);
+      ambientValues.add(statement.name.text);
     } else if (
       (ts.isFunctionDeclaration(statement) ||
         ts.isClassDeclaration(statement) ||
@@ -241,6 +245,10 @@ function localTypeOnlyNames(sourceFile, file = null, walk = newExportWalk()) {
   for (const name of values) types.delete(name);
   const importedTypeOnly = new Map();
   return {
+    // Whether `name` is an ambient `declare` binding with no value declaration.
+    ambient(name) {
+      return types.has(name) && ambientValues.has(name);
+    },
     has(name) {
       if (types.has(name)) return true;
       if (!file || !imports.has(name) || localValues.has(name)) return false;
@@ -254,17 +262,64 @@ function localTypeOnlyNames(sourceFile, file = null, walk = newExportWalk()) {
   };
 }
 
-// One traversal's recursion state for the mutually recursive export walks
+// One traversal's state for the mutually recursive export walks
 // (`localTypeOnlyNames`, `moduleExportIsTypeOnly`, `exportElementIsValue`,
-// `starExportedNames`): the type-only lookups (`file\0name`) and star-name
-// collections (`file`) currently on the call path. Every recursion between
-// the walks passes one of the two, so a re-export cycle ends at its first
-// repeated key: a type-only lookup is then not proven type-only (a value),
-// and a star collection adds nothing, since the frame already collecting
-// that module adds its names. A key leaves the path when its frame returns,
-// so a module reached twice without a cycle is read in full each time.
+// `starExportedNames`). `path` holds the type-only lookups (`type\0file\0name`)
+// and star-name collections (`star\0file`) currently on the call path, each
+// with its depth. Every recursion between the walks passes through one of the
+// two, so a re-export cycle ends at its first repeated key: a type-only lookup
+// is then not proven type-only (a value), and a star collection adds nothing,
+// since the frame already collecting that module adds its names. `done` keeps
+// each finished answer for every later path that reaches the same key, so a
+// module shared by many re-export paths is analysed once, not once per path.
+// An answer that ended a cycle at a key above its own frame (`low`, the
+// shallowest depth a cycle cut reached) depends on that path, so it is not
+// kept, and the next path recomputes it. `modules` keeps each parsed module,
+// or the error that reading it raised.
 function newExportWalk() {
-  return { types: new Set(), stars: new Set() };
+  return { path: new Map(), low: Infinity, done: new Map(), modules: new Map() };
+}
+
+// Runs `compute` as the walk frame for `key`: a finished answer is reused, a
+// key already on the path ends the cycle with `cut()`, and an answer that no
+// cycle above this frame shaped is kept in `done`.
+function exportWalkFrame(walk, key, cut, compute) {
+  if (walk.done.has(key)) return walk.done.get(key);
+  const onPath = walk.path.get(key);
+  if (onPath !== undefined) {
+    walk.low = Math.min(walk.low, onPath);
+    return cut();
+  }
+  const depth = walk.path.size;
+  const outerLow = walk.low;
+  walk.path.set(key, depth);
+  walk.low = Infinity;
+  try {
+    const answer = compute();
+    if (walk.low >= depth) walk.done.set(key, answer);
+    return answer;
+  } finally {
+    walk.path.delete(key);
+    walk.low = Math.min(outerLow, walk.low);
+  }
+}
+
+// The parsed local module `file`, read and parsed once per walk; a read error
+// is kept and rethrown to every caller.
+function parsedExportModule(file, walk) {
+  let parsed = walk.modules.get(file);
+  if (!parsed) {
+    try {
+      parsed = {
+        sourceFile: ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, false, ts.ScriptKind.TS),
+      };
+    } catch (error) {
+      parsed = { error };
+    }
+    walk.modules.set(file, parsed);
+  }
+  if (parsed.error) throw parsed.error;
+  return parsed.sourceFile;
 }
 
 // Whether the local module `file` exports `name` with no runtime value. Every
@@ -273,8 +328,8 @@ function newExportWalk() {
 // only when some export of it is a type (an exported interface, type alias or
 // ambient declaration, a type-only clause element, a re-export, followed
 // through further local modules, of a name that is type-only there, or, for
-// `default`, an `export default` interface or type-only binding) and none is a
-// value. A name the module does not export directly is looked up through
+// `default`, an `export default` interface or a binding declared only as a
+// type, not an ambient one) and none is a value. A name the module does not export directly is looked up through
 // its local `export *` targets, where a local declaration would otherwise
 // shadow it. A re-export TypeScript can only erase (`export { T as x } from
 // './types'` of an interface) emits no property at all. A module that cannot
@@ -282,20 +337,13 @@ function newExportWalk() {
 // its name stays a value, as does a lookup that re-enters itself through a
 // re-export cycle (`walk`, see `newExportWalk`).
 function moduleExportIsTypeOnly(file, name, walk = newExportWalk()) {
-  const key = `${file}\0${name}`;
-  if (walk.types.has(key)) return false;
-  walk.types.add(key);
-  try {
-    return exportIsTypeOnlyIn(file, name, walk);
-  } finally {
-    walk.types.delete(key);
-  }
+  return exportWalkFrame(walk, `type\0${file}\0${name}`, () => false, () => exportIsTypeOnlyIn(file, name, walk));
 }
 
 function exportIsTypeOnlyIn(file, name, walk) {
   let sourceFile;
   try {
-    sourceFile = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+    sourceFile = parsedExportModule(file, walk);
   } catch {
     return false;
   }
@@ -332,11 +380,15 @@ function exportIsTypeOnlyIn(file, name, walk) {
     if (ts.isExportAssignment(statement)) {
       // `export default T` of a type-only binding is erased; any other
       // `export default` expression is a value, and an `export =` makes
-      // every name the module exposes unknown.
+      // every name the module exposes unknown. An ambient `declare` binding
+      // is not erased here: TypeScript emits `exports.default = T`, which
+      // reads whatever the runtime supplies under that name.
       if (statement.isExportEquals) valueSeen = true;
       else if (name === "default") {
-        if (ts.isIdentifier(statement.expression) && typeOnlyNames.has(statement.expression.text)) typeSeen = true;
-        else valueSeen = true;
+        const expression = statement.expression;
+        if (ts.isIdentifier(expression) && typeOnlyNames.has(expression.text) && !typeOnlyNames.ambient(expression.text)) {
+          typeSeen = true;
+        } else valueSeen = true;
       }
       continue;
     }
@@ -391,19 +443,15 @@ function exportElementIsValue(statement, element, typeOnlyNames, file = null, wa
 // collected on this path (a star cycle, see `newExportWalk`) adds nothing
 // more.
 function starExportedNames(file, walk = newExportWalk()) {
-  const names = new Set();
-  if (walk.stars.has(file)) return names;
-  walk.stars.add(file);
-  try {
+  return exportWalkFrame(walk, `star\0${file}`, () => new Set(), () => {
+    const names = new Set();
     collectStarExportedNames(file, walk, names);
-  } finally {
-    walk.stars.delete(file);
-  }
-  return names;
+    return names;
+  });
 }
 
 function collectStarExportedNames(file, walk, names) {
-  const sourceFile = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+  const sourceFile = parsedExportModule(file, walk);
   const typeOnlyNames = localTypeOnlyNames(sourceFile, file, walk);
   for (const statement of sourceFile.statements) {
     // An ambient `export declare` is erased and publishes nothing.
@@ -446,7 +494,10 @@ function protectedServicesFromSource(source, table, sourcePath = null) {
     false,
     ts.ScriptKind.TS,
   );
-  const typeOnlyNames = localTypeOnlyNames(sourceFile, sourcePath);
+  // One walk for the whole index, so a module shared by several exports is
+  // analysed once.
+  const walk = newExportWalk();
+  const typeOnlyNames = localTypeOnlyNames(sourceFile, sourcePath, walk);
   for (const statement of sourceFile.statements) {
     const exported =
       statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) &&
@@ -480,7 +531,7 @@ function protectedServicesFromSource(source, table, sourcePath = null) {
     }
     if (ts.isNamedExports(statement.exportClause)) {
       for (const specifier of statement.exportClause.elements) {
-        if (exportElementIsValue(statement, specifier, typeOnlyNames, sourcePath)) exportedNames.add(specifier.name.text);
+        if (exportElementIsValue(statement, specifier, typeOnlyNames, sourcePath, walk)) exportedNames.add(specifier.name.text);
       }
     }
   }
@@ -493,7 +544,7 @@ function protectedServicesFromSource(source, table, sourcePath = null) {
       if (!ts.isExportDeclaration(statement) || statement.isTypeOnly || statement.exportClause) continue;
       const specifier = statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier) ? statement.moduleSpecifier.text : "";
       const target = resolveModule(sourcePath, specifier);
-      if (target) for (const name of starExportedNames(target)) starNames.add(name);
+      if (target) for (const name of starExportedNames(target, walk)) starNames.add(name);
     }
     for (const [exportName] of table) {
       if (graph.opaque || graph.https.has(exportName) || starNames.has(exportName)) exportedNames.add(exportName);
@@ -4344,6 +4395,45 @@ async function starReexportsOpaqueModule(indexPath, indexSource) {
   return false;
 }
 
+// The hook Firebase generates for a TypeScript codebase (`firebase init`), in
+// its POSIX and Windows spellings: it runs the source directory's own `build`.
+const COMPILE_PREDEPLOY_HOOKS = new Set([
+  'npm --prefix "$RESOURCE_DIR" run build',
+  'npm --prefix "%RESOURCE_DIR%" run build',
+]);
+
+// tsc's output extension for each TypeScript input extension.
+const TSC_OUTPUT_SOURCES = Object.freeze({ ".js": [".ts", ".tsx"], ".cjs": [".cts"], ".mjs": [".mts"] });
+
+/**
+ * Whether a codebase's `predeploy` hooks only compile its index. Every hook
+ * runs before Functions prepare loads the source, so the index is the surface
+ * the CLI discovers only when each hook is the generated compile hook, and the
+ * `build` script it runs is `tsc`, optionally followed by copies
+ * `cp src/<file> lib/<file>` of one relative path, none onto a file tsc emits
+ * from a TypeScript source there, with no `prebuild` or `postbuild` script
+ * (npm runs both around `build`). Any other hook or build step can generate or
+ * rewrite what the CLI publishes, so the codebase stays uninventoried.
+ */
+function predeployOnlyCompiles(predeploy, scripts, sourceDir) {
+  const hooks = Array.isArray(predeploy) ? predeploy : [predeploy];
+  if (!hooks.every((hook) => typeof hook === "string" && COMPILE_PREDEPLOY_HOOKS.has(hook.trim()))) return false;
+  if (!scripts || typeof scripts !== "object" || Array.isArray(scripts)) return false;
+  if (Object.hasOwn(scripts, "prebuild") || Object.hasOwn(scripts, "postbuild")) return false;
+  if (typeof scripts.build !== "string") return false;
+  const [compile, ...copies] = scripts.build.split("&&").map((step) => step.trim());
+  if (compile !== "tsc") return false;
+  return copies.every((step) => {
+    const match = /^cp src\/(\S+) lib\/(\S+)$/.exec(step);
+    if (!match || match[1] !== match[2]) return false;
+    const file = match[1];
+    if (file.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) return false;
+    const extension = posix.extname(file);
+    const stem = file.slice(0, file.length - extension.length);
+    return !(TSC_OUTPUT_SOURCES[extension] ?? []).some((input) => existsSync(resolve(sourceDir, "src", stem + input)));
+  });
+}
+
 async function protectedServiceInventory(configSource, configPath, table) {
   const functionsConfigs = Array.isArray(configSource.functions)
     ? configSource.functions
@@ -4405,14 +4495,25 @@ async function protectedServiceInventory(configSource, configPath, table) {
       services.set(codebase, null);
       continue;
     }
+    const predeploy = functionsConfig.predeploy;
+    const hasPredeploy = Array.isArray(predeploy) ? predeploy.length > 0 : predeploy != null && predeploy !== "";
     if (existsSync(packagePath)) {
       let main = null;
+      let scripts = null;
       try {
-        main = JSON.parse(await readFile(packagePath, "utf8")).main ?? "index.js";
+        const packageJson = JSON.parse(await readFile(packagePath, "utf8"));
+        main = packageJson.main ?? "index.js";
+        scripts = packageJson.scripts ?? null;
       } catch {
         main = null;
       }
       if (typeof main !== "string" || posix.normalize(main.replaceAll("\\", "/")) !== "lib/index.js") {
+        services.set(codebase, null);
+        continue;
+      }
+      // A hook that can change the surface before Functions prepare loads it
+      // leaves the codebase uninventoried whether or not its index exists yet.
+      if (hasPredeploy && !predeployOnlyCompiles(predeploy, scripts, sourceDir)) {
         services.set(codebase, null);
         continue;
       }
@@ -4434,8 +4535,6 @@ async function protectedServiceInventory(configSource, configPath, table) {
       // hook, which runs before Functions prepare reads the directory and can
       // generate it. A missing source directory with no hook has nothing the
       // CLI could publish.
-      const predeploy = functionsConfig.predeploy;
-      const hasPredeploy = Array.isArray(predeploy) ? predeploy.length > 0 : predeploy != null && predeploy !== "";
       if (error && typeof error === "object" && error.code === "ENOENT") {
         if (hasPredeploy || existsSync(resolve(dirname(configPath), functionsConfig.source))) {
           services.set(codebase, null);

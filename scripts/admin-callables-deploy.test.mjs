@@ -172,6 +172,41 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
           resolve(fixture, "ops", "src", "index.ts"),
           header + "export const mintEventInvitation = onCall(async () => 1);\n",
         );
+      } else if (layout.startsWith("ops-hook-")) {
+        // A non-default codebase whose index exists, with a predeploy hook that
+        // runs before Functions prepare loads it.
+        const variant = layout.slice("ops-hook-".length);
+        const compile = 'npm --prefix "$RESOURCE_DIR" run build';
+        const { predeploy, scripts, exportsUnlock } = {
+          compile: { predeploy: [compile], scripts: { build: "tsc" }, exportsUnlock: true },
+          "compile-string-mirror-copy": {
+            predeploy: compile,
+            scripts: { build: "tsc && cp src/contract.cjs lib/contract.cjs" },
+            exportsUnlock: true,
+          },
+          generator: { predeploy: ["node generate.js", compile], scripts: { build: "tsc" }, exportsUnlock: false },
+          "build-generates": { predeploy: [compile], scripts: { build: "node generate.js && tsc" }, exportsUnlock: false },
+          prebuild: { predeploy: [compile], scripts: { prebuild: "node generate.js", build: "tsc" }, exportsUnlock: false },
+          "index-copy": {
+            predeploy: [compile],
+            scripts: { build: "tsc && cp src/index.js lib/index.js" },
+            exportsUnlock: false,
+          },
+        }[variant];
+        await nodeSource(resolve(fixture, "ops"));
+        await writeFile(resolve(fixture, "ops", "package.json"), JSON.stringify({ main: "lib/index.js", scripts }));
+        await writeFile(
+          resolve(fixture, "firebase.json"),
+          JSON.stringify({ functions: [{ source: "functions" }, { source: "ops", codebase: "ops", predeploy }] }),
+        );
+        await writeFile(resolve(fixture, "functions", "src", "index.ts"), "export const unrelated = 1;\n");
+        await writeFile(resolve(fixture, "ops", "src", "index.ts"), exportsUnlock ? header + callable : "export const unrelated = 1;\n");
+        if (variant === "compile-string-mirror-copy") {
+          await writeFile(resolve(fixture, "ops", "src", "contract.cjs"), "module.exports = {};\n");
+        } else if (variant === "index-copy") {
+          // The copy replaces what tsc emitted from src/index.ts.
+          await writeFile(resolve(fixture, "ops", "src", "index.js"), "exports.unlockDayNow = 1;\n");
+        }
       } else if (layout.startsWith("ops-variant-")) {
         // One non-default TypeScript codebase exporting `unlockDayNow`, made
         // opaque by a single variant.
@@ -357,6 +392,31 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
           await writeFile(resolve(fixture, "ops", "src", "a.ts"), "export * from './b';\n");
           await writeFile(resolve(fixture, "ops", "src", "b.ts"), "export interface T { value: string }\nexport * from './c';\n");
           await writeFile(resolve(fixture, "ops", "src", "c.ts"), "export { T } from './a';\n");
+        } else if (variant === "ambient-default-reexport" || variant === "ambient-function-default-reexport") {
+          // `export default` of an ambient binding emits `exports.default = handler`,
+          // a read of whatever the runtime supplies, so its re-export stays a value.
+          await writeFile(
+            resolve(fixture, "ops", "src", "index.ts"),
+            header + callable + "export { default as approvePrompts } from './handler';\n",
+          );
+          await writeFile(
+            resolve(fixture, "ops", "src", "handler.ts"),
+            variant === "ambient-default-reexport"
+              ? "declare const handler: unknown;\nexport default handler;\n"
+              : "declare function handler(): void;\nexport default handler;\n",
+          );
+        } else if (variant === "diamond-type-reexport") {
+          // Twenty layers of two local stars into one shared module reach the
+          // interface along 2^20 paths; each module is analysed once.
+          const layers = 20;
+          const src = resolve(fixture, "ops", "src");
+          await writeFile(resolve(src, "index.ts"), header + callable + "export { T as approvePrompts } from './l0';\n");
+          for (let layer = 0; layer < layers; layer += 1) {
+            await writeFile(resolve(src, `l${layer}.ts`), `export * from './a${layer}';\nexport * from './b${layer}';\n`);
+            await writeFile(resolve(src, `a${layer}.ts`), `export * from './l${layer + 1}';\n`);
+            await writeFile(resolve(src, `b${layer}.ts`), `export * from './l${layer + 1}';\n`);
+          }
+          await writeFile(resolve(src, `l${layers}.ts`), "export interface T { value: string }\n");
         } else if (variant === "default-value-import") {
           // A default-imported value re-exported under a callable's name stays a value.
           await writeFile(
@@ -509,13 +569,21 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       "default-type-import",
       "named-type-import",
       "default-type-reexport",
+      "diamond-type-reexport",
     ].map((variant) => [
       `ops-variant-${variant}`,
       ["--only", "functions:ops"],
       { selected: true, conservative: false, strict: "unlock" },
       { selected: false, conservative: false, strict: "" },
     ]),
-    ...["value-reexport", "default-value-import", "merged-import-value", "cyclic-type-reexport"].map((variant) => [
+    ...[
+      "value-reexport",
+      "default-value-import",
+      "merged-import-value",
+      "cyclic-type-reexport",
+      "ambient-default-reexport",
+      "ambient-function-default-reexport",
+    ].map((variant) => [
       `ops-variant-${variant}`,
       ["--only", "functions:ops"],
       { selected: true, conservative: false, strict: "unlock,approve" },
@@ -543,6 +611,20 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     // a missing one with no hook publishes nothing.
     ["ts-default-and-generated-ops", ["--only", "functions:ops"], unknown, unknown],
     ["ts-default-and-generated-ops", ["--only", "functions"], unknown, unknown],
+    // So does an existing index whose hook can generate or rewrite it before
+    // Functions prepare loads it; the generated compile hook alone cannot.
+    ...["generator", "build-generates", "prebuild", "index-copy"].map((variant) => [
+      `ops-hook-${variant}`,
+      ["--only", "functions:ops"],
+      unknown,
+      unknown,
+    ]),
+    ...["compile", "compile-string-mirror-copy"].map((variant) => [
+      `ops-hook-${variant}`,
+      ["--only", "functions:ops"],
+      { selected: true, conservative: false, strict: "unlock" },
+      { selected: false, conservative: false, strict: "" },
+    ]),
     [
       "ts-default-and-missing-ops",
       ["--only", "functions:ops"],
