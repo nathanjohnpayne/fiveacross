@@ -42,7 +42,9 @@ set -euo pipefail
 #     approvePrompts) (#768, #548, #803, #1277;
 #     see docs/app/bug-reports.md § Repeat-deploy
 #     hardening). Idempotent — no-ops when already correct. Runs whenever
-#     this deploy could have RELEASED Functions, on success or failure; the
+#     this deploy could have RELEASED Functions (each wrapper only when the
+#     classifier selects its family, per Functions codebase, #1282, #1299),
+#     on success or failure; the
 #     deploy's own exit status is honoured afterwards either way. The wrapper-
 #     owned IAM mutation is skipped when the caller passed Firebase's own
 #     `--dry-run` (#768 r5): no app or Function is released, so there is nothing
