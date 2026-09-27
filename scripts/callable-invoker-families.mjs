@@ -187,8 +187,9 @@ function groupMembers(object, scope) {
 
 // `groups` maps an exported object-group name to its member names; `opaque`
 // records a star re-export this scan cannot see into (a package, or a module
-// that does not resolve), directly or through a local star.
-const newAnalysis = () => ({ https: new Set(), factories: new Set(), groups: new Map(), opaque: false });
+// that does not resolve), directly or through a local star. `unread` holds the
+// exported names whose value it could not classify (#1299): unknown, not absent.
+const newAnalysis = () => ({ https: new Set(), factories: new Set(), groups: new Map(), opaque: false, unread: new Set() });
 const EMPTY = Object.freeze(newAnalysis());
 
 // One pass over `file`. `results` persists across passes and its sets only
@@ -305,6 +306,32 @@ function analyzeModule(file, results, visited) {
       changed = true;
     }
   }
+  // An exported variable or default this scan did not classify is unread
+  // unless it is a `const` whose value provably builds no endpoint (a function,
+  // a literal, an array or object literal): `https['onCall'](...)`, a call
+  // through a local alias or any other callee it cannot read is unknown, never
+  // empty (#1299).
+  const inert = (node) =>
+    isFunctionNode(node) ||
+    ts.isClassExpression(node) ||
+    ts.isArrayLiteralExpression(node) ||
+    ts.isObjectLiteralExpression(node) ||
+    ts.isLiteralExpression(node) ||
+    ts.isTemplateExpression(node) ||
+    [ts.SyntaxKind.TrueKeyword, ts.SyntaxKind.FalseKeyword, ts.SyntaxKind.NullKeyword].includes(node.kind);
+  for (const statement of source.statements) {
+    // `export default <expression>` is the binding `default`, which a named
+    // re-export can rename (`export { default as x } from './leaf'`).
+    if (ts.isExportAssignment(statement) && !statement.isExportEquals && !localHttps.has("default") && !localBuilders.has("default")) {
+      if (!inert(unwrap(statement.expression))) analysis.unread.add("default");
+    }
+    if (!ts.isVariableStatement(statement) || !isExported(statement)) continue;
+    const constant = Boolean(statement.declarationList.flags & ts.NodeFlags.Const);
+    for (const { name, initializer } of statement.declarationList.declarations) {
+      if (!ts.isIdentifier(name) || localHttps.has(name.text) || localBuilders.has(name.text)) continue;
+      if (!(constant && initializer && inert(unwrap(initializer)))) analysis.unread.add(name.text);
+    }
+  }
   for (const statement of source.statements) {
     if (!ts.isExportDeclaration(statement) || statement.isTypeOnly) continue;
     const specifier = statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)
@@ -315,6 +342,9 @@ function analyzeModule(file, results, visited) {
     // local one cannot build. A star of either is opaque to the inventory.
     if (specifier && !target) {
       if (!statement.exportClause) analysis.opaque = true;
+      else if (ts.isNamedExports(statement.exportClause)) {
+        for (const element of statement.exportClause.elements) if (!element.isTypeOnly) analysis.unread.add(element.name.text);
+      }
       continue;
     }
     const upstream = target
@@ -328,6 +358,7 @@ function analyzeModule(file, results, visited) {
       for (const name of upstream.https) if (forwarded(name)) analysis.https.add(name);
       for (const name of upstream.factories) if (forwarded(name)) analysis.factories.add(name);
       for (const [name, members] of upstream.groups) if (forwarded(name)) analysis.groups.set(name, members);
+      for (const name of upstream.unread) if (forwarded(name)) analysis.unread.add(name);
       if (upstream.opaque) analysis.opaque = true;
       continue;
     }
@@ -347,6 +378,8 @@ function analyzeModule(file, results, visited) {
       if (element.isTypeOnly) continue;
       const local = (element.propertyName ?? element.name).text;
       if (upstream.https.has(local)) analysis.https.add(element.name.text);
+      // A local `export { x }` is not traced to its value, so it is unread.
+      else if (!target || upstream.unread.has(local)) analysis.unread.add(element.name.text);
       // `import * as admin from './admin'; export { admin }` is the same group.
       if (!target && namespaceImports.has(local)) {
         for (const name of namespaceImports.get(local).https) analysis.https.add(`${element.name.text}-${name}`);
@@ -378,13 +411,13 @@ export function httpsFunctionExports(file) {
  * `httpsFunctionExports` plus `opaque`: whether `file` re-exports, directly or
  * through local stars, a star this scan cannot see into (a package or an
  * unresolvable module). A caller that needs the complete export list treats an
- * opaque graph conservatively.
+ * opaque graph conservatively, and an `unread` name as unknown (#1299).
  */
 export function httpsExportGraph(file) {
   const results = new Map();
   const size = () =>
     [...results.values()].reduce(
-      (n, a) => n + a.https.size + a.factories.size + a.groups.size + (a.opaque ? 1 : 0),
+      (n, a) => n + a.https.size + a.factories.size + a.groups.size + a.unread.size + (a.opaque ? 1 : 0),
       0,
     );
   let before;
@@ -393,7 +426,7 @@ export function httpsExportGraph(file) {
     analyzeModule(file, results, new Set());
   } while (size() !== before);
   const analysis = results.get(file);
-  return { https: analysis.https, opaque: analysis.opaque };
+  return { https: analysis.https, opaque: analysis.opaque, unread: analysis.unread };
 }
 
 /** The names in `names` that are in no invoker family and not private, sorted. */

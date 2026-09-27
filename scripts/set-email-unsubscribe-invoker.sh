@@ -26,8 +26,10 @@ set -euo pipefail
 #
 # A `firebase deploy --only functions` can reset this — it may re-try the
 # rejected allUsers binding and report a partial failure, leaving the endpoint
-# unreachable (every emailed unsubscribe link 403s). Re-run this AFTER any
-# Functions deploy to restore the reachable state. It is idempotent: if the
+# unreachable (every emailed unsubscribe link 403s). Re-run this after a
+# Functions deploy that could have released emailUnsubscribe (deploy.sh runs
+# it itself when that family is selected; this is the manual repair path) to
+# restore the reachable state. It is idempotent: if the
 # invoker IAM check is already disabled it no-ops.
 #
 # Usage:

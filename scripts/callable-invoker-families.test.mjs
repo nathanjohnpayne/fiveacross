@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CALLABLE_INVOKER_FAMILIES,
+  httpsExportGraph,
   httpsFunctionExports,
   unfamiliedHttpsExports,
 } from "./callable-invoker-families.mjs";
@@ -46,6 +47,14 @@ describe("callable invoker families (#1277)", () => {
   it("leaves no HTTPS export of the real Functions index unfamilied", () => {
     expect(unfamiliedHttpsExports(realIndex)).toEqual([]);
     expect([...httpsFunctionExports(realIndex)]).toContain("unlockDayNow");
+  });
+
+  it("classifies every familied export of the real index, so a star over it stays inventoried (#1299)", () => {
+    const graph = httpsExportGraph(realIndex);
+    const familied = CALLABLE_INVOKER_FAMILIES.flatMap((family) => family.exports);
+    expect(graph.opaque).toBe(false);
+    expect(familied.filter((name) => graph.unread.has(name) && !graph.https.has(name))).toEqual([]);
+    expect([...graph.https]).toEqual(expect.arrayContaining(["submitBugReport", "emailUnsubscribe", "mintAuthHandoff", "exchangeAuthHandoff", "unlockDayNow"]));
   });
 
   it("registers a wrapper that exists for every family", () => {

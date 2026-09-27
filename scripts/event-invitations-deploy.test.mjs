@@ -54,13 +54,13 @@ describe("event-invitation deploy scope", () => {
     { args: ["--only", "functions"] },
     { args: ["--only", "functions:default"] },
   ])(
-    "skips unexported services for a full Functions release ($args)",
+    "selects the family with every unexported service allowed absent for a full Functions release (#1335) ($args)",
     async ({ args }) => {
       const result = await classify(args);
 
       expect(result).toMatchObject({
-        eventInvitationsInvokerSelected: false,
-        eventInvitationsInvokerConservative: false,
+        eventInvitationsInvokerSelected: true,
+        eventInvitationsInvokerConservative: true,
         eventInvitationsStrictServices: "",
       });
     },
@@ -118,8 +118,8 @@ describe("event-invitation deploy scope", () => {
         defaultConfigPath: resolve(fixture, "firebase.json"),
       });
       expect(result).toMatchObject({
-        eventInvitationsInvokerSelected: false,
-        eventInvitationsInvokerConservative: false,
+        eventInvitationsInvokerSelected: true,
+        eventInvitationsInvokerConservative: true,
         eventInvitationsStrictServices: "",
       });
     } finally {
@@ -127,7 +127,7 @@ describe("event-invitation deploy scope", () => {
     }
   });
 
-  it("fails closed for a runtime export-star whose names cannot be known locally", async () => {
+  it("treats a runtime export-star whose names cannot be known locally as unknown, not every service strict (#1335)", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "event-invitation-star-export-"));
     try {
       await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
@@ -145,8 +145,8 @@ describe("event-invitation deploy scope", () => {
       });
       expect(result).toMatchObject({
         eventInvitationsInvokerSelected: true,
-        eventInvitationsInvokerConservative: false,
-        eventInvitationsStrictServices: "mint,redeem,revoke",
+        eventInvitationsInvokerConservative: true,
+        eventInvitationsStrictServices: "",
       });
     } finally {
       await rm(fixture, { recursive: true, force: true });
@@ -225,9 +225,10 @@ describe("event-invitation deploy scope", () => {
       "--except",
       "functions:mintEventInvitation",
     ]);
+    // A no-op exclusion leaves a full release, which selects the family (#1335).
     expect(endpointQualifiedNoop).toMatchObject({
-      eventInvitationsInvokerSelected: false,
-      eventInvitationsInvokerConservative: false,
+      eventInvitationsInvokerSelected: true,
+      eventInvitationsInvokerConservative: true,
       eventInvitationsStrictServices: "",
     });
   });
@@ -244,7 +245,7 @@ describe("event-invitation deploy scope across Functions codebases (#1282)", () 
   it.each([
     [null, true, false, "mint,redeem"],
     ["functions", true, false, "mint,redeem"],
-    ["functions:default", false, false, ""],
+    ["functions:default", true, true, ""],
     ["functions:invites", true, false, "mint,redeem"],
     ["functions:mintEventInvitation", true, true, ""],
     ["functions:invites:mintEventInvitation", true, false, "mint"],

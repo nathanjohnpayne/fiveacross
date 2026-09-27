@@ -42,7 +42,9 @@ set -euo pipefail
 #     approvePrompts) (#768, #548, #803, #1277;
 #     see docs/app/bug-reports.md § Repeat-deploy
 #     hardening). Idempotent — no-ops when already correct. Runs whenever
-#     this deploy could have RELEASED Functions, on success or failure; the
+#     this deploy could have RELEASED Functions (each wrapper only when the
+#     classifier selects its family, per Functions codebase, #1282, #1299),
+#     on success or failure; the
 #     deploy's own exit status is honoured afterwards either way. The wrapper-
 #     owned IAM mutation is skipped when the caller passed Firebase's own
 #     `--dry-run` (#768 r5): no app or Function is released, so there is nothing
@@ -525,11 +527,14 @@ run_invoker() {
 # only ever one of this repo's two primaries (#548, Codex P2 round 3).
 INVOKER_REPAIR_PROJECT="${INVOKER_PIN_PROJECT:-<project-id>}"
 
-# A post-deploy `--allow-missing` is normally wrong: an endpoint explicitly
-# selected for Functions release must exist once Firebase returns. The one
-# exception is an endpoint selected only because an unfamiliar
-# `functions:<selector>` might be a group/codebase containing it. That
-# conservative probe must not make a valid unrelated first deploy fail on a
+# A post-deploy `--allow-missing` is the conservative arm. A selected service
+# is strict (it must exist once Firebase returns) only when the classifier
+# proved the released codebase exports it; every other selected service is
+# allowed to be absent: a named endpoint whose resolved codebase does not prove
+# the export, a whole-codebase scope's unproven services, or a service inferred
+# from an unfamiliar `functions:<selector>` that might be a group/codebase
+# containing it (#1282, #1299, #1335: the scan proves presence only). That
+# conservative arm must not make a valid unrelated first deploy fail on a
 # service Firebase had no reason to create; credential and permission failures
 # remain fatal because set-cloud-run-invoker only tolerates its narrowly
 # matched missing-service diagnostics.
@@ -544,8 +549,8 @@ run_postdeploy_invoker() {
 }
 
 # The handoff pair needs a third state the two-way flag above cannot express:
-# ONE named half strict, its partner allowed to be absent. See
-# AUTH_HANDOFF_STRICT_HALF.
+# ONE proven half strict (named, or the only half its codebase exports, #1299),
+# its partner allowed to be absent. See AUTH_HANDOFF_STRICT_HALF.
 run_postdeploy_handoff_invoker() {
   local script="$SCRIPT_DIR/set-auth-handoff-invoker.sh"
   if [[ "$AUTH_HANDOFF_INVOKER_CONSERVATIVE" == "true" ]]; then
@@ -842,12 +847,14 @@ fi
 # deploy state. It narrows what counts as absent, not what counts as fine: a
 # missing credential, PERMISSION_DENIED, or any other describe failure still
 # aborts below exactly as before. Step 2.5's post-deploy reconciliation omits
-# this flag on purpose for exactly selected endpoints — by then the service
-# should exist, so a 404 stays a real, fatal signal. A service selected only
-# conservatively from an unfamiliar codebase/group selector is the exception:
-# the post-deploy call also allows it to be absent, because that selector may
-# have been an unrelated function Firebase validly deployed without creating
-# either protected service.
+# this flag only for services the classifier proved the released codebase
+# exports — by then the service should exist, so a 404 stays a real, fatal
+# signal. Every other selected service is allowed to be absent post-deploy: a
+# named endpoint whose resolved codebase does not prove the export, a
+# whole-codebase scope's unproven services, or one inferred from an unfamiliar
+# codebase/group selector that may have been an unrelated function Firebase
+# validly deployed without creating either protected service (#1282, #1299,
+# #1335: the scan proves presence only).
 if [[ "$INVOKER_SKIP" == "true" ]]; then
   echo ">> Invoker credential check skipped (--skip-invoker)"
 elif [[ "$FUNCTIONS_ATTEMPTED" != "true" ]]; then
@@ -979,7 +986,11 @@ set -e
 #
 # It runs whenever this deploy could have RELEASED Functions
 # (FUNCTIONS_ATTEMPTED, computed from the argument list at the top of this
-# script) — on success AND on failure, whatever the failure was.
+# script) — on success AND on failure, whatever the failure was — and only
+# for the invoker families the classifier selected for that scope (#1282,
+# #1299, #1335): a whole-codebase or every-codebase scope selects every family,
+# strict only for the services its codebases are proven to export, and a named
+# callable selects only its own family.
 #
 # The previous rule ran it only on success or on a failure whose text matched
 # the org-policy invoker rejection, and that rule was wrong in the direction

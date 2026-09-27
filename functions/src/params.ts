@@ -163,8 +163,9 @@ export const APPROVE_PROMPTS_APP_CHECK = defineBoolean('APPROVE_PROMPTS_APP_CHEC
  * the Cloud Run invoker role on that service either way — a Hosting rewrite
  * FORWARDS the unauthenticated request into the same invoker check, it does
  * not bypass it. What actually makes the endpoint answer is
- * `scripts/set-email-unsubscribe-invoker.sh`, run once after every Functions
- * deploy: it DISABLES the invoker IAM check on the backing service (the exact
+ * `scripts/set-email-unsubscribe-invoker.sh`, run after every Functions deploy
+ * that could release this endpoint (`scripts/deploy.sh` selects it per
+ * Functions codebase, #1299): it DISABLES the invoker IAM check on the backing service (the exact
  * mechanism `scripts/set-bug-report-invoker.sh` already uses for
  * `submitBugReport`, #158) — see `docs/app/bug-reports.md` § Repeat-deploy
  * hardening and `docs/app/phase-1-deploy.md` § 1a-i. Skip that step and every

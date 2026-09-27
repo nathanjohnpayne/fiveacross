@@ -8,10 +8,13 @@ set -euo pipefail
 #
 # ONE WRAPPER FOR TWO SERVICES, unlike its siblings, because mintAuthHandoff and
 # exchangeAuthHandoff are two halves of a single sign-in flow: either one left
-# 403ing breaks authentication on every Event origin, they are always released
-# together, and there is no deploy in which reconciling one without the other is
-# the correct outcome. Splitting them would double deploy.sh's per-endpoint
-# selection state to buy a distinction nothing can act on.
+# 403ing breaks authentication on every Event origin, so every deploy that could
+# release either half reconciles the pair in one call. A scope that proves only
+# one half released (a named selector, or a Functions codebase whose index
+# exports only that half, #1299) holds that half strict and lets its peer be
+# absent via --allow-missing-half below; it never skips the wrapper. Splitting
+# them would double deploy.sh's per-endpoint selection state to buy a
+# distinction the strict-half field already expresses.
 #
 # The org policy on these projects rejects an `allUsers` Cloud Run invoker IAM
 # binding (Domain Restricted Sharing), which is the binding `firebase deploy`
@@ -36,8 +39,10 @@ set -euo pipefail
 #
 # A `firebase deploy --only functions` can reset this — it may re-try the
 # rejected allUsers binding and report a partial failure, leaving the callables
-# unreachable and sign-in broken. Re-run this AFTER any Functions deploy to
-# restore the reachable state. It is idempotent: if the invoker IAM check is
+# unreachable and sign-in broken. Re-run this after a Functions deploy that
+# could have released the auth-handoff callables (deploy.sh runs it itself
+# when that family is selected; this is the manual repair path) to restore
+# the reachable state. It is idempotent: if the invoker IAM check is
 # already disabled on both services it no-ops.
 #
 # Usage:
@@ -53,9 +58,11 @@ set -euo pipefail
 # --allow-missing-half exists because "the pair is reconciled together" must not
 # become "a missing service is always tolerated" (#548, Codex P2 round 4). A
 # scoped `--only functions:mintAuthHandoff` deploy may legitimately leave
-# exchangeAuthHandoff uncreated, but the half it actually DEPLOYED must still be
-# there afterwards — tolerating both would let a scoped deploy finish green
-# without reconciling the function it just released, which is the 403 this whole
+# exchangeAuthHandoff uncreated, and the half it actually DEPLOYED is strict
+# only when the classifier proved the released codebase exports it (otherwise
+# both halves are allowed absent, #1299: the scan proves presence only).
+# Tolerating a PROVEN half would let a scoped deploy finish green without
+# reconciling the function it just released, which is the 403 this whole
 # mechanism exists to prevent. deploy.sh therefore names the absent-tolerated
 # half rather than passing a single blanket --allow-missing.
 #

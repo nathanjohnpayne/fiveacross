@@ -19,8 +19,10 @@ set -euo pipefail
 #
 # A `firebase deploy --only functions` can reset this — it may re-try the
 # rejected allUsers binding and report a partial failure, leaving the service
-# unreachable. Re-run the per-endpoint wrapper AFTER every Functions deploy to
-# restore the reachable state. Idempotent: if the invoker IAM check is already
+# unreachable. Re-run the per-endpoint wrapper after a Functions deploy that
+# could have released its callable (deploy.sh runs the wrappers itself for the
+# families a deploy selects; this is the manual repair path) to restore the
+# reachable state. Idempotent: if the invoker IAM check is already
 # disabled it no-ops.
 #
 # This script is not meant to be invoked directly for a specific endpoint —
@@ -56,10 +58,13 @@ set -euo pipefail
 #                          — still exits 1: this flag narrows what counts as
 #                          "absent", it does not widen what counts as "fine".
 #                          Intended for the PRE-PUBLISH check. The deploy
-#                          wrapper also uses it after publish ONLY for a
-#                          service inferred from an unfamiliar Functions
-#                          codebase/group selector; exact endpoint scopes omit
-#                          it post-deploy, so a 404 there still fails loud.
+#                          wrapper also uses it after publish for every
+#                          selected service the classifier did not prove the
+#                          released codebase exports (unfamiliar selectors, a
+#                          whole-codebase scope's unproven services, a named
+#                          endpoint without a proven export); only a proven
+#                          export omits it post-deploy, so a 404 there still
+#                          fails loud (#1282, #1299, #1335).
 #
 # Environment:
 #   GCLOUD_BIN   gcloud binary (default: gcloud; the 1Password-backed wrapper
