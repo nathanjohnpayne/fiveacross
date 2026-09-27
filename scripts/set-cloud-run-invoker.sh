@@ -58,10 +58,13 @@ set -euo pipefail
 #                          — still exits 1: this flag narrows what counts as
 #                          "absent", it does not widen what counts as "fine".
 #                          Intended for the PRE-PUBLISH check. The deploy
-#                          wrapper also uses it after publish ONLY for a
-#                          service inferred from an unfamiliar Functions
-#                          codebase/group selector; exact endpoint scopes omit
-#                          it post-deploy, so a 404 there still fails loud.
+#                          wrapper also uses it after publish for every
+#                          selected service the classifier did not prove the
+#                          released codebase exports (unfamiliar selectors, a
+#                          whole-codebase scope's unproven services, a named
+#                          endpoint without a proven export); only a proven
+#                          export omits it post-deploy, so a 404 there still
+#                          fails loud (#1282, #1299, #1335).
 #
 # Environment:
 #   GCLOUD_BIN   gcloud binary (default: gcloud; the 1Password-backed wrapper

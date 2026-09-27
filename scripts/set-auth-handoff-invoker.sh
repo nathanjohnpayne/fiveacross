@@ -58,9 +58,11 @@ set -euo pipefail
 # --allow-missing-half exists because "the pair is reconciled together" must not
 # become "a missing service is always tolerated" (#548, Codex P2 round 4). A
 # scoped `--only functions:mintAuthHandoff` deploy may legitimately leave
-# exchangeAuthHandoff uncreated, but the half it actually DEPLOYED must still be
-# there afterwards — tolerating both would let a scoped deploy finish green
-# without reconciling the function it just released, which is the 403 this whole
+# exchangeAuthHandoff uncreated, and the half it actually DEPLOYED is strict
+# only when the classifier proved the released codebase exports it (otherwise
+# both halves are allowed absent, #1299: the scan proves presence only).
+# Tolerating a PROVEN half would let a scoped deploy finish green without
+# reconciling the function it just released, which is the 403 this whole
 # mechanism exists to prevent. deploy.sh therefore names the absent-tolerated
 # half rather than passing a single blanket --allow-missing.
 #
