@@ -85,7 +85,7 @@ describe("admin-callables deploy scope (#1277)", () => {
     }
   });
 
-  it("stays conservative when a local star re-exports a package star", async () => {
+  it("stays conservative when a local star re-exports a package star (#1335)", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "admin-callable-package-star-"));
     try {
       await mkdir(resolve(fixture, "functions", "src"), { recursive: true });
@@ -101,8 +101,8 @@ describe("admin-callables deploy scope (#1277)", () => {
       });
       expect(result).toMatchObject({
         adminCallablesInvokerSelected: true,
-        adminCallablesInvokerConservative: false,
-        adminCallablesStrictServices: "unlock,approve",
+        adminCallablesInvokerConservative: true,
+        adminCallablesStrictServices: "",
       });
     } finally {
       await rm(fixture, { recursive: true, force: true });
@@ -127,13 +127,14 @@ describe("admin-callables deploy scope (#1277)", () => {
     });
   });
 
-  it("does not select the family for a codebase that exports neither callable", async () => {
+  it("selects the family conservatively for a codebase that exports neither callable (#1335)", async () => {
     const result = await withIndex(["export const unrelated = 1;"], (configPath) =>
       classifyFirebaseDeployRequest(["fiveacross"], { defaultConfigPath: configPath }),
     );
 
     expect(result).toMatchObject({
-      adminCallablesInvokerSelected: false,
+      adminCallablesInvokerSelected: true,
+      adminCallablesInvokerConservative: true,
       adminCallablesStrictServices: "",
     });
   });
@@ -236,11 +237,13 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
   const TWO_CODEBASES = [UNRELATED, { codebase: "ops", source: "ops", index: UNLOCK }];
 
   // [args, selected, conservative, strict]. A selected family with nothing
-  // strict is an allow-missing probe, the only empty form deploy.sh accepts.
+  // strict is an allow-missing probe, the only empty form deploy.sh accepts. A
+  // whole-codebase scope selects every family (#1335); the scan only proves
+  // which services are strict.
   it.each([
     [[], true, false, "unlock"],
     [["--only", "functions"], true, false, "unlock"],
-    [["--only", "functions:default"], false, false, ""],
+    [["--only", "functions:default"], true, true, ""],
     [["--only", "functions:ops"], true, false, "unlock"],
     [["--only", "functions:unlockDayNow"], true, true, ""],
     [["--only", "functions:default:unlockDayNow"], true, true, ""],
@@ -255,9 +258,13 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
     });
   });
 
-  it("does not select a single-service family a codebase selector's index does not export (#1299)", async () => {
+  it("selects a single-service family a codebase selector's index does not export conservatively (#1335)", async () => {
     const result = await withCodebases(TWO_CODEBASES, ["--only", "functions:ops"]);
-    expect(result).toMatchObject({ bugReportInvokerSelected: false, emailUnsubscribeInvokerSelected: false, authHandoffInvokerSelected: false });
+    expect(result).toMatchObject({
+      bugReportInvokerSelected: true, bugReportInvokerConservative: true,
+      emailUnsubscribeInvokerSelected: true, emailUnsubscribeInvokerConservative: true,
+      authHandoffInvokerSelected: true, authHandoffInvokerConservative: true,
+    });
   });
 
   // A codebase with no TypeScript index (JavaScript, Python), or an index the
@@ -309,37 +316,46 @@ describe("admin-callables deploy scope across Functions codebases (#1282)", () =
       codebase: "ops",
       source: "ops",
       index: [
+        ...UNLOCK,
         "const box = { exports: 1, module: 2 };",
         "export const size = box.exports + box.module;",
         "export function self(this: unknown) { return this; }",
         "export class Holder { value = this; }",
       ],
     };
+    // Inventoried, so the proven callable stays strict; an unknown index would prove nothing.
     expect(await withCodebases([UNRELATED, ops], ["--only", "functions:ops"])).toMatchObject({
-      eventInvitationsInvokerSelected: false,
-      adminCallablesInvokerSelected: false,
+      eventInvitationsInvokerSelected: true,
+      eventInvitationsInvokerConservative: true,
+      adminCallablesInvokerSelected: true,
       adminCallablesInvokerConservative: false,
-      adminCallablesStrictServices: "",
+      adminCallablesStrictServices: "unlock",
     });
   });
 
   it("answers functions:default from its own inventory beside an uninventoried codebase", async () => {
     const result = await withCodebases([{ source: "functions", index: UNLOCK }, NO_INDEX[1]], ["--only", "functions:default"]);
-    expect(result).toMatchObject({ eventInvitationsInvokerSelected: false, adminCallablesInvokerConservative: false, adminCallablesStrictServices: "unlock" });
+    expect(result).toMatchObject({ eventInvitationsInvokerConservative: true, adminCallablesInvokerConservative: false, adminCallablesStrictServices: "unlock" });
   });
 
-  it("keeps strict what the export rule before #1282 counts in the selected codebase", async () => {
-    const ops = { codebase: "ops", source: "ops", index: ["export * from 'admin-callables-package';"] };
+  // An opaque star proves nothing (Phase 4b P2 on #1335): unknown, never every service strict.
+  it.each([
+    [["export * from 'callables-package';"], {}],
+    [["export * from './barrel';"], { "barrel.ts": ["export * from 'callables-package';"] }],
+  ])("treats a package export-star in the selected codebase as unknown (%#)", async (index, modules) => {
+    const ops = { codebase: "ops", source: "ops", index, modules };
     expect(await withCodebases([UNRELATED, ops], ["--only", "functions:ops"])).toMatchObject({
-      eventInvitationsInvokerConservative: false, eventInvitationsStrictServices: "mint,redeem,revoke",
-      adminCallablesInvokerConservative: false, adminCallablesStrictServices: "unlock,approve",
+      ...BOTH_FAMILIES_CONSERVATIVE,
+      bugReportInvokerConservative: true, emailUnsubscribeInvokerConservative: true,
+      authHandoffInvokerConservative: true, authHandoffStrictHalf: "",
     });
   });
 });
 
-// The single-service families follow the same per-codebase rules (#1299). Only
-// the non-default `ops` codebase exports submitBugReport and mintAuthHandoff;
-// no codebase exports emailUnsubscribe or exchangeAuthHandoff.
+// The single-service families follow the same per-codebase rules (#1299), and a
+// whole-codebase scope selects every family (#1335). Only the non-default `ops`
+// codebase exports submitBugReport and mintAuthHandoff; no codebase exports
+// emailUnsubscribe or exchangeAuthHandoff.
 describe("single-service invoker families across Functions codebases (#1299)", () => {
   const OPS_SINGLES = [
     "import { onCall } from 'firebase-functions/v2/https';",
@@ -360,10 +376,10 @@ describe("single-service invoker families across Functions codebases (#1299)", (
   });
 
   it.each([
-    [[], "S", "-", "mint"],
-    [["--only", "functions"], "S", "-", "mint"],
-    [["--only", "functions:default"], "-", "-", "-"],
-    [["--only", "functions:ops"], "S", "-", "mint"],
+    [[], "S", "C", "mint"],
+    [["--only", "functions"], "S", "C", "mint"],
+    [["--only", "functions:default"], "C", "C", "C"],
+    [["--only", "functions:ops"], "S", "C", "mint"],
     [["--only", "functions:submitBugReport"], "C", "-", "-"],
     [["--only", "functions:default:submitBugReport"], "C", "-", "-"],
     [["--only", "functions:ops:submitBugReport"], "S", "-", "-"],
@@ -375,7 +391,7 @@ describe("single-service invoker families across Functions codebases (#1299)", (
     [["--only", "functions:exchangeAuthHandoff"], "-", "-", "C"],
     [["--only", "functions:ops:exchangeAuthHandoff"], "-", "-", "C"],
     [["--only", "functions:ops:mintAuthHandoff,functions:ops:exchangeAuthHandoff"], "-", "-", "mint"],
-    [["--only", "functions:default,functions:ops:submitBugReport"], "S", "-", "-"],
+    [["--only", "functions:default,functions:ops:submitBugReport"], "S", "C", "C"],
   ])("marks strict only what the selected codebase exports (%j)", async (args, bug, email, auth) => {
     expect(await withCodebases(TWO_CODEBASES, args)).toMatchObject({ functionsAttempted: true, ...fields(bug, email, auth) });
   });
@@ -395,12 +411,12 @@ describe("single-service invoker families across Functions codebases (#1299)", (
 
   it("keeps both auth-handoff halves strict when the selected codebase exports both", async () => {
     const ops = { codebase: "ops", source: "ops", index: [...OPS_SINGLES, "export const exchangeAuthHandoff = onCall(async () => 1);"] };
-    expect(await withCodebases([UNRELATED, ops], ["--only", "functions:ops"])).toMatchObject(fields("S", "-", "S"));
+    expect(await withCodebases([UNRELATED, ops], ["--only", "functions:ops"])).toMatchObject(fields("S", "C", "S"));
   });
 
   // An index the scan does not read (here CommonJS) is unknown, not empty: a
   // scope that releases its codebase keeps all three families selected with
-  // every service allowed absent, while an inventoried peer stays exact.
+  // every service allowed absent, as a whole-codebase scope of its peer does.
   const OPAQUE = [
     UNRELATED,
     { codebase: "ops", source: "ops", index: ["import { onCall } from 'firebase-functions/v2/https';", "exports.submitBugReport = onCall(async () => 1);"] },
@@ -410,7 +426,7 @@ describe("single-service invoker families across Functions codebases (#1299)", (
     [["--only", "functions"], "C", "C", "C"],
     [["--only", "functions:ops"], "C", "C", "C"],
     [["--only", "functions:ops:submitBugReport"], "C", "-", "-"],
-    [["--only", "functions:default"], "-", "-", "-"],
+    [["--only", "functions:default"], "C", "C", "C"],
   ])("keeps the families conservative for an uninventoried codebase (%j)", async (args, bug, email, auth) => {
     expect(await withCodebases(OPAQUE, args)).toMatchObject(fields(bug, email, auth));
   });
@@ -452,7 +468,7 @@ describe("single-service invoker families across Functions codebases (#1299)", (
     expect(await withCodebases(codebases, args)).toMatchObject(ALL_CONSERVATIVE);
   });
 
-  it("keeps a recognized builder behind a local star strict and inert or unrelated exports absent", async () => {
+  it("keeps a recognized builder behind a local star strict and allows inert or unrelated exports absent", async () => {
     const handoff = [
       "import * as https from 'firebase-functions/v2/https';",
       "import { getFirestore } from 'firebase-admin/firestore';",
@@ -463,9 +479,8 @@ describe("single-service invoker families across Functions codebases (#1299)", (
     ];
     const codebases = [{ source: "functions", index: ["export * from './handoff';"], modules: { "handoff.ts": handoff } }];
     expect(await withCodebases(codebases, ["--only", "functions:default"])).toMatchObject({
-      ...fields("-", "-", "mint"),
-      eventInvitationsInvokerSelected: false,
-      adminCallablesInvokerSelected: false,
+      ...fields("C", "C", "mint"),
+      ...BOTH_FAMILIES_CONSERVATIVE,
     });
   });
 
@@ -476,9 +491,8 @@ describe("single-service invoker families across Functions codebases (#1299)", (
     };
     const codebases = [{ source: "functions", index: ["export * from './handoff';"], modules }];
     expect(await withCodebases(codebases, ["--only", "functions:default"])).toMatchObject({
-      ...fields("-", "-", "mint"),
-      eventInvitationsInvokerSelected: false,
-      adminCallablesInvokerSelected: false,
+      ...fields("C", "C", "mint"),
+      ...BOTH_FAMILIES_CONSERVATIVE,
     });
   });
 });

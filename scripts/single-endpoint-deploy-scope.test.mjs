@@ -1772,7 +1772,8 @@ describe("codebase precedence and per-codebase keying", RUNS_A_BUILD, () => {
     // carries no idChunks — so endpointMatchesFilter admits EVERY endpoint in
     // that codebase, including protected callables. Reading it as the
     // same-named single endpoint would release them with no reconciliation;
-    // read as the codebase, it selects exactly what that codebase exports.
+    // read as the codebase, it selects every family, strict for exactly what
+    // that codebase is proven to export (#1335).
     await withCodebases(
       {
         api: [
@@ -1788,8 +1789,10 @@ describe("codebase precedence and per-codebase keying", RUNS_A_BUILD, () => {
           authHandoffInvokerSelected: true,
           authHandoffInvokerConservative: false,
           authHandoffStrictHalf: "mint",
-          bugReportInvokerSelected: false,
-          emailUnsubscribeInvokerSelected: false,
+          bugReportInvokerSelected: true,
+          bugReportInvokerConservative: true,
+          emailUnsubscribeInvokerSelected: true,
+          emailUnsubscribeInvokerConservative: true,
         });
       },
     );
@@ -1817,7 +1820,8 @@ describe("codebase precedence and per-codebase keying", RUNS_A_BUILD, () => {
           authHandoffInvokerSelected: true,
           authHandoffInvokerConservative: false,
           authHandoffStrictHalf: "mint",
-          emailUnsubscribeInvokerSelected: false,
+          emailUnsubscribeInvokerSelected: true,
+          emailUnsubscribeInvokerConservative: true,
         });
       },
     );
@@ -4886,8 +4890,9 @@ describe("pinned Hosting rewrites widen the selector the way the CLI does", RUNS
   });
 
   it("re-adds the whole Functions target when only Hosting was asked for", async () => {
-    // The whole codebase comes back, so each family is what its index exports
-    // (#1299): the bug report strictly, and neither family it does not export.
+    // The whole codebase comes back, so every family is selected (#1335): the
+    // bug report strictly, and the families its index does not export allowed
+    // absent.
     await withFunctionsProject(
       { config: pinned(), source: pinnedSource, files: { "public/index.html": "" } },
       async (configPath) => {
@@ -4897,8 +4902,10 @@ describe("pinned Hosting rewrites widen the selector the way the CLI does", RUNS
           functionsAttempted: true,
           bugReportInvokerSelected: true,
           bugReportInvokerConservative: false,
-          emailUnsubscribeInvokerSelected: false,
-          authHandoffInvokerSelected: false,
+          emailUnsubscribeInvokerSelected: true,
+          emailUnsubscribeInvokerConservative: true,
+          authHandoffInvokerSelected: true,
+          authHandoffInvokerConservative: true,
         });
       },
     );

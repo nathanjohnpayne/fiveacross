@@ -264,7 +264,7 @@ function localStarLeavesEsmForms(file, sourceFile, seen = new Set([file])) {
 // exists be resolved through the module graph (`httpsExportGraph`) to the
 // names it really exports, so one unexported peer does not become strict. A
 // star of a package or of a module that cannot be resolved, here or anywhere
-// behind a local star, still widens to every protected callable. An index that
+// behind a local star, is unknown (`null`, #1335). An index that
 // reaches its exports object outside the ESM forms read here, itself or behind
 // a local star, is unknown (`null`, #1282): see `exportsOutsideEsmForms`. So is
 // one whose star reaches a protected name the scan cannot classify (#1299).
@@ -312,12 +312,14 @@ function protectedServicesFromSource(source, table, sourcePath = null) {
       }
     }
   }
-  if (hasRuntimeExportStar) {
-    for (const [exportName] of table) exportedNames.add(exportName);
-  } else if (hasLocalExportStar) {
+  // A star the scan cannot see into proves nothing (#1335): unknown, never
+  // every service strict.
+  if (hasRuntimeExportStar) return null;
+  if (hasLocalExportStar) {
     const graph = httpsExportGraph(sourcePath);
+    if (graph.opaque) return null;
     for (const [exportName] of table) {
-      if (graph.opaque || graph.https.has(exportName)) exportedNames.add(exportName);
+      if (graph.https.has(exportName)) exportedNames.add(exportName);
       // Exported with a value the scan could not classify (#1299): unknown.
       else if (graph.unread.has(exportName) && !exportedNames.has(exportName)) return null;
     }
@@ -4073,16 +4075,16 @@ async function protectedServiceInventory(configSource, configPath, table) {
 
 /**
  * A family's inventory as `classifyInvokerScope` reads it: `union` answers a
- * scope that releases every codebase, `complete` whether every configured
- * codebase was inventoried, and `of(codebase)` one codebase's services, `null`
- * when it is uninventoried or not configured. A plain list is the default's.
+ * scope that releases every codebase, `configured` whether any codebase is,
+ * and `of(codebase)` one codebase's services, `null` when it is uninventoried
+ * or not configured. A plain list is the default's.
  */
 function familyInventory(inventory, table) {
   const byCodebase = inventory instanceof Map ? inventory : new Map([["default", [...inventory]]]);
   const values = [...byCodebase.values()];
   return {
     union: table.map(([, service]) => service).filter((service) => values.some((found) => found?.includes(service))),
-    complete: !values.includes(null),
+    configured: byCodebase.size > 0,
     of: (codebase) => byCodebase.get(codebase) ?? null,
   };
 }
@@ -4286,22 +4288,23 @@ export async function classifyInvokerScope(
   // Direct callers that predate #1299 assume the default codebase exports all four.
   exportedSingleServiceCallables = SINGLE_SERVICE_EXPORTS.map(([, service]) => service),
 ) {
-  // Per Functions codebase (#1282, #1299). A scope that releases every codebase
-  // reads the union (Q3), and an uninventoried codebase in it keeps every
-  // family selected with every service not in the union allowed absent.
+  // The syntax scan proves PRESENCE only, never absence (#1335, amending Q1 on
+  // #1282 for all five families): a scope that releases a whole codebase, or
+  // every codebase (Q3), selects EVERY family, strict for exactly the services
+  // the released codebases are proven to export and allowing every other one
+  // absent. An uninventoried codebase proves nothing, so it adds nothing strict.
   const invitations = familyInventory(exportedEventInvitationServices, EVENT_INVITATION_EXPORTS);
   const admins = familyInventory(exportedAdminCallableServices, ADMIN_CALLABLE_EXPORTS);
   const singles = familyInventory(exportedSingleServiceCallables, SINGLE_SERVICE_EXPORTS);
-  const everyCodebaseInventoried = invitations.complete && admins.complete && singles.complete;
   const exportedInvitationCsv = invitations.union.join(",");
   const exportedAdminCsv = admins.union.join(",");
-  const allInvitationsSelected = exportedInvitationCsv !== "" || !everyCodebaseInventoried;
-  const allAdminsSelected = exportedAdminCsv !== "" || !everyCodebaseInventoried;
-  const unionSelects = (...services) =>
-    services.some((service) => singles.union.includes(service)) || !everyCodebaseInventoried;
-  const allBugReportsSelected = unionSelects("bugReport");
-  const allUnsubscribesSelected = unionSelects("emailUnsubscribe");
-  const allAuthHandoffsSelected = unionSelects("mint", "exchange");
+  // No configured codebase releases nothing.
+  const everyCodebaseSelects = invitations.configured || admins.configured || singles.configured;
+  const allInvitationsSelected = everyCodebaseSelects;
+  const allAdminsSelected = everyCodebaseSelects;
+  const allBugReportsSelected = everyCodebaseSelects;
+  const allUnsubscribesSelected = everyCodebaseSelects;
+  const allAuthHandoffsSelected = everyCodebaseSelects;
   let functionsAttempted = true;
   let hostingAttempted = true;
   let bugReportInvokerSelected = allBugReportsSelected;
@@ -4345,28 +4348,17 @@ export async function classifyInvokerScope(
       eventInvitationsInvokerSelected = true;
       adminCallablesInvokerSelected = true;
     };
-    // A whole-codebase scope (Q1), or every codebase for `null` (Q3): the
-    // services that surface exports are strict, and one this parse could not
-    // inventory keeps every family selected with nothing proven.
+    // A whole-codebase scope (Q1), or every codebase for `null` (Q3), selects
+    // every family (#1335): the services that surface is proven to export are
+    // strict, and an uninventoried one proves nothing.
     const releaseProtectedCallables = (codebase) => {
       functionsAttempted = true;
-      const invitationServices = codebase === null ? invitations.union : invitations.of(codebase);
-      const adminServices = codebase === null ? admins.union : admins.of(codebase);
-      const singleServices = codebase === null ? singles.union : singles.of(codebase);
-      if (
-        invitationServices === null ||
-        adminServices === null ||
-        singleServices === null ||
-        (codebase === null && !everyCodebaseInventoried)
-      ) {
-        selectEveryInvokerConservatively();
+      if (codebase !== null || everyCodebaseSelects) selectEveryInvokerConservatively();
+      for (const service of (codebase === null ? invitations.union : invitations.of(codebase)) ?? []) {
+        strictInvitationServices.add(service);
       }
-      for (const service of invitationServices ?? []) strictInvitationServices.add(service);
-      for (const service of adminServices ?? []) strictAdminServices.add(service);
-      for (const service of singleServices ?? []) strictSingleServices.add(service);
-      for (const service of singleServices ?? []) selectSingleFamily(service);
-      if (invitationServices?.length > 0) eventInvitationsInvokerSelected = true;
-      if (adminServices?.length > 0) adminCallablesInvokerSelected = true;
+      for (const service of (codebase === null ? admins.union : admins.of(codebase)) ?? []) strictAdminServices.add(service);
+      for (const service of (codebase === null ? singles.union : singles.of(codebase)) ?? []) strictSingleServices.add(service);
     };
     // A named protected callable selects its family, and is strict only when
     // the codebase its selector resolves to exports it (Q2): the one named in

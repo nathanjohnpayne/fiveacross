@@ -983,9 +983,9 @@ set -e
 # (FUNCTIONS_ATTEMPTED, computed from the argument list at the top of this
 # script) — on success AND on failure, whatever the failure was — and only
 # for the invoker families the classifier selected for that scope (#1282,
-# #1299): an inventoried codebase that exports none of a family's callables
-# selects none of its wrappers, and an uninventoried codebase keeps every
-# family selected conservatively.
+# #1299, #1335): a whole-codebase or every-codebase scope selects every family,
+# strict only for the services its codebases are proven to export, and a named
+# callable selects only its own family.
 #
 # The previous rule ran it only on success or on a failure whose text matched
 # the org-policy invoker rejection, and that rule was wrong in the direction
