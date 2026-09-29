@@ -6,7 +6,9 @@ How to produce publishable screenshots of the app — project pages on nathanpay
 scripts/marketing-shots.sh
 ```
 
-Output lands in `artifacts/marketing/`: `vacay-card.png`, `vacay-feed.png`, `vacay-ranks.png`, at 393×775 CSS pixels and 2× DPR (786×1550). Copy the one you want into the consuming repo; don't commit the PNGs here.
+Output lands in `artifacts/marketing/`: `vacay-card.png`, `vacay-feed.png`, `vacay-ranks.png`, at 393×775 CSS pixels and 2× DPR (786×1550), plus the two email mockups, `email-daily-card.png` and `email-winner-announcement.png` (see [The email mockups](#the-email-mockups)). Copy the one you want into the consuming repo; `artifacts/marketing/` itself stays uncommitted.
+
+The one exception is the README's own set, committed under `docs/images/`: `vacay-card`, `vacay-feed`, `vacay-ranks`, `gcb-card` and both emails. Refresh them by re-running the capture, reading every PNG, and copying the same six files over—never by editing a PNG.
 
 ## Why this exists instead of a phone screenshot
 
@@ -60,6 +62,18 @@ The distinction matters for the next person to change this file: the loose versi
 
 **The `fiveacross` Edition is wired but unused.** It renders the platform wordmark and the occasion-neutral Themes (Marquee / Confetti Hour / Afterglow), but it would still deal *Bodega* prompts under a generic "the weekend" frame, which reads as incoherent. It needs an occasion-neutral prompt pool before it produces a publishable shot. The Vacay capture already carries `BY FIVE ACROSS` under the wordmark, which is the platform story anyway.
 
+## The email mockups
+
+`tests/marketing/email-shots.spec.ts` photographs the two player emails by rendering the **real templates**—`buildDailyEmailModel` / `renderDailyEmailHtml` and `buildPodiumEmailModel` / `renderPodiumEmailHtml`, the same code the Functions send—into a 640px page and taking a full-page capture. It needs no emulator and no app build, so `scripts/marketing-shots.sh --grep email` runs it alone in seconds; a plain run takes it along with the app shots.
+
+The same safety rules hold, from different inputs:
+
+- **The Event is the Bodega Bay seed** (`scripts/seed-data/bodega-bay-2026.mjs`)—its real schedule, Themes and Tonight lines, all general-audience. The emails always render in Vacay chrome, whatever `HERO_EDITION` says.
+- **The roster is `fixture.ts`'s invented names**, with play invented to be internally consistent: per-Day stats sum to the totals, the podium is built by the finale's own `buildPodiumPayload`, and the Day honours are the earliest per-Day bingos.
+- **The most-loved photo is a line of text, not a photo.** The template carries no `<img>`, so the award names an invented winner and a Bodega prompt and shows no picture.
+
+The reader is Devon K., second on the board, so the "You're #N" and "You finished #N" lines have something to say. Unsubscribe and preferences links point at `example.com`.
+
 ## Mechanics
 
 - **Not a test.** It lives in `tests/marketing/`, outside `playwright.config.ts`'s `testDir`, so `npm run test:e2e` never runs it. It asserts only enough to know the screen it wants has settled.
@@ -67,4 +81,5 @@ The distinction matters for the next person to change this file: the loose versi
 - **Its own web port** (5184) and its own build output (`dist-marketing`), so a capture and an e2e run cannot serve or clobber each other's bundle.
 - **Do not run it concurrently with `npm run test:e2e`.** A distinct project id namespaces the data, not the sockets: both read the fixed emulator ports in `firebase.json` (8080, 9099), and `firebase emulators:exec` has no per-invocation port override, so the second run dies on the occupied ports before Playwright starts. Run them in sequence. Separating them properly needs a second firebase config wired through the bundle.
 - **`VITE_ADULT_CONTENT=false` is not enough on its own.** A single-Event build treats that as an unproven *seed* and re-derives the posture from `hostnames/{host}`; with no such document the posture fails closed and the 18+ gate returns after sign-in. The fixture therefore seeds `hostnames/127.0.0.1` with `adultContent: false` — which is the truthful value for a Bodega-pool Event, not a convenience.
+- **Fonts.** The app loads no webfonts: its display stack is `'Bebas Neue','Arial Narrow',sans-serif`, designed to land on Arial Narrow, which macOS ships as a supplemental font. On a host without it, Chromium falls to a wide generic sans; the capture still succeeds, but the wordmark and theme headlines render in the wrong face and the Free Space's `FREE` wraps onto two lines. Look for that wrap before publishing. On Linux, a metric-compatible substitute is Liberation Sans Narrow (Liberation 1.07; 2.x dropped it), installed locally under the family name `Arial Narrow`, because Chromium will not take a fontconfig alias as a match for it.
 - **Java.** The Firestore emulator needs a JDK 21+ on `PATH`, the floor firebase-tools enforces. The script sources the shared probe, `scripts/lib/ensure-java.sh`, exactly as the emulator-backed npm entry points do: it runs `java -version` rather than testing for the binary — macOS ships a `/usr/bin/java` stub that exists and exits 1 — checks the reported major, and falls back to `JAVA_HOME`, `/usr/libexec/java_home` and Homebrew's keg-only `openjdk` prefixes.

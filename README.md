@@ -6,6 +6,24 @@ The platform wears an **Edition** per class of occasion and runs one **Event** p
 
 **Read more:** the [Five Across project page](https://nathanpayne.com/projects/five-across/) is the case study—the problem, the eight-day launch, and the decisions made against each default, with what each one cost. [*The Product Did Not Travel*](https://nathanpayne.com/blog/the-product-did-not-travel/) follows the second Event, run for a different host, where nobody was still marking squares by Saturday afternoon—and the dinner ritual the cruise's engagement totals had been hiding. The [wireframes](https://raw.githack.com/nathanjohnpayne/fiveacross/main/plans/daily-cards-wireframes.html) ([source](plans/daily-cards-wireframes.html)) draw the player, admin, share and email surfaces across the platform and both Editions, painted with the shipped Theme tokens; they are the parity reference for the player-facing screens ([`specs/d15-mockup-parity.md`](specs/d15-mockup-parity.md)).
 
+## Screenshots
+
+The real app and the real email templates, captured over a seeded demo Event with invented players ([how they are made](docs/app/marketing-screenshots.md)). One platform, two Editions: the Vacay Bingo warm-up card beside the Gay Cruise Bingo one, then Vacay's Feed and Ranks.
+
+<p>
+  <img src="docs/images/vacay-card.png" width="200" alt="Vacay Bingo Day Card: a 5×5 board of Bodega Bay prompts with seven squares marked">
+  <img src="docs/images/gcb-card.png" width="200" alt="Gay Cruise Bingo Day Card: the boarding-day board in the Neon Playground Theme">
+  <img src="docs/images/vacay-feed.png" width="200" alt="Vacay Bingo Feed: text proofs, a shared Tally card and a BINGO Moment">
+  <img src="docs/images/vacay-ranks.png" width="200" alt="Vacay Bingo Ranks: the leaderboard with the Daily First to BINGO strip">
+</p>
+
+The two player emails, both opt-in per Event: the morning Day Card, themed to the Day it announces, and the winner announcement after the Standings Freeze.
+
+<p>
+  <img src="docs/images/email-daily-card.png" width="400" alt="Daily card email: the Day's Theme header, standings through yesterday, today's nudge and a link to the Feed">
+  <img src="docs/images/email-winner-announcement.png" width="400" alt="Winner announcement email: final standings, the First to BINGO honour, the most-loved photo and the reader's own placing">
+</p>
+
 ## Where it runs
 
 | Edition | Event | Host | State |
