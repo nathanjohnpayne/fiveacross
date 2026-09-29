@@ -107,3 +107,7 @@ The target files are local and ignored because they contain the client configura
 ## Contributing
 
 Changes land via branch + pull request—see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE). The license covers the code and content in this repository; it grants no rights to the Five Across, Gay Cruise Bingo or Vacay Bingo names and marks (§6).
