@@ -4,7 +4,7 @@ A live, phone-first social bingo platform (PWA) for a group sharing one occasion
 
 The platform wears an **Edition** per class of occasion and runs one **Event** per occasion, addressed by its own hostname. See [`BRAND.md`](BRAND.md) for the Brand / Edition / Namespace model and [`CONTEXT.md`](CONTEXT.md) for the domain language.
 
-**Read more:** the [Five Across project page](https://nathanpayne.com/projects/five-across/) is the case study—the problem, the eight-day launch, and the decisions made against each default, with what each one cost. [*The Product Did Not Travel*](https://nathanpayne.com/blog/the-product-did-not-travel/) follows the second Event, run for a different host, where nobody was still marking squares by Saturday afternoon—and the dinner ritual the cruise's engagement totals had been hiding.
+**Read more:** the [Five Across project page](https://nathanpayne.com/projects/five-across/) is the case study—the problem, the eight-day launch, and the decisions made against each default, with what each one cost. [*The Product Did Not Travel*](https://nathanpayne.com/blog/the-product-did-not-travel/) follows the second Event, run for a different host, where nobody was still marking squares by Saturday afternoon—and the dinner ritual the cruise's engagement totals had been hiding. The [wireframes](https://raw.githack.com/nathanjohnpayne/fiveacross/main/plans/daily-cards-wireframes.html) ([source](plans/daily-cards-wireframes.html)) draw the player, admin, share and email surfaces across the platform and both Editions, painted with the shipped Theme tokens; they are the parity reference for the player-facing screens ([`specs/d15-mockup-parity.md`](specs/d15-mockup-parity.md)).
 
 ## Where it runs
 
@@ -85,6 +85,7 @@ The target files are local and ignored because they contain the client configura
 | [`docs/app/preview-deploys.md`](docs/app/preview-deploys.md) | Previewing a branch on a real device, with working Google sign-in |
 | [`docs/adr/`](docs/adr/) · [`docs/architecture/`](docs/architecture/) | Architecture decision records |
 | [`specs/`](specs/) | Per-feature contracts—this repo's canonical spec source |
+| [`plans/daily-cards-wireframes.html`](plans/daily-cards-wireframes.html) ([rendered](https://raw.githack.com/nathanjohnpayne/fiveacross/main/plans/daily-cards-wireframes.html)) | Tri-brand wireframes of the player, admin, share and email surfaces; prose source of truth is [`plans/daily-cards-spec.md`](plans/daily-cards-spec.md) |
 | [`docs/projects/gaycruisebingo/prds/gaycruisebingo.md`](docs/projects/gaycruisebingo/prds/gaycruisebingo.md) | Founding PRD. Describes the first Edition only and predates the platform model—`CONTEXT.md` and the ADRs win where they differ |
 | [`DEPLOYMENT.md`](DEPLOYMENT.md) | Deploy tooling + 1Password credential model |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`SECURITY.md`](SECURITY.md) | Contribution workflow · security policy |
