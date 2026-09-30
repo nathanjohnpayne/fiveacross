@@ -488,6 +488,18 @@ describe('the automatic mint is bound to the redirect credential', () => {
     expect(mocks.mintAuthHandoff).toHaveBeenCalledWith(expect.anything(), { expectedUid: 'u1' });
   });
 
+  it('fails closed when another tab signed OUT between the redirect and the observer', async () => {
+    // Codex P1 on #1350 (4141267991): a null observer callback after a Google
+    // round trip must not fall through to the signed-out arm and re-run sign-in.
+    returningFromGoogle(); // this flow signed in u1…
+    withSession(null); // …but the session is gone by the first callback
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} />);
+    expect(await screen.findByText(/signed-in account changed/i)).toBeInTheDocument();
+    expect(mocks.signInWithRedirect).not.toHaveBeenCalled();
+    expect(mocks.mintAuthHandoff).not.toHaveBeenCalled();
+    expect(replace).not.toHaveBeenCalled();
+  });
+
   it('refuses when another tab switched the session between the redirect and the observer', async () => {
     returningFromGoogle(); // this flow signed in u1…
     withSession({ uid: 'u2', email: 'second@example.com' }); // …but the session now reports u2

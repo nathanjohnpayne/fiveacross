@@ -368,8 +368,13 @@ export default function AuthHandoffOrigin({
             return;
           }
           handled = true;
-          if (user !== null && cameBackFromGoogle) {
-            if (user.uid !== redirectUid) {
+          if (cameBackFromGoogle) {
+            // EVERY callback of a flow that just came back from Google is held
+            // to the redirect credential — including a signed-out one (another
+            // tab signed out in between, Codex on #1350). Falling through to
+            // the signed-out arm would send the player back to Google as if the
+            // round trip had never happened; fail closed instead.
+            if (user === null || user.uid !== redirectUid || redirectUid === null) {
               terminate('account-changed');
               return;
             }
