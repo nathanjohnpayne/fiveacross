@@ -89,13 +89,18 @@ describe('clearHandoffFragment', () => {
   });
 
   it('drops the fragment while preserving path and query, without navigating', () => {
-    const loc = { pathname: '/board', search: '?day=3', hash: `#${HANDOFF_FRAGMENT_KEY}=${CODE}` };
+    const loc = {
+      origin: ORIGIN,
+      pathname: '/board',
+      search: '?day=3',
+      hash: `#${HANDOFF_FRAGMENT_KEY}=${CODE}`,
+    };
     const replaceState = vi.fn(() => {
       loc.hash = '';
     });
     vi.stubGlobal('window', { location: loc, history: { state: { a: 1 }, replaceState } });
     expect(clearHandoffFragment()).toBe(true);
-    expect(replaceState).toHaveBeenCalledWith({ a: 1 }, '', '/board?day=3');
+    expect(replaceState).toHaveBeenCalledWith({ a: 1 }, '', `${ORIGIN}/board?day=3`);
   });
 
   it('never throws when the history API refuses, and says so', () => {
@@ -187,6 +192,9 @@ describe('parseHandoffRequest', () => {
     ['a protocol-relative return path', `?target=${encodeURIComponent(ORIGIN)}&txn=${txn}&return=//evil.test`],
     ['a same-host protocol-relative return path', `?target=${encodeURIComponent(ORIGIN)}&txn=${txn}&return=//summer-camp.fiveacross.app/board`],
     ['a relative return path', `?target=${encodeURIComponent(ORIGIN)}&txn=${txn}&return=board`],
+    // Dot segments that normalise to a `//` pathname on the target origin.
+    ['a dot segment normalising to //', `?target=${encodeURIComponent(ORIGIN)}&txn=${txn}&return=${encodeURIComponent('/..//evil.test')}`],
+    ['a dot-dot chain normalising to //', `?target=${encodeURIComponent(ORIGIN)}&txn=${txn}&return=${encodeURIComponent('/a/../..//evil.test')}`],
   ])('refuses %s', (_label, search) => {
     expect(parseHandoffRequest(search)).toBeNull();
   });

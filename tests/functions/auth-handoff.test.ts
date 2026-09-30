@@ -385,6 +385,13 @@ describe('mintHandoff', () => {
     ['a CRLF injection', '/board\r\nX-Evil: 1'],
     ['an over-long path', `/${'a'.repeat(600)}`],
     ['a non-string', 7],
+    // Dot segments that NORMALISE to a protocol-relative pathname: each starts
+    // with one slash and resolves on the target origin, so only the check on
+    // the resolved pathname catches them.
+    ['a dot segment that normalises to //', '/..//evil.test'],
+    ['a dot-dot chain that normalises to //', '/a/../..//evil.test/x'],
+    ['a single-dot segment that normalises to //', '/.//evil.test'],
+    ['a backslash dot segment that normalises to //', '/..\\/evil.test'],
   ])('rejects %s as a return path — the open-redirect surface', async (_label, returnPath) => {
     expect(validateReturnPath(returnPath, ORIGIN)).toBeNull();
 
@@ -397,6 +404,32 @@ describe('mintHandoff', () => {
     expect(fake.docs.has(handoffPath(CODE))).toBe(false);
   });
 
+  // Codex P1 / CodeRabbit on #1350: the central page confirms ONE account, and
+  // another tab can swap the shared session before the call runs. The page
+  // sends the uid it showed; a mismatch with the callable's own uid refuses.
+  it('refuses to mint when the confirmed uid is not the caller, before any read or write', async () => {
+    const fake = makeDb(activeHost());
+    const result = await mintHandoff(
+      { uid: UID, expectedUid: 'someone-else', targetOrigin: ORIGIN, transactionId: transactionIdFor(VERIFIER) },
+      mintDeps(fake),
+    );
+    expect(result).toEqual({ ok: false, reason: 'account-changed' });
+    expect(fake.reads.count).toBe(0);
+    expect(fake.docs.has(handoffPath(CODE))).toBe(false);
+  });
+
+  it('mints when the confirmed uid IS the caller, and when none is sent', async () => {
+    for (const expectedUid of [UID, undefined]) {
+      const fake = makeDb(activeHost());
+      const result = await mintHandoff(
+        { uid: UID, expectedUid, targetOrigin: ORIGIN, transactionId: transactionIdFor(VERIFIER) },
+        mintDeps(fake),
+      );
+      expect(result).toMatchObject({ ok: true });
+      expect(fake.docs.get(handoffPath(CODE))?.data).toMatchObject({ uid: UID });
+    }
+  });
+
   it('refuses an unattested minter before any Firestore read when App Check is enforced', async () => {
     const fake = makeDb(activeHost());
     const result = await mintHandoff(
@@ -406,6 +439,11 @@ describe('mintHandoff', () => {
 
     expect(result).toEqual({ ok: false, reason: 'app-check-required' });
     expect(fake.reads.count).toBe(0);
+  });
+
+  it('keeps an ordinary dot segment that stays a one-slash path', () => {
+    expect(validateReturnPath('/a/../board', ORIGIN)).toBe('/board');
+    expect(validateReturnPath('/./board?day=2', ORIGIN)).toBe('/board?day=2');
   });
 
   it('defaults an absent return path to the root', () => {

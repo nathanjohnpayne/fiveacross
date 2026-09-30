@@ -24,8 +24,14 @@
  * `FIRST_PARTY_AUTH_HOSTS`), so it sits squarely inside the redirect branch.
  * There is no UA sniffing here and no second copy of that decision to drift.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { getRedirectResult, onAuthStateChanged, signInWithRedirect } from 'firebase/auth';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  GoogleAuthProvider,
+  getRedirectResult,
+  onAuthStateChanged,
+  signInWithRedirect,
+  signOut,
+} from 'firebase/auth';
 import { auth, googleProvider } from '../firebase';
 import { parseHandoffRequest, type HandoffRequest } from './handoffClient';
 import { mintAuthHandoff } from './handoffExchange';
@@ -50,6 +56,12 @@ type Phase =
   | 'checking'
   /** Leaving for Google, or coming back from it. */
   | 'authenticating'
+  /**
+   * A session already exists at this origin and NO Google round trip happened
+   * in this flow: the page waits for the person at the keyboard to say which
+   * account goes to the Event before anything is minted.
+   */
+  | 'confirm'
   /** Signed in; minting the code and bouncing. */
   | 'minting'
   /** Terminal. Nothing retries itself from here. */
@@ -60,7 +72,12 @@ type Phase =
  * navigates here by hand — they arrive from a Sign in tap on an Event origin, so
  * anything that goes wrong is a provisioning or configuration fault.
  */
-type FailureKind = 'bad-request' | 'sign-in-failed' | 'mint-failed';
+type FailureKind =
+  | 'bad-request'
+  | 'sign-in-failed'
+  | 'switch-failed'
+  | 'mint-failed'
+  | 'account-changed';
 
 const COPY: Record<FailureKind, { headline: string; detail: string }> = {
   'bad-request': {
@@ -70,12 +87,28 @@ const COPY: Record<FailureKind, { headline: string; detail: string }> = {
   },
   'sign-in-failed': {
     headline: "Google sign-in didn't finish",
-    detail: 'Nothing was changed. Try again, or go back to the event address and start over.',
+    // No "nothing was changed": a cancelled Google return after "Use another
+    // account" lands here on a fresh page load that cannot know the previous
+    // page signed the session out.
+    detail: 'Try again, or go back to the event address and start over.',
+  },
+  // "Use another account" signs the central session out BEFORE it leaves for
+  // Google, so a failure after that point has changed something: the copy
+  // says so rather than "Nothing was changed" (Codex on #1350).
+  'switch-failed': {
+    headline: "Google sign-in didn't finish",
+    detail:
+      'You were signed out here, but choosing another account did not finish. Go back to the event address and tap Sign in again.',
   },
   'mint-failed': {
     headline: "We couldn't return you to your event",
     detail:
       'You are signed in, but this event address is not one we can hand you back to. Check the link you were sent, or ask whoever set the event up.',
+  },
+  'account-changed': {
+    headline: 'The signed-in account changed',
+    detail:
+      'Another tab signed in or out while this page was waiting, so nothing was sent. Go back to the event address and tap Sign in again.',
   },
 };
 
@@ -90,6 +123,51 @@ function replaceLocation(url: string): void {
   window.location.replace(url);
 }
 
+/**
+ * The provider "Use another account" sends the player to. `prompt:
+ * select_account` makes Google show its account chooser even when one Google
+ * session is live in the browser, which is the whole point of the button; the
+ * shared `googleProvider` is left alone so no other sign-in changes behaviour.
+ */
+function accountChooserProvider(): GoogleAuthProvider {
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: 'select_account' });
+  return provider;
+}
+
+/** The host a player is being returned to, as it reads in the address bar. */
+function targetHost(origin: string): string {
+  try {
+    return new URL(origin).host;
+  } catch {
+    return origin;
+  }
+}
+
+const PAGE_STYLE = {
+  minHeight: '100dvh',
+  display: 'grid',
+  placeItems: 'center',
+  padding: '2rem 1.5rem',
+  // Literal colours for the same reason EventNotFound uses them: the theme
+  // layer is part of the app this page deliberately does not mount.
+  background: '#0b0f14',
+  color: '#eef2f6',
+  fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif',
+  textAlign: 'center',
+} as const;
+
+const BUTTON_STYLE = {
+  font: 'inherit',
+  fontSize: '1rem',
+  fontWeight: 600,
+  padding: '0.85rem 1.25rem',
+  borderRadius: '0.75rem',
+  border: 'none',
+  cursor: 'pointer',
+  overflowWrap: 'anywhere',
+} as const;
+
 export default function AuthHandoffOrigin({
   search = window.location.search,
   navigate = replaceLocation,
@@ -103,6 +181,14 @@ export default function AuthHandoffOrigin({
 }) {
   const [phase, setPhase] = useState<Phase>('checking');
   const [failure, setFailure] = useState<FailureKind | null>(null);
+  /** Who the existing session is, shown on the confirmation. */
+  const [accountLabel, setAccountLabel] = useState<string>('');
+  /**
+   * The confirmation's two actions, published by the effect that owns the
+   * flow's locals (see the StrictMode note below). `null` whenever the page is
+   * not waiting on the player, so a stale click can do nothing.
+   */
+  const confirmActions = useRef<{ proceed: () => void; switchAccount: () => void } | null>(null);
 
   // Memoised for the same reason `navigate` is hoisted to module scope: a fresh
   // object each render would change the effect's dependencies, and this effect
@@ -141,6 +227,17 @@ export default function AuthHandoffOrigin({
     // has been assigned, and reaching for it there is a temporal-dead-zone
     // throw.
     let handled = false;
+    /**
+     * The uid the player is being asked to confirm, once the confirmation is
+     * on screen. Another same-origin tab can replace the shared Auth session
+     * while the prompt waits, and the mint callable authenticates as whoever
+     * is current when it runs — so the confirmed uid is re-checked here, and
+     * sent to the server, which refuses to mint for any other uid.
+     */
+    let confirmedUid: string | null = null;
+    /** Set once "Use another account" has signed the central session out, so
+     *  every later failure reports that something DID change. */
+    let switched = false;
     let minted = false;
     let settled = false;
 
@@ -187,14 +284,36 @@ export default function AuthHandoffOrigin({
     // (Phase 4b P2). Once minting has started the player IS signed in at this
     // origin, so "Google sign-in didn't finish / nothing was changed" is simply
     // untrue — the accurate statement is that we could not return them.
-    deadline = setTimeout(() => terminate(minted ? 'mint-failed' : 'sign-in-failed'), timeoutMs);
+    const arm = () => {
+      clearTimeout(deadline);
+      deadline = setTimeout(
+        () => terminate(minted ? 'mint-failed' : switched ? 'switch-failed' : 'sign-in-failed'),
+        timeoutMs,
+      );
+    };
+    arm();
 
-    const bounce = async (req: HandoffRequest) => {
+    const sendToGoogle = (provider = googleProvider) => {
+      // The deadline stays ARMED across this call, deliberately (Phase 4b
+      // P1). Disarming it here — before the navigation actually starts —
+      // was the inverse of the bug above: a `signInWithRedirect` that hangs
+      // on initiation would then spin forever with nothing left to catch
+      // it. Leaving the timer running costs nothing on the happy path,
+      // because a successful redirect unloads the page and takes the timer
+      // with it; on a hung one it is the only thing that can still rescue
+      // the player.
+      setPhase('authenticating');
+      void signInWithRedirect(auth, provider).catch(() => {
+        terminate(switched ? 'switch-failed' : 'sign-in-failed');
+      });
+    };
+
+    const bounce = async (req: HandoffRequest, expectedUid: string) => {
       if (minted) return;
       minted = true;
       setPhase('minting');
       try {
-        const handoffUrl = await mintAuthHandoff(req);
+        const handoffUrl = await mintAuthHandoff(req, { expectedUid });
         if (cancelled) return;
         // NAVIGATE FIRST, then mark settled (Phase 4b P2). Setting the guard
         // before attempting the navigation meant a `replace` that THREW — a
@@ -222,30 +341,96 @@ export default function AuthHandoffOrigin({
     // signed-out user and firing `signInWithRedirect` again — bouncing the
     // player back to Google in a loop instead of showing them the failure.
     void getRedirectResult(auth).then(
-      () => {
+      (redirectResult) => {
         if (cancelled) return;
-        // Then ask the session itself rather than trusting the result above: a
-        // player who already has a session at this origin (a second Event, or a
-        // reload) must mint straight away and never see Google at all.
+        // Whether THIS flow just came back from Google. A non-null result is the
+        // credential of a sign-in the player completed seconds ago, for this
+        // very request; `null` means the session below (if any) predates it.
+        const cameBackFromGoogle = redirectResult != null;
+        // The account THIS flow's Google round trip signed in. The automatic
+        // mint is bound to it, not to whatever the shared session reports by
+        // the time the observer fires: another same-origin tab can switch the
+        // session in between (CodeRabbit / Codex on #1350).
+        const redirectUid = redirectResult?.user?.uid ?? null;
+        // Then ask the session itself rather than trusting the result above.
         unsubscribe = onAuthStateChanged(auth, (user) => {
-          if (cancelled || handled) return;
-          handled = true;
-          if (user !== null) {
-            void bounce(request);
+          if (cancelled) return;
+          if (handled) {
+            // A LATER transition while the confirmation is still on screen: the
+            // account the prompt names is no longer the one a mint would use.
+            // Withdraw the prompt rather than let Continue act on a stale name.
+            // (`switchAccount` clears the actions before it signs out, so its
+            // own sign-out never lands here.)
+            if (confirmActions.current !== null && user?.uid !== confirmedUid) {
+              confirmActions.current = null;
+              terminate('account-changed');
+            }
             return;
           }
-          // The deadline stays ARMED across this call, deliberately (Phase 4b
-          // P1). Disarming it here — before the navigation actually starts —
-          // was the inverse of the bug above: a `signInWithRedirect` that hangs
-          // on initiation would then spin forever with nothing left to catch
-          // it. Leaving the timer running costs nothing on the happy path,
-          // because a successful redirect unloads the page and takes the timer
-          // with it; on a hung one it is the only thing that can still rescue
-          // the player.
-          setPhase('authenticating');
-          void signInWithRedirect(auth, googleProvider).catch(() => {
-            terminate('sign-in-failed');
-          });
+          handled = true;
+          if (cameBackFromGoogle) {
+            // EVERY callback of a flow that just came back from Google is held
+            // to the redirect credential — including a signed-out one (another
+            // tab signed out in between, Codex on #1350). Falling through to
+            // the signed-out arm would send the player back to Google as if the
+            // round trip had never happened; fail closed instead.
+            if (user === null || user.uid !== redirectUid || redirectUid === null) {
+              terminate('account-changed');
+              return;
+            }
+            // `expectedUid` is the redirect credential's uid, so the server
+            // refuses too if the session moves again before the call runs.
+            void bounce(request, redirectUid);
+            return;
+          }
+          if (user !== null) {
+            // A session that PREDATES this flow — a second Event, a reload, or
+            // somebody else's sign-in on a shared device. Minting on it
+            // silently would hand whoever opened this URL a code for that
+            // account, and the `txn` is caller-chosen, so the page would be a
+            // one-click way to sign a stranger's device in as the last person
+            // who used it. The person at the keyboard confirms the account (or
+            // switches) before anything is minted. The deadline is disarmed
+            // while they read: it bounds this page's own work, not a human
+            // decision, and re-arms the moment they choose.
+            clearTimeout(deadline);
+            confirmedUid = user.uid;
+            setAccountLabel(user.email ?? user.displayName ?? 'your Google account');
+            confirmActions.current = {
+              proceed: () => {
+                if (cancelled || minted) return;
+                confirmActions.current = null;
+                // Fail closed if the session moved since the prompt rendered;
+                // the server repeats this check against the callable's own uid.
+                if (auth.currentUser?.uid !== confirmedUid) {
+                  terminate('account-changed');
+                  return;
+                }
+                arm();
+                void bounce(request, user.uid);
+              },
+              switchAccount: () => {
+                if (cancelled || minted) return;
+                confirmActions.current = null;
+                arm();
+                setPhase('authenticating');
+                // Sign the central session OUT first, so the account that was
+                // here cannot be minted for by anything that follows, then let
+                // Google's chooser pick. The return leg lands back on this page
+                // with a fresh redirect result and mints for the chosen account.
+                void signOut(auth).then(
+                  () => {
+                    switched = true;
+                    if (!cancelled) sendToGoogle(accountChooserProvider());
+                  },
+                  () => terminate('sign-in-failed'),
+                );
+              },
+            };
+            setPhase('confirm');
+            return;
+          }
+          sendToGoogle();
         });
       },
       () => {
@@ -255,10 +440,46 @@ export default function AuthHandoffOrigin({
 
     return () => {
       cancelled = true;
+      confirmActions.current = null;
       clearTimeout(deadline);
       unsubscribe?.();
     };
   }, [request, fail, navigate, timeoutMs]);
+
+  if (phase === 'confirm' && request !== null) {
+    const host = targetHost(request.targetOrigin);
+    return (
+      <main style={PAGE_STYLE}>
+        <div style={{ maxWidth: '32rem' }}>
+          <p style={{ fontSize: '2.5rem', margin: '0 0 0.75rem' }} aria-hidden="true">
+            🔑
+          </p>
+          <h1 style={{ fontSize: '1.5rem', lineHeight: 1.25, margin: '0 0 0.75rem' }}>
+            Continue to {host}?
+          </h1>
+          <p style={{ margin: '0 0 1.5rem', lineHeight: 1.55, color: '#a9b7c4' }}>
+            You are signed in here as <strong style={{ color: '#eef2f6' }}>{accountLabel}</strong>.
+          </p>
+          <div style={{ display: 'grid', gap: '0.75rem' }}>
+            <button
+              type="button"
+              onClick={() => confirmActions.current?.proceed()}
+              style={{ ...BUTTON_STYLE, background: '#eef2f6', color: '#0b0f14' }}
+            >
+              Continue to {host} as {accountLabel}
+            </button>
+            <button
+              type="button"
+              onClick={() => confirmActions.current?.switchAccount()}
+              style={{ ...BUTTON_STYLE, background: 'transparent', color: '#eef2f6', border: '1px solid #3a4652' }}
+            >
+              Use another account
+            </button>
+          </div>
+        </div>
+      </main>
+    );
+  }
 
   const body =
     phase === 'failed' && failure !== null
@@ -266,20 +487,7 @@ export default function AuthHandoffOrigin({
       : { headline: 'Signing you in…', detail: 'One moment — we are taking you back to your event.' };
 
   return (
-    <main
-      style={{
-        minHeight: '100dvh',
-        display: 'grid',
-        placeItems: 'center',
-        padding: '2rem 1.5rem',
-        // Literal colours for the same reason EventNotFound uses them: the theme
-        // layer is part of the app this page deliberately does not mount.
-        background: '#0b0f14',
-        color: '#eef2f6',
-        fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif',
-        textAlign: 'center',
-      }}
-    >
+    <main style={PAGE_STYLE}>
       <div style={{ maxWidth: '32rem' }}>
         <p style={{ fontSize: '2.5rem', margin: '0 0 0.75rem' }} aria-hidden="true">
           {phase === 'failed' ? '🌫️' : '🔑'}
