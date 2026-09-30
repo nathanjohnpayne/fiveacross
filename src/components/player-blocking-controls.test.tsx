@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import type { BlockDoc } from '../types';
+import type { ComponentProps } from 'react';
 
 // specs/player-blocking.md § Block and unblock controls (#689 part 3): the
 // block confirm sheet, the Blocked players panel, and the payloads of the
@@ -50,7 +51,7 @@ beforeEach(() => {
 });
 
 describe('BlockPlayerButton', () => {
-  const open = (block: ReturnType<typeof vi.fn>) => {
+  const open = (block: ComponentProps<typeof BlockPlayerButton>['block']) => {
     render(<BlockPlayerButton meUid="viewer" targetUid="bea" targetName="Bea" surface="proof_card" block={block} />);
     fireEvent.click(screen.getByRole('button', { name: 'Block Bea' }));
     return screen.getByRole('dialog', { name: 'Block Bea?' });

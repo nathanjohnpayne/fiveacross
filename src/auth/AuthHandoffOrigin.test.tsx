@@ -7,7 +7,7 @@
 // malformed request rather than redirect to Google and strand the player.
 import { StrictMode } from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   getRedirectResult: vi.fn(),
@@ -40,13 +40,13 @@ function withSession(user: { uid: string } | null) {
   return unsubscribe;
 }
 
-let replace: ReturnType<typeof vi.fn>;
+let replace: Mock<(url: string) => void>;
 
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.getRedirectResult.mockResolvedValue(null);
   mocks.signInWithRedirect.mockResolvedValue(undefined);
-  replace = vi.fn();
+  replace = vi.fn<(url: string) => void>();
 });
 
 afterEach(() => {
