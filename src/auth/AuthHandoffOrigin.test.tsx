@@ -5,7 +5,7 @@
 // that would be silent: it must navigate to the SERVER's URL verbatim, it must
 // not mint twice under StrictMode's double-invoked effects, and it must refuse a
 // malformed request rather than redirect to Google and strand the player.
-import { StrictMode } from 'react';
+import { StrictMode, act } from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
   signOut: vi.fn(),
   mintAuthHandoff: vi.fn(),
   providers: [] as Array<{ params: Record<string, string> }>,
+  // The shared `auth` singleton the page reads `currentUser` off.
+  auth: { currentUser: null as { uid: string } | null },
 }));
 
 vi.mock('firebase/auth', () => ({
@@ -33,7 +35,7 @@ vi.mock('firebase/auth', () => ({
     }
   },
 }));
-vi.mock('../firebase', () => ({ auth: {}, googleProvider: {} }));
+vi.mock('../firebase', () => ({ auth: mocks.auth, googleProvider: {} }));
 vi.mock('./handoffExchange', () => ({ mintAuthHandoff: mocks.mintAuthHandoff }));
 
 import AuthHandoffOrigin, { HANDOFF_ORIGIN_TIMEOUT_MS } from './AuthHandoffOrigin';
@@ -54,12 +56,17 @@ function returningFromGoogle() {
 /** Drive `onAuthStateChanged` to a settled answer, and hand back its unsubscribe. */
 function withSession(user: { uid: string; email?: string } | null) {
   const unsubscribe = vi.fn();
+  mocks.auth.currentUser = user;
   mocks.onAuthStateChanged.mockImplementation((_auth: unknown, cb: (u: unknown) => void) => {
+    observer = cb;
     cb(user);
     return unsubscribe;
   });
   return unsubscribe;
 }
+
+/** The last observer the page subscribed, for driving a LATER auth transition. */
+let observer: ((u: unknown) => void) | null = null;
 
 let replace: Mock<(url: string) => void>;
 
@@ -69,6 +76,8 @@ beforeEach(() => {
   mocks.signInWithRedirect.mockResolvedValue(undefined);
   mocks.signOut.mockResolvedValue(undefined);
   mocks.providers.length = 0;
+  mocks.auth.currentUser = null;
+  observer = null;
   replace = vi.fn<(url: string) => void>();
 });
 
@@ -89,11 +98,11 @@ describe('AuthHandoffOrigin', () => {
     // client assembles a redirect target; rebuilding it is what would
     // reintroduce the open redirect.
     expect(replace).toHaveBeenCalledWith(`${ORIGIN}/board#fa_handoff=${'C'.repeat(43)}`);
-    expect(mocks.mintAuthHandoff).toHaveBeenCalledWith({
-      targetOrigin: ORIGIN,
-      transactionId: TXN,
-      returnPath: '/board',
-    });
+    expect(mocks.mintAuthHandoff).toHaveBeenCalledWith(
+      { targetOrigin: ORIGIN, transactionId: TXN, returnPath: '/board' },
+      // The server refuses to mint for any other uid than the one signed in here.
+      { expectedUid: 'u1' },
+    );
     // A player with a session must never be sent to Google again.
     expect(mocks.signInWithRedirect).not.toHaveBeenCalled();
   });
@@ -380,6 +389,45 @@ describe('an existing session is confirmed before anything is minted', () => {
     fireEvent.click(proceed);
     await waitFor(() => expect(replace).toHaveBeenCalledWith(`${ORIGIN}/board`));
     expect(mocks.mintAuthHandoff).toHaveBeenCalledTimes(1);
+    expect(mocks.mintAuthHandoff).toHaveBeenCalledWith(expect.anything(), { expectedUid: 'u1' });
+  });
+
+  // Codex P1 / CodeRabbit on #1350: another same-origin tab can replace the
+  // shared session while the prompt waits, and the callable mints for whoever
+  // is current when it runs. The confirmed uid is re-checked before minting.
+  it('refuses Continue when the session changed after the prompt rendered', async () => {
+    withSession({ uid: 'u1', email: 'first@example.com' });
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} />);
+    const proceed = await screen.findByRole('button', { name: /^Continue to/ });
+
+    mocks.auth.currentUser = { uid: 'u2' }; // swapped by another tab, no event seen yet
+    fireEvent.click(proceed);
+
+    expect(await screen.findByText(/signed-in account changed/i)).toBeInTheDocument();
+    expect(mocks.mintAuthHandoff).not.toHaveBeenCalled();
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it('withdraws the prompt when a later auth transition names another account', async () => {
+    withSession({ uid: 'u1', email: 'first@example.com' });
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} />);
+    await screen.findByRole('button', { name: /^Continue to/ });
+
+    mocks.auth.currentUser = { uid: 'u2' };
+    act(() => observer?.({ uid: 'u2', email: 'second@example.com' }));
+
+    expect(await screen.findByText(/signed-in account changed/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Continue to/ })).toBeNull();
+    expect(mocks.mintAuthHandoff).not.toHaveBeenCalled();
+  });
+
+  it('ignores a later transition that keeps the same account', async () => {
+    withSession({ uid: 'u1', email: 'first@example.com' });
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} />);
+    await screen.findByRole('button', { name: /^Continue to/ });
+    act(() => observer?.({ uid: 'u1', email: 'first@example.com' }));
+    expect(screen.getByRole('button', { name: /^Continue to/ })).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
   it('"Use another account" signs the central session out and opens Google’s account chooser', async () => {

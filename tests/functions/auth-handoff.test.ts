@@ -404,6 +404,32 @@ describe('mintHandoff', () => {
     expect(fake.docs.has(handoffPath(CODE))).toBe(false);
   });
 
+  // Codex P1 / CodeRabbit on #1350: the central page confirms ONE account, and
+  // another tab can swap the shared session before the call runs. The page
+  // sends the uid it showed; a mismatch with the callable's own uid refuses.
+  it('refuses to mint when the confirmed uid is not the caller, before any read or write', async () => {
+    const fake = makeDb(activeHost());
+    const result = await mintHandoff(
+      { uid: UID, expectedUid: 'someone-else', targetOrigin: ORIGIN, transactionId: transactionIdFor(VERIFIER) },
+      mintDeps(fake),
+    );
+    expect(result).toEqual({ ok: false, reason: 'account-changed' });
+    expect(fake.reads.count).toBe(0);
+    expect(fake.docs.has(handoffPath(CODE))).toBe(false);
+  });
+
+  it('mints when the confirmed uid IS the caller, and when none is sent', async () => {
+    for (const expectedUid of [UID, undefined]) {
+      const fake = makeDb(activeHost());
+      const result = await mintHandoff(
+        { uid: UID, expectedUid, targetOrigin: ORIGIN, transactionId: transactionIdFor(VERIFIER) },
+        mintDeps(fake),
+      );
+      expect(result).toMatchObject({ ok: true });
+      expect(fake.docs.get(handoffPath(CODE))?.data).toMatchObject({ uid: UID });
+    }
+  });
+
   it('refuses an unattested minter before any Firestore read when App Check is enforced', async () => {
     const fake = makeDb(activeHost());
     const result = await mintHandoff(

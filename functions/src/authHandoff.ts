@@ -162,6 +162,8 @@ export interface HandoffFirestore {
  */
 export type HandoffMintReason =
   | 'unauthenticated'
+  /** The page confirmed one account; the call authenticated as another. */
+  | 'account-changed'
   | 'app-check-required'
   | 'invalid-target-origin'
   | 'origin-not-allowed'
@@ -440,6 +442,13 @@ export interface MintInput {
   targetOrigin: unknown;
   transactionId: unknown;
   returnPath?: unknown;
+  /**
+   * The account the central page showed the player, when it sends one. A GUARD
+   * only, never a source of identity: the code still binds to `uid` above, and
+   * a mismatch refuses the mint. It closes the window in which another tab
+   * swaps the shared session after the player confirmed an account.
+   */
+  expectedUid?: unknown;
   /** Whether the transport verified an App Check token on this request. */
   appCheckPresent?: boolean;
 }
@@ -471,6 +480,9 @@ export interface MintDeps {
 export async function mintHandoff(input: MintInput, deps: MintDeps): Promise<HandoffMintResult> {
   const uid = input.uid;
   if (typeof uid !== 'string' || uid.length === 0) return { ok: false, reason: 'unauthenticated' };
+  if (input.expectedUid !== undefined && input.expectedUid !== null && input.expectedUid !== uid) {
+    return { ok: false, reason: 'account-changed' };
+  }
   if (deps.requireAppCheck && input.appCheckPresent !== true) {
     return { ok: false, reason: 'app-check-required' };
   }

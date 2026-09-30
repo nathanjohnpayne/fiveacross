@@ -72,7 +72,7 @@ type Phase =
  * navigates here by hand — they arrive from a Sign in tap on an Event origin, so
  * anything that goes wrong is a provisioning or configuration fault.
  */
-type FailureKind = 'bad-request' | 'sign-in-failed' | 'mint-failed';
+type FailureKind = 'bad-request' | 'sign-in-failed' | 'mint-failed' | 'account-changed';
 
 const COPY: Record<FailureKind, { headline: string; detail: string }> = {
   'bad-request': {
@@ -88,6 +88,11 @@ const COPY: Record<FailureKind, { headline: string; detail: string }> = {
     headline: "We couldn't return you to your event",
     detail:
       'You are signed in, but this event address is not one we can hand you back to. Check the link you were sent, or ask whoever set the event up.',
+  },
+  'account-changed': {
+    headline: 'The signed-in account changed',
+    detail:
+      'Another tab signed in or out while this page was waiting, so nothing was sent. Go back to the event address and tap Sign in again.',
   },
 };
 
@@ -206,6 +211,14 @@ export default function AuthHandoffOrigin({
     // has been assigned, and reaching for it there is a temporal-dead-zone
     // throw.
     let handled = false;
+    /**
+     * The uid the player is being asked to confirm, once the confirmation is
+     * on screen. Another same-origin tab can replace the shared Auth session
+     * while the prompt waits, and the mint callable authenticates as whoever
+     * is current when it runs — so the confirmed uid is re-checked here, and
+     * sent to the server, which refuses to mint for any other uid.
+     */
+    let confirmedUid: string | null = null;
     let minted = false;
     let settled = false;
 
@@ -273,12 +286,12 @@ export default function AuthHandoffOrigin({
       });
     };
 
-    const bounce = async (req: HandoffRequest) => {
+    const bounce = async (req: HandoffRequest, expectedUid: string) => {
       if (minted) return;
       minted = true;
       setPhase('minting');
       try {
-        const handoffUrl = await mintAuthHandoff(req);
+        const handoffUrl = await mintAuthHandoff(req, { expectedUid });
         if (cancelled) return;
         // NAVIGATE FIRST, then mark settled (Phase 4b P2). Setting the guard
         // before attempting the navigation meant a `replace` that THREW — a
@@ -314,10 +327,22 @@ export default function AuthHandoffOrigin({
         const cameBackFromGoogle = redirectResult != null;
         // Then ask the session itself rather than trusting the result above.
         unsubscribe = onAuthStateChanged(auth, (user) => {
-          if (cancelled || handled) return;
+          if (cancelled) return;
+          if (handled) {
+            // A LATER transition while the confirmation is still on screen: the
+            // account the prompt names is no longer the one a mint would use.
+            // Withdraw the prompt rather than let Continue act on a stale name.
+            // (`switchAccount` clears the actions before it signs out, so its
+            // own sign-out never lands here.)
+            if (confirmActions.current !== null && user?.uid !== confirmedUid) {
+              confirmActions.current = null;
+              terminate('account-changed');
+            }
+            return;
+          }
           handled = true;
           if (user !== null && cameBackFromGoogle) {
-            void bounce(request);
+            void bounce(request, user.uid);
             return;
           }
           if (user !== null) {
@@ -331,13 +356,20 @@ export default function AuthHandoffOrigin({
             // while they read: it bounds this page's own work, not a human
             // decision, and re-arms the moment they choose.
             clearTimeout(deadline);
+            confirmedUid = user.uid;
             setAccountLabel(user.email ?? user.displayName ?? 'your Google account');
             confirmActions.current = {
               proceed: () => {
                 if (cancelled || minted) return;
                 confirmActions.current = null;
+                // Fail closed if the session moved since the prompt rendered;
+                // the server repeats this check against the callable's own uid.
+                if (auth.currentUser?.uid !== confirmedUid) {
+                  terminate('account-changed');
+                  return;
+                }
                 arm();
-                void bounce(request);
+                void bounce(request, user.uid);
               },
               switchAccount: () => {
                 if (cancelled || minted) return;

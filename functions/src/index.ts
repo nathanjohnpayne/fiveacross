@@ -154,6 +154,7 @@ export const mintAuthHandoff = onCall(
         targetOrigin: payload.targetOrigin,
         transactionId: payload.transactionId,
         returnPath: payload.returnPath,
+        expectedUid: payload.expectedUid,
         appCheckPresent: request.app != null,
       },
       {
