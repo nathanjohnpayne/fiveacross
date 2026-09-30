@@ -105,6 +105,10 @@ export type EventLike = Partial<
      *  every doc written before the field existed, in which case `finaleTimes`
      *  falls back to the first ceremonial Day's own `unlockAt`. */
     | 'standingsFreezeAt'
+    /** The per-Event membership switch (specs/event-membership.md). The
+     *  admin-gated callables conjoin an active membership with the `admins`
+     *  roster when it reads `'enforced'`, as `approvePrompts` does. */
+    | 'membershipEnforcement'
   >
 > & {
   /** `EventDoc['days']` under the raw Day view above — the two fields `DayLike`
@@ -215,6 +219,8 @@ import {
   type MostLovedHeartLike,
 } from './finaleContent';
 import { normalizePool } from './poolVocab';
+import { isActiveMembershipData, membershipPath } from './eventMembership.generated';
+import { isFirestoreDocumentId } from './firestoreIds';
 // Declaration-only shared contract (the daily-engagement-email precedent) —
 // the persisted award shape both compiler roots agree on.
 
@@ -658,6 +664,51 @@ export function eventClosedToPlay(
 /** Thrown by `manualUnlockNow` for a non-admin caller; mapped to an HttpsError at the trigger seam. */
 export class UnlockPermissionError extends Error {}
 
+/**
+ * The `unlockDayNow` callable's payload, validated before anything reads
+ * Firestore: `eventId` is joined into document paths, so it must be a real
+ * document id (`isFirestoreDocumentId`, the check `approvePrompts` applies to
+ * its own payload) rather than any string, and `dayIndex` a non-negative
+ * integer. `null` for anything else, which the seam maps to `invalid-argument`.
+ */
+export function parseUnlockDayNowPayload(
+  raw: unknown,
+): { eventId: string; dayIndex: number; resnapshot: boolean } | null {
+  const data = (raw ?? {}) as { eventId?: unknown; dayIndex?: unknown; resnapshot?: unknown };
+  if (!isFirestoreDocumentId(data.eventId)) return null;
+  if (typeof data.dayIndex !== 'number' || !Number.isInteger(data.dayIndex) || data.dayIndex < 0) {
+    return null;
+  }
+  return { eventId: data.eventId, dayIndex: data.dayIndex, resnapshot: data.resnapshot === true };
+}
+
+/**
+ * The admin gate both manual callables share: the caller is on the Event's
+ * `admins` roster AND — on an Event whose membership is ENFORCED — holds an
+ * active membership (specs/event-membership.md § The role model: anything that
+ * consults `EventDoc.admins` to authorize an action conjoins an active-membership
+ * check, and no rule runs on this Admin-SDK path). `admins` is client-writable,
+ * so without the conjunct a UID added to the roster with no membership could
+ * still unlock or re-snapshot a Day. Same predicate, same `'off'` behaviour, as
+ * `approvePromptsCore`: an unenforced Event admits on the roster alone.
+ */
+async function assertUnlockAdmin(
+  db: AdminFirestore,
+  event: EventLike | undefined,
+  callerUid: string | undefined,
+  eventId: string,
+  message: string,
+  read: (ref: DocRef) => Promise<DocSnapshot> = (ref) => ref.get(),
+): Promise<void> {
+  if (!isEventAdmin(event, callerUid)) throw new UnlockPermissionError(message);
+  if (event?.membershipEnforcement === 'enforced') {
+    const snap = await read(db.doc(membershipPath(eventId, callerUid as string)));
+    if (!isActiveMembershipData(snap.exists ? snap.data() : undefined)) {
+      throw new UnlockPermissionError(message);
+    }
+  }
+}
+
 // --- Injectable admin-SDK Firestore surface (minimal) ---------------------------
 
 interface DocSnapshot {
@@ -824,7 +875,7 @@ function finiteNumber(value: unknown, fallback: number): number {
  *  READABLE BEFORE RANKED, and by the SAME normalisation the two client paths
  *  apply (#1152, Codex P2 on PR #1165). The coercions here only asked whether a
  *  value was finite, and `buildPodiumPayload` then compared the raw numbers —
- *  but `players/{uid}` validates no field (ADR 0001), so a Player can self-write
+ *  but `players/{uid}` validates no stat field (ADR 0001), so a Player can self-write
  *  a count or an instant far outside the magnitude `firestore.rules` accepts, and
  *  both `useLeaderboard` and `draftEventArchive` CLAMP those before they rank.
  *  The scheduler did not, so the live board and the frozen record could order two
@@ -944,6 +995,14 @@ export async function stampDaySnapshot(
   eventId: string,
   dayIndex: number,
   deps: UnlockDeps = {},
+  /**
+   * The manual callable's caller authorization, run INSIDE the writing
+   * transaction against the Event it read (and, on an enforced Event, the
+   * caller's membership read through the same transaction), so a revocation
+   * that commits after the pre-flight is serialized with the write and a retry
+   * re-authorizes. The scheduler passes none: it acts for no caller.
+   */
+  authorize?: (tx: Transaction, event: EventLike | undefined) => Promise<void>,
 ): Promise<SnapshotResult> {
   const now = (deps.now ?? Date.now)();
   const eventRef = db.doc(`events/${eventId}`);
@@ -962,6 +1021,7 @@ export async function stampDaySnapshot(
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(eventRef);
     const ev = snap.data() as EventLike | undefined;
+    if (authorize) await authorize(tx, ev);
     if (!ev) return 'no-event';
     // Re-confirmed INSIDE the transaction, exactly like the unstamped/due
     // guards below: the archive can commit between the pre-read above and this
@@ -1431,7 +1491,7 @@ export async function runFinaleBeats(db: AdminFirestore, eventId: string, deps: 
       let playRecorded: boolean | undefined;
       try {
         // THE ROSTER IS NOT THE ONLY WITNESS (Codex P2 `4058671218`). A Player
-        // row is client-authoritative and validates no field (ADR 0001), so a
+        // row is client-authoritative and validates no stat field (ADR 0001), so a
         // Player who clears their own roots and buckets after taking a Day's
         // honour leaves a roster that says nobody marked anything — while
         // `meta.firstBingo`, which no client can write, still records the bingo
@@ -1704,11 +1764,14 @@ export async function manualUnlockNow(
   deps: UnlockDeps = {},
 ): Promise<SnapshotResult> {
   const event = (await db.doc(`events/${eventId}`).get()).data() as EventLike | undefined;
-  if (!isEventAdmin(event, callerUid)) {
-    throw new UnlockPermissionError('Only an event admin can unlock a Day.');
-  }
+  const message = 'Only an event admin can unlock a Day.';
+  // The pre-flight answers a non-admin cheaply; the transaction below asks
+  // again against the state it commits over (CodeRabbit / Codex on #1352).
+  await assertUnlockAdmin(db, event, callerUid, eventId, message);
   if (eventClosedToPlay(event)) return 'archived';
-  return stampDaySnapshot(db, eventId, dayIndex, deps);
+  return stampDaySnapshot(db, eventId, dayIndex, deps, (tx, ev) =>
+    assertUnlockAdmin(db, ev, callerUid, eventId, message, (ref) => tx.get(ref)),
+  );
 }
 
 // --- Guarded re-snapshot (the easy-mix deploy-race fallback) ---------------------
@@ -1759,9 +1822,8 @@ export async function resnapshotDayIfNoBoards(
   const now = (deps.now ?? Date.now)();
   const eventRef = db.doc(`events/${eventId}`);
   const pre = (await eventRef.get()).data() as EventLike | undefined;
-  if (!isEventAdmin(pre, callerUid)) {
-    throw new UnlockPermissionError('Only an event admin can re-snapshot a Day.');
-  }
+  const message = 'Only an event admin can re-snapshot a Day.';
+  await assertUnlockAdmin(db, pre, callerUid, eventId, message);
   // #134: the freeze binds the Admin for gameplay too. This is the ONE path that
   // overwrites an existing snapshot, so it is the last one that should survive
   // an archive.
@@ -1775,6 +1837,10 @@ export async function resnapshotDayIfNoBoards(
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(eventRef);
     const ev = snap.data() as EventLike | undefined;
+    // Authorization re-asked INSIDE the writing transaction, against the roster
+    // and membership this commit is serialized with (CodeRabbit / Codex on
+    // #1352): a revocation committing after the pre-flight refuses the write.
+    await assertUnlockAdmin(db, ev, callerUid, eventId, message, (ref) => tx.get(ref));
     if (!ev) return 'no-event';
     // Re-checked inside the writing transaction, beside the zero-boards guard:
     // everything above is a pre-flight read, so an archive can commit between

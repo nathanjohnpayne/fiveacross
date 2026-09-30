@@ -91,7 +91,11 @@ export async function uploadAvatar(uid: string, blob: Blob): Promise<string> {
   const small = await downscaleImage(blob, 400, 0.85);
   const r = ref(storage, `avatars/${uid}.jpg`);
   await uploadBytes(r, small, { contentType: 'image/jpeg' });
-  return await getDownloadURL(r);
+  // Identity in every real build. Under the e2e emulator build the download URL
+  // is rewritten to its production-shaped twin, because `firestore.rules`'
+  // `photoUrlOk` pins stored avatars to the production Storage host just as the
+  // proof-create rule pins `mediaURL`; `Avatar` resolves it back to render.
+  return canonicalizeProofMediaUrl(await getDownloadURL(r));
 }
 
 /**

@@ -363,7 +363,17 @@ function clientWriteInventory(
     ],
     [
       'claim create',
-      () => setDoc(doc(database, at(`claims/claim-${uid}`)), { uid }),
+      () =>
+        setDoc(doc(database, at(`claims/claim-${uid}`)), {
+          uid,
+          displayName: uid,
+          cellIndex: 0,
+          itemText: 'Membership claim',
+          proofId: null,
+          status: 'pending',
+          createdAt: NOW,
+          resolvedBy: null,
+        }),
     ],
     [
       'Tally marker create',

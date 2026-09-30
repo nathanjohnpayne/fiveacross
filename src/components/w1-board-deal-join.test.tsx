@@ -162,7 +162,7 @@ const EVENT_LEGACY = { exists: () => true, data: () => ({}) };
 const SIGNED_IN_WITH_PHOTO = {
   uid: 'sailor-1',
   displayName: 'Sailor',
-  photoURL: 'https://lh3.example/google.jpg',
+  photoURL: 'https://lh3.googleusercontent.com/google.jpg',
 } as unknown as User;
 
 function mkItem(id: string, isFreeSpace = false): ItemDoc {
@@ -224,7 +224,7 @@ describe('ensureUserProfile', () => {
       expect.objectContaining({ kind: 'doc' }),
       expect.objectContaining({
         displayName: 'Sailor',
-        photoURL: 'https://lh3.example/google.jpg',
+        photoURL: 'https://lh3.googleusercontent.com/google.jpg',
       }),
     );
   });
@@ -499,7 +499,7 @@ describe('joinAndDeal freeze-at-join', () => {
   });
 
   it('daily: REPAIRS a malformed joinedAt to a number, so the Day deal it gates stops no-opping (Codex P2, #1158 round 6)', async () => {
-    // `players/{uid}` is self-writable and `firestore.rules` validates no field
+    // `players/{uid}` is self-writable and `firestore.rules` validates no stat field
     // on it (ADR 0001), so a pre-existing row can carry a non-number here. Every
     // reader of the marker calls that row unjoined — `alreadyJoined`, `Board`'s
     // `playerJoined` and `dealDayCard`'s own guard — but while the repair below
@@ -813,7 +813,7 @@ describe('joinAndDeal Player-row attribution (Codex P2 on PR #67, api half)', ()
         exists: () => true,
         data: () => ({
           displayName: 'Deck Daddy',
-          photoURL: 'https://cdn.example/custom.jpg',
+          photoURL: 'https://firebasestorage.googleapis.com/v0/b/fiveacross.firebasestorage.app/o/avatars%2Fsailor-1.jpg?alt=media',
           customPhoto: true,
           createdAt: 0,
         }),
@@ -824,7 +824,7 @@ describe('joinAndDeal Player-row attribution (Codex P2 on PR #67, api half)', ()
 
     expect(playerWrite()).toMatchObject({
       displayName: 'Deck Daddy', // saved name, not the Google "Sailor"
-      photoURL: 'https://cdn.example/custom.jpg', // custom avatar wins
+      photoURL: 'https://firebasestorage.googleapis.com/v0/b/fiveacross.firebasestorage.app/o/avatars%2Fsailor-1.jpg?alt=media', // custom avatar wins
     });
   });
 
@@ -836,7 +836,7 @@ describe('joinAndDeal Player-row attribution (Codex P2 on PR #67, api half)', ()
         exists: () => true,
         data: () => ({
           displayName: 'Deck Daddy',
-          photoURL: 'https://stale.example/copied-at-first-signin.jpg',
+          photoURL: 'https://lh3.googleusercontent.com/stale/copied-at-first-signin.jpg',
           createdAt: 0, // no customPhoto flag — profile photo is a stale copy
         }),
       });
@@ -846,7 +846,7 @@ describe('joinAndDeal Player-row attribution (Codex P2 on PR #67, api half)', ()
 
     expect(playerWrite()).toMatchObject({
       displayName: 'Deck Daddy',
-      photoURL: 'https://lh3.example/google.jpg', // live auth photo, not the stale copy
+      photoURL: 'https://lh3.googleusercontent.com/google.jpg', // live auth photo, not the stale copy
     });
   });
 
@@ -867,7 +867,7 @@ describe('joinAndDeal Player-row attribution (Codex P2 on PR #67, api half)', ()
 
     expect(playerWrite()).toMatchObject({
       displayName: 'Sailor', // auth fallback — the numeric junk never flows through
-      photoURL: 'https://lh3.example/google.jpg', // non-string saved photo ignored
+      photoURL: 'https://lh3.googleusercontent.com/google.jpg', // non-string saved photo ignored
     });
   });
 
@@ -923,7 +923,7 @@ describe('joinAndDeal Player-row attribution (Codex P2 on PR #67, api half)', ()
 
     expect(playerWrite()).toMatchObject({
       displayName: 'Deck Daddy', // per-field: the valid name still wins
-      photoURL: 'https://lh3.example/google.jpg', // auth fallback for the photo
+      photoURL: 'https://lh3.googleusercontent.com/google.jpg', // auth fallback for the photo
     });
   });
 
@@ -939,11 +939,26 @@ describe('joinAndDeal Player-row attribution (Codex P2 on PR #67, api half)', ()
 
     await joinAndDeal(SIGNED_IN_WITH_PHOTO);
 
-    expect(playerWrite()).toMatchObject({ photoURL: 'https://lh3.example/google.jpg' });
+    expect(playerWrite()).toMatchObject({ photoURL: 'https://lh3.googleusercontent.com/google.jpg' });
+  });
+
+  it('rejects an https custom photo on a host the app does not produce (specs/sec-rules-shape-hardening.md)', async () => {
+    H.getDoc
+      .mockResolvedValueOnce(EVENT_LEGACY) // mode decision → legacy single-board
+      .mockResolvedValueOnce({ exists: () => false })
+      .mockResolvedValueOnce({
+        exists: () => true,
+        data: () => ({ photoURL: 'https://tracker.example/pixel.gif', customPhoto: true, createdAt: 0 }),
+      });
+    H.getDocs.mockResolvedValueOnce(healthyPoolDocs());
+
+    await joinAndDeal(SIGNED_IN_WITH_PHOTO);
+
+    expect(playerWrite()).toMatchObject({ photoURL: 'https://lh3.googleusercontent.com/google.jpg' });
   });
 
   it("ignores a truthy-junk customPhoto (the string 'false') — the flag must be exactly true", async () => {
-    // users/{uid} is unvalidated, so customPhoto can hold any type (round 4,
+    // A legacy users/{uid} row can hold any type here (round 4,
     // Codex P3). A truthy non-boolean must not publish the saved photo.
     H.getDoc
       .mockResolvedValueOnce(EVENT_LEGACY) // mode decision → legacy single-board
@@ -951,7 +966,7 @@ describe('joinAndDeal Player-row attribution (Codex P2 on PR #67, api half)', ()
       .mockResolvedValueOnce({
         exists: () => true,
         data: () => ({
-          photoURL: 'https://stale.example/copied.jpg', // valid https, but not opted in
+          photoURL: 'https://lh3.googleusercontent.com/stale/copied.jpg', // valid https, but not opted in
           customPhoto: 'false',
           createdAt: 0,
         }),
@@ -960,7 +975,7 @@ describe('joinAndDeal Player-row attribution (Codex P2 on PR #67, api half)', ()
 
     await joinAndDeal(SIGNED_IN_WITH_PHOTO);
 
-    expect(playerWrite()).toMatchObject({ photoURL: 'https://lh3.example/google.jpg' });
+    expect(playerWrite()).toMatchObject({ photoURL: 'https://lh3.googleusercontent.com/google.jpg' });
   });
 
   it('ignores a numeric customPhoto (1) — the flag must be exactly true', async () => {
@@ -970,7 +985,7 @@ describe('joinAndDeal Player-row attribution (Codex P2 on PR #67, api half)', ()
       .mockResolvedValueOnce({
         exists: () => true,
         data: () => ({
-          photoURL: 'https://stale.example/copied.jpg',
+          photoURL: 'https://lh3.googleusercontent.com/stale/copied.jpg',
           customPhoto: 1,
           createdAt: 0,
         }),
@@ -979,7 +994,7 @@ describe('joinAndDeal Player-row attribution (Codex P2 on PR #67, api half)', ()
 
     await joinAndDeal(SIGNED_IN_WITH_PHOTO);
 
-    expect(playerWrite()).toMatchObject({ photoURL: 'https://lh3.example/google.jpg' });
+    expect(playerWrite()).toMatchObject({ photoURL: 'https://lh3.googleusercontent.com/google.jpg' });
   });
 
   it('falls back to the auth identity when no users/{uid} profile exists', async () => {
@@ -1003,7 +1018,7 @@ describe('joinAndDeal Player-row attribution (Codex P2 on PR #67, api half)', ()
     expect(H.runTransaction).toHaveBeenCalledTimes(1); // the deal still lands
     expect(playerWrite()).toMatchObject({
       displayName: 'Sailor',
-      photoURL: 'https://lh3.example/google.jpg',
+      photoURL: 'https://lh3.googleusercontent.com/google.jpg',
     });
   });
 });

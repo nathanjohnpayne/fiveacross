@@ -305,18 +305,30 @@ describe('confirmClaim — a Vision safety hide survives the claim confirm (spec
   });
 
   it('publishes a genuinely PENDING Proof with no verdict — the ordinary confirm is unchanged', async () => {
-    liveProof = { status: 'pending', visionFlag: null };
+    liveProof = { uid: 'u1', status: 'pending', visionFlag: null };
 
     await confirmClaim(pendingClaim(), 'admin-1');
 
     expect(setPayload('/proofs/')).toMatchObject({ status: 'active' });
   });
 
+  it('never publishes ANOTHER Player’s Proof that a Claim names (specs/sec-rules-shape-hardening.md)', async () => {
+    // A Claim's `proofId` is creator-supplied, so the Proof it names is only
+    // published when the live read shows it is the claimant's own upload. The
+    // Claim still resolves; the other Player's Proof is left exactly as it is.
+    liveProof = { uid: 'someone-else', status: 'pending', visionFlag: null };
+
+    await confirmClaim(pendingClaim(), 'admin-1');
+
+    expect(setPayload('/proofs/')).toBeUndefined();
+    expect(setPayload('/claims/')).toMatchObject({ status: 'confirmed' });
+  });
+
   it('publishes a Proof whose verdict is outside the allowlist — nothing withholds for raciness', async () => {
     // ADR 0004 in the confirm path: a racy verdict is a reason on the queue row,
     // never a hide, so nothing marks it and the claim's photo publishes exactly
     // as it always did.
-    liveProof = { status: 'pending', visionFlag: 'racy' };
+    liveProof = { uid: 'u1', status: 'pending', visionFlag: 'racy' };
 
     await confirmClaim(pendingClaim(), 'admin-1');
 
@@ -335,25 +347,35 @@ describe('confirmClaim — a Vision safety hide survives the claim confirm (spec
     expect(setPayload('/claims/')).toMatchObject({ status: 'confirmed' });
   });
 
-  it('publishes a plain hidden Proof carrying NO marker — a report or manual hide is confirm\'s to lift', async () => {
-    // The counterpart fact: an extreme verdict alone is not a safety hide. This
-    // doc was hidden by the #43 threshold or an admin's own Hide, each with its
-    // own console lift, and confirm's behaviour toward them is unchanged.
-    liveProof = { status: 'hidden', visionFlag: 'violence' };
+  it('leaves a plain hidden Proof carrying NO marker as it stands — its lift is Clear reports / Restore', async () => {
+    // An extreme verdict alone is not a safety hide, but a confirm publishes only
+    // a still-`pending` Proof (specs/sec-rules-shape-hardening.md): a doc hidden
+    // by the #43 threshold or an admin's own Hide keeps its own console lift.
+    liveProof = { uid: 'u1', status: 'hidden', visionFlag: 'violence' };
+
+    await confirmClaim(pendingClaim(), 'admin-1');
+
+    expect(setPayload('/proofs/')).toBeUndefined();
+    expect(setPayload('/claims/')).toMatchObject({ status: 'confirmed' });
+  });
+
+  it('publishes a Proof an admin Restored back to PENDING, so the override is not re-applied', async () => {
+    // restoreProof clears the marker, leaves `visionFlag` set as the audit record
+    // of the override, and returns a claim-backed Proof to `pending`; the confirm
+    // then publishes it.
+    liveProof = { uid: 'u1', status: 'pending', safetyHide: false, visionFlag: 'violence' };
 
     await confirmClaim(pendingClaim(), 'admin-1');
 
     expect(setPayload('/proofs/')).toMatchObject({ status: 'active' });
   });
 
-  it('publishes a Proof an admin already Restored, so the override is not re-applied', async () => {
-    // restoreProof clears the marker and leaves `visionFlag` set as the audit
-    // record of the override, so the confirm publishes.
-    liveProof = { status: 'active', safetyHide: false, visionFlag: 'violence' };
+  it('writes nothing to an already-active Proof — publishing it would be a no-op', async () => {
+    liveProof = { uid: 'u1', status: 'active', safetyHide: false, visionFlag: 'violence' };
 
     await confirmClaim(pendingClaim(), 'admin-1');
 
-    expect(setPayload('/proofs/')).toMatchObject({ status: 'active' });
+    expect(setPayload('/proofs/')).toBeUndefined();
   });
 
   it('reads the Proof LIVE and BEFORE any write, so a stale console cannot beat the scan', async () => {
@@ -370,14 +392,13 @@ describe('confirmClaim — a Vision safety hide survives the claim confirm (spec
     expect(proofGet).toBeLessThan(firstWrite);
   });
 
-  it('keeps the pre-#133 write when the Proof snapshot is missing', async () => {
-    // A deleted/absent Proof has no Vision state to preserve; the publish write
-    // is left exactly as it was rather than silently changing on this path.
+  it('writes nothing when the Proof snapshot is missing — a merge set would CREATE a ghost Proof', async () => {
     liveProof = undefined;
 
     await confirmClaim(pendingClaim(), 'admin-1');
 
-    expect(setPayload('/proofs/')).toMatchObject({ status: 'active' });
+    expect(setPayload('/proofs/')).toBeUndefined();
+    expect(setPayload('/claims/')).toMatchObject({ status: 'confirmed' });
   });
 
   it('never reads the Proof on a REJECT — a rejected claim publishes nothing either way', async () => {
@@ -421,8 +442,7 @@ describe('hideProof — an admin Hide preserves a standing safety hold (#1143)',
 
   it('stays byte-for-byte the write it always was on an ordinary moderation hide', async () => {
     // No hold: a plain reported Proof. Hiding it must not mint a safety hide an
-    // admin never made — this one is liftable by Restore and publishable by a
-    // confirm, exactly as before.
+    // admin never made — this one stays liftable by Restore, exactly as before.
     liveProof = { status: 'active', reportCount: 4 };
 
     await hideProof('P');
@@ -634,8 +654,10 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
   });
 
   it("cannot be crowded out by the owner's OWN resolved claims either", async () => {
-    // #1155 (the Phase 4b P2 on #1143). The create rule binds `uid` to the caller
-    // and nothing else, so the owner can mint claims against their own Proof
+    // #1155 (the Phase 4b P2 on #1143). The create rule USED to bind `uid` to
+    // the caller and nothing else (it now requires `status: 'pending'`,
+    // specs/sec-rules-shape-hardening.md, so this pins the defence for Claims
+    // written before that), so the owner could mint claims against their own Proof
     // with `status: 'confirmed'` already written, under ids that sort before the
     // genuine one — and an equality-only query with no `orderBy` pages by
     // document id. 25 of those filled the page the same way the forged ones
@@ -722,8 +744,8 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
 
   it('does NOT publish when the fetched page resolves in the gap and a DROPPED claim is still pending', async () => {
     // Codex P2 on #1237, exactly as reported. The owner holds six pending claims
-    // for one Proof — the claim-create rule binds `uid` to the caller and
-    // nothing else, so it permits that — and all five the bounded page fetched
+    // for one Proof — the claim-create rule permits several pending claims of
+    // the owner's own against their own Proof — and all five the bounded page fetched
     // are resolved between the out-of-transaction lookup and the transactional
     // re-read. Before the sentinel, every fetched candidate re-read as resolved,
     // `claimUndecided` stayed false, and Restore published a Proof whose sixth

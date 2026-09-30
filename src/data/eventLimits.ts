@@ -33,7 +33,7 @@ export const MAX_DAYS = 10;
  * labelled `D0` or `D11` could be frozen into `dailyHonors`, where
  * `firestore.rules` cannot look inside a list to refuse it. The same integer can
  * arrive from the other side too, off a `dayStats` KEY: that map is
- * Player-written under ADR 0001 and its rules arm validates nothing, so a row can
+ * Player-written under ADR 0001 and its rules arm validates none of its stats, so a row can
  * name Day 4000 and the derived honour fallback would carry it.
  *
  * SAFE-INTEGER as well as ranged, stated rather than implied. The range bound
@@ -140,7 +140,7 @@ export const ARCHIVE_NUMBER_BOUND = 4_102_444_800_000;
  * THE WRITER AND THE RULES MUST SHARE ONE REPRESENTABLE-NUMBER CONTRACT, and
  * before this they did not. The archive's coercions kept ANY finite value, while
  * `finiteArchiveNumber` accepts only the bounded ones — so a Player self-writing
- * `bingoCount: 5e12` on their own row (`players/{uid}` validates no field at all,
+ * `bingoCount: 5e12` on their own row (`players/{uid}` validates no stat field,
  * ADR 0001) produced a record the rules REFUSED. That refusal lands on the flip,
  * which runs after `beginArchive` has already shut the Event, and a rejected
  * write throws past the refusal cleanup rather than returning one — so play was
@@ -185,7 +185,7 @@ export function clampArchiveNumber(value: number): number {
  * Leaderboard and the frozen record read that same row's root as
  * `MAX_ARCHIVE_NUMBER` — so a second row ties the champion on the board and
  * loses to it on the podium, which is exactly the disagreement one shared bound
- * exists to prevent. `players/{uid}` validates no field (ADR 0001), so a pair of
+ * exists to prevent. `players/{uid}` validates no stat field (ADR 0001), so a pair of
  * maxed buckets is reachable on any Event.
  *
  * The clamp is applied ONCE, to the finished total, never per addend: a count

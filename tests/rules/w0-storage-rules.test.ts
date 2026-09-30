@@ -12,8 +12,8 @@ import { deleteObject, getMetadata, ref, uploadBytes } from 'firebase/storage';
 import { deleteDoc, doc, setDoc } from 'firebase/firestore';
 import { clearStorageDeep } from '../support/storage-emulator';
 
-// Storage security-rules coverage for storage.rules (ADR 0004): the okImage()
-// (image/* < 8 MB) and okAudio() (audio/* < 12 MB) upload caps, the
+// Storage security-rules coverage for storage.rules (ADR 0004): the okJpeg()
+// (image/jpeg < 8 MB) and okAudio() (audio/* < 12 MB) upload caps, the
 // filename-pinned avatars path, the owner/admin proofs path, the now-removed
 // /og/** block staying unmatched (#39, ADR 0005), and — critically — the
 // cross-check that a Proof object which passes storage.rules also passes the
@@ -107,17 +107,17 @@ afterAll(async () => {
   await testEnv?.cleanup();
 });
 
-describe('storage.rules — okImage / okAudio upload caps (ADR 0004)', () => {
+describe('storage.rules — okJpeg / okAudio upload caps (ADR 0004)', () => {
   // EACH CAP IS MEASURED ON ITS OWN FRESH PATH (#1153, Codex round 3 P2).
   // These cases used to allow the under-cap object and then deny the over-cap
   // one at the SAME path, which made the denial an UPDATE. Proof objects are
   // immutable now — the arm allows `create` only — so a repeat at an occupied
   // path is denied whatever it weighs, and the assertion would pass without
   // saying anything about the size cap. A virgin path per upload keeps each
-  // denial about `okImage()` / `okAudio()`, which is also the shape
+  // denial about `okJpeg()` / `okAudio()`, which is also the shape
   // `uploadProofMedia` actually performs: a first write to a name nothing has
   // used.
-  it('allows a 7 MB image but denies a 9 MB image (okImage < 8 MB)', async () => {
+  it('allows a 7 MB image but denies a 9 MB image (okJpeg < 8 MB)', async () => {
     const owner = testEnv.authenticatedContext(OWNER);
     await assertSucceeds(put(owner, photoPath, sized(7), IMAGE));
     await assertFails(put(owner, `proofs/${EVENT}/${OWNER}/${PROOF}-over.jpg`, sized(9), IMAGE));
@@ -161,7 +161,7 @@ describe('storage.rules — avatars/{uid}.jpg (owner + filename pinned)', () => 
     await assertSucceeds(put(owner, avatarPath(OWNER), TINY, IMAGE));
   });
 
-  it('denies an over-cap (9 MB) avatar image (okImage applies to avatars too)', async () => {
+  it('denies an over-cap (9 MB) avatar image (okJpeg applies to avatars too)', async () => {
     const owner = testEnv.authenticatedContext(OWNER);
     await assertFails(put(owner, avatarPath(OWNER), sized(9), IMAGE));
   });

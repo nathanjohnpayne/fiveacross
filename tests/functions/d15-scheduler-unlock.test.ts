@@ -10,6 +10,7 @@ import {
   stampDaySnapshot,
   runScheduledUnlock,
   manualUnlockNow,
+  parseUnlockDayNowPayload,
   UnlockPermissionError,
   type AdminFirestore,
   type DayLike,
@@ -52,8 +53,11 @@ function makeDb(seed: {
   players?: Array<Record<string, unknown>>;
   // #266: pinned day honors, keyed by dayIndex.
   dayHonors?: Record<number, Record<string, unknown>>;
+  // Any other documents, by full path (e.g. a caller's membership record).
+  docs?: Record<string, Record<string, unknown>>;
 }): AdminFirestore & { readEvent(): EventLike; moments(): StoredMoment[] } {
   const docs: Record<string, Record<string, unknown> | undefined> = {
+    ...(seed.docs ?? {}),
     [`events/${seed.eventId}`]: { ...seed.event } as Record<string, unknown>,
   };
   for (const [dayIndex, honor] of Object.entries(seed.dayHonors ?? {})) {
@@ -603,6 +607,27 @@ describe('runScheduledUnlock — the finale beats through the write path (AC 3)'
   });
 });
 
+describe('parseUnlockDayNowPayload — the callable validates its input before any read', () => {
+  it('accepts a document-id eventId and a non-negative integer dayIndex', () => {
+    expect(parseUnlockDayNowPayload({ eventId: 'e1', dayIndex: 0 })).toEqual({ eventId: 'e1', dayIndex: 0, resnapshot: false });
+    expect(parseUnlockDayNowPayload({ eventId: 'e1', dayIndex: 8, resnapshot: true })).toEqual({
+      eventId: 'e1',
+      dayIndex: 8,
+      resnapshot: true,
+    });
+  });
+
+  it('refuses a path-shaped or reserved eventId, and a fractional, negative or non-numeric dayIndex', () => {
+    for (const eventId of ['', 'a/b', '..', '.', '__x__', 7, null, undefined]) {
+      expect(parseUnlockDayNowPayload({ eventId, dayIndex: 1 })).toBeNull();
+    }
+    for (const dayIndex of [1.5, -1, Number.NaN, Number.POSITIVE_INFINITY, '1', null]) {
+      expect(parseUnlockDayNowPayload({ eventId: 'e1', dayIndex })).toBeNull();
+    }
+    expect(parseUnlockDayNowPayload(undefined)).toBeNull();
+  });
+});
+
 describe('manualUnlockNow — the admin fallback (AC 2)', () => {
   it('is admin-gated: isEventAdmin only accepts a uid on the roster', () => {
     const event: EventLike = { admins: ['admin-1'] };
@@ -646,6 +671,68 @@ describe('manualUnlockNow — the admin fallback (AC 2)', () => {
       UnlockPermissionError,
     );
     expect(db.readEvent().days!.find((d) => d.index === 8)!.snapshotItemIds).toBeUndefined();
+  });
+
+  it('on a membership-ENFORCED Event, conjoins an active membership with the admins roster', async () => {
+    // specs/event-membership.md § The role model, as approvePrompts applies it:
+    // `admins` is client-writable, so a roster entry with no active membership
+    // is refused on an enforced Event, and an active one is admitted.
+    const seed = (membership?: Record<string, unknown>) => ({
+      eventId: 'e1',
+      event: { days: mainDays(), admins: ['admin-1'], membershipEnforcement: 'enforced' as const },
+      items: [{ id: 'a', status: 'active', pool: 'main' }],
+      docs: membership ? { 'events/e1/memberships/admin-1': membership } : {},
+    });
+    const now = () => D9_UNLOCK + 1;
+    for (const membership of [undefined, { status: 'revoked' }]) {
+      const denied = makeDb(seed(membership));
+      await expect(manualUnlockNow(denied, 'admin-1', 'e1', 8, { now })).rejects.toBeInstanceOf(UnlockPermissionError);
+      expect(denied.readEvent().days!.find((d) => d.index === 8)!.snapshotItemIds).toBeUndefined();
+    }
+    const admitted = makeDb(seed({ status: 'active' }));
+    await expect(manualUnlockNow(admitted, 'admin-1', 'e1', 8, { now })).resolves.toBe('stamped');
+  });
+
+  it('re-authorizes INSIDE the writing transaction: a revocation after the pre-flight refuses the stamp', async () => {
+    // CodeRabbit / Codex on #1352: the pre-flight membership read is not part of
+    // the transaction, so a revocation committing between it and the write must
+    // be caught by the transaction's own read.
+    const base = makeDb({
+      eventId: 'e1',
+      event: { days: mainDays(), admins: ['admin-1'], membershipEnforcement: 'enforced' },
+      items: [{ id: 'a', status: 'active', pool: 'main' }],
+    });
+    const membershipPath = 'events/e1/memberships/admin-1';
+    let membershipReads = 0;
+    const db: typeof base = {
+      ...base,
+      doc: (path: string) =>
+        path === membershipPath
+          ? {
+              get: async () => {
+                membershipReads += 1;
+                // Active for the pre-flight, revoked by the time the transaction reads it.
+                const data = membershipReads === 1 ? { status: 'active' } : { status: 'revoked' };
+                return { exists: true, id: 'admin-1', data: () => data };
+              },
+              set: async () => undefined,
+            }
+          : base.doc(path),
+    };
+    await expect(manualUnlockNow(db, 'admin-1', 'e1', 8, { now: () => D9_UNLOCK + 1 })).rejects.toBeInstanceOf(
+      UnlockPermissionError,
+    );
+    expect(membershipReads).toBe(2);
+    expect(base.readEvent().days!.find((d) => d.index === 8)!.snapshotItemIds).toBeUndefined();
+  });
+
+  it('on an UNENFORCED Event, admits on the roster alone, exactly as before', async () => {
+    const db = makeDb({
+      eventId: 'e1',
+      event: { days: mainDays(), admins: ['admin-1'], membershipEnforcement: 'off' },
+      items: [{ id: 'a', status: 'active', pool: 'main' }],
+    });
+    await expect(manualUnlockNow(db, 'admin-1', 'e1', 8, { now: () => D9_UNLOCK + 1 })).resolves.toBe('stamped');
   });
 });
 
@@ -900,7 +987,7 @@ describe('runFinaleBeats — the beats carry their CONTENT (#266)', () => {
   });
 
   // #1152, Codex P2 on PR #1165. `readFinaleRoster` only asked whether a value
-  // was finite, and `players/{uid}` validates no field at all (ADR 0001) — so a
+  // was finite, and `players/{uid}` validates no stat field (ADR 0001) — so a
   // Player self-writing a count or an instant far outside the magnitude
   // `firestore.rules` accepts was ranked here by its RAW value, while the live
   // board and the freeze both clamped it first. These two pin the SEAM: the
@@ -1045,7 +1132,7 @@ describe('runFinaleBeats — the beats carry their CONTENT (#266)', () => {
       // The other direction, and the one a live derivation gets wrong in the
       // costlier way: the frozen Event WAS played, and a roster that has since
       // been emptied would have the email tell every recipient nobody marked a
-      // square. `players/{uid}` validates no field (ADR 0001), so a self-write
+      // square. `players/{uid}` validates no stat field (ADR 0001), so a self-write
       // clearing a row is reachable; so is a moderation deletion.
       const db = makeDb({
         eventId: 'e',
@@ -1184,7 +1271,7 @@ describe('runFinaleBeats — the beats carry their CONTENT (#266)', () => {
 
     it('reads a PINNED honour as play, even when the roster says nothing was marked', async () => {
       // Codex P2 `4058671218`. A Player row is client-authoritative and
-      // validates no field (ADR 0001), so its holder can clear the counts that
+      // validates no stat field (ADR 0001), so its holder can clear the counts that
       // earned a Day's honour. `meta.firstBingo` is server-written and cannot
       // be cleared, so the two disagree — and a roster-only capture stored
       // `false` while the podium printed the pin beside it, which is the #1192

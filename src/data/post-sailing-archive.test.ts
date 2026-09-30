@@ -49,7 +49,7 @@ const A = vi.hoisted(() => ({
    *  P1 on PR #1162) — it is not a `PlayerDoc` field, and it defaults to the
    *  row's own stored `uid`, which is what every honest row carries. A row that
    *  sets the two apart is the hostile shape the rules permit: `players/{uid}`
-   *  binds the PATH and validates nothing inside the document. */
+   *  binds the PATH and validates nothing inside the document beyond its display name and avatar. */
   players: [] as Array<Record<string, unknown> & { id?: string }>,
   dayMetas: new Map<number, Record<string, unknown>>(),
   /** Field maps handed to `tx.update` — empty means the call wrote nothing. */
@@ -1469,7 +1469,7 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
   });
 
   it('CLAMPS a finite number the rules would refuse, rather than freezing one the flip cannot write', () => {
-    // Codex P1 on PR #1162. `players/{uid}` validates no field at all (ADR
+    // Codex P1 on PR #1162. `players/{uid}` validates no stat field (ADR
     // 0001), so a Player can self-write `bingoCount: 5e12` on their own row —
     // FINITE, so every coercion here kept it, and outside `finiteArchiveNumber`,
     // so `firestore.rules` refused the record carrying it. That refusal lands on
@@ -2088,14 +2088,14 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
   // supported-range filter there was one honest exception to that: on an Event
   // with NO schedule the derived fallback yielded one honour per Day index any
   // Player's `dayStats` mentioned, `players/{uid}` validates nothing inside the
-  // document, and one row filled to Firestore's own limit therefore minted tens of
+  // document beyond its display name and avatar, and one row filled to Firestore's own limit therefore minted tens of
   // thousands of honours — pushing the record past its OWN share, where banning
   // that Player really was the lever. Both halves are pinned here rather than
   // argued: the finding's own fixture, and the largest record the builder can
   // produce at all.
   describe('the record’s own share cannot be filled', () => {
     it('by one Player carrying the maximal `dayStats` the rules admit, with no schedule', () => {
-      // `players/{uid}` binds the PATH and validates nothing inside, so the only
+      // `players/{uid}` binds the PATH and validates no stat inside it, so the only
       // ceiling on this map is Firestore's 1 MiB document limit. Sixteen thousand
       // buckets clears it.
       const dayStats: Record<string, unknown> = {};

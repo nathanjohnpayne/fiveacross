@@ -544,7 +544,7 @@ describe('client/functions parity — podium champion + First to BINGO (ADR 0011
 
 // --- One normalisation, three ranking paths (#1152, Codex P2 on PR #1165) -------
 //
-// `players/{uid}` validates no field (ADR 0001), so a Player can self-write a
+// `players/{uid}` validates no stat field (ADR 0001), so a Player can self-write a
 // count or an instant far outside the magnitude `firestore.rules` accepts. The
 // live board (`useLeaderboard`) and the freeze (`draftEventArchive`) both CLAMP
 // those before they rank, through `withReadableDayStats`. The scheduler did not:
@@ -1185,7 +1185,7 @@ describe('client/functions parity — the dayStats ENTRY rule (#1168)', () => {
 // Clamping each BUCKET is not enough. Two of the three ranking surfaces do not
 // rank by the buckets: both `podiumStandingRow` implementations and
 // `standingsThrough` ADD the surviving buckets back up, and a sum of bounded
-// counts is not itself bounded. `players/{uid}` validates no field (ADR 0001),
+// counts is not itself bounded. `players/{uid}` validates no stat field (ADR 0001),
 // so two buckets at the maximum are reachable — and they gave their row a
 // `2 * MAX_ARCHIVE_NUMBER` podium and email score while the live Leaderboard and
 // the frozen record read that same row's ROOT as `MAX_ARCHIVE_NUMBER`. Another
@@ -1320,7 +1320,7 @@ describe('client/functions parity — the bound a RE-AGGREGATED total keeps (#11
 
   it('bounds a re-aggregated total in the NEGATIVE direction too, on both sides', () => {
     // Counts go negative for the same reason they go oversized — the rules arm
-    // validates no field — and an unclamped negative sum sorts a row BELOW every
+    // validates no stat field — and an unclamped negative sum sorts a row BELOW every
     // representable one, which is again not where the clamped root puts it.
     const players: PlayerDoc[] = [
       oversized('two-negatives', 'Two Negatives', {
@@ -1658,7 +1658,7 @@ describe('client/functions parity — the daily email standings and ⭐ (#1052)'
   // raw Player-written numbers: `useLeaderboard` and `draftEventArchive` clamp
   // before they rank, `readFinaleRoster` was fixed to, and `standingsThrough` /
   // `headlineFirstBingoAt` still accepted anything FINITE. `players/{uid}`
-  // validates no field (ADR 0001), so that is a reachable roster — and sent mail
+  // validates no stat field (ADR 0001), so that is a reachable roster — and sent mail
   // is irreversible. `readEmailRosterPage` now maps every row through the same
   // normaliser, which is what these two compare.
   //
