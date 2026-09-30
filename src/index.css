@@ -420,7 +420,7 @@ a {
    direct children of the tile; here they are children of the button. */
 .cell.free.marked > .cell-claim {
   flex-direction: column;
-  gap: 3px;
+  gap: 1px;
 }
 /* A focusable control needs a visible focus indicator (WCAG 2.4.7); .cell had
    no focus style at all before Squares became reachable. The ring is drawn on
@@ -452,14 +452,18 @@ a {
   box-shadow: 0 0 14px var(--shadow);
 }
 .cell.free.marked {
+  /* The wireframe's free centre (plans/daily-cards-wireframes.html, `.cell.free`):
+     a plain panel tile set apart only by a thin accent border, with FREE and the
+     Day's free-space text as one bold ink block. It replaced an accent-tinted
+     wash with an inset ring and a large accent display FREE, which diverged from
+     the parity reference and, where the display face is missing, wrapped FREE
+     onto two lines. */
   flex-direction: column;
-  gap: 3px;
-  border: 2px solid var(--accent);
+  gap: 1px;
+  border: 1.5px solid var(--accent);
   color: var(--ink);
-  background: color-mix(in srgb, var(--accent) 18%, var(--cell));
-  box-shadow:
-    inset 0 0 0 2px var(--cell),
-    0 0 16px var(--shadow);
+  background: var(--panel);
+  box-shadow: none;
 }
 .cell.free.marked::after {
   content: none;
@@ -483,12 +487,11 @@ a {
   }
 }
 .free-label {
-  color: var(--accent);
-  font-family: 'Bebas Neue', 'Arial Narrow', sans-serif;
-  font-size: clamp(15px, 4.5vw, 22px);
-  line-height: 0.9;
-  letter-spacing: 0.08em;
-  text-shadow: 0 0 10px var(--shadow);
+  /* Same face, size and weight as the free-space text beneath it: the
+     wireframe reads the pair as one line break, not an eyebrow over a caption. */
+  font-size: calc(clamp(7px, 1.9vw, 10px) * var(--square-scale, 1));
+  font-weight: 700;
+  line-height: 1.05;
 }
 .free-prompt {
   max-width: 100%;
@@ -3454,8 +3457,9 @@ body:has(.sheet-backdrop) .guidelines-trigger {
 .share-card-cell.free {
   /* Free centre — accent. After .marked so it wins over the gradient (the
      centre is always "marked"). Text on --ink: the accent-tinted wash is a
-     --cell mix, not the gradient, so --on-gradient is the wrong token here
-     — mirrors the on-page .cell.free.marked. */
+     --cell mix, not the gradient, so --on-gradient is the wrong token here.
+     The share card keeps this wash (the wireframe's .shc .sq.freec); the
+     on-page .cell.free.marked is the plain wireframe tile instead. */
   color: var(--ink);
   background: color-mix(in srgb, var(--accent) 32%, var(--cell));
   border-color: var(--accent);
