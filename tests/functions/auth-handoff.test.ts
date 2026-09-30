@@ -385,6 +385,13 @@ describe('mintHandoff', () => {
     ['a CRLF injection', '/board\r\nX-Evil: 1'],
     ['an over-long path', `/${'a'.repeat(600)}`],
     ['a non-string', 7],
+    // Dot segments that NORMALISE to a protocol-relative pathname: each starts
+    // with one slash and resolves on the target origin, so only the check on
+    // the resolved pathname catches them.
+    ['a dot segment that normalises to //', '/..//evil.test'],
+    ['a dot-dot chain that normalises to //', '/a/../..//evil.test/x'],
+    ['a single-dot segment that normalises to //', '/.//evil.test'],
+    ['a backslash dot segment that normalises to //', '/..\\/evil.test'],
   ])('rejects %s as a return path — the open-redirect surface', async (_label, returnPath) => {
     expect(validateReturnPath(returnPath, ORIGIN)).toBeNull();
 
@@ -406,6 +413,11 @@ describe('mintHandoff', () => {
 
     expect(result).toEqual({ ok: false, reason: 'app-check-required' });
     expect(fake.reads.count).toBe(0);
+  });
+
+  it('keeps an ordinary dot segment that stays a one-slash path', () => {
+    expect(validateReturnPath('/a/../board', ORIGIN)).toBe('/board');
+    expect(validateReturnPath('/./board?day=2', ORIGIN)).toBe('/board?day=2');
   });
 
   it('defaults an absent return path to the root', () => {

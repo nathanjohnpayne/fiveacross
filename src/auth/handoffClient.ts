@@ -232,7 +232,11 @@ function isSameOriginPath(path: string, targetOrigin: string): boolean {
   if (path.includes('#')) return false;
   if (path.length > 512) return false;
   try {
-    return new URL(path, targetOrigin).origin === targetOrigin;
+    const resolved = new URL(path, targetOrigin);
+    // Dot segments (`/..//evil.example`) normalise to a `//` pathname even
+    // though the raw value starts with one slash — the server refuses the same
+    // shape after resolving (`validateReturnPath`).
+    return resolved.origin === targetOrigin && !resolved.pathname.startsWith('//');
   } catch {
     return false;
   }
