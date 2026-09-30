@@ -43,7 +43,7 @@ function driveTransaction(existsSequence: boolean[]): FakeTx[] {
 const userFrom = (
   over: Partial<{ uid: string; displayName: string | null; photoURL: string | null }> = {},
 ) =>
-  ({ uid: 'sailor-1', displayName: 'Sailor', photoURL: 'https://sailor/pic.jpg', ...over }) as unknown as User;
+  ({ uid: 'sailor-1', displayName: 'Sailor', photoURL: 'https://lh3.googleusercontent.com/sailor/pic.jpg', ...over }) as unknown as User;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -64,7 +64,7 @@ describe('ensureUserProfile create is exists-checked (#77 — never clobbers a r
     expect(txs[0].set).toHaveBeenCalledTimes(1);
     expect(txs[0].set).toHaveBeenCalledWith(
       { path: 'users/sailor-1' },
-      { displayName: 'Sailor', photoURL: 'https://sailor/pic.jpg', createdAt: expect.any(Number) },
+      { displayName: 'Sailor', photoURL: 'https://lh3.googleusercontent.com/sailor/pic.jpg', createdAt: expect.any(Number) },
     );
   });
 

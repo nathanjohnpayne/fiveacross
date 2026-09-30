@@ -70,10 +70,10 @@ describe('attestAdult persists the 18+ self-attestation create-only (#23)', () =
     // leaving displayName/photoURL/createdAt missing forever. So it writes the FULL
     // bootstrap shape ensureUserProfile would have, plus the stamp, in one create.
     const tx = driveTransaction(snap(null));
-    await attestAdult(userLike({ displayName: 'Ada', photoURL: 'https://ada/pic.jpg' }), 42);
+    await attestAdult(userLike({ displayName: 'Ada', photoURL: 'https://lh3.googleusercontent.com/ada/pic.jpg' }), 42);
     expect(tx.set).toHaveBeenCalledWith(
       { path: 'users/sailor-1' },
-      { displayName: 'Ada', photoURL: 'https://ada/pic.jpg', createdAt: 42, attestedAdultAt: 42 },
+      { displayName: 'Ada', photoURL: 'https://lh3.googleusercontent.com/ada/pic.jpg', createdAt: 42, attestedAdultAt: 42 },
     );
   });
 
