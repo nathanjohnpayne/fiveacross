@@ -42,6 +42,41 @@ import { ITEMS, EASY_ITEMS, CLOSING_ITEMS } from '../../../scripts/seed-data/bod
 // @ts-expect-error — plain-JS seed script, no type declarations.
 import { EASY_ITEMS as GCB_EMBARK_ITEMS } from '../../../scripts/seed-data/med-2026.mjs';
 
+/**
+ * The platform capture's occasion: the wedding weekend the wireframes draw for
+ * Five Across with no Edition on top (`#fx-card-fa` in
+ * plans/daily-cards-wireframes.html), prompts verbatim from that frame. The
+ * `fiveacross` build otherwise has no occasion-neutral pool to deal, and Bodega
+ * prompts under platform chrome read as a trip wearing someone else's clothes.
+ * General-audience throughout, like every pool this fixture seeds.
+ */
+const FIVE_ACROSS_ITEMS: ReadonlyArray<{ text: string; spicy?: boolean }> = [
+  'Someone cries during a toast',
+  'Ask the DJ for a song',
+  'Find your name on the seating chart',
+  'Photo with someone you just met',
+  'Grandparents on the dance floor',
+  'A speech runs past five minutes',
+  "Someone's phone rings mid-vow",
+  'Kids own the aisle',
+  'Two guests in the same color',
+  'Get a drink for a stranger',
+  'Group photo, wide angle',
+  'Someone loses a shoe',
+  'Best man forgets a name',
+  'Cake before dinner',
+  'Photograph the flowers',
+  'Sparkler photo attempt',
+  'Someone asks for the wifi',
+  'First dance, phones down',
+  'A table of empty glasses',
+  'Ask a barn staffer their favorite wedding',
+  'Bouquet lands nowhere near you',
+  'Late-night snack run',
+  'Selfie with the couple',
+  'Toast with someone new',
+].map((text) => ({ text, spicy: false }));
+
 /** Keep this literal in lockstep with scripts/marketing-shots.sh's PROJECT_ID:
  *  the emulator, the browser bundle and this seeder must all name the same
  *  demo project or the app's writes evaluate rules under a different one. */
@@ -189,7 +224,11 @@ export const heroDealable = (items: Array<{ text: string }>) =>
  * snapshot.
  */
 const EMBARK_ITEMS: ReadonlyArray<{ text: string; spicy?: boolean }> =
-  HERO_EDITION === 'gcb' ? GCB_EMBARK_ITEMS : EASY_ITEMS;
+  HERO_EDITION === 'gcb'
+    ? GCB_EMBARK_ITEMS
+    : HERO_EDITION === 'fiveacross'
+      ? FIVE_ACROSS_ITEMS
+      : EASY_ITEMS;
 
 /**
  * Invented display names. Deliberately NOT the real roster: first name plus an
@@ -242,7 +281,12 @@ export const HERO_DAY_DEAL: ReadonlyArray<{
   {
     pool: 'embark',
     // Each Edition's own warm-up copy. GCB's is med-2026's Day 0 free space.
-    freeText: HERO_EDITION === 'gcb' ? 'You made it aboard' : 'The flock has landed',
+    freeText:
+      HERO_EDITION === 'gcb'
+        ? 'You made it aboard'
+        : HERO_EDITION === 'fiveacross'
+          ? 'Kim & Jo said yes'
+          : 'The flock has landed',
     // The TUTORIAL pool of whichever Edition is under capture. For GCB that is
     // `embark` and ONLY `embark` — its main pool is not imported into this
     // file at all, so a Day-index change cannot reach it by accident.
@@ -322,11 +366,13 @@ const DAY_CHROME =
         ],
       }
     : {
+        // The wireframe's Five Across weekend: rehearsal Friday, the wedding
+        // Saturday, brunch Sunday, each in the platform's own Theme trio.
         defaultTheme: 'marquee',
         days: [
-          { place: 'Opening night', placeEmoji: '🎟️', theme: 'marquee' },
-          { place: 'The main day', placeEmoji: '🎊', theme: 'confetti-hour' },
-          { place: 'The slow morning', placeEmoji: '🌙', theme: 'afterglow' },
+          { place: 'The Barn at Green Valley', placeEmoji: '🥂', theme: 'marquee' },
+          { place: 'The Barn at Green Valley', placeEmoji: '💍', theme: 'confetti-hour' },
+          { place: 'The Barn at Green Valley', placeEmoji: '🥞', theme: 'afterglow' },
         ],
       };
 
@@ -410,7 +456,7 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
             ? 'Trieste to Barcelona'
             : HERO_EDITION === 'vacay'
               ? 'Bodega Bay'
-              : 'The weekend',
+              : 'Kim & Jo’s wedding',
         startsOn: isoDay(0),
         endsOn: isoDay(2),
         sailStart: isoDay(0),
@@ -427,7 +473,12 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
             ...DAY_CHROME.days[0],
             port: DAY_CHROME.days[0].place,
             portEmoji: DAY_CHROME.days[0].placeEmoji,
-            tonight: ['🍷 Arrival pours', '🌊 First look at the water'],
+            tonight:
+              HERO_EDITION === 'fiveacross'
+                ? ['🥂 Run-through at five', '🍽️ Dinner on the lawn']
+                : HERO_EDITION === 'gcb'
+                  ? ['⛵ Sail-Away Party', '🎉 Welcome Party'] // med-2026's own Day 0
+                  : ['🍷 Arrival pours', '🌊 First look at the water'],
             pool: HERO_DAY_DEAL[0].pool,
             // The warm-up card: tutorial pool, tutorial tag, gentlest prompts.
             tutorial: true,

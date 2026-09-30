@@ -8,13 +8,19 @@ The platform wears an **Edition** per class of occasion and runs one **Event** p
 
 ## Screenshots
 
-The real app and the real email templates, captured over a seeded demo Event with invented players ([how they are made](docs/app/marketing-screenshots.md)). One platform, two Editions: the Vacay Bingo warm-up card beside the Gay Cruise Bingo one, then Vacay's Feed and Ranks.
+The real app and the real email templates, captured over a seeded demo Event with invented players ([how they are made](docs/app/marketing-screenshots.md)). One platform, three identities, each on its own opening Day: Five Across on its own at a wedding weekend, then the Vacay Bingo and Gay Cruise Bingo Editions. Grid, marking and navigation are identical; only chrome, palette and voice move.
 
 <p>
-  <img src="docs/images/vacay-card.png" width="200" alt="Vacay Bingo Day Card: a 5×5 board of Bodega Bay prompts with seven squares marked">
-  <img src="docs/images/gcb-card.png" width="200" alt="Gay Cruise Bingo Day Card: the boarding-day board in the Neon Playground Theme">
-  <img src="docs/images/vacay-feed.png" width="200" alt="Vacay Bingo Feed: text proofs, a shared Tally card and a BINGO Moment">
-  <img src="docs/images/vacay-ranks.png" width="200" alt="Vacay Bingo Ranks: the leaderboard with the Daily First to BINGO strip">
+  <img src="docs/images/fiveacross-card.png" width="260" alt="Five Across Day Card: a wedding-weekend board in the Marquee Theme, with no Edition on top">
+  <img src="docs/images/vacay-card.png" width="260" alt="Vacay Bingo Day Card: a 5×5 board of Bodega Bay prompts with seven squares marked">
+  <img src="docs/images/gcb-card.png" width="260" alt="Gay Cruise Bingo Day Card: the boarding-day board in the Neon Playground Theme">
+</p>
+
+The social surfaces, shown here in Vacay Bingo: the Feed and Ranks.
+
+<p>
+  <img src="docs/images/vacay-feed.png" width="260" alt="Vacay Bingo Feed: text proofs, a shared Tally card and a BINGO Moment">
+  <img src="docs/images/vacay-ranks.png" width="260" alt="Vacay Bingo Ranks: the leaderboard with the Daily First to BINGO strip">
 </p>
 
 The two player emails, both opt-in per Event: the morning Day Card, themed to the Day it announces, and the winner announcement after the Standings Freeze.
