@@ -129,16 +129,23 @@ function readEnvKey(path: string, key: string): string | undefined {
  * without a redeploy.
  *
  * Semantics: scan unless the setting is EXPLICITLY false (absent = on, the
- * seeded default), and FAIL OPEN on a read error — moderation must not
+ * seeded default) or the Event document does not exist, and FAIL OPEN on a read error — moderation must not
  * silently disable on a transient Firestore hiccup. Takes a minimal
  * Firestore-like seam so the decision is unit-testable without firebase-admin.
  */
 export async function shouldScanProof(
-  dbLike: { doc(path: string): { get(): Promise<{ get(field: string): unknown }> } },
+  dbLike: { doc(path: string): { get(): Promise<{ exists?: boolean; get(field: string): unknown }> } },
   eventId: string,
 ): Promise<boolean> {
   try {
     const snap = await dbLike.doc(`events/${eventId}`).get();
+    // An object under an Event id that names NO Event is not media any Proof
+    // can point at (the Proof create reads the Event, and `storage.rules` now
+    // refuses the upload too), so there is nothing to moderate: skip it rather
+    // than spend a Vision call and park a verdict for a Proof that cannot come.
+    // A successful read is the only thing that can say so; a failed read still
+    // falls through to the fail-open catch below.
+    if (snap.exists === false) return false;
     return snap.get('settings.visionGate') !== false;
   } catch {
     return true;

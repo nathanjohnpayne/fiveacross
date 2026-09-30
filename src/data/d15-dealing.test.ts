@@ -257,7 +257,7 @@ describe('dealDayCard — the join is a precondition (#1158)', () => {
 
   it('writes NOTHING for a MALFORMED joinedAt, and deals once the join repairs it to a number (Codex P2, round 6)', async () => {
     // The third state a nullish-only repair used to strand: the row is
-    // self-writable and the rules validate no field on it (ADR 0001), so
+    // self-writable and the rules validate no stat field on it (ADR 0001), so
     // `joinedAt` can hold a string. It is not a number, so the guard no-ops
     // exactly as it does for an unstamped row — and that no-op resolves
     // itself, because `joinAndDeal` now repairs any non-number stamp (see

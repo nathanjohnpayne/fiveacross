@@ -263,6 +263,41 @@ describe('resnapshotDayIfNoBoards — the guarded deploy-race fallback', () => {
     );
   });
 
+  it('rejects a roster admin with no active membership on a membership-ENFORCED Event', async () => {
+    // The same conjunct manualUnlockNow and approvePrompts apply: `admins` is
+    // client-writable, so an enforced Event also requires the membership record.
+    const db = makeDb({ eventId: 'e1', event: { ...event(['m1']), membershipEnforcement: 'enforced' }, items });
+    await expect(resnapshotDayIfNoBoards(db, admin, 'e1', 3, { now: () => D4_UNLOCK + 1 })).rejects.toBeInstanceOf(
+      UnlockPermissionError,
+    );
+    expect(db.readEvent().days!.find((d) => d.index === 3)!.snapshotItemIds).toEqual(['m1']);
+  });
+
+  it('re-authorizes inside the transaction: a membership revoked after the pre-flight refuses the overwrite', async () => {
+    const base = makeDb({ eventId: 'e1', event: { ...event(['m1']), membershipEnforcement: 'enforced' }, items });
+    const membershipPath = `events/e1/memberships/${admin}`;
+    let reads = 0;
+    const db: typeof base = {
+      ...base,
+      doc: (path: string) =>
+        path === membershipPath
+          ? ({
+              get: async () => {
+                reads += 1;
+                const data = reads === 1 ? { status: 'active' } : { status: 'revoked' };
+                return { exists: true, id: admin, data: () => data };
+              },
+              set: async () => undefined,
+            } as unknown as ReturnType<typeof base.doc>)
+          : base.doc(path),
+    };
+    await expect(resnapshotDayIfNoBoards(db, admin, 'e1', 3, { now: () => D4_UNLOCK + 1 })).rejects.toBeInstanceOf(
+      UnlockPermissionError,
+    );
+    expect(reads).toBe(2);
+    expect(base.readEvent().days!.find((d) => d.index === 3)!.snapshotItemIds).toEqual(['m1']);
+  });
+
   it('is not-due before the Day has unlocked', async () => {
     const db = makeDb({ eventId: 'e1', event: event(['m1']), items });
     const result = await resnapshotDayIfNoBoards(db, admin, 'e1', 3, { now: () => D4_UNLOCK - 1 });

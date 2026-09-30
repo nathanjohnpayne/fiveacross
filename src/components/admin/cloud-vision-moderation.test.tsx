@@ -207,9 +207,9 @@ describe('Review queue — the Vision treatment (specs/cloud-vision-moderation.m
   });
 
   it('says nothing about a pending claim that names the Proof but belongs to ANOTHER Player', () => {
-    // The claims create rule binds `uid` to the caller, not `proofId` to the
-    // caller's own Proof, so any signed-in Player can mint a pending claim naming
-    // someone else's photo. `restoreProof` ignores such a claim and publishes
+    // The claims create rule now refuses a claim naming someone else's Proof
+    // (specs/sec-rules-shape-hardening.md), but Claims written before that rule
+    // can still carry one. `restoreProof` ignores such a claim and publishes
     // (src/data/admin.ts, Codex P2 on #1143) — so the row must not promise the
     // opposite. Only the OWNER's claim steers the destination copy (#1156).
     adminConfirmedEvent();

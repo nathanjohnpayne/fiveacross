@@ -25,6 +25,7 @@ import {
   tutorialDayIndexes,
 } from './finaleContent';
 import { emailThemeTokens, type EmailThemeTokens } from './dailyEmailTheme';
+import { singleLine } from './emailShell';
 
 // --- Canonical domain views -----------------------------------------------------
 
@@ -376,7 +377,11 @@ export function standingsRows(
   const toRow = (p: EmailPlayer, rank: number): StandingsRow => ({
     uid: p.uid,
     rank,
-    displayName: p.displayName,
+    // Flattened and bounded IN THE MODEL (`singleLine`, ./emailShell): the
+    // plain-text part interpolates this verbatim, so a stored newline or control
+    // character would otherwise fabricate standings rows in a text-only client,
+    // exactly the podium's round-8 finding (#1207).
+    displayName: singleLine(p.displayName),
     bingoCount: p.bingoCount,
     squaresMarked: p.squaresMarked,
     starred: p.uid === starUid,
@@ -912,7 +917,9 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
   }
 
   // --- ④ Participation nudge ----------------------------------------------------
-  const firstName = (recipient.displayName || '').trim().split(/\s+/)[0] || '';
+  // `singleLine` first, for the same reason the standings rows go through it:
+  // `\s` does not match every character a mail client renders as a break.
+  const firstName = singleLine(recipient.displayName || '').split(' ')[0] || '';
   const greeting = firstName ? `Morning, ${firstName}. ` : 'Morning. ';
   // The arrival line names the Place WITHOUT its flag emoji: the flag rides the
   // context line, and a flag mid-sentence reads as decoration rather than data.

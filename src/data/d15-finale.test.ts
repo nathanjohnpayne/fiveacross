@@ -337,7 +337,7 @@ describe('buildPodium — champion, First to BINGO, honors', () => {
   // bucket reaching this podium is already inside `MAX_ARCHIVE_NUMBER` — the
   // live roster comes through `withReadableDayStats` — but `podiumStandingRow`
   // ADDS the non-ceremonial buckets back up, and a sum of bounded counts is not
-  // itself bounded. `players/{uid}` validates no field (ADR 0001), so two
+  // itself bounded. `players/{uid}` validates no stat field (ADR 0001), so two
   // buckets at the maximum are reachable, and they used to hand their row twice
   // the bound HERE while the live Leaderboard ranked that same row by its
   // clamped ROOT — the two surfaces ordering one roster two different ways.

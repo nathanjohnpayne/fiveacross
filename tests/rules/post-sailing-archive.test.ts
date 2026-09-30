@@ -1578,9 +1578,13 @@ describe.each([
     const makeClaim = (id: string) =>
       setDoc(doc(db(ALICE), `${eventPath()}/claims/${id}`), {
         uid: ALICE,
-        itemId: ITEM,
+        displayName: ALICE,
         cellIndex: 3,
+        itemText: ITEM,
+        proofId: null,
+        status: 'pending',
         createdAt: NOW(),
+        resolvedBy: null,
       });
     await assertSucceeds(makeClaim('claim-1'));
     await close();
@@ -1839,7 +1843,14 @@ describe.each([
         dayIndex: 0,
       });
     });
-    await assertSucceeds(uploadBytes(ref(storageOf(ALICE), dotted), TINY, IMAGE));
+    // A dotted object name can no longer be UPLOADED by a client
+    // (specs/sec-rules-shape-hardening.md: the name is `<auto-id>.<ext>`), but
+    // legacy media under one can still exist, so it is seeded server-side and
+    // the delete arm's whole-id lookup is still what is pinned here.
+    await assertFails(uploadBytes(ref(storageOf(ALICE), dotted), TINY, IMAGE));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await uploadBytes(ref(ctx.storage(), dotted), TINY, IMAGE);
+    });
     await close();
     // Its document exists, so the freeze holds — this is NOT an orphan.
     await assertFails(deleteObject(ref(storageOf(ALICE), dotted)));
@@ -2194,7 +2205,8 @@ describe('post-sailing-archive — what the freeze deliberately leaves open', ()
 
   it('keeps the OWNER media delete open where the Event says nothing (#1157)', async () => {
     // The new delete arm reads the Event, so it inherits the absence-means-open
-    // obligation the upload arm already carries — and failing closed here would
+    // obligation the upload arm carried until it began requiring the Event (the
+    // delete arm still honours it) — and failing closed here would
     // be worse than the hole it fixes: an owner could not clear their own media
     // from a legacy Event, or from a path whose Event document does not exist at
     // all. Neither blob is backed by a Proof document, so the ORPHAN clause is
@@ -2202,7 +2214,13 @@ describe('post-sailing-archive — what the freeze deliberately leaves open', ()
     const legacyBlob = `proofs/${LEGACY_EVENT}/${BOB}/legacy.jpg`;
     const orphanBlob = `proofs/no-such-event/${BOB}/orphan.jpg`;
     await assertSucceeds(uploadBytes(ref(storageOf(BOB), legacyBlob), TINY, IMAGE));
-    await assertSucceeds(uploadBytes(ref(storageOf(BOB), orphanBlob), TINY, IMAGE));
+    // An upload under an Event id with no document is refused now
+    // (specs/sec-rules-shape-hardening.md); media already there — written before
+    // that check — is seeded server-side, and stays its owner's to clear.
+    await assertFails(uploadBytes(ref(storageOf(BOB), orphanBlob), TINY, IMAGE));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await uploadBytes(ref(ctx.storage(), orphanBlob), TINY, IMAGE);
+    });
     await assertSucceeds(deleteObject(ref(storageOf(BOB), legacyBlob)));
     await assertSucceeds(deleteObject(ref(storageOf(BOB), orphanBlob)));
   });
@@ -2267,7 +2285,12 @@ describe('post-sailing-archive — what the freeze deliberately leaves open', ()
         cellIndex: 1,
       });
     });
-    await assertSucceeds(uploadBytes(ref(storageOf(BOB), strayBlob), TINY, IMAGE));
+    // The upload itself is refused now — no Event document — so the legacy
+    // shape is seeded server-side to keep the delete arm's answer pinned.
+    await assertFails(uploadBytes(ref(storageOf(BOB), strayBlob), TINY, IMAGE));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await uploadBytes(ref(ctx.storage(), strayBlob), TINY, IMAGE);
+    });
     await assertFails(deleteObject(ref(storageOf(BOB), strayBlob)));
   });
 

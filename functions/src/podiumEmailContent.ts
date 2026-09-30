@@ -27,6 +27,7 @@ import type { PodiumPayload } from './finaleContent';
 // Same source `finaleContent.ts` imports them from — the award types are app
 // package types, not this module's own.
 import type { MostLovedPhotoAward } from '../../src/domainTypes';
+import { BODY_TEXT_MAX, singleLine } from './emailShell';
 
 /**
  * The podium payload as the EMAIL path carries it: `buildPodiumPayload`'s own
@@ -217,9 +218,10 @@ export interface BuildPodiumEmailArgs {
  * This email is the first in the family to interpolate user-written text into a
  * header at all — the daily card's subject is built entirely from the Theme
  * registry and the Edition register, so nothing it sends carries participant
- * content there. `players/{uid}` validates no field (ADR 0001), so a display
- * name is arbitrary text, and `sendEmail` passes `subject` through to the
- * provider untouched.
+ * content there. `firestore.rules` bounds a Player's `displayName` to a string
+ * of at most 100 characters but says nothing about WHICH characters (ADR 0001),
+ * so a display name is arbitrary text, and `sendEmail` passes `subject` through
+ * to the provider untouched.
  *
  * Two things are therefore stripped here rather than trusted to the transport:
  *
@@ -242,52 +244,11 @@ export function subjectSafeName(raw: string, maxLength = 48): string {
   return flattened.length > maxLength ? `${flattened.slice(0, maxLength - 1).trimEnd()}…` : flattened;
 }
 
-/** The ceiling on any single participant-authored value in the rendered body.
- *  Generous against real names and prompts — both live Events' longest are well
- *  under it — and small enough that a full standings module plus an award line
- *  cannot approach Firestore's 1 MiB document limit when both alternatives are
- *  frozen together. */
-export const BODY_TEXT_MAX = 120;
-
-/**
- * Flatten participant-authored text to a single line.
- *
- * The PLAIN-TEXT alternative has no escaping layer (Codex P2, round 8 on PR
- * #1207). The HTML part confines every field through `esc`, and the subject
- * through `subjectSafeName` — but the text renderer interpolated display names
- * and prompt text verbatim, so a stored newline could fabricate what looks like
- * an extra standings row, a second CTA, or a footer line in a text-only client.
- * `players/{uid}` and Proof `itemText` validate no field (ADR 0001), so this is
- * participant-controlled structure in a message the recipient reads as ours.
- *
- * Applied by the MODEL rather than by the renderer, so both alternatives carry
- * the same characters and cannot present a different message structure — which
- * is the property a `multipart/alternative` pair has to hold.
- */
-export function singleLine(raw: string, maxLength = BODY_TEXT_MAX): string {
-  // C0 **AND C1**, plus DEL (Codex P2, round 11 on PR #1207). The first version
-  // covered `\u0000-\u001f\u007f` and leaned on `\s+` for the rest — but
-  // JavaScript's `\s` does NOT match U+0085 NEXT LINE, and some clients render
-  // NEL as a line break. So a C1 control survived into subjects and plain-text
-  // bodies and could still fabricate structure, which is the whole thing this
-  // function exists to prevent. U+0080–U+009F is the range that was missing.
-  // eslint-disable-next-line no-control-regex -- flattening control characters IS the point.
-  const flat = raw.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim();
-  // AND BOUNDED (Codex P1, final round on PR #1207). Flattening alone left the
-  // LENGTH unbounded, and `players/{uid}` validates no field (ADR 0001): a
-  // Player can edit their own `displayName` while the Event is active, place
-  // themselves in the live top three after the podium posts, and store a name
-  // hundreds of kilobytes long. That value is copied into BOTH alternatives for
-  // every recipient and both halves are then stored in ONE outbox document, so
-  // past Firestore's 1 MiB limit every `create` fails, every recipient counts as
-  // blocked, and the Event's winner announcement can never drain — one
-  // participant denying the whole roster its last email.
-  //
-  // The subject has been bounded since round 8 (`subjectSafeName`); this is the
-  // same oversight one layer in, the body left unbounded while the header was
-  // protected.
-  return flat.length > maxLength ? `${flat.slice(0, maxLength - 1).trimEnd()}…` : flat;
-}
+// `singleLine` and `BODY_TEXT_MAX` live in `./emailShell` since the daily
+// card's plain-text part needed the same flattening (and `dailyEmailContent`
+// cannot import from this module, which imports from it). Re-exported so the
+// podium's own callers and suite keep one import site.
+export { BODY_TEXT_MAX, singleLine };
 
 /** "16 bingos · 124 sq" — the stat cell, pluralised. Shared by both parts so
  *  the HTML and the text cannot disagree about a singular. */
@@ -451,7 +412,7 @@ export function buildPodiumEmailModel(args: BuildPodiumEmailArgs): PodiumEmailMo
 
   // ROW 1 IS THE MOMENT'S CHAMPION, NOT THE LIVE ROSTER'S HEAD (Codex P2, round
   // 2 on PR #1207). The ranking below is rebuilt from Player documents, which
-  // are client-authoritative and validate no field (ADR 0001) — and the freeze
+  // are client-authoritative and validate no stat field (ADR 0001) — and the freeze
   // cutoff bounds timestamps, not counts — so a post-freeze self-write can put
   // somebody else at the head of it. The subject names the Moment's champion, so
   // an unpinned row 1 would have produced an email whose headline and whose

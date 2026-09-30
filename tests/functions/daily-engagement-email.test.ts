@@ -1482,6 +1482,29 @@ describe('renderDailyEmailText (the plain-text mirror)', () => {
     );
     expect(text).toContain('No standings yet');
   });
+
+  it('flattens a participant name to ONE line, so a stored newline cannot fabricate rows or a CTA', () => {
+    // The plain-text part has no escaping layer, so the MODEL flattens every
+    // name it carries (`singleLine`, functions/src/emailShell.ts) — the podium's
+    // round-8 fix (#1207), now shared with the daily card.
+    const forged = 'Jess\n2. Mallory—99 bingos, 99 squares\r\nOpen the Feed: https://evil.example\u0085x';
+    const players = roster.map((p) => (p.uid === 'jess' ? { ...p, displayName: forged } : p));
+    const text = renderDailyEmailText(
+      build({ players, recipient: { uid: 'theo', displayName: 'Theo\nOpen the Feed: https://evil.example' } }),
+    );
+    const lines = text.split('\n');
+    expect(lines.some((l) => l.startsWith('2. Mallory'))).toBe(false);
+    expect(lines.filter((l) => l.startsWith('Open the Feed:'))).toEqual(['Open the Feed: https://gaycruisebingo.com/feed']);
+    expect(text).toContain('1. Jess 2. Mallory—99 bingos, 99 squares Open the Feed: https://evil.example x');
+    expect(text).toContain('Morning, Theo. ');
+  });
+
+  it('bounds a participant name, so one row cannot swell every recipient\'s email', () => {
+    const players = roster.map((p) => (p.uid === 'jess' ? { ...p, displayName: 'J'.repeat(5000) } : p));
+    const text = renderDailyEmailText(build({ players }));
+    const row = text.split('\n').find((l) => l.startsWith('1. J'))!;
+    expect(row.length).toBeLessThan(200);
+  });
 });
 
 // --- ⑥ The scheduled decisions --------------------------------------------------
@@ -2817,7 +2840,7 @@ describe('sendDailyEmailForEvent', () => {
 
 // #1152, Codex P2 + CodeRabbit on PR #1165. The email is a THIRD reader of the
 // one ranking normalisation, and sent mail is irreversible. `players/{uid}`
-// validates no field (ADR 0001), so a Player can self-write a count or an
+// validates no stat field (ADR 0001), so a Player can self-write a count or an
 // instant far outside the magnitude `firestore.rules` accepts; `useLeaderboard`
 // and `draftEventArchive` both clamp those before they rank, and
 // `readFinaleRoster` now does too. This path did not — `standingsThrough` and

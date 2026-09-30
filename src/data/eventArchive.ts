@@ -557,7 +557,7 @@ export const MAX_ARCHIVED_UID = 128;
  * shape a Player can actually produce by deleting a field from their own row.
  *
  * IT IS ASKED OF THE DOCUMENT ID, not of the stored field. The rules arm binds
- * the PATH (`isOwner(uid)`) and validates nothing inside the document, so a
+ * the PATH (`isOwner(uid)`) and validates nothing inside the document beyond its display name and avatar, so a
  * Player can store a 300 KB string at `uid` on their own row — and a record that
  * copied it would exceed `MAX_ARCHIVE_BYTES` on every attempt, permanently, on
  * an Event the first write has already shut. `playerConverter` is where the two
@@ -696,7 +696,7 @@ export function archiveInstant(value: unknown): number | null {
  * #1142 item 9).
  *
  * `usableUid` is about the one malformation a row cannot survive; this is about
- * the one the SELECTORS cannot survive. `players/{uid}` validates nothing in its
+ * the one the SELECTORS cannot survive. `players/{uid}` validates no stat in its
  * rules arm, so `dayStats` is a Player-written map that can hold `null`, a
  * string, or a bucket missing every field — and `eventFirstBingoAt`,
  * `sumDayStats` and `perDayHonors` all dereference the bucket directly
@@ -1250,7 +1250,7 @@ export interface EventArchiveDraft {
  * and the ceremonial `first_bingo` Moment. An Event with no freeze at all
  * (`null`) has no cutoff, which is the pre-ADR-0011 behaviour unchanged.
  *
- * THE INPUTS ARE VALIDATED, because `players/{uid}` validates nothing (#1151,
+ * THE INPUTS ARE VALIDATED, because `players/{uid}` validates no stat (#1151,
  * Codex P2 on PR #1139). That row is self-written under the honour system and
  * its rules arm requires neither `uid`, `displayName`, `bingoCount` nor
  * `squaresMarked` — so a Player can delete a field from their own row, or store

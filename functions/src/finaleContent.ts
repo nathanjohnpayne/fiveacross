@@ -145,7 +145,7 @@ function readableRankingInstant(value: unknown): number | null {
  * `useLeaderboard` maps the live roster through and what `draftEventArchive`
  * maps the roster it freezes through. This side had only `readFinaleRoster`'s
  * finiteness checks, and `buildPodiumPayload` then compared the RAW numbers —
- * so for values `players/{uid}` freely admits (its rules arm validates no field,
+ * so for values `players/{uid}` freely admits (its rules arm validates no stat field,
  * ADR 0001) the scheduler's podium ordered a roster the two client paths ordered
  * differently. Two distinct oversized `bingoCount`s collapse to a tie under the
  * clamp and reorder on squares live and in the archive, while the podium Moment
@@ -222,7 +222,7 @@ export function canonicalDayStatsKey(key: string): boolean {
  * rebuild the map unconditionally, so a well-formed bucket carrying a field the
  * rankers never read lost that field here and kept it there (#1168, fix round
  * 1). The rule itself used to differ on three shapes, all reachable
- * because `players/{uid}` validates no field (ADR 0001) and none written by a
+ * because `players/{uid}` validates no stat field (ADR 0001) and none written by a
  * real client: a non-integer key (client kept, Functions canonicalised or
  * dropped), an array bucket (client kept and coerced, Functions dropped), and
  * a map with nothing readable in it (client `{}`, Functions absent — which

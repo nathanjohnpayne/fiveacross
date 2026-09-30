@@ -146,13 +146,13 @@ describe('moments broadcasts — the Feed beat writer (specs/w2-feed-moments.md)
   });
 
   it('a legacy (day-less) Blackout broadcasts one `blackout` Moment at the per-Player id', async () => {
-    broadcastBlackout({ uid: 'u1', displayName: 'Alice', photoURL: 'https://x/a.jpg' });
+    broadcastBlackout({ uid: 'u1', displayName: 'Alice', photoURL: 'https://lh3.googleusercontent.com/a.jpg' });
     await settle();
 
     expect(setDocSpy).toHaveBeenCalledTimes(1);
     const [ref, payload] = setDocSpy.mock.calls[0];
     expect(ref.path).toBe(`events/${EVENT_ID}/moments/u1-blackout`);
-    expect(payload).toMatchObject({ kind: 'blackout', uid: 'u1', photoURL: 'https://x/a.jpg' });
+    expect(payload).toMatchObject({ kind: 'blackout', uid: 'u1', photoURL: 'https://lh3.googleusercontent.com/a.jpg' });
   });
 
   it('a per-card Blackout (#267) writes a per-(Player, Day) id — a second Day posts its own Moment, the same Day dedupes', async () => {
@@ -203,13 +203,13 @@ describe('moments broadcasts — the Feed beat writer (specs/w2-feed-moments.md)
   });
 
   it('a legacy (day-less) BINGO still broadcasts at the once-per-Player id', async () => {
-    broadcastBingo({ uid: 'u1', displayName: 'Alice', photoURL: 'https://x/a.jpg' });
+    broadcastBingo({ uid: 'u1', displayName: 'Alice', photoURL: 'https://lh3.googleusercontent.com/a.jpg' });
     await settle();
 
     expect(setDocSpy).toHaveBeenCalledTimes(1);
     const [ref, payload] = setDocSpy.mock.calls[0];
     expect(ref.path).toBe(`events/${EVENT_ID}/moments/u1-bingo`);
-    expect(payload).toMatchObject({ kind: 'bingo', uid: 'u1', photoURL: 'https://x/a.jpg' });
+    expect(payload).toMatchObject({ kind: 'bingo', uid: 'u1', photoURL: 'https://lh3.googleusercontent.com/a.jpg' });
     expect('dayIndex' in payload).toBe(false);
   });
 

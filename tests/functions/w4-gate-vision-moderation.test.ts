@@ -319,6 +319,17 @@ describe('shouldScanProof — the RUNTIME admin toggle (#268)', () => {
     await expect(shouldScanProof(dbWith({ visionGate: false }), 'e')).resolves.toBe(false);
   });
 
+  it('skips an object whose Event document does not exist — no Proof can point at it', async () => {
+    const missing = {
+      doc: () => ({ get: () => Promise.resolve({ exists: false, get: () => undefined }) }),
+    };
+    await expect(shouldScanProof(missing, 'e')).resolves.toBe(false);
+    const present = {
+      doc: () => ({ get: () => Promise.resolve({ exists: true, get: () => undefined }) }),
+    };
+    await expect(shouldScanProof(present, 'e')).resolves.toBe(true);
+  });
+
   it('fails OPEN on a read error — moderation never silently disables on a transient hiccup', async () => {
     const failing = { doc: () => ({ get: () => Promise.reject(new Error('unavailable')) }) };
     await expect(shouldScanProof(failing, 'e')).resolves.toBe(true);

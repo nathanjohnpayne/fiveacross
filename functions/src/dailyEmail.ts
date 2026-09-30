@@ -370,7 +370,7 @@ function finiteNumber(value: unknown, fallback: number): number {
  *  READABLE BEFORE RANKED, exactly as `readFinaleRoster` prepares the
  *  scheduler's roster and `useLeaderboard` the live one (#1152, Codex P2 on PR
  *  #1165). `standingsThrough` and `eventFirstBingoUid` accepted any FINITE
- *  number a Player self-wrote (ADR 0001 — `players/{uid}` validates no field),
+ *  number a Player self-wrote (ADR 0001 — `players/{uid}` validates no stat field),
  *  so two counts above the archive's magnitude bound tied on the two client
  *  paths, which clamp, and ranked by their raw difference in the morning email;
  *  an out-of-bound `firstBingoAt` likewise ties under the clamp, where the
