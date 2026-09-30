@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 // specs/player-blocking.md — the write flows and the pure derivations
 // (#689). Firestore is mocked: what is pinned is the EXACT batch contents,
@@ -9,9 +9,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // the SDK never applies locally before the server accepts it).
 type Batch = {
   kind: 'batch' | 'transaction';
-  set: ReturnType<typeof vi.fn>;
-  delete: ReturnType<typeof vi.fn>;
-  commit: ReturnType<typeof vi.fn>;
+  set: Mock;
+  delete: Mock;
+  commit: Mock<() => Promise<void>>;
 };
 
 const H = vi.hoisted(() => ({
