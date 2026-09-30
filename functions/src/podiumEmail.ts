@@ -1923,7 +1923,7 @@ export async function podiumEmailInputFor(
   // ⭐ or a pinned honour can still arrive here, and no later freeze can repair
   // it. The two halves contradict each other and only one of them is evidence:
   // a pin is a server-written record of a bingo, a count is a Player's own
-  // figure on a row that validates no field (ADR 0001) and that the holder can
+  // figure on a row that validates no stat field (ADR 0001) and that the holder can
   // clear. So the honour reading is asked FIRST and can only ever answer
   // `true`; the stored fact decides only what the record does not otherwise
   // name.

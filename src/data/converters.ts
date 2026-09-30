@@ -3,6 +3,7 @@ import { normalizePool } from '../game/pool';
 import { scoringForDay } from '../game/scoring';
 import { standingsFreezeAtFor } from '../game/logic';
 import { normalizeEventTheme } from '../theme/themes';
+import { allowedPhotoUrlOrNull } from './photoUrl';
 import type {
   FirestoreDataConverter,
   QueryDocumentSnapshot,
@@ -248,8 +249,9 @@ export const boardConverter: FirestoreDataConverter<BoardDoc> = {
 //
 // AND `uid` IS THE DOCUMENT ID, never the stored field (#1151, Codex P1 on PR
 // #1162). `players/{uid}` is keyed by the Player's own auth uid and its rules
-// arm binds the PATH — `isOwner(uid)` — while validating nothing at all inside
-// the document (ADR 0001: the row is self-written). So the stored `uid` is
+// arm binds the PATH — `isOwner(uid)` — while validating nothing inside the
+// document beyond the rendered identity fields' types (ADR 0001: the row is
+// self-written; `uid` is not one of them). So the stored `uid` is
 // unbounded, untyped Player input that happens to share a name with the row's
 // real identity, and every reader that trusts it is trusting a field its author
 // could have set to anything: `isBanned(p.uid, bannedUids)` would miss a ban,
@@ -261,15 +263,28 @@ export const boardConverter: FirestoreDataConverter<BoardDoc> = {
 // field. For a legitimate row the two are identical — `joinAndDeal` and the
 // profile mirror both write `uid: user.uid` at `playerRef(user.uid)` — so this
 // changes nothing an honest client ever sees.
+//
+// AND THE RENDERED IDENTITY FIELDS ARE COERCED to the types every renderer
+// assumes. `firestore.rules` now type-checks `displayName` / `photoURL` on every
+// write that sets them, but a row written before that check can still carry a
+// number, an object or an off-host URL, and one such row reaches EVERY viewer's
+// Leaderboard. A non-string `displayName` reads as ABSENT — the shape a
+// pre-#1158 identity-less row already has, which every renderer tolerates
+// (#317) — and a `photoURL` that is not an allowed avatar URL reads as `null`.
 export const playerConverter: FirestoreDataConverter<PlayerDoc> = {
   toFirestore: (data) => data as DocumentData,
   fromFirestore: (snap: QueryDocumentSnapshot) => {
     const data = snap.data() as PlayerDoc;
-    return {
+    const out: PlayerDoc = {
       ...data,
       uid: snap.id,
+      photoURL: allowedPhotoUrlOrNull(data.photoURL),
       reshufflesUsed: typeof data.reshufflesUsed === 'number' ? data.reshufflesUsed : 0,
     };
+    if ('displayName' in out && typeof out.displayName !== 'string') {
+      delete (out as Partial<PlayerDoc>).displayName;
+    }
+    return out;
   },
 };
 export const userConverter = passthrough<UserDoc>();
@@ -292,12 +307,22 @@ export const itemConverter: FirestoreDataConverter<ItemDoc> = {
   },
 };
 
+// Proofs coerce the two participant-authored fields `firestore.rules` did not
+// always type-check at create — the Callout `text` and the uploader's avatar —
+// so a legacy Proof carrying a non-string in either cannot throw in every Feed
+// reader's render: `text` reads as `null` unless it is a string, and `photoURL`
+// as `null` unless it is an allowed avatar URL (src/data/photoUrl.ts).
 export const proofConverter: FirestoreDataConverter<ProofDoc> = {
   toFirestore: (data) => data as DocumentData,
-  fromFirestore: (snap: QueryDocumentSnapshot) => ({
-    ...(snap.data() as Omit<ProofDoc, 'id'>),
-    id: snap.id,
-  }),
+  fromFirestore: (snap: QueryDocumentSnapshot) => {
+    const data = snap.data() as Omit<ProofDoc, 'id'>;
+    return {
+      ...data,
+      id: snap.id,
+      photoURL: allowedPhotoUrlOrNull(data.photoURL),
+      ...('text' in data ? { text: typeof data.text === 'string' ? data.text : null } : {}),
+    };
+  },
 };
 
 export const claimConverter: FirestoreDataConverter<ClaimDoc> = {

@@ -249,7 +249,7 @@ describe('withReadableRanking — the roster is made readable BEFORE it is ranke
 });
 
 // ONE BOUND, BOTH RANKING PATHS (#1152, Codex P2 on PR #1165). `players/{uid}`
-// validates no field, so a Player can self-write a count or an instant above the
+// validates no stat field, so a Player can self-write a count or an instant above the
 // magnitude `firestore.rules`' `finiteArchiveNumber` accepts. The archive clamped
 // those before it ranked and serialised; this live normaliser passed them through
 // untouched — so two oversized rows could order one way on the last live

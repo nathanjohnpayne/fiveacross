@@ -345,7 +345,8 @@ export function bulkApproveItems(
  * have hidden and marked it already, or an admin at another console may have
  * Restored it. When a hold stands, the marker rides the same update; when none
  * does, this is byte-for-byte the write it always was, so an ordinary moderation
- * hide is untouched and stays liftable by `Restore` and publishable by a confirm.
+ * hide is untouched and stays liftable by `Restore` (a Confirm publishes only a
+ * still-`'pending'` Proof of the claimant's own, never a hidden one).
  *
  * It deliberately reads no verdict. The verdict strings live in the Functions
  * allowlist (`AUTO_HIDE_VISION_FLAGS`) and Functions and this bundle deploy
@@ -2052,16 +2053,31 @@ async function resolve(
     // a verdict its cached copy of the list had never heard of.
     //
     // The gate reads the LIVE snapshot, not the stale event that opened the
-    // admin's console, and only a genuinely publishable Proof is moved: a
-    // 'pending' one, an already-active one (a no-op re-write), or a plain
-    // report-count / manual hide, whose lift is `Clear reports` / `Restore` and
-    // whose confirm behaviour is unchanged. A missing snapshot keeps the pre-#133
-    // write.
+    // admin's console, and only a genuinely publishable Proof is moved: see the
+    // ownership-and-status gate below.
+    //
+    // AND ONLY THE CLAIMANT'S OWN, STILL-PENDING PROOF IS PUBLISHED. A Claim's
+    // `proofId` is creator-supplied, so the Proof it names is trusted only once
+    // the live read shows it is the claimant's own upload (`uid === c.uid`) and
+    // is still the admin-only `'pending'` Proof this Claim was filed with — the
+    // same owner-first discipline `restoreProof` applies to the claims that
+    // steer it. Anything else is left exactly as it stands: another Player's
+    // Proof (a hidden or pending one must not reach the Feed through somebody
+    // else's Claim), an already-active one (publishing it would be a no-op), a
+    // report- or admin-hidden one (its lift is `Clear reports` / `Restore`, not
+    // a confirm), and a missing one (a merge `set` would CREATE a ghost Proof
+    // carrying nothing but a status). The Claim still resolves and the Mark is
+    // still confirmed in every case.
     if (claimProofRef) {
       const liveProof = claimProofSnap?.exists()
         ? (claimProofSnap.data() as Partial<ProofDoc> | undefined)
         : undefined;
-      if (!safetyHideStands(liveProof)) {
+      if (
+        liveProof !== undefined &&
+        liveProof.uid === c.uid &&
+        liveProof.status === 'pending' &&
+        !safetyHideStands(liveProof)
+      ) {
         tx.set(claimProofRef, { status: 'active' }, { merge: true });
       }
     }

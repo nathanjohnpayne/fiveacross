@@ -1,4 +1,5 @@
 import { collection, doc, increment, runTransaction, updateDoc } from 'firebase/firestore';
+import { allowedPhotoUrlOrNull } from './photoUrl';
 import { db, EVENT_ID } from '../firebase';
 import { uploadProofMedia, deleteStoragePath, proofMediaGeneration } from './storage';
 import { purgeProofMediaFromCaches } from './proofMediaCache';
@@ -350,7 +351,10 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
     tx.set(pRef, {
       uid,
       displayName,
-      photoURL,
+      // Held to the avatar hosts `firestore.rules`' `photoUrlOk` admits, so an
+      // off-host value in a legacy Player row drops to the initial instead of
+      // failing the whole Proof.
+      photoURL: allowedPhotoUrlOrNull(photoURL),
       type: proof.type,
       cellIndex,
       itemText,

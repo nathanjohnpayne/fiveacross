@@ -21,20 +21,20 @@ service firebase.storage {
     // `closedToPlay` is what keeps it at two: unlike `firestore.rules`, Storage
     // Rules make no promise of deduplicating a repeated `firestore.get()` on the
     // same path, so a second inline read of the same document could spend the
-    // budget and fail the write closed. The `exists()` half is not decoration
-    // either: without it a missing Event document would error the `get()` and
-    // newly deny a write that succeeds today, and the `'active'` / `false`
-    // defaults keep an Event document carrying neither key OPEN.
+    // budget and fail the write closed. The `'active'` / `false` defaults keep an
+    // Event document carrying neither key OPEN.
+    //
+    // A MISSING Event document is CLOSED for proof media (see
+    // `eventOpenForProofMedia` below): the Firestore half of a Proof already
+    // requires the Event (`admitted()` reads it), so media under an Event id
+    // that names no Event is media no Proof document can ever point at — and a
+    // server-side scanner would otherwise spend work on it.
     //
     // Each arm is evaluated on its own, for its own method, so the budget is
     // spent per operation rather than shared across the two arms below.
     function closedToPlay(event) {
       return event.get('status', 'active') == 'archived'
         || event.get('archiving', false) == true;
-    }
-    function eventClosedToPlay(eventId) {
-      return firestore.exists(/databases/(default)/documents/events/$(eventId))
-        && closedToPlay(firestore.get(/databases/(default)/documents/events/$(eventId)).data);
     }
 
     // WHO MAY DELETE PROOF MEDIA. NOBODY, WHILE ITS PROOF DOCUMENT STANDS.
@@ -129,8 +129,8 @@ service firebase.storage {
     // `get()` errors and an errored access is a denial. Conservative, and it
     // costs the app nothing: the OWNER's orphan delete never reads the Event at
     // all, so a legacy Event — or media under an Event document that was never
-    // written — stays clearable by the party that uploaded it, which is the
-    // absence-means-open default this file carries everywhere it matters. Media
+    // written — stays clearable by the party that uploaded it: a delete never
+    // needs the Event to exist (an UPLOAD does — `eventOpenForProofMedia`). Media
     // whose Proof document exists under a missing Event document is denied one
     // step earlier still, by `proofDocMissing` itself.
     function proofMediaDeleteOk(event) {
@@ -147,9 +147,36 @@ service firebase.storage {
           || proofMediaDeleteOk(
                firestore.get(/databases/(default)/documents/events/$(eventId)).data));
     }
-    function okImage() {
-      return request.resource.contentType.matches('image/.*')
+    // Image uploads name their type exactly rather than `image/*`:
+    // `image/svg+xml` is a document that can carry script, and a download URL
+    // for one served from the Storage origin is not something any flow in this
+    // app produces. Both image writers — `uploadAvatar` and `uploadProofMedia`
+    // — re-encode through a canvas and upload `image/jpeg` under a `.jpg` name,
+    // and both image arms below admit only a `.jpg` name, so a `.jpg` object
+    // must BE `image/jpeg`. A future image arm that takes another extension
+    // should allow-list raster types (`image/(jpeg|png|webp|heic)`), never
+    // widen back to `image/*`.
+    function okJpeg() {
+      return request.resource.contentType == 'image/jpeg'
         && request.resource.size < 8 * 1024 * 1024;
+    }
+    // A proof object's name is `<proofId>.<ext>`: the Firestore auto-id
+    // `attachProof` minted (alphanumeric; `firestore.rules` holds the Proof id
+    // to the same `[A-Za-z0-9-]` shape) and the extension `uploadProofMedia`
+    // chose for the media kind. No `_` and no second `.`, so a client cannot
+    // plant a `{proofId}_thumb.jpg` beside the server-written thumbnail. The extension decides the content check, so a `.jpg` is a
+    // JPEG and a `.webm` / `.m4a` is audio.
+    function okProofMedia(file) {
+      return (file.matches('^[A-Za-z0-9-]{1,40}[.]jpg$') && okJpeg())
+        || (file.matches('^[A-Za-z0-9-]{1,40}[.](webm|m4a)$') && okAudio());
+    }
+    // Proof media lands only under an Event that EXISTS and is open. The
+    // `exists()` answers the first question and gates the `get()` for the
+    // second, so the arm still spends at most the two Firestore accesses
+    // Storage Rules allow (see `closedToPlay` above).
+    function eventOpenForProofMedia(eventId) {
+      return firestore.exists(/databases/(default)/documents/events/$(eventId))
+        && !closedToPlay(firestore.get(/databases/(default)/documents/events/$(eventId)).data);
     }
     function okAudio() {
       return request.resource.contentType.matches('audio/.*')
@@ -161,14 +188,14 @@ service firebase.storage {
     // + .jpg rather than treating the filename as the uid (which never matched).
     match /avatars/{file} {
       allow read: if true;
-      allow write: if signedIn() && file == request.auth.uid + '.jpg' && okImage();
+      allow write: if signedIn() && file == request.auth.uid + '.jpg' && okJpeg();
     }
 
     // Proof media (Phase 1). Path scoped to the uploading user.
     match /proofs/{eventId}/{uid}/{file} {
       allow read: if signedIn();
       // Content-validate uploads, but keep delete separate: a delete carries no
-      // request.resource, so okImage()/okAudio() would reject it and leave the
+      // request.resource, so okJpeg()/okAudio() would reject it and leave the
       // blob orphaned when deleteProof() removes the doc. An ORPHANED object —
       // one no Proof document points at — is clearable in every state, and since
       // #1153 that is the ONLY client delete this arm admits: media a live Proof
@@ -208,7 +235,7 @@ service firebase.storage {
       // `firestore.rules` refuses the Proof create while its
       // `proofStorageDeletes` row stands, and asking that question HERE would be
       // a third Firestore access this arm has no budget for
-      // (`eventClosedToPlay` already spends both).
+      // (`eventOpenForProofMedia` already spends both).
       //
       // `resource == null` IS THE PREDICATE, not an `allow create` without
       // `update`. The two are supposed to be equivalent — `create` is documented
@@ -240,8 +267,8 @@ service firebase.storage {
       // What this arm governs is the browser.
       allow create, update: if isOwner(uid)
         && resource == null
-        && !eventClosedToPlay(eventId)
-        && (okImage() || okAudio());
+        && okProofMedia(file)
+        && eventOpenForProofMedia(eventId);
       allow delete: if mayDeleteProofMedia(eventId, uid, file);
     }
 

@@ -294,7 +294,7 @@ describe('anyMarksRecorded — the Marks question, not the scoring one', () => {
     // This reads `dayStats` UNCONDITIONALLY, where `podiumStandingRow` reads it
     // only on a schedule with a ceremonial Day — so a roster that skipped
     // `sanitizeFinaleDayStats` reaches a bucket the row builder never touches, and
-    // `players/{uid}` validates no field (ADR 0001). One row must not take the
+    // `players/{uid}` validates no stat field (ADR 0001). One row must not take the
     // whole finale beat down.
     const malformed = (dayStats: unknown): FinalePlayer =>
       ({ uid: 'x', displayName: 'X', bingoCount: 0, squaresMarked: 0, firstBingoAt: null, dayStats }) as unknown as FinalePlayer;

@@ -1,3 +1,6 @@
+import { isAllowedPhotoUrl } from '../data/photoUrl';
+import { resolveProofMediaUrl } from '../data/proofMediaUrl';
+
 export default function Avatar({
   name,
   src,
@@ -16,14 +19,22 @@ export default function Avatar({
    *  screen for every viewer until the identity write landed. Render the `?`
    *  fallback instead, exactly like an empty name. */
   name: string | null | undefined;
-  src: string | null;
+  src: string | null | undefined;
   /** A custom-uploaded avatar URL — takes priority over `src` when set (see specs/w1-profile-avatar.md). */
   customPhoto?: string | null;
   size?: number;
 }) {
-  const initial = (name?.trim()[0] ?? '?').toUpperCase();
+  // `typeof` rather than `?.`: a self-written row can carry a non-string name,
+  // and `.trim` on a number throws during render just as it did on `null`.
+  const initial = ((typeof name === 'string' ? name.trim()[0] : undefined) ?? '?').toUpperCase();
   const style = size ? { width: size, height: size } : undefined;
-  const resolvedSrc = customPhoto || src;
+  // Only an avatar on an app-produced host renders (src/data/photoUrl.ts): any
+  // other value — another host, another scheme, a non-string from a legacy row —
+  // falls back to the initial rather than pointing every viewer's browser at a
+  // URL a participant chose. The allowed custom photo still wins over `src`.
+  // `resolveProofMediaUrl` is identity outside the e2e emulator build.
+  const allowed = isAllowedPhotoUrl(customPhoto) ? customPhoto : isAllowedPhotoUrl(src) ? src : null;
+  const resolvedSrc = allowed ? resolveProofMediaUrl(allowed) : null;
   if (resolvedSrc) {
     return (
       <img

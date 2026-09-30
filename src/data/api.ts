@@ -59,6 +59,7 @@ import { directMarkAnalyticsRequest } from './markAnalytics';
 import { stampEchoAnalyticsTransitions } from './echoAnalytics';
 import { eventScopeKey } from './eventScope';
 import { assertSupportedDayIndexes } from './eventLimits';
+import { allowedPhotoUrlOrNull } from './photoUrl';
 import type { Cell, ClaimMode, DayDef, EventDoc, ItemDoc, PlayerDoc, UserDoc } from '../types';
 
 // Raw (converter-free) refs for writes, to keep partial merges simple.
@@ -78,22 +79,6 @@ const rawItem = (id: string, eventId: string = EVENT_ID) =>
 const rawEvent = (eventId: string = EVENT_ID) => doc(db, 'events', eventId);
 
 /**
- * True only for a well-formed `https://` URL — the only photo shape the public
- * players row accepts from the self-writable users/{uid} profile. Rejects
- * non-strings, unparseable strings, and every other scheme (`http:`,
- * `javascript:`, `data:`, …), so a malformed saved photo can never be
- * denormalized into a public doc other clients render.
- */
-function isHttpsUrl(v: unknown): v is string {
-  if (typeof v !== 'string') return false;
-  try {
-    return new URL(v).protocol === 'https:';
-  } catch {
-    return false;
-  }
-}
-
-/**
  * The public displayName to denormalize for a Player: their SAVED users/{uid}
  * name when it is a real, trimmed-non-empty string within the 100-char cap the
  * public-doc rules enforce (markers, moments, proofs), else the auth value, else
@@ -111,7 +96,11 @@ export function resolveDisplayName(
     profile.displayName.length <= 100
       ? profile.displayName
       : null;
-  return saved ?? authFallback ?? 'Anonymous';
+  // The auth value is Google's, unbounded; clip it to the same 100-char cap the
+  // public-doc rules enforce (`displayNameOk`), or a long Google name would fail
+  // the join outright instead of rendering truncated.
+  const fallback = typeof authFallback === 'string' ? authFallback.slice(0, 100) : null;
+  return saved ?? fallback ?? 'Anonymous';
 }
 
 /**
@@ -199,8 +188,11 @@ function dayEasyMixRatio(day: DayDef, eventData: Partial<EventDoc> | null | unde
  */
 function bootstrapProfile(u: User, now: number = Date.now()) {
   return {
-    displayName: u.displayName ?? 'Anonymous',
-    photoURL: u.photoURL ?? null,
+    // Bounded and host-checked to what `firestore.rules`' users arm admits
+    // (`displayNameOk`, `photoUrlOk`): a create the rule refused would leave
+    // the User with no profile row at all.
+    displayName: (u.displayName ?? 'Anonymous').slice(0, 100),
+    photoURL: allowedPhotoUrlOrNull(u.photoURL),
     createdAt: now,
   };
 }
@@ -523,10 +515,12 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
     // add a round trip for no correctness gain.
     const profileSnap = await getDoc(rawUser(u.uid)).catch(() => null);
     const profile = profileSnap?.exists() ? (profileSnap.data() as Partial<UserDoc>) : null;
-    const savedPhoto = profile && isHttpsUrl(profile.photoURL) ? profile.photoURL : null;
+    const savedPhoto = profile ? allowedPhotoUrlOrNull(profile.photoURL) : null;
     const displayName = resolveDisplayName(profile, u.displayName);
     const photoURL =
-      profile?.customPhoto === true ? (savedPhoto ?? u.photoURL ?? null) : (u.photoURL ?? null);
+      profile?.customPhoto === true
+        ? (savedPhoto ?? allowedPhotoUrlOrNull(u.photoURL))
+        : allowedPhotoUrlOrNull(u.photoURL);
     // The row read + conditional seed run as ONE transaction (#409): the
     // per-field guards below are only sound against the row state the write
     // actually lands on. Two overlapping joins (a timed-out deal still in
@@ -548,7 +542,7 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
       // and `Board`'s `playerJoined` (Codex P2, #1158 review round 6), so all
       // four predicates are one rule. A nullish-only check left a third state
       // unrepairable: `players/{uid}` is self-writable and `firestore.rules`
-      // validates no field on it (ADR 0001), so a pre-existing row can carry
+      // validates no stat field on it (ADR 0001), so a pre-existing row can carry
       // a string or an object here. Every reader calls such a row UNJOINED,
       // and the repair skipped it because the field was not nullish — so the
       // stamp never became numeric, the Day deal no-opped forever, and the
@@ -593,21 +587,25 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
   ]);
   const profile = profileSnap?.exists() ? (profileSnap.data() as Partial<UserDoc>) : null;
   // Validate before denormalizing (Codex P2 on PR #66 round 3): users/{uid} is
-  // self-writable — firestore.rules only shape-checks its attestedAdultAt — so
-  // a malformed saved profile must not flow into the public players row (nor
-  // fail the join against the rules' shape checks). The saved name is validated
-  // by `resolveDisplayName` (real, trimmed-non-empty, within the 100-char cap
-  // the rules enforce on every public displayName — markers, moments, proofs),
-  // the SAME guard the Tally marker write uses; a saved photo only counts when
-  // it is a well-formed https:// URL AND the profile's customPhoto flag is
+  // self-writable — firestore.rules shape-checks its fields, but a row written
+  // before those checks existed can still carry anything — so a malformed saved
+  // profile must not flow into the public players row (nor fail the join
+  // against the rules' shape checks). The saved name is validated by
+  // `resolveDisplayName` (real, trimmed-non-empty, within the 100-char cap the
+  // rules enforce on every public displayName — players, markers, moments,
+  // proofs), the SAME guard the Tally marker write uses; a saved photo only
+  // counts when it is an allowed avatar URL (`./photoUrl.ts`, the client mirror
+  // of the rules' `photoUrlOk`) AND the profile's customPhoto flag is
   // EXACTLY boolean true (round 4: a malformed truthy value like 'false' or 1
   // must not publish the saved photo — the contract is customPhoto: true, and
   // everything else in this doc is untrusted junk). Anything malformed falls
   // back per-field to the auth values, exactly like a missing profile.
-  const savedPhoto = profile && isHttpsUrl(profile.photoURL) ? profile.photoURL : null;
+  const savedPhoto = profile ? allowedPhotoUrlOrNull(profile.photoURL) : null;
   const displayName = resolveDisplayName(profile, u.displayName);
   const photoURL =
-    profile?.customPhoto === true ? (savedPhoto ?? u.photoURL ?? null) : (u.photoURL ?? null);
+    profile?.customPhoto === true
+      ? (savedPhoto ?? allowedPhotoUrlOrNull(u.photoURL))
+      : allowedPhotoUrlOrNull(u.photoURL);
 
   // The ADR 0004 Phase 0 community auto-hide threshold, read from the event doc so
   // a frozen card is dealt from the SAME pool a Player sees live (useItems): a
@@ -895,7 +893,7 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
     // the join writes rather than the row's EXISTENCE, because the row is not
     // the join's to create alone: `savePlayerTheme`/`clearPlayerTheme` merge
     // `{ theme }` onto `rawPlayer(uid)`, which CREATES the document when it is
-    // absent, and `firestore.rules` validates no field on `players/{uid}` at
+    // absent, and `firestore.rules` validates no stat field on `players/{uid}` at
     // all (ADR 0001) — so a `{theme}`-only row with no identity commits. `More`
     // renders while `runDeal`'s join is still in flight, exactly as `Board`
     // does, which is how a brand-new account with no legacy data reaches that

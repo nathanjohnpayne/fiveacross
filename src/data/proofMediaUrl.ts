@@ -39,10 +39,11 @@
 // the gate LOCAL to this module is the point: a cross-module import would make
 // the fold depend on the bundler propagating a constant between chunks.
 //
-// SCOPE. PROOF media only. `uploadAvatar` deliberately keeps the raw
-// `getDownloadURL()` value: avatar URLs are pinned by no rules regex (a profile
-// `photoURL` is free-form), so canonicalizing one would buy nothing and add a
-// second rewrite surface. The service worker's CacheFirst proof-media route
+// SCOPE. Proof media, and custom avatars. `uploadAvatar` canonicalizes too,
+// because `firestore.rules`' `photoUrlOk` pins every stored avatar URL to the
+// same production Storage host (or Google's photo host), and `Avatar` resolves
+// the stored value back to the emulator to render it (see `./photoUrl.ts`).
+// The service worker's CacheFirst proof-media route
 // (`PROOF_MEDIA_URL_PATTERN`, ./proofMediaCache.ts) matches the PRODUCTION host,
 // so under the e2e build the resolved emulator request simply misses the route
 // and nothing is cached — which is the correct behaviour for a test run, and the

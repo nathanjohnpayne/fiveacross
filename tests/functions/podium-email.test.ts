@@ -1764,7 +1764,7 @@ describe('an all-ceremonial Event is not an empty board (#1192, Codex P2 r14)', 
     // and one already carrying `false` beside a pin outlives the fix. The two
     // halves contradict each other and only one is evidence: the pin is a
     // server-written record of a bingo, the count is a figure its own holder
-    // can clear on a row that validates no field (ADR 0001).
+    // can clear on a row that validates no stat field (ADR 0001).
     const got = await podiumEmailInputFor(
       makeDb(
         seedCeremonialOnly({
@@ -3446,7 +3446,7 @@ describe('round-13 findings (Codex P2)', () => {
 
 describe('final round (Codex P1 + P2)', () => {
   it('bounds a hostile display name so the frozen outbox cannot exceed Firestore', async () => {
-    // `players/{uid}` validates no field (ADR 0001), so a Player can edit their
+    // `players/{uid}` validates no stat field (ADR 0001), so a Player can edit their
     // own name while the Event is active, place themselves in the live top three
     // after the podium posts, and store hundreds of kilobytes. Both alternatives
     // carry it and BOTH are frozen in one document — past 1 MiB every create
@@ -3766,7 +3766,7 @@ describe('current-head convergence round (Codex P2)', () => {
 describe('the subject header carries no unsanitised participant text', () => {
   it('strips newlines and control characters from a display name', () => {
     // This email is the first in the family to put user-written text in a
-    // header at all — `players/{uid}` validates no field (ADR 0001), and
+    // header at all — `players/{uid}` validates no stat field (ADR 0001), and
     // `sendEmail` passes `subject` through untouched.
     expect(subjectSafeName('Zac\r\nBcc: victim@example.com')).toBe(
       'Zac Bcc: victim@example.com',

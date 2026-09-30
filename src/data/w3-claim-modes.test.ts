@@ -218,6 +218,11 @@ beforeEach(() => {
     const exists = () => true;
     if (ref.path.includes('/boards/')) return Promise.resolve({ exists, data: () => boardState });
     if (ref.path.includes('/players/')) return Promise.resolve({ exists, data: () => playerState });
+    // The claim's own pending Proof: `confirmClaim` publishes it only when the
+    // live read shows the claimant's own, still-pending upload.
+    if (ref.path.includes('/proofs/')) {
+      return Promise.resolve({ exists, data: () => ({ uid: pendingClaim().uid, status: 'pending' }) });
+    }
     return Promise.resolve({ exists: () => false, data: () => undefined });
   });
 });
