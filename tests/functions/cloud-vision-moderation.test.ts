@@ -28,6 +28,11 @@ import {
 } from '../../functions/src/autohide';
 import { safetyHideStands } from '../../src/data/moderation';
 
+// The scanned object every Proof fixture below owns: `writeVisionVerdict` and
+// `applyPendingVisionScan` apply a verdict only to the Proof whose own
+// `storagePath` is the object that was scanned.
+const MEDIA = 'proofs/e/u1/p1.jpg';
+
 // specs/cloud-vision-moderation.md — the CONSUMER half of Cloud Vision (#133,
 // ADR 0004). Proves the Vision-flag → hide path: an extreme/illegal `visionFlag`
 // takes a `'flagged'` Proof to `status: 'hidden'` server-side with `visionFlag`
@@ -393,16 +398,16 @@ describe('writeVisionVerdict — the scanner records a verdict, never a Proof (#
 
   it('writes the verdict straight onto a Proof that already exists — the ordinary path', async () => {
     const { db, updates, ops, store } = fakeDb({
-      [PROOF]: { uid: 'u1', status: 'active', visionFlag: null, reportCount: 0 },
+      [PROOF]: { uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: null, reportCount: 0 },
     });
-    expect(await writeVisionVerdict(db, 'e', 'p1', 'violence', 5)).toBe('proof');
+    expect(await writeVisionVerdict(db, 'e', 'p1', 'violence', MEDIA, 5)).toBe('proof');
     // The safety hold rides the SAME update as the verdict (see the atomic-marker
     // block below): there is no interval in which the flag stands unrecorded.
     expect(updates).toEqual([
       { path: PROOF, data: { status: 'flagged', visionFlag: 'violence', safetyHide: true } },
     ]);
     expect(store[PROOF]).toEqual({
-      uid: 'u1', status: 'flagged', visionFlag: 'violence', safetyHide: true, reportCount: 0,
+      uid: 'u1', storagePath: MEDIA, status: 'flagged', visionFlag: 'violence', safetyHide: true, reportCount: 0,
     });
     // No hand-off record when there is nothing to hand off to.
     expect(store[SCAN]).toBeUndefined();
@@ -411,12 +416,12 @@ describe('writeVisionVerdict — the scanner records a verdict, never a Proof (#
 
   it('parks the verdict instead of CREATING the Proof when the upload beat the document', async () => {
     const { db, ops, store } = fakeDb({});
-    expect(await writeVisionVerdict(db, 'e', 'p1', 'extreme', 5)).toBe('scan');
+    expect(await writeVisionVerdict(db, 'e', 'p1', 'extreme', MEDIA, 5)).toBe('scan');
     // The whole finding, as one assertion: nothing was written to the Proof path,
     // so the Player's still-in-flight create is still a create.
     expect(store[PROOF]).toBeUndefined();
     expect(ops.filter((o) => o.path === PROOF).map((o) => o.op)).toEqual(['get']);
-    expect(store[SCAN]).toEqual({ visionFlag: 'extreme', scannedAt: 5 });
+    expect(store[SCAN]).toEqual({ visionFlag: 'extreme', scannedAt: 5, storagePath: MEDIA });
   });
 
   it('uses update, never a re-creating set, so a Proof deleted since the upload stays deleted', async () => {
@@ -424,7 +429,7 @@ describe('writeVisionVerdict — the scanner records a verdict, never a Proof (#
     // Proof is worse than no Proof, and the parked record is the deleted case's
     // answer too — it waits for a create that never comes rather than inventing one.
     const { db, ops } = fakeDb({});
-    await writeVisionVerdict(db, 'e', 'p1', 'violence', 5);
+    await writeVisionVerdict(db, 'e', 'p1', 'violence', MEDIA, 5);
     expect(ops.some((o) => o.op === 'update' && o.path === PROOF)).toBe(false);
     expect(ops.some((o) => o.op === 'set' && o.path === PROOF)).toBe(false);
   });
@@ -436,12 +441,12 @@ describe('writeVisionVerdict — the scanner records a verdict, never a Proof (#
     // direct write AND the admin's Restore, and the delayed create-trigger
     // delivery then consumed it and reinstated the hide the admin had lifted.
     const { db, updates, ops, store } = fakeDb({
-      [PROOF]: { uid: 'u1', status: 'active', visionFlag: null, reportCount: 0 },
-      [SCAN]: { visionFlag: 'extreme', scannedAt: 5 },
+      [PROOF]: { uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: null, reportCount: 0 },
+      [SCAN]: { visionFlag: 'extreme', scannedAt: 5, storagePath: MEDIA },
     });
-    expect(await writeVisionVerdict(db, 'e', 'p1', 'extreme', 6)).toBe('proof');
+    expect(await writeVisionVerdict(db, 'e', 'p1', 'extreme', MEDIA, 6)).toBe('proof');
     expect(store[PROOF]).toEqual({
-      uid: 'u1', status: 'flagged', visionFlag: 'extreme', safetyHide: true, reportCount: 0,
+      uid: 'u1', storagePath: MEDIA, status: 'flagged', visionFlag: 'extreme', safetyHide: true, reportCount: 0,
     });
     // The record is retired in the SAME transaction as the direct write, and the
     // delete is BLIND: the only read is the Proof's, so reads still precede writes.
@@ -462,7 +467,7 @@ describe('writeVisionVerdict — the scanner records a verdict, never a Proof (#
     expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(false);
     expect(updates).toHaveLength(1);
     expect(store[PROOF]).toEqual({
-      uid: 'u1', status: 'active', safetyHide: false, visionFlag: 'extreme', reportCount: 0,
+      uid: 'u1', storagePath: MEDIA, status: 'active', safetyHide: false, visionFlag: 'extreme', reportCount: 0,
     });
     expect(visionHideAction(store[PROOF] as VisionFlaggedDoc)).toBe(null);
   });
@@ -476,10 +481,10 @@ describe('writeVisionVerdict — the scanner records a verdict, never a Proof (#
     // server-written, never cleared, and deliberately survives a Restore, so a
     // Proof that already RECORDS a verdict has already had its one scan applied.
     const { db, updates, ops, store } = fakeDb({
-      [PROOF]: { uid: 'u1', status: 'active', visionFlag: null, reportCount: 0 },
+      [PROOF]: { uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: null, reportCount: 0 },
     });
     // 1. The first delivery records the verdict, and the trigger hides it.
-    expect(await writeVisionVerdict(db, 'e', 'p1', 'extreme', 5)).toBe('proof');
+    expect(await writeVisionVerdict(db, 'e', 'p1', 'extreme', MEDIA, 5)).toBe('proof');
     expect(await hideVisionFlaggedIfQualifies(db, 'e', 'p1')).toBe(true);
     expect(store[PROOF]).toMatchObject({ status: 'hidden', safetyHide: true, visionFlag: 'extreme' });
 
@@ -492,9 +497,9 @@ describe('writeVisionVerdict — the scanner records a verdict, never a Proof (#
 
     // 3. The redelivery arrives, with a record a twin delivery parked still
     //    standing beside it.
-    store[SCAN] = { visionFlag: 'extreme', scannedAt: 5 };
+    store[SCAN] = { visionFlag: 'extreme', scannedAt: 5, storagePath: MEDIA };
     const writesSoFar = updates.length;
-    const target = await writeVisionVerdict(db, 'e', 'p1', 'extreme', 7);
+    const target = await writeVisionVerdict(db, 'e', 'p1', 'extreme', MEDIA, 7);
 
     // 4. The lift stands, byte for byte: active, unhidden, and still carrying the
     //    admin's explicit `false`. This is the assertion the finding is about —
@@ -502,7 +507,7 @@ describe('writeVisionVerdict — the scanner records a verdict, never a Proof (#
     //    `safetyHide: true` and hidden again by the re-fire.
     expect(store[PROOF]).toEqual(lifted);
     expect(store[PROOF]).toEqual({
-      uid: 'u1', status: 'active', safetyHide: false, visionFlag: 'extreme', reportCount: 0,
+      uid: 'u1', storagePath: MEDIA, status: 'active', safetyHide: false, visionFlag: 'extreme', reportCount: 0,
     });
     expect(updates).toHaveLength(writesSoFar); // not one write to the Proof
     // …so no consumer arm re-hides it either, and no client's confirm gate holds it.
@@ -529,13 +534,13 @@ describe('writeVisionVerdict — the scanner records a verdict, never a Proof (#
     const { db, updates, ops, store } = fakeDb({
       // What a Restore leaves behind, here on a merely-racy flag an admin hand-Hid
       // and then lifted: active, the explicit `false`, verdict still standing.
-      [PROOF]: { uid: 'u1', status: 'active', visionFlag: 'racy', safetyHide: false, reportCount: 0 },
-      [SCAN]: { visionFlag: 'racy', scannedAt: 5 },
+      [PROOF]: { uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: 'racy', safetyHide: false, reportCount: 0 },
+      [SCAN]: { visionFlag: 'racy', scannedAt: 5, storagePath: MEDIA },
     });
     const lifted = { ...(store[PROOF] as Record<string, unknown>) };
     // The retry now says `violence` — an allowlisted verdict, so an equality arm
     // would not merely re-flag it but stamp the hold and hide it again.
-    const target = await writeVisionVerdict(db, 'e', 'p1', 'violence', 9);
+    const target = await writeVisionVerdict(db, 'e', 'p1', 'violence', MEDIA, 9);
     // The lift stands untouched. This is the assertion the finding is about: with
     // the arm reverted to verdict EQUALITY the Proof is `'flagged'` with
     // `safetyHide: true` here, reversed by a retry the admin never saw.
@@ -554,10 +559,10 @@ describe('writeVisionVerdict — the scanner records a verdict, never a Proof (#
     // second verdict either, so a redelivery cannot churn `visionFlag` under the
     // admin queue or re-stamp a marker the doc already carries.
     const { db, updates, store } = fakeDb({
-      [PROOF]: { uid: 'u1', status: 'hidden', visionFlag: 'extreme', safetyHide: true, reportCount: 0 },
+      [PROOF]: { uid: 'u1', storagePath: MEDIA, status: 'hidden', visionFlag: 'extreme', safetyHide: true, reportCount: 0 },
     });
     const hidden = { ...(store[PROOF] as Record<string, unknown>) };
-    const target = await writeVisionVerdict(db, 'e', 'p1', 'violence', 9);
+    const target = await writeVisionVerdict(db, 'e', 'p1', 'violence', MEDIA, 9);
     expect(store[PROOF]).toEqual(hidden);
     expect(updates).toEqual([]);
     // Still hidden, still held — the audit record says `extreme`, which is the
@@ -566,17 +571,48 @@ describe('writeVisionVerdict — the scanner records a verdict, never a Proof (#
     expect(safetyHideStands(store[PROOF] as { status?: string; safetyHide?: boolean })).toBe(true);
     expect(target).toBe('duplicate');
   });
+
+  it('never lands on a Proof whose own object was not the one scanned — a borrowed id writes nothing', async () => {
+    // The scanner reads `proofId` off the object NAME, and the `{uid}` segment
+    // is the uploader's own folder: an object uploaded into u2's folder under
+    // u1's Proof id names u1's Proof. The verdict is about u2's bytes, so u1's
+    // Proof is left exactly as it stands — and so is anything parked for it.
+    const { db, updates, ops, store } = fakeDb({
+      [PROOF]: { uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: null, reportCount: 0 },
+      [SCAN]: { visionFlag: 'extreme', scannedAt: 5, storagePath: MEDIA },
+    });
+    const before = { ...(store[PROOF] as Record<string, unknown>) };
+    expect(await writeVisionVerdict(db, 'e', 'p1', 'violence', 'proofs/e/u2/p1.jpg', 9)).toBe('mismatch');
+    expect(store[PROOF]).toEqual(before);
+    expect(updates).toEqual([]);
+    expect(ops).toEqual([{ op: 'get', path: PROOF }]);
+    expect(store[SCAN]).toEqual({ visionFlag: 'extreme', scannedAt: 5, storagePath: MEDIA });
+  });
+
+  it('never lands on a TEXT Proof, which owns no object at all', async () => {
+    const { db, updates } = fakeDb({
+      [PROOF]: { uid: 'u1', storagePath: null, status: 'active', visionFlag: null, reportCount: 0 },
+    });
+    expect(await writeVisionVerdict(db, 'e', 'p1', 'violence', 'proofs/e/u2/p1.jpg', 9)).toBe('mismatch');
+    expect(updates).toEqual([]);
+  });
+
+  it('parks the scanned path with the verdict, for the consumer to match', async () => {
+    const { db, store } = fakeDb({});
+    expect(await writeVisionVerdict(db, 'e', 'p1', 'violence', 'proofs/e/u2/p1.jpg', 9)).toBe('scan');
+    expect(store[SCAN]).toEqual({ visionFlag: 'violence', scannedAt: 9, storagePath: 'proofs/e/u2/p1.jpg' });
+  });
 });
 
 describe('applyPendingVisionScan — the parked verdict lands when the Proof appears (#1143)', () => {
   const PROOF = 'events/e/proofs/p1';
   const SCAN = 'events/e/proofScans/p1';
-  const created = () => ({ uid: 'u1', status: 'active', visionFlag: null, reportCount: 0 });
+  const created = () => ({ uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: null, reportCount: 0 });
 
   it('flags the freshly created Proof with the parked verdict and CONSUMES the record', async () => {
     const { db, updates, store } = fakeDb({
       [PROOF]: created(),
-      [SCAN]: { visionFlag: 'violence', scannedAt: 5 },
+      [SCAN]: { visionFlag: 'violence', scannedAt: 5, storagePath: MEDIA },
     });
     expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(true);
     expect(updates).toEqual([
@@ -586,7 +622,7 @@ describe('applyPendingVisionScan — the parked verdict lands when the Proof app
     // so the hide is decided where every hide is decided — and the hand-off is
     // gone, so no later write can re-flag a Proof an admin has since acted on.
     expect(store[PROOF]).toEqual({
-      uid: 'u1', status: 'flagged', visionFlag: 'violence', safetyHide: true, reportCount: 0,
+      uid: 'u1', storagePath: MEDIA, status: 'flagged', visionFlag: 'violence', safetyHide: true, reportCount: 0,
     });
     expect(store[SCAN]).toBeUndefined();
   });
@@ -594,13 +630,13 @@ describe('applyPendingVisionScan — the parked verdict lands when the Proof app
   it('hands the flagged doc to the ordinary hide arm — flag, then hide, then mark', async () => {
     const { db, updates, store } = fakeDb({
       [PROOF]: created(),
-      [SCAN]: { visionFlag: 'violence', scannedAt: 5 },
+      [SCAN]: { visionFlag: 'violence', scannedAt: 5, storagePath: MEDIA },
     });
     await applyPendingVisionScan(db, 'e', 'p1');
     expect(visionHideAction(store[PROOF] as VisionFlaggedDoc)).toBe('hide');
     expect(await hideVisionFlaggedIfQualifies(db, 'e', 'p1')).toBe(true);
     expect(store[PROOF]).toEqual({
-      uid: 'u1', status: 'hidden', safetyHide: true, visionFlag: 'violence', reportCount: 0,
+      uid: 'u1', storagePath: MEDIA, status: 'hidden', safetyHide: true, visionFlag: 'violence', reportCount: 0,
     });
     expect(updates.map((u) => u.data)).toEqual([
       { status: 'flagged', visionFlag: 'violence', safetyHide: true },
@@ -614,7 +650,7 @@ describe('applyPendingVisionScan — the parked verdict lands when the Proof app
     // A verdict outside AUTO_HIDE_VISION_FLAGS still reaches admins as a
     // 'flagged' doc and is hidden by nobody, exactly as a scan that had won the
     // race would leave it. The race must not become a second, laxer policy.
-    const { db, store } = fakeDb({ [PROOF]: created(), [SCAN]: { visionFlag: 'racy', scannedAt: 5 } });
+    const { db, store } = fakeDb({ [PROOF]: created(), [SCAN]: { visionFlag: 'racy', scannedAt: 5, storagePath: MEDIA } });
     expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(true);
     expect(store[PROOF]).toMatchObject({ status: 'flagged', visionFlag: 'racy' });
     // …and marker-less, because nothing racy ever earns a safety hold (ADR 0004).
@@ -631,8 +667,8 @@ describe('applyPendingVisionScan — the parked verdict lands when the Proof app
     // is a redelivery of the scan already applied, so it is dropped, not applied.
     const { db, updates, ops, store } = fakeDb({
       // Flagged, hidden, then lifted by the console Restore — `visionFlag` retained.
-      [PROOF]: { uid: 'u1', status: 'active', visionFlag: 'violence', safetyHide: false, reportCount: 0 },
-      [SCAN]: { visionFlag: 'violence', scannedAt: 5 },
+      [PROOF]: { uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: 'violence', safetyHide: false, reportCount: 0 },
+      [SCAN]: { visionFlag: 'violence', scannedAt: 5, storagePath: MEDIA },
     });
     const lifted = { ...(store[PROOF] as Record<string, unknown>) };
     expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(false);
@@ -661,10 +697,10 @@ describe('applyPendingVisionScan — the parked verdict lands when the Proof app
   });
 
   it('never CREATES the Proof either — a record whose Proof is missing simply waits', async () => {
-    const { db, ops, store } = fakeDb({ [SCAN]: { visionFlag: 'violence', scannedAt: 5 } });
+    const { db, ops, store } = fakeDb({ [SCAN]: { visionFlag: 'violence', scannedAt: 5, storagePath: MEDIA } });
     expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(false);
     expect(store[PROOF]).toBeUndefined();
-    expect(store[SCAN]).toEqual({ visionFlag: 'violence', scannedAt: 5 }); // kept for the create to come
+    expect(store[SCAN]).toEqual({ visionFlag: 'violence', scannedAt: 5, storagePath: MEDIA }); // kept for the create to come
     expect(ops.every((o) => o.op === 'get')).toBe(true);
   });
 
@@ -678,10 +714,23 @@ describe('applyPendingVisionScan — the parked verdict lands when the Proof app
     }
   });
 
+  it('DROPS a parked verdict reached on another object, rather than applying it to this Proof', async () => {
+    for (const storagePath of ['proofs/e/u2/p1.jpg', undefined, 7]) {
+      const { db, updates, store } = fakeDb({
+        [PROOF]: created(),
+        [SCAN]: { visionFlag: 'violence', scannedAt: 5, storagePath },
+      });
+      expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(false);
+      expect(updates).toEqual([]);
+      expect(store[PROOF]).toEqual(created());
+      expect(store[SCAN]).toBeUndefined();
+    }
+  });
+
   it('is exactly-once: a redelivered trigger finds the record consumed and writes nothing', async () => {
     const { db, updates, store } = fakeDb({
       [PROOF]: created(),
-      [SCAN]: { visionFlag: 'violence', scannedAt: 5 },
+      [SCAN]: { visionFlag: 'violence', scannedAt: 5, storagePath: MEDIA },
     });
     await applyPendingVisionScan(db, 'e', 'p1');
     // An admin lifts the flag before the duplicate delivery arrives.
@@ -718,12 +767,12 @@ describe('visionVerdictWrite — the hold is stamped WITH the verdict (#1143)', 
 
   it('is the write BOTH producer paths make, so neither can drift from the other', async () => {
     // The scan that won the race, and the scan that lost it and was parked.
-    const direct = fakeDb({ [PROOF]: { uid: 'u1', status: 'active', visionFlag: null } });
-    await writeVisionVerdict(direct.db, 'e', 'p1', 'extreme', 5);
+    const direct = fakeDb({ [PROOF]: { uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: null } });
+    await writeVisionVerdict(direct.db, 'e', 'p1', 'extreme', MEDIA, 5);
 
     const parked = fakeDb({
-      [PROOF]: { uid: 'u1', status: 'active', visionFlag: null },
-      [SCAN]: { visionFlag: 'extreme', scannedAt: 5 },
+      [PROOF]: { uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: null },
+      [SCAN]: { visionFlag: 'extreme', scannedAt: 5, storagePath: MEDIA },
     });
     await applyPendingVisionScan(parked.db, 'e', 'p1');
 
@@ -736,13 +785,13 @@ describe('visionVerdictWrite — the hold is stamped WITH the verdict (#1143)', 
     // out; a marker in the record itself would be a second place to keep the
     // allowlist, on a document no arm ever reads for a decision.
     const { db, store } = fakeDb({});
-    expect(await writeVisionVerdict(db, 'e', 'p1', 'violence', 5)).toBe('scan');
-    expect(store[SCAN]).toEqual({ visionFlag: 'violence', scannedAt: 5 });
+    expect(await writeVisionVerdict(db, 'e', 'p1', 'violence', MEDIA, 5)).toBe('scan');
+    expect(store[SCAN]).toEqual({ visionFlag: 'violence', scannedAt: 5, storagePath: MEDIA });
   });
 
   it('closes the pre-hide window: a stale-client publish now lands in the re-hide arm', async () => {
-    const { db, store } = fakeDb({ [PROOF]: { uid: 'u1', status: 'active', visionFlag: null } });
-    await writeVisionVerdict(db, 'e', 'p1', 'violence', 5);
+    const { db, store } = fakeDb({ [PROOF]: { uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: null } });
+    await writeVisionVerdict(db, 'e', 'p1', 'violence', MEDIA, 5);
     // A console cached before this work publishes the claim's Proof before the
     // hide trigger has run. WITHOUT the marker that doc matched no arm at all…
     expect(visionHideAction({ status: 'active', visionFlag: 'violence' })).toBe(null);
@@ -754,8 +803,8 @@ describe('visionVerdictWrite — the hold is stamped WITH the verdict (#1143)', 
   });
 
   it('holds the flagged Proof on the MARKER, not on the status a stale bundle may not read', async () => {
-    const { db, store } = fakeDb({ [PROOF]: { uid: 'u1', status: 'active', visionFlag: null } });
-    await writeVisionVerdict(db, 'e', 'p1', 'violence', 5);
+    const { db, store } = fakeDb({ [PROOF]: { uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: null } });
+    await writeVisionVerdict(db, 'e', 'p1', 'violence', MEDIA, 5);
     const flagged = store[PROOF] as { status?: string; safetyHide?: boolean };
     expect(safetyHideStands(flagged)).toBe(true);
     // …and on the marker ALONE — which is what makes the hold survive a client
@@ -764,9 +813,9 @@ describe('visionVerdictWrite — the hold is stamped WITH the verdict (#1143)', 
   });
 
   it('leaves a racy flag exactly as it was — flagged for admins, held by nobody, hidden by nobody', async () => {
-    const { db, store } = fakeDb({ [PROOF]: { uid: 'u1', status: 'active', visionFlag: null } });
-    await writeVisionVerdict(db, 'e', 'p1', 'racy', 5);
-    expect(store[PROOF]).toEqual({ uid: 'u1', status: 'flagged', visionFlag: 'racy' });
+    const { db, store } = fakeDb({ [PROOF]: { uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: null } });
+    await writeVisionVerdict(db, 'e', 'p1', 'racy', MEDIA, 5);
+    expect(store[PROOF]).toEqual({ uid: 'u1', storagePath: MEDIA, status: 'flagged', visionFlag: 'racy' });
     expect(visionHideAction(store[PROOF] as VisionFlaggedDoc)).toBe(null);
     // The publish it would allow after a Restore is the pre-existing behaviour:
     // the `'flagged'` arm still holds it while it sits in the queue.
@@ -1033,11 +1082,11 @@ describe('applyVisionFlagHide — the create-time hand-off (#1143)', () => {
     const PROOF = 'events/e/proofs/p1';
     const { db, store } = fakeDb({});
     // 1. The upload finalizes and the scan lands before attachProof commits.
-    expect(await writeVisionVerdict(db, 'e', 'p1', 'violence', 5)).toBe('scan');
+    expect(await writeVisionVerdict(db, 'e', 'p1', 'violence', MEDIA, 5)).toBe('scan');
     // 2. attachProof's create then succeeds as a CREATE — the Proof path is
     //    untouched, so the rules judge it as one and the submission goes through.
     expect(store[PROOF]).toBeUndefined();
-    store[PROOF] = { uid: 'u1', status: 'active', visionFlag: null, reportCount: 0 };
+    store[PROOF] = { uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: null, reportCount: 0 };
     // 3. The create fires the trigger, which consumes the parked verdict...
     const deps = {
       applyPendingScan: (e: string, p: string) => applyPendingVisionScan(db, e, p),
@@ -1049,7 +1098,7 @@ describe('applyVisionFlagHide — the create-time hand-off (#1143)', () => {
       await applyVisionFlagHide('e', 'p1', { status: 'active' }, store[PROOF] as VisionFlaggedDoc, deps),
     ).toBe(true);
     expect(store[PROOF]).toEqual({
-      uid: 'u1', status: 'hidden', safetyHide: true, visionFlag: 'violence', reportCount: 0,
+      uid: 'u1', storagePath: MEDIA, status: 'hidden', safetyHide: true, visionFlag: 'violence', reportCount: 0,
     });
     expect(store[proofScanPath('e', 'p1')]).toBeUndefined();
     // 5. And it settles: the next write matches no arm.
@@ -1088,9 +1137,9 @@ describe('the hand-off survives a failure — redelivery, then reconciliation (#
     const { db, store } = fakeDb({});
 
     // 1. The scan lands before attachProof commits, so the verdict is parked…
-    expect(await writeVisionVerdict(db, 'e', 'p1', 'violence', NOW)).toBe('scan');
+    expect(await writeVisionVerdict(db, 'e', 'p1', 'violence', MEDIA, NOW)).toBe('scan');
     // …and the Player's create then succeeds, as a create.
-    store[PROOF] = { uid: 'u1', status: 'active', visionFlag: null, reportCount: 0, createdAt: NOW };
+    store[PROOF] = { uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: null, reportCount: 0, createdAt: NOW };
 
     // 2. The create fires the trigger and the hand-off transaction fails. It is
     //    RETHROWN, which is what `retry: true` turns into a redelivery…
@@ -1117,7 +1166,7 @@ describe('the hand-off survives a failure — redelivery, then reconciliation (#
     // 3. This is the exhausted state the finding named: media public, the
     //    server's own verdict parked where no client can even read it.
     expect(store[PROOF]).toMatchObject({ status: 'active', visionFlag: null });
-    expect(store[proofScanPath('e', 'p1')]).toEqual({ visionFlag: 'violence', scannedAt: NOW });
+    expect(store[proofScanPath('e', 'p1')]).toEqual({ visionFlag: 'violence', scannedAt: NOW, storagePath: MEDIA });
 
     // 4. The next ordinary write — a report bump — reconciles it, because the
     //    Proof is still inside the window.
@@ -1148,8 +1197,8 @@ describe('the hand-off survives a failure — redelivery, then reconciliation (#
     const PROOF = 'events/e/proofs/p1';
     const NOW = 1_000_000_000;
     const { db, store } = fakeDb({});
-    await writeVisionVerdict(db, 'e', 'p1', 'violence', NOW);
-    store[PROOF] = { uid: 'u1', status: 'active', visionFlag: null, reportCount: 1, createdAt: NOW };
+    await writeVisionVerdict(db, 'e', 'p1', 'violence', MEDIA, NOW);
+    store[PROOF] = { uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: null, reportCount: 1, createdAt: NOW };
     const applyPendingScan = vi.fn(async () => true);
     expect(
       await applyVisionFlagHide('e', 'p1', { status: 'active' }, store[PROOF] as VisionFlaggedDoc, {
@@ -1158,7 +1207,7 @@ describe('the hand-off survives a failure — redelivery, then reconciliation (#
       }),
     ).toBe(false);
     expect(applyPendingScan).not.toHaveBeenCalled();
-    expect(store[proofScanPath('e', 'p1')]).toEqual({ visionFlag: 'violence', scannedAt: NOW });
+    expect(store[proofScanPath('e', 'p1')]).toEqual({ visionFlag: 'violence', scannedAt: NOW, storagePath: MEDIA });
   });
 });
 

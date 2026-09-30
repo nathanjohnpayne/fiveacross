@@ -245,3 +245,55 @@ export function renderEmailDocument(args: {
     `</table></td></tr></table></body></html>`
   );
 }
+
+/** The ceiling on any single participant-authored value in the rendered body.
+ *  Generous against real names and prompts — both live Events' longest are well
+ *  under it — and small enough that a full standings module plus an award line
+ *  cannot approach Firestore's 1 MiB document limit when both alternatives are
+ *  frozen together. */
+export const BODY_TEXT_MAX = 120;
+
+/**
+ * Flatten participant-authored text to a single line.
+ *
+ * The PLAIN-TEXT alternative has no escaping layer (Codex P2, round 8 on PR
+ * #1207). The HTML part confines every field through `esc`, and the subject
+ * through `subjectSafeName` — but the text renderer interpolated display names
+ * and prompt text verbatim, so a stored newline could fabricate what looks like
+ * an extra standings row, a second CTA, or a footer line in a text-only client.
+ * A display name and a Proof's `itemText` are participant-authored (ADR 0001);
+ * the rules bound their type and size at most, never which characters they
+ * hold, so this is participant-controlled structure in a message the recipient
+ * reads as ours. Shared by the podium and the daily card (#616), whose
+ * standings rows and greeting interpolate the same names.
+ *
+ * Applied by the MODEL rather than by the renderer, so both alternatives carry
+ * the same characters and cannot present a different message structure — which
+ * is the property a `multipart/alternative` pair has to hold.
+ */
+export function singleLine(raw: string, maxLength = BODY_TEXT_MAX): string {
+  // C0 **AND C1**, plus DEL (Codex P2, round 11 on PR #1207). The first version
+  // covered `\u0000-\u001f\u007f` and leaned on `\s+` for the rest — but
+  // JavaScript's `\s` does NOT match U+0085 NEXT LINE, and some clients render
+  // NEL as a line break. So a C1 control survived into subjects and plain-text
+  // bodies and could still fabricate structure, which is the whole thing this
+  // function exists to prevent. U+0080–U+009F is the range that was missing.
+  // eslint-disable-next-line no-control-regex -- flattening control characters IS the point.
+  const flat = raw.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  // AND BOUNDED (Codex P1, final round on PR #1207). Flattening alone left the
+  // LENGTH unbounded, and `players/{uid}` validated no field at the time (ADR
+  // 0001): a Player could edit their own `displayName` while the Event is
+  // active, place themselves in the live top three after the podium posts, and
+  // store a name hundreds of kilobytes long. The rules now cap a written name at
+  // 100 characters, but a row written before that cap still reads back here, so
+  // the bound stays. That value is copied into BOTH alternatives for
+  // every recipient and both halves are then stored in ONE outbox document, so
+  // past Firestore's 1 MiB limit every `create` fails, every recipient counts as
+  // blocked, and the Event's winner announcement can never drain — one
+  // participant denying the whole roster its last email.
+  //
+  // The subject has been bounded since round 8 (`subjectSafeName`); this is the
+  // same oversight one layer in, the body left unbounded while the header was
+  // protected.
+  return flat.length > maxLength ? `${flat.slice(0, maxLength - 1).trimEnd()}…` : flat;
+}

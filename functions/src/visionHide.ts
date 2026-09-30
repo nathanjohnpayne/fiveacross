@@ -99,6 +99,13 @@ export interface VisionFlaggedDoc {
    * hand-off to need.
    */
   createdAt?: unknown;
+  /**
+   * The Storage object this Proof's media IS (`attachProof` writes it and
+   * `firestore.rules` pins it to `proofs/{eventId}/{uid}/{proofId}.{ext}`).
+   * Read by the scanner so a verdict lands only on the Proof whose own object
+   * was scanned — see `writeVisionVerdict`.
+   */
+  storagePath?: unknown;
 }
 
 /** The Proof document this module hides. */
@@ -155,6 +162,9 @@ export function proofScanPath(eventId: string, proofId: string): string {
 export interface PendingVisionScan {
   visionFlag?: unknown;
   scannedAt?: unknown;
+  /** The object the parked verdict was reached on; applied only to a Proof
+   *  whose own `storagePath` is this path. */
+  storagePath?: unknown;
 }
 
 /**
@@ -412,7 +422,7 @@ function hasRecordedVisionFlag(doc: VisionFlaggedDoc | undefined): boolean {
  * reporting `'proof'` would misdescribe a no-op to every caller, log line and
  * test that reads it.
  */
-export type VisionVerdictTarget = 'proof' | 'scan' | 'duplicate';
+export type VisionVerdictTarget = 'proof' | 'scan' | 'duplicate' | 'mismatch';
 
 /**
  * The PRODUCER-side write, and the half of the #1143 fix that lives with the
@@ -505,6 +515,17 @@ export type VisionVerdictTarget = 'proof' | 'scan' | 'duplicate';
  * is the write `applyVisionFlagHide` consults the record on. There is no
  * interleaving in which a verdict is parked and nothing ever picks it up.
  *
+ * THE VERDICT IS BOUND TO THE OBJECT IT WAS REACHED ON (`storagePath`). The
+ * scanner derives `proofId` from the uploaded object's NAME, and the name's
+ * `{uid}` segment is the UPLOADER's folder — so an object uploaded into one
+ * Player's own folder under ANOTHER Player's Proof id names that other Proof.
+ * A verdict is therefore applied only when the Proof's own stored `storagePath`
+ * is the scanned path (`'mismatch'` otherwise, writing nothing), and a parked
+ * verdict carries the path so `applyPendingVisionScan` asks the same question
+ * when the Proof appears. `storagePath` is written once by `attachProof` and
+ * pinned by `firestore.rules` to the Proof's own uploader and id, so it names
+ * exactly one object.
+ *
  * `db` is a parameter so the whole decision is unit-testable with a fake
  * transaction; `now` is one so the stamp is deterministic under test.
  */
@@ -513,6 +534,7 @@ export async function writeVisionVerdict(
   eventId: string,
   proofId: string,
   visionFlag: string,
+  storagePath: string,
   now: number = Date.now(),
 ): Promise<VisionVerdictTarget> {
   const proofRef = db.doc(proofPath(eventId, proofId));
@@ -520,6 +542,12 @@ export async function writeVisionVerdict(
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(proofRef);
     if (snap.exists) {
+      // Not this Proof's object: a verdict about some other upload that merely
+      // borrowed this id. Nothing is written — not the verdict, and not the
+      // parked-record retirement below, which is this Proof's own business.
+      if ((snap.data() as VisionFlaggedDoc | undefined)?.storagePath !== storagePath) {
+        return 'mismatch';
+      }
       // A verdict is already recorded ⇒ this `proofId`'s one scan has already
       // been applied, so THIS delivery is a redelivery of it whatever verdict it
       // carries, and the Proof is left untouched — the lift an admin may have
@@ -533,7 +561,7 @@ export async function writeVisionVerdict(
       tx.delete(scanRef);
       return alreadyRecorded ? 'duplicate' : 'proof';
     }
-    tx.set(scanRef, { visionFlag, scannedAt: now });
+    tx.set(scanRef, { visionFlag, scannedAt: now, storagePath });
     return 'scan';
   });
 }
@@ -595,9 +623,21 @@ export async function applyPendingVisionScan(
       tx.delete(scanRef);
       return false;
     }
-    const visionFlag = (scanSnap.data() as PendingVisionScan | undefined)?.visionFlag;
+    const parked = scanSnap.data() as PendingVisionScan | undefined;
+    const visionFlag = parked?.visionFlag;
     if (typeof visionFlag !== 'string' || visionFlag.length === 0) {
       tx.delete(scanRef); // nothing a producer would have written — drop it
+      return false;
+    }
+    // The parked verdict was reached on ONE object; it applies only to the Proof
+    // whose own `storagePath` is that object (see `writeVisionVerdict`). A record
+    // for any other object can never apply to this Proof — its path is fixed at
+    // create — so it is dropped rather than left to wait.
+    if (
+      typeof parked?.storagePath !== 'string' ||
+      parked.storagePath !== (proofSnap.data() as VisionFlaggedDoc | undefined)?.storagePath
+    ) {
+      tx.delete(scanRef);
       return false;
     }
     tx.update(proofRef, visionVerdictWrite(visionFlag));
@@ -620,8 +660,9 @@ export async function recordVisionVerdict(
   eventId: string,
   proofId: string,
   visionFlag: string,
+  storagePath: string,
 ): Promise<VisionVerdictTarget> {
-  return writeVisionVerdict(await adminFirestore(), eventId, proofId, visionFlag);
+  return writeVisionVerdict(await adminFirestore(), eventId, proofId, visionFlag, storagePath);
 }
 
 /**

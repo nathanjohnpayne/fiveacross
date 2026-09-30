@@ -43,6 +43,7 @@ import {
 import { exchangeHandoff, mintHandoff, type HandoffFirestore } from './authHandoff';
 import {
   manualUnlockNow,
+  parseUnlockDayNowPayload,
   resnapshotDayIfNoBoards,
   runScheduledUnlock,
   UnlockPermissionError,
@@ -317,7 +318,9 @@ async function moderateProofHandler(event: StorageEvent): Promise<void> {
       // verdict in the server-only `proofScans` collection when it does not;
       // `hideProofOnVisionFlag` applies a parked verdict on the Proof's create.
       // See functions/src/visionHide.ts § PROOF_SCANS_COLLECTION.
-      await recordVisionVerdict(eventId, proofId, flag);
+      // The scanned object's path rides along: the verdict lands only on the
+      // Proof whose own `storagePath` IS this object (visionHide.ts).
+      await recordVisionVerdict(eventId, proofId, flag, path);
     }
   } catch {
     /* Vision optional; reporting still covers moderation */
@@ -1098,14 +1101,14 @@ export const unlockDayNow = onCall(
   async (request) => {
   const uid = request.auth?.uid;
   if (!uid) throw new HttpsError('unauthenticated', 'Sign in before unlocking a Day.');
-  const data = (request.data ?? {}) as { eventId?: unknown; dayIndex?: unknown; resnapshot?: unknown };
-  if (typeof data.eventId !== 'string' || typeof data.dayIndex !== 'number') {
-    throw new HttpsError('invalid-argument', 'eventId (string) and dayIndex (number) are required.');
+  const data = parseUnlockDayNowPayload(request.data);
+  if (!data) {
+    throw new HttpsError('invalid-argument', 'eventId (document id) and dayIndex (integer) are required.');
   }
   const adminDb = db as unknown as AdminFirestore;
   try {
     const result =
-      data.resnapshot === true
+      data.resnapshot
         ? await resnapshotDayIfNoBoards(adminDb, uid, data.eventId, data.dayIndex)
         : await manualUnlockNow(adminDb, uid, data.eventId, data.dayIndex);
     return { result };
