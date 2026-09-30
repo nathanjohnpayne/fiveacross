@@ -698,10 +698,11 @@ async function assertUnlockAdmin(
   callerUid: string | undefined,
   eventId: string,
   message: string,
+  read: (ref: DocRef) => Promise<DocSnapshot> = (ref) => ref.get(),
 ): Promise<void> {
   if (!isEventAdmin(event, callerUid)) throw new UnlockPermissionError(message);
   if (event?.membershipEnforcement === 'enforced') {
-    const snap = await db.doc(membershipPath(eventId, callerUid as string)).get();
+    const snap = await read(db.doc(membershipPath(eventId, callerUid as string)));
     if (!isActiveMembershipData(snap.exists ? snap.data() : undefined)) {
       throw new UnlockPermissionError(message);
     }
@@ -994,6 +995,14 @@ export async function stampDaySnapshot(
   eventId: string,
   dayIndex: number,
   deps: UnlockDeps = {},
+  /**
+   * The manual callable's caller authorization, run INSIDE the writing
+   * transaction against the Event it read (and, on an enforced Event, the
+   * caller's membership read through the same transaction), so a revocation
+   * that commits after the pre-flight is serialized with the write and a retry
+   * re-authorizes. The scheduler passes none: it acts for no caller.
+   */
+  authorize?: (tx: Transaction, event: EventLike | undefined) => Promise<void>,
 ): Promise<SnapshotResult> {
   const now = (deps.now ?? Date.now)();
   const eventRef = db.doc(`events/${eventId}`);
@@ -1012,6 +1021,7 @@ export async function stampDaySnapshot(
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(eventRef);
     const ev = snap.data() as EventLike | undefined;
+    if (authorize) await authorize(tx, ev);
     if (!ev) return 'no-event';
     // Re-confirmed INSIDE the transaction, exactly like the unstamped/due
     // guards below: the archive can commit between the pre-read above and this
@@ -1754,9 +1764,14 @@ export async function manualUnlockNow(
   deps: UnlockDeps = {},
 ): Promise<SnapshotResult> {
   const event = (await db.doc(`events/${eventId}`).get()).data() as EventLike | undefined;
-  await assertUnlockAdmin(db, event, callerUid, eventId, 'Only an event admin can unlock a Day.');
+  const message = 'Only an event admin can unlock a Day.';
+  // The pre-flight answers a non-admin cheaply; the transaction below asks
+  // again against the state it commits over (CodeRabbit / Codex on #1352).
+  await assertUnlockAdmin(db, event, callerUid, eventId, message);
   if (eventClosedToPlay(event)) return 'archived';
-  return stampDaySnapshot(db, eventId, dayIndex, deps);
+  return stampDaySnapshot(db, eventId, dayIndex, deps, (tx, ev) =>
+    assertUnlockAdmin(db, ev, callerUid, eventId, message, (ref) => tx.get(ref)),
+  );
 }
 
 // --- Guarded re-snapshot (the easy-mix deploy-race fallback) ---------------------
@@ -1807,7 +1822,8 @@ export async function resnapshotDayIfNoBoards(
   const now = (deps.now ?? Date.now)();
   const eventRef = db.doc(`events/${eventId}`);
   const pre = (await eventRef.get()).data() as EventLike | undefined;
-  await assertUnlockAdmin(db, pre, callerUid, eventId, 'Only an event admin can re-snapshot a Day.');
+  const message = 'Only an event admin can re-snapshot a Day.';
+  await assertUnlockAdmin(db, pre, callerUid, eventId, message);
   // #134: the freeze binds the Admin for gameplay too. This is the ONE path that
   // overwrites an existing snapshot, so it is the last one that should survive
   // an archive.
@@ -1821,6 +1837,10 @@ export async function resnapshotDayIfNoBoards(
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(eventRef);
     const ev = snap.data() as EventLike | undefined;
+    // Authorization re-asked INSIDE the writing transaction, against the roster
+    // and membership this commit is serialized with (CodeRabbit / Codex on
+    // #1352): a revocation committing after the pre-flight refuses the write.
+    await assertUnlockAdmin(db, ev, callerUid, eventId, message, (ref) => tx.get(ref));
     if (!ev) return 'no-event';
     // Re-checked inside the writing transaction, beside the zero-boards guard:
     // everything above is a pre-flight read, so an archive can commit between

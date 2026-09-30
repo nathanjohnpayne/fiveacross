@@ -207,7 +207,10 @@ function ProofQueueRow({
         // lands, and the trigger's hide is not instantaneous. Clicking there is
         // agreement with the AI screen, not an override, so `hideProof` carries
         // the standing safety hold onto the hidden doc rather than demoting it to
-        // a plain hide a later Confirm would publish (src/data/admin.ts).
+        // a plain hide (src/data/admin.ts). A Confirm publishes only a still-
+        // pending Proof of the claimant's own, so the hold is what keeps a later
+        // Restore-to-pending + Confirm (or a cached pre-gate bundle) from
+        // publishing it.
         <AsyncButton onAction={() => hideProof(p.id)}>
           Hide
         </AsyncButton>

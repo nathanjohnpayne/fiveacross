@@ -115,7 +115,8 @@ export function proofPath(eventId: string, proofId: string): string {
 
 /**
  * The SERVER-ONLY collection that parks a Vision verdict whose Proof document
- * does not exist yet — `events/{eventId}/proofScans/{proofId}` — and the reason
+ * does not exist yet — `events/{eventId}/proofScans/{proofId}__{uploaderUid}`,
+ * see `proofScanPath` — and the reason
  * the scanner is no longer allowed to touch the Proof at all in that case.
  *
  * `moderateProof` is a STORAGE trigger: it fires on the uploaded object, and
@@ -154,8 +155,21 @@ export function proofPath(eventId: string, proofId: string): string {
  */
 export const PROOF_SCANS_COLLECTION = 'proofScans' as const;
 
-export function proofScanPath(eventId: string, proofId: string): string {
-  return `events/${eventId}/${PROOF_SCANS_COLLECTION}/${proofId}`;
+/**
+ * The hand-off record for ONE scanned object: keyed by the Proof id AND the
+ * uploader folder the object sits in (`proofs/{eventId}/{uid}/{proofId}.jpg`).
+ * Keyed by the Proof id alone, a scan of an object uploaded into another
+ * folder under the same id could REPLACE a parked verdict for the real one
+ * before the Proof existed, and the real Proof would then arrive to find only
+ * a mismatched record — its own safety verdict already lost (CodeRabbit on
+ * #1352). Each object now parks under its own key and the consumer reads only
+ * the one its Proof's own `storagePath` names. `null` for a path that is not
+ * a proof object's.
+ */
+export function proofScanPath(eventId: string, proofId: string, storagePath: string): string | null {
+  const parts = storagePath.split('/');
+  if (parts.length !== 4 || parts[0] !== 'proofs' || parts[1] !== eventId || parts[2] === '') return null;
+  return `events/${eventId}/${PROOF_SCANS_COLLECTION}/${proofId}__${parts[2]}`;
 }
 
 /** The parked verdict. `visionFlag` is whatever the producer decided to flag. */
@@ -272,8 +286,10 @@ export function qualifiesForVisionHide(doc: VisionFlaggedDoc | undefined): boole
  *     admin's own Hide on a row the trigger had not reached yet (the console
  *     offers Hide on a `'flagged'` row, and the trigger is not instantaneous), or
  *     a hide whose marker write was lost to a swallowed best-effort failure.
- *     Left unstamped, `confirmClaim` reads that Proof as a PLAIN hide and
- *     publishes it, which is the hole this arm closes.
+ *     Left unstamped, the Proof reads as a PLAIN hide: a current `confirmClaim`
+ *     publishes only a still-`'pending'` Proof, so it no longer publishes this
+ *     one directly, but a CACHED pre-gate bundle would, and a Restore to
+ *     `'pending'` followed by a Confirm would too — the hole this arm closes.
  *   - `'rehide'` — an `'active'` Proof whose marker still says `true`. That
  *     combination is not reachable from any current client: every legitimate lift
  *     writes `safetyHide: false` in the SAME update as the status (`restoreProof`,
@@ -538,7 +554,9 @@ export async function writeVisionVerdict(
   now: number = Date.now(),
 ): Promise<VisionVerdictTarget> {
   const proofRef = db.doc(proofPath(eventId, proofId));
-  const scanRef = db.doc(proofScanPath(eventId, proofId));
+  const scanPath = proofScanPath(eventId, proofId, storagePath);
+  if (scanPath === null) return 'mismatch';
+  const scanRef = db.doc(scanPath);
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(proofRef);
     if (snap.exists) {
@@ -608,14 +626,19 @@ export async function applyPendingVisionScan(
   proofId: string,
 ): Promise<boolean> {
   const proofRef = db.doc(proofPath(eventId, proofId));
-  const scanRef = db.doc(proofScanPath(eventId, proofId));
   return db.runTransaction(async (tx) => {
-    // Reads before writes, and the cheap one first: the overwhelming majority of
-    // Proof creates have no parked verdict and stop here having read one doc.
+    // Reads before writes. The Proof comes first because it NAMES the record:
+    // the hand-off is keyed by the object the Proof stores (`proofScanPath`),
+    // so only a verdict reached on this Proof's own object is ever read here.
+    const proofSnap = await tx.get(proofRef);
+    if (!proofSnap.exists) return false; // deleted again already — leave any record
+    const storagePath = (proofSnap.data() as VisionFlaggedDoc | undefined)?.storagePath;
+    if (typeof storagePath !== 'string') return false; // a text Proof owns no object
+    const scanPath = proofScanPath(eventId, proofId, storagePath);
+    if (scanPath === null) return false;
+    const scanRef = db.doc(scanPath);
     const scanSnap = await tx.get(scanRef);
     if (!scanSnap.exists) return false;
-    const proofSnap = await tx.get(proofRef);
-    if (!proofSnap.exists) return false; // deleted again already — leave the record
     if (hasRecordedVisionFlag(proofSnap.data() as VisionFlaggedDoc | undefined)) {
       // This Proof's one scan is already applied, so the record is a redelivery
       // of it — retire it WITHOUT re-applying, whatever verdict it parked, and

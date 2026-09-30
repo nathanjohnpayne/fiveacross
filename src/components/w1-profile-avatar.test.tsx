@@ -48,7 +48,8 @@ const { refMock, uploadBytesMock } = vi.hoisted(() => ({
 vi.mock('firebase/storage', () => ({
   ref: refMock,
   uploadBytes: uploadBytesMock,
-  getDownloadURL: async (r: { path: string }) => `https://firebasestorage.googleapis.com/${r.path}`,
+  getDownloadURL: async (r: { path: string }) =>
+    `https://firebasestorage.googleapis.com/v0/b/fiveacross.firebasestorage.app/o/${encodeURIComponent(r.path)}?alt=media`,
   deleteObject: vi.fn(),
 }));
 
@@ -149,7 +150,7 @@ function resetMocks() {
 describe('Avatar prefers a custom photo over src', () => {
   it('prefers customPhoto, falls back to src, then to an initial', () => {
     const google = 'https://lh3.googleusercontent.com/x.jpg';
-    const custom = 'https://firebasestorage.googleapis.com/custom.jpg';
+    const custom = 'https://firebasestorage.googleapis.com/v0/b/fiveacross.firebasestorage.app/o/avatars%2Fu1.jpg?alt=media';
     const { rerender } = render(<Avatar name="Alex" src={google} customPhoto={custom} />);
     expect(screen.getByRole('img')).toHaveAttribute('src', custom);
     rerender(<Avatar name="Alex" src={google} customPhoto={null} />);
@@ -279,7 +280,7 @@ describe('data/profile.ts — persists to users/{uid}, reusing storage.ts', () =
       { path: 'events/test-event/players/u1' },
       { photoURL: url },
     );
-    expect(url).toBe('https://firebasestorage.googleapis.com/avatars/u1.jpg');
+    expect(url).toBe('https://firebasestorage.googleapis.com/v0/b/fiveacross.firebasestorage.app/o/avatars%2Fu1.jpg?alt=media');
   });
 
   // #134 (specs/post-sailing-archive.md). `eventOpenForPlay` denies every
@@ -300,12 +301,12 @@ describe('data/profile.ts — persists to users/{uid}, reusing storage.ts', () =
     eventState.value = { status: 'active', archiving: true };
 
     await expect(updateAvatar('u1', new Blob(['x'], { type: 'image/png' }))).resolves.toBe(
-      'https://firebasestorage.googleapis.com/avatars/u1.jpg',
+      'https://firebasestorage.googleapis.com/v0/b/fiveacross.firebasestorage.app/o/avatars%2Fu1.jpg?alt=media',
     );
 
     expect(setDocMock).toHaveBeenCalledWith(
       { path: 'users/u1' },
-      { photoURL: 'https://firebasestorage.googleapis.com/avatars/u1.jpg', customPhoto: true },
+      { photoURL: 'https://firebasestorage.googleapis.com/v0/b/fiveacross.firebasestorage.app/o/avatars%2Fu1.jpg?alt=media', customPhoto: true },
       { merge: true },
     );
     expect(updateDocMock).not.toHaveBeenCalled();
@@ -398,7 +399,7 @@ describe('data/profile.ts — persists to users/{uid}, reusing storage.ts', () =
 
     expect(updateDocMock).toHaveBeenCalledWith(
       { path: 'events/test-event/players/u1' },
-      { photoURL: 'https://firebasestorage.googleapis.com/avatars/u1.jpg' },
+      { photoURL: 'https://firebasestorage.googleapis.com/v0/b/fiveacross.firebasestorage.app/o/avatars%2Fu1.jpg?alt=media' },
     );
     expect(updateDocMock).not.toHaveBeenCalledWith(
       { path: 'events/event-b/players/u1' },
@@ -409,7 +410,7 @@ describe('data/profile.ts — persists to users/{uid}, reusing storage.ts', () =
 
 describe('ProfileEditor', () => {
   const googlePhoto = 'https://lh3.googleusercontent.com/photo.jpg';
-  const customUrl = 'https://firebasestorage.googleapis.com/avatars/u1.jpg';
+  const customUrl = 'https://firebasestorage.googleapis.com/v0/b/fiveacross.firebasestorage.app/o/avatars%2Fu1.jpg?alt=media';
 
   beforeEach(() => {
     resetMocks();

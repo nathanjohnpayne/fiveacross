@@ -354,7 +354,7 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
       // Held to the avatar hosts `firestore.rules`' `photoUrlOk` admits, so an
       // off-host value in a legacy Player row drops to the initial instead of
       // failing the whole Proof.
-      photoURL: allowedPhotoUrlOrNull(photoURL),
+      photoURL: allowedPhotoUrlOrNull(photoURL, uid),
       type: proof.type,
       cellIndex,
       itemText,

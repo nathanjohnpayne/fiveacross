@@ -654,8 +654,10 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
   });
 
   it("cannot be crowded out by the owner's OWN resolved claims either", async () => {
-    // #1155 (the Phase 4b P2 on #1143). The create rule binds `uid` to the caller
-    // and nothing else, so the owner can mint claims against their own Proof
+    // #1155 (the Phase 4b P2 on #1143). The create rule USED to bind `uid` to
+    // the caller and nothing else (it now requires `status: 'pending'`,
+    // specs/sec-rules-shape-hardening.md, so this pins the defence for Claims
+    // written before that), so the owner could mint claims against their own Proof
     // with `status: 'confirmed'` already written, under ids that sort before the
     // genuine one — and an equality-only query with no `orderBy` pages by
     // document id. 25 of those filled the page the same way the forged ones
@@ -742,8 +744,8 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
 
   it('does NOT publish when the fetched page resolves in the gap and a DROPPED claim is still pending', async () => {
     // Codex P2 on #1237, exactly as reported. The owner holds six pending claims
-    // for one Proof — the claim-create rule binds `uid` to the caller and
-    // nothing else, so it permits that — and all five the bounded page fetched
+    // for one Proof — the claim-create rule permits several pending claims of
+    // the owner's own against their own Proof — and all five the bounded page fetched
     // are resolved between the out-of-transaction lookup and the transactional
     // re-read. Before the sentinel, every fetched candidate re-read as resolved,
     // `claimUndecided` stayed false, and Restore published a Proof whose sixth

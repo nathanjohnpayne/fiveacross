@@ -1388,7 +1388,7 @@ async function writeMomentOnce(
     // Held to the avatar hosts `firestore.rules`' `photoUrlOk` admits, so an
     // off-host value in a legacy Player row drops to the initial instead of
     // failing the whole Moment.
-    photoURL: allowedPhotoUrlOrNull(who.photoURL),
+    photoURL: allowedPhotoUrlOrNull(who.photoURL, who.uid),
     createdAt: Date.now(),
     // Included only when the caller supplied one — never an explicit `undefined`
     // (Firestore's setDoc rejects that field value outright).

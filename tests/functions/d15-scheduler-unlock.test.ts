@@ -693,6 +693,39 @@ describe('manualUnlockNow — the admin fallback (AC 2)', () => {
     await expect(manualUnlockNow(admitted, 'admin-1', 'e1', 8, { now })).resolves.toBe('stamped');
   });
 
+  it('re-authorizes INSIDE the writing transaction: a revocation after the pre-flight refuses the stamp', async () => {
+    // CodeRabbit / Codex on #1352: the pre-flight membership read is not part of
+    // the transaction, so a revocation committing between it and the write must
+    // be caught by the transaction's own read.
+    const base = makeDb({
+      eventId: 'e1',
+      event: { days: mainDays(), admins: ['admin-1'], membershipEnforcement: 'enforced' },
+      items: [{ id: 'a', status: 'active', pool: 'main' }],
+    });
+    const membershipPath = 'events/e1/memberships/admin-1';
+    let membershipReads = 0;
+    const db: typeof base = {
+      ...base,
+      doc: (path: string) =>
+        path === membershipPath
+          ? {
+              get: async () => {
+                membershipReads += 1;
+                // Active for the pre-flight, revoked by the time the transaction reads it.
+                const data = membershipReads === 1 ? { status: 'active' } : { status: 'revoked' };
+                return { exists: true, id: 'admin-1', data: () => data };
+              },
+              set: async () => undefined,
+            }
+          : base.doc(path),
+    };
+    await expect(manualUnlockNow(db, 'admin-1', 'e1', 8, { now: () => D9_UNLOCK + 1 })).rejects.toBeInstanceOf(
+      UnlockPermissionError,
+    );
+    expect(membershipReads).toBe(2);
+    expect(base.readEvent().days!.find((d) => d.index === 8)!.snapshotItemIds).toBeUndefined();
+  });
+
   it('on an UNENFORCED Event, admits on the roster alone, exactly as before', async () => {
     const db = makeDb({
       eventId: 'e1',

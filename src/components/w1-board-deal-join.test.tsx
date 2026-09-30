@@ -813,7 +813,7 @@ describe('joinAndDeal Player-row attribution (Codex P2 on PR #67, api half)', ()
         exists: () => true,
         data: () => ({
           displayName: 'Deck Daddy',
-          photoURL: 'https://firebasestorage.googleapis.com/custom.jpg',
+          photoURL: 'https://firebasestorage.googleapis.com/v0/b/fiveacross.firebasestorage.app/o/avatars%2Fsailor-1.jpg?alt=media',
           customPhoto: true,
           createdAt: 0,
         }),
@@ -824,7 +824,7 @@ describe('joinAndDeal Player-row attribution (Codex P2 on PR #67, api half)', ()
 
     expect(playerWrite()).toMatchObject({
       displayName: 'Deck Daddy', // saved name, not the Google "Sailor"
-      photoURL: 'https://firebasestorage.googleapis.com/custom.jpg', // custom avatar wins
+      photoURL: 'https://firebasestorage.googleapis.com/v0/b/fiveacross.firebasestorage.app/o/avatars%2Fsailor-1.jpg?alt=media', // custom avatar wins
     });
   });
 

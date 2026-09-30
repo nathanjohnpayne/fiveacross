@@ -12,8 +12,25 @@ describe('isAllowedPhotoUrl — the avatar hosts the app itself produces', () =>
     expect(isAllowedPhotoUrl('https://lh3.googleusercontent.com/a/ACg8oc-x=s96-c')).toBe(true);
     expect(isAllowedPhotoUrl('https://lh5.googleusercontent.com/-abc/photo.jpg')).toBe(true);
     expect(
-      isAllowedPhotoUrl('https://firebasestorage.googleapis.com/v0/b/demo.appspot.com/o/avatars%2Fu1.jpg?alt=media&token=t'),
+      isAllowedPhotoUrl('https://firebasestorage.googleapis.com/v0/b/gaycruisebingo.firebasestorage.app/o/avatars%2Fu1.jpg?alt=media&token=t'),
     ).toBe(true);
+  });
+
+  it('binds a Storage avatar to the two projects\' buckets, the avatars/ object, and — for a writer — its owner', () => {
+    const own = 'https://firebasestorage.googleapis.com/v0/b/fiveacross.firebasestorage.app/o/avatars%2Fu1.jpg?alt=media';
+    expect(isAllowedPhotoUrl(own, 'u1')).toBe(true);
+    expect(isAllowedPhotoUrl(own)).toBe(true); // the renderer has no owner to bind
+    expect(isAllowedPhotoUrl(own, 'u2')).toBe(false); // somebody else's avatar object
+    for (const value of [
+      // another Firebase project's bucket — its owner reads the access logs
+      'https://firebasestorage.googleapis.com/v0/b/attacker.appspot.com/o/avatars%2Fu1.jpg?alt=media',
+      'https://firebasestorage.googleapis.com/v0/b/fiveacross.firebasestorage.app.evil/o/avatars%2Fu1.jpg',
+      // the app's bucket, but not an avatar object
+      'https://firebasestorage.googleapis.com/v0/b/fiveacross.firebasestorage.app/o/proofs%2Fe%2Fu1%2Fp.jpg?alt=media',
+      'https://firebasestorage.googleapis.com/v0/b/fiveacross.firebasestorage.app/o/avatars%2Fu1.png',
+    ]) {
+      expect(isAllowedPhotoUrl(value)).toBe(false);
+    }
   });
 
   it('refuses every other host, look-alike, scheme, type and over-long value', () => {

@@ -389,11 +389,11 @@ describe('the re-hide arm — a standing marker outranks an active status (#1143
 
 describe('writeVisionVerdict — the scanner records a verdict, never a Proof (#1143)', () => {
   const PROOF = 'events/e/proofs/p1';
-  const SCAN = 'events/e/proofScans/p1';
+  const SCAN = 'events/e/proofScans/p1__u1';
 
   it('names the server-only hand-off path both sides agree on', () => {
     expect(PROOF_SCANS_COLLECTION).toBe('proofScans');
-    expect(proofScanPath('e', 'p1')).toBe(SCAN);
+    expect(proofScanPath('e', 'p1', MEDIA)).toBe(SCAN);
   });
 
   it('writes the verdict straight onto a Proof that already exists — the ordinary path', async () => {
@@ -597,16 +597,40 @@ describe('writeVisionVerdict — the scanner records a verdict, never a Proof (#
     expect(updates).toEqual([]);
   });
 
-  it('parks the scanned path with the verdict, for the consumer to match', async () => {
-    const { db, store } = fakeDb({});
-    expect(await writeVisionVerdict(db, 'e', 'p1', 'violence', 'proofs/e/u2/p1.jpg', 9)).toBe('scan');
-    expect(store[SCAN]).toEqual({ visionFlag: 'violence', scannedAt: 9, storagePath: 'proofs/e/u2/p1.jpg' });
+  it('parks each scanned object under its OWN key, so one object cannot replace another\'s verdict', async () => {
+    // CodeRabbit on #1352: keyed by the Proof id alone, a scan of an object in
+    // another folder under the same id REPLACED the parked verdict for the real
+    // one before the Proof existed. Both arrival orders must keep u1's verdict.
+    for (const order of [
+      ['proofs/e/u1/p1.jpg', 'proofs/e/u2/p1.jpg'],
+      ['proofs/e/u2/p1.jpg', 'proofs/e/u1/p1.jpg'],
+    ]) {
+      const { db, store } = fakeDb({});
+      for (const path of order) {
+        expect(await writeVisionVerdict(db, 'e', 'p1', 'violence', path, 9)).toBe('scan');
+      }
+      expect(store[SCAN]).toEqual({ visionFlag: 'violence', scannedAt: 9, storagePath: MEDIA });
+      expect(store['events/e/proofScans/p1__u2']).toEqual({
+        visionFlag: 'violence', scannedAt: 9, storagePath: 'proofs/e/u2/p1.jpg',
+      });
+      // u1 then creates the Proof: its OWN verdict lands, and u2's record is never read.
+      store[PROOF] = { uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: null, reportCount: 0 };
+      expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(true);
+      expect(store[PROOF]).toMatchObject({ status: 'flagged', visionFlag: 'violence', safetyHide: true });
+      expect(store[SCAN]).toBeUndefined();
+    }
+  });
+
+  it('refuses a path that is not a proof object of this Event', async () => {
+    const { db, ops } = fakeDb({});
+    expect(await writeVisionVerdict(db, 'e', 'p1', 'violence', 'proofs/other/u1/p1.jpg', 9)).toBe('mismatch');
+    expect(ops).toEqual([]);
   });
 });
 
 describe('applyPendingVisionScan — the parked verdict lands when the Proof appears (#1143)', () => {
   const PROOF = 'events/e/proofs/p1';
-  const SCAN = 'events/e/proofScans/p1';
+  const SCAN = 'events/e/proofScans/p1__u1';
   const created = () => ({ uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: null, reportCount: 0 });
 
   it('flags the freshly created Proof with the parked verdict and CONSUMES the record', async () => {
@@ -675,10 +699,11 @@ describe('applyPendingVisionScan — the parked verdict lands when the Proof app
     expect(store[PROOF]).toEqual(lifted);
     expect(updates).toEqual([]);
     expect(store[SCAN]).toBeUndefined();
-    // Both reads still precede the only write, and the record is read first.
+    // Both reads still precede the only write; the Proof is read first because
+    // its own `storagePath` names the record (CodeRabbit on #1352).
     expect(ops).toEqual([
-      { op: 'get', path: SCAN },
       { op: 'get', path: PROOF },
+      { op: 'get', path: SCAN },
       { op: 'delete', path: SCAN },
     ]);
     // `false` is the right answer for `applyVisionFlagHide`: nothing was applied,
@@ -691,9 +716,9 @@ describe('applyPendingVisionScan — the parked verdict lands when the Proof app
     const { db, ops, store } = fakeDb({ [PROOF]: created() });
     expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(false);
     expect(store[PROOF]).toEqual(created());
-    // One read, and it is the cheap one: the absent record short-circuits before
-    // the Proof is read at all.
-    expect(ops).toEqual([{ op: 'get', path: SCAN }]);
+    // Two reads and no write: the Proof (which names the record), then the
+    // record it names, absent.
+    expect(ops).toEqual([{ op: 'get', path: PROOF }, { op: 'get', path: SCAN }]);
   });
 
   it('never CREATES the Proof either — a record whose Proof is missing simply waits', async () => {
@@ -750,7 +775,7 @@ describe('applyPendingVisionScan — the parked verdict lands when the Proof app
 
 describe('visionVerdictWrite — the hold is stamped WITH the verdict (#1143)', () => {
   const PROOF = 'events/e/proofs/p1';
-  const SCAN = 'events/e/proofScans/p1';
+  const SCAN = 'events/e/proofScans/p1__u1';
 
   it('stamps the marker for exactly the verdicts this module hides', () => {
     for (const flag of AUTO_HIDE_VISION_FLAGS) {
@@ -1100,7 +1125,7 @@ describe('applyVisionFlagHide — the create-time hand-off (#1143)', () => {
     expect(store[PROOF]).toEqual({
       uid: 'u1', storagePath: MEDIA, status: 'hidden', safetyHide: true, visionFlag: 'violence', reportCount: 0,
     });
-    expect(store[proofScanPath('e', 'p1')]).toBeUndefined();
+    expect(store[proofScanPath('e', 'p1', MEDIA)!]).toBeUndefined();
     // 5. And it settles: the next write matches no arm.
     expect(
       await applyVisionFlagHide('e', 'p1', { status: 'flagged' }, store[PROOF] as VisionFlaggedDoc, deps),
@@ -1166,7 +1191,7 @@ describe('the hand-off survives a failure — redelivery, then reconciliation (#
     // 3. This is the exhausted state the finding named: media public, the
     //    server's own verdict parked where no client can even read it.
     expect(store[PROOF]).toMatchObject({ status: 'active', visionFlag: null });
-    expect(store[proofScanPath('e', 'p1')]).toEqual({ visionFlag: 'violence', scannedAt: NOW, storagePath: MEDIA });
+    expect(store[proofScanPath('e', 'p1', MEDIA)!]).toEqual({ visionFlag: 'violence', scannedAt: NOW, storagePath: MEDIA });
 
     // 4. The next ordinary write — a report bump — reconciles it, because the
     //    Proof is still inside the window.
@@ -1180,7 +1205,7 @@ describe('the hand-off survives a failure — redelivery, then reconciliation (#
       await applyVisionFlagHide('e', 'p1', created, store[PROOF] as VisionFlaggedDoc, deps),
     ).toBe(true);
     expect(store[PROOF]).toMatchObject({ status: 'flagged', visionFlag: 'violence', safetyHide: true });
-    expect(store[proofScanPath('e', 'p1')]).toBeUndefined();
+    expect(store[proofScanPath('e', 'p1', MEDIA)!]).toBeUndefined();
 
     // 5. …and the flag write re-fires the trigger, where the hide arm takes over.
     expect(
@@ -1207,7 +1232,7 @@ describe('the hand-off survives a failure — redelivery, then reconciliation (#
       }),
     ).toBe(false);
     expect(applyPendingScan).not.toHaveBeenCalled();
-    expect(store[proofScanPath('e', 'p1')]).toEqual({ visionFlag: 'violence', scannedAt: NOW, storagePath: MEDIA });
+    expect(store[proofScanPath('e', 'p1', MEDIA)!]).toEqual({ visionFlag: 'violence', scannedAt: NOW, storagePath: MEDIA });
   });
 });
 

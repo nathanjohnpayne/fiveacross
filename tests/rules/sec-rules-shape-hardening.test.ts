@@ -8,7 +8,7 @@ import {
   type RulesTestContext,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { doc, setDoc, writeBatch } from 'firebase/firestore';
+import { deleteField, doc, setDoc, updateDoc, writeBatch } from 'firebase/firestore';
 import { ref, uploadBytes } from 'firebase/storage';
 import { clearStorageDeep } from '../support/storage-emulator';
 
@@ -37,7 +37,13 @@ const MISSING_EVENT = 'evtmissing';
 const [ALICE, BOB, ADMIN] = ['alice', 'bob', 'carol'];
 const GOOGLE_PHOTO = 'https://lh3.googleusercontent.com/a/ACg8ocK-example=s96-c';
 const STORAGE_PHOTO =
-  'https://firebasestorage.googleapis.com/v0/b/demo.appspot.com/o/avatars%2Falice.jpg?alt=media&token=t';
+  'https://firebasestorage.googleapis.com/v0/b/fiveacross.firebasestorage.app/o/avatars%2Falice.jpg?alt=media&token=t';
+// The same object path in a bucket some other Firebase project owns, and
+// another user's avatar object in the app's own bucket.
+const FOREIGN_BUCKET_PHOTO =
+  'https://firebasestorage.googleapis.com/v0/b/attacker-project.appspot.com/o/avatars%2Falice.jpg?alt=media';
+const OTHER_USERS_AVATAR =
+  'https://firebasestorage.googleapis.com/v0/b/fiveacross.firebasestorage.app/o/avatars%2Fbob.jpg?alt=media';
 const OFF_HOST_PHOTO = 'https://tracker.example/pixel.gif';
 const NOW = () => Date.now();
 const at = (path: string) => `events/${EVENT}/${path}`;
@@ -141,6 +147,9 @@ describe('users/{uid} — the owner writes only the profile fields the app write
     const ref = doc(db(ALICE), `users/${ALICE}`);
     for (const photoURL of [
       OFF_HOST_PHOTO,
+      FOREIGN_BUCKET_PHOTO,
+      OTHER_USERS_AVATAR,
+      'https://firebasestorage.googleapis.com/v0/b/fiveacross.firebasestorage.app/o/proofs%2Fe%2Falice%2Fp.jpg',
       'http://lh3.googleusercontent.com/a/x',
       'https://lh3.googleusercontent.com.tracker.example/a/x',
       'javascript:alert(1)',
@@ -166,6 +175,9 @@ describe('users/{uid} — the owner writes only the profile fields the app write
     await assertSucceeds(setDoc(ref, { displayName: 'Bob' }, { merge: true }));
     await assertFails(setDoc(ref, { photoURL: 'https://other.example/b.jpg' }, { merge: true }));
     await assertFails(setDoc(ref, { anotherLegacyKey: 1 }, { merge: true }));
+    // REMOVING a stale key (or clearing a field) only makes the row cleaner.
+    await assertSucceeds(updateDoc(ref, { legacyKey: deleteField() }));
+    await assertSucceeds(updateDoc(ref, { photoURL: deleteField() }));
   });
 });
 
@@ -194,6 +206,8 @@ describe('players/{uid} — identity fields are typed; stats stay self-written (
     await assertFails(setDoc(ref, base({ displayName: 12345 })));
     await assertFails(setDoc(ref, base({ displayName: 'A'.repeat(101) })));
     await assertFails(setDoc(ref, base({ photoURL: OFF_HOST_PHOTO })));
+    await assertFails(setDoc(ref, base({ photoURL: FOREIGN_BUCKET_PHOTO })));
+    await assertFails(setDoc(ref, base({ photoURL: OTHER_USERS_AVATAR })));
     await assertFails(setDoc(ref, base({ photoURL: { src: GOOGLE_PHOTO } })));
   });
 
@@ -241,6 +255,9 @@ describe('proofs/{proofId} — the create holds the id, the Callout text and the
     await assertFails(put('textNum', { text: 5 }));
     await assertFails(put('textLong', { text: 'x'.repeat(1001) }));
     await assertFails(put('photoOff', { photoURL: OFF_HOST_PHOTO }));
+    await assertFails(put('photoForeign', { photoURL: FOREIGN_BUCKET_PHOTO }));
+    await assertFails(put('photoOthers', { photoURL: OTHER_USERS_AVATAR }));
+    await assertSucceeds(put('photoOwn', { photoURL: STORAGE_PHOTO }));
     await assertSucceeds(put('textNull', { text: null }));
   });
 });
@@ -259,8 +276,10 @@ describe('moments/{momentId} — the avatar is pinned like every other', () => {
     await assertSucceeds(setDoc(doc(db(ALICE), at(`moments/${ALICE}-blackout`)), { ...moment(null), kind: 'blackout' }));
   });
 
-  it('DENIES a Moment carrying an off-host avatar', async () => {
-    await assertFails(setDoc(doc(db(ALICE), at(`moments/${ALICE}-bingo`)), moment(OFF_HOST_PHOTO)));
+  it('DENIES a Moment carrying an off-host, foreign-bucket or someone else\'s avatar', async () => {
+    for (const photoURL of [OFF_HOST_PHOTO, FOREIGN_BUCKET_PHOTO, OTHER_USERS_AVATAR]) {
+      await assertFails(setDoc(doc(db(ALICE), at(`moments/${ALICE}-bingo`)), moment(photoURL)));
+    }
   });
 });
 

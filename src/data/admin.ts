@@ -408,16 +408,20 @@ export function hideProof(id: string, eventId: string = EVENT_ID): Promise<void>
  * #1143). Only the owner's claim may steer a restore, and the bound below is
  * applied to the query — so a `proofId`-only lookup lets any signed-in user
  * decide what the query returns: enough forged pending claims naming someone
- * else's Proof fill the page, the owner's real claim falls off the end, and
+ * else's Proof (refused at create since specs/sec-rules-shape-hardening.md, but
+ * possible in Claims written before it) fill the page, the owner's real claim falls off the end, and
  * Restore publishes a photo whose claim nobody has judged. The forged docs are excluded
  * where the exclusion cannot be crowded out — by the query itself — and the
  * in-transaction owner check below was kept all the same, because the query
  * reads a snapshot and a candidate read from one cannot be trusted to publish.
  *
  * And it asks for the owner's PENDING claims (#1155, the Phase 4b P2 on #1143).
- * The claims create rule binds `uid` to the caller and nothing else, so the
- * owner may mint further claims against their own Proof with `status:
- * 'confirmed'` already written — and an equality-only query with no `orderBy`
+ * The claims create rule used to bind `uid` to the caller and nothing else, so
+ * the owner could mint further claims against their own Proof with `status:
+ * 'confirmed'` already written. It now requires `status: 'pending'` and a
+ * `proofId` naming the caller's own Proof (specs/sec-rules-shape-hardening.md),
+ * so this — like the forged claims above — is a defence for Claims written
+ * before that rule — and an equality-only query with no `orderBy`
  * pages by document id, so enough of them under ids that sort before the genuine
  * claim fill the page just as the forged ones did, the pending claim falls off
  * the end, and Restore publishes it. The `status` filter removes them the same
@@ -559,8 +563,9 @@ async function restoreProofOnce(id: string, eventId: string): Promise<boolean> {
   const claimRefs = fetched.map((d) => claim(d.id, eventId));
   return runTransaction(db, async (tx) => {
     // The Proof first: a claim steers the restore only when it is the Proof
-    // OWNER's claim. Any signed-in user can create a pending claim that names
-    // someone else's Proof, and trusting it would let a stranger send another
+    // OWNER's claim. A pending claim naming someone else's Proof is refused at
+    // create now (specs/sec-rules-shape-hardening.md), but Claims written
+    // before that rule can still carry one, and trusting it would let a stranger send another
     // Player's photo back to `pending` instead of to the Feed (Codex P2 on
     // #1143). The owner is read live, inside the transaction, ahead of any claim.
     const proofSnap = await tx.get(proof(id, eventId));

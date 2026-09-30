@@ -192,7 +192,7 @@ function bootstrapProfile(u: User, now: number = Date.now()) {
     // (`displayNameOk`, `photoUrlOk`): a create the rule refused would leave
     // the User with no profile row at all.
     displayName: (u.displayName ?? 'Anonymous').slice(0, 100),
-    photoURL: allowedPhotoUrlOrNull(u.photoURL),
+    photoURL: allowedPhotoUrlOrNull(u.photoURL, u.uid),
     createdAt: now,
   };
 }
@@ -515,12 +515,12 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
     // add a round trip for no correctness gain.
     const profileSnap = await getDoc(rawUser(u.uid)).catch(() => null);
     const profile = profileSnap?.exists() ? (profileSnap.data() as Partial<UserDoc>) : null;
-    const savedPhoto = profile ? allowedPhotoUrlOrNull(profile.photoURL) : null;
+    const savedPhoto = profile ? allowedPhotoUrlOrNull(profile.photoURL, u.uid) : null;
     const displayName = resolveDisplayName(profile, u.displayName);
     const photoURL =
       profile?.customPhoto === true
-        ? (savedPhoto ?? allowedPhotoUrlOrNull(u.photoURL))
-        : allowedPhotoUrlOrNull(u.photoURL);
+        ? (savedPhoto ?? allowedPhotoUrlOrNull(u.photoURL, u.uid))
+        : allowedPhotoUrlOrNull(u.photoURL, u.uid);
     // The row read + conditional seed run as ONE transaction (#409): the
     // per-field guards below are only sound against the row state the write
     // actually lands on. Two overlapping joins (a timed-out deal still in
@@ -600,12 +600,12 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
   // must not publish the saved photo — the contract is customPhoto: true, and
   // everything else in this doc is untrusted junk). Anything malformed falls
   // back per-field to the auth values, exactly like a missing profile.
-  const savedPhoto = profile ? allowedPhotoUrlOrNull(profile.photoURL) : null;
+  const savedPhoto = profile ? allowedPhotoUrlOrNull(profile.photoURL, u.uid) : null;
   const displayName = resolveDisplayName(profile, u.displayName);
   const photoURL =
     profile?.customPhoto === true
-      ? (savedPhoto ?? allowedPhotoUrlOrNull(u.photoURL))
-      : allowedPhotoUrlOrNull(u.photoURL);
+      ? (savedPhoto ?? allowedPhotoUrlOrNull(u.photoURL, u.uid))
+      : allowedPhotoUrlOrNull(u.photoURL, u.uid);
 
   // The ADR 0004 Phase 0 community auto-hide threshold, read from the event doc so
   // a frozen card is dealt from the SAME pool a Player sees live (useItems): a

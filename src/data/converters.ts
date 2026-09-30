@@ -278,7 +278,7 @@ export const playerConverter: FirestoreDataConverter<PlayerDoc> = {
     const out: PlayerDoc = {
       ...data,
       uid: snap.id,
-      photoURL: allowedPhotoUrlOrNull(data.photoURL),
+      photoURL: allowedPhotoUrlOrNull(data.photoURL, snap.id),
       reshufflesUsed: typeof data.reshufflesUsed === 'number' ? data.reshufflesUsed : 0,
     };
     if ('displayName' in out && typeof out.displayName !== 'string') {
@@ -319,7 +319,7 @@ export const proofConverter: FirestoreDataConverter<ProofDoc> = {
     return {
       ...data,
       id: snap.id,
-      photoURL: allowedPhotoUrlOrNull(data.photoURL),
+      photoURL: allowedPhotoUrlOrNull(data.photoURL, typeof data.uid === 'string' ? data.uid : ''),
       ...('text' in data ? { text: typeof data.text === 'string' ? data.text : null } : {}),
     };
   },

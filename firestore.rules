@@ -5,19 +5,29 @@ service cloud.firestore {
     function signedIn() { return request.auth != null; }
     function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
     // Avatar URLs other clients render (users, players, proofs, moments). An
-    // `<img src>` pointed at an arbitrary host lets one participant log every
-    // viewer's IP and user agent, so a stored avatar is either absent or a URL
-    // on one of the two hosts the app itself produces: Google account photos
-    // (`lh3.googleusercontent.com`, the only sign-in provider) and Firebase
-    // Storage download URLs (`firebasestorage.googleapis.com`, custom avatars
-    // via `uploadAvatar`). Length-capped so a profile cannot carry a megabyte
-    // URL into every roster read. Mirrored client-side by
-    // `src/data/photoUrl.ts`, which every writer and `Avatar` go through.
-    function photoUrlOk(value) {
+    // `<img src>` pointed at a host or bucket a participant controls lets them
+    // log every viewer's IP and user agent, so a stored avatar is either absent
+    // or one of the two things the app itself produces:
+    //   - a Google account photo (`lh<N>.googleusercontent.com`; Google is the
+    //     only sign-in provider), or
+    //   - THIS app's own custom-avatar object — a Firebase Storage download URL
+    //     for `avatars/{uid}.jpg` in one of the two projects' own buckets, for
+    //     the avatar's OWNER `uid`. The host alone is not enough: any Firebase
+    //     project's bucket answers on `firebasestorage.googleapis.com`, and a
+    //     bucket someone else owns is one whose access logs they read (Codex P1
+    //     on #1352). The `uid` is spliced into the pattern only after it is
+    //     held to a plain id shape, so it cannot widen the pattern.
+    // Length-capped so a profile cannot carry a megabyte URL into every roster
+    // read. Mirrored client-side by `src/data/photoUrl.ts`, which every writer
+    // and `Avatar` go through.
+    function photoUrlOk(value, uid) {
       return value == null
         || (value is string
             && value.size() <= 1024
-            && value.matches('^https://(lh[0-9][.]googleusercontent[.]com|firebasestorage[.]googleapis[.]com)/.*'));
+            && (value.matches('^https://lh[0-9][.]googleusercontent[.]com/.*')
+                || (uid is string
+                    && uid.matches('^[A-Za-z0-9_-]{1,128}$')
+                    && value.matches('^https://firebasestorage[.]googleapis[.]com/v0/b/(gaycruisebingo|fiveacross)[.](firebasestorage[.]app|appspot[.]com)/o/avatars%2F' + uid + '[.]jpg([?].*)?$'))));
     }
     // A participant-authored display name other clients render: a bounded
     // string. Size 0 stays admissible here (the public-doc arms that need a
@@ -1438,14 +1448,20 @@ service cloud.firestore {
         return keys.hasOnly(userProfileKeys())
           && (!('displayName' in keys) || displayNameOk(d.displayName))
           && (!('handle' in keys) || (d.handle is string && d.handle.size() <= 100))
-          && (!('photoURL' in keys) || photoUrlOk(d.photoURL))
+          && (!('photoURL' in keys) || photoUrlOk(d.photoURL, uid))
           && (!('customPhoto' in keys) || d.customPhoto is bool)
           && (!('createdAt' in keys) || d.createdAt is number);
       }
+      // On UPDATE only the keys the write leaves WITH a value are checked — the
+      // added and changed ones. A REMOVED key is not: deleting a stale legacy
+      // field, or clearing `photoURL`, only ever makes the row cleaner, and a
+      // type check on a key that is no longer there would error and deny
+      // (CodeRabbit on #1352).
       function userProfileWriteOk() {
+        let diff = request.resource.data.diff(resource == null ? {} : resource.data);
         return resource == null
           ? userProfileFieldsOk(request.resource.data.keys())
-          : userProfileFieldsOk(request.resource.data.diff(resource.data).affectedKeys());
+          : userProfileFieldsOk(diff.addedKeys().union(diff.changedKeys()));
       }
       // Honor-system 18+ self-attestation (ADR 0001): a User records their OWN
       // `attestedAdultAt` — a self-statement, not identity verification — so the
@@ -2155,7 +2171,7 @@ service cloud.firestore {
           let d = request.resource.data;
           let keys = resource == null ? d.keys() : d.diff(resource.data).affectedKeys();
           return (!('displayName' in keys) || !('displayName' in d) || displayNameOk(d.displayName))
-            && (!('photoURL' in keys) || !('photoURL' in d) || photoUrlOk(d.photoURL));
+            && (!('photoURL' in keys) || !('photoURL' in d) || photoUrlOk(d.photoURL, uid));
         }
         allow read: if admitted(eventId);
         allow create, update: if isAdmittedOwnerOrAdmin(eventId, uid)
@@ -2456,7 +2472,7 @@ service cloud.firestore {
           && request.resource.data.cellIndex <= 24
           && request.resource.data.displayName is string
           && request.resource.data.displayName.size() <= 100
-          && photoUrlOk(request.resource.data.get('photoURL', null))
+          && photoUrlOk(request.resource.data.get('photoURL', null), request.auth.uid)
           // The Callout / caption every Feed reader renders: absent, null, or a
           // bounded string (ProofSheet caps typed text well under this).
           && (request.resource.data.get('text', null) == null
@@ -3190,7 +3206,7 @@ service cloud.firestore {
           && request.resource.data.displayName.size() <= 100
           // The avatar every Feed reader renders beside the beat: absent, null,
           // or on an app-produced host (see `photoUrlOk`).
-          && photoUrlOk(request.resource.data.get('photoURL', null))
+          && photoUrlOk(request.resource.data.get('photoURL', null), request.auth.uid)
           // createdAt is client-set and the Feed sorts by it desc; require a
           // numeric, near-now value (same tolerance as proofs above: within +60s /
           // -24h of request.time) so a bad clock or a forged far-future stamp can't

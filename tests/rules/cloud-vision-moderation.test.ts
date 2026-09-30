@@ -140,7 +140,7 @@ describe('firestore.rules — the scanner hand-off is server-to-server ONLY (#11
   // `moderateProof` is a STORAGE trigger and `attachProof` uploads the media
   // before the transaction that writes the Proof, so a fast scan can reach a
   // verdict with no document to put it on. It parks the verdict in
-  // `events/{eventId}/proofScans/{proofId}` rather than merge-CREATING the Proof
+  // `events/{eventId}/proofScans/{proofId}__{uploaderUid}` rather than merge-CREATING the Proof
   // — a scanner-created Proof turns the Player's own create into a rules-denied
   // update, and lets an admin uploader's full `set` overwrite the verdict and the
   // safety marker back to a public Proof. The collection is a hand-off between
