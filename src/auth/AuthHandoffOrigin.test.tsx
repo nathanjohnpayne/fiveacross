@@ -6,20 +6,32 @@
 // not mint twice under StrictMode's double-invoked effects, and it must refuse a
 // malformed request rather than redirect to Google and strand the player.
 import { StrictMode } from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   getRedirectResult: vi.fn(),
   onAuthStateChanged: vi.fn(),
   signInWithRedirect: vi.fn(),
+  signOut: vi.fn(),
   mintAuthHandoff: vi.fn(),
+  providers: [] as Array<{ params: Record<string, string> }>,
 }));
 
 vi.mock('firebase/auth', () => ({
   getRedirectResult: mocks.getRedirectResult,
   onAuthStateChanged: mocks.onAuthStateChanged,
   signInWithRedirect: mocks.signInWithRedirect,
+  signOut: mocks.signOut,
+  GoogleAuthProvider: class {
+    params: Record<string, string> = {};
+    constructor() {
+      mocks.providers.push(this);
+    }
+    setCustomParameters(p: Record<string, string>) {
+      this.params = p;
+    }
+  },
 }));
 vi.mock('../firebase', () => ({ auth: {}, googleProvider: {} }));
 vi.mock('./handoffExchange', () => ({ mintAuthHandoff: mocks.mintAuthHandoff }));
@@ -30,8 +42,17 @@ const TXN = 'T'.repeat(43);
 const ORIGIN = 'https://summer-camp.fiveacross.app';
 const SEARCH = `?target=${encodeURIComponent(ORIGIN)}&txn=${TXN}&return=/board`;
 
+/**
+ * This flow just came back from Google: `getRedirectResult` resolves the
+ * credential of the sign-in the player completed for THIS request, so the page
+ * mints without asking again.
+ */
+function returningFromGoogle() {
+  mocks.getRedirectResult.mockResolvedValue({ user: { uid: 'u1' } });
+}
+
 /** Drive `onAuthStateChanged` to a settled answer, and hand back its unsubscribe. */
-function withSession(user: { uid: string } | null) {
+function withSession(user: { uid: string; email?: string } | null) {
   const unsubscribe = vi.fn();
   mocks.onAuthStateChanged.mockImplementation((_auth: unknown, cb: (u: unknown) => void) => {
     cb(user);
@@ -46,6 +67,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.getRedirectResult.mockResolvedValue(null);
   mocks.signInWithRedirect.mockResolvedValue(undefined);
+  mocks.signOut.mockResolvedValue(undefined);
+  mocks.providers.length = 0;
   replace = vi.fn<(url: string) => void>();
 });
 
@@ -54,7 +77,8 @@ afterEach(() => {
 });
 
 describe('AuthHandoffOrigin', () => {
-  it('mints immediately and bounces when a session already exists here', async () => {
+  it('mints immediately and bounces when the player has just come back from Google', async () => {
+    returningFromGoogle();
     withSession({ uid: 'u1' });
     mocks.mintAuthHandoff.mockResolvedValue(`${ORIGIN}/board#fa_handoff=${'C'.repeat(43)}`);
 
@@ -86,6 +110,7 @@ describe('AuthHandoffOrigin', () => {
 
   // A plain re-render must not restart anything.
   it('mints once across a re-render', async () => {
+    returningFromGoogle();
     withSession({ uid: 'u1' });
     mocks.mintAuthHandoff.mockResolvedValue(`${ORIGIN}/`);
 
@@ -104,6 +129,7 @@ describe('AuthHandoffOrigin', () => {
   // StrictMode React also double-invokes the render body, so the mint may be
   // attempted twice; what must hold is that the page RESOLVES.
   it('still completes under a real StrictMode mount', async () => {
+    returningFromGoogle();
     withSession({ uid: 'u1' });
     mocks.mintAuthHandoff.mockResolvedValue(`${ORIGIN}/board`);
 
@@ -141,6 +167,7 @@ describe('AuthHandoffOrigin', () => {
   });
 
   it('reports a refused mint rather than stranding the player on a spinner', async () => {
+    returningFromGoogle();
     withSession({ uid: 'u1' });
     mocks.mintAuthHandoff.mockRejectedValue(new Error('invalid-argument'));
 
@@ -198,6 +225,7 @@ describe('the central-origin page reaches a terminal state', () => {
   });
 
   it('gives up when the mint never returns', async () => {
+    returningFromGoogle();
     withSession({ uid: 'u1' });
     mocks.mintAuthHandoff.mockImplementation(() => new Promise(() => {}));
     render(<AuthHandoffOrigin search={SEARCH} navigate={replace} timeoutMs={20} />);
@@ -206,6 +234,7 @@ describe('the central-origin page reaches a terminal state', () => {
   });
 
   it('does not fire the deadline against a page that already bounced', async () => {
+    returningFromGoogle();
     withSession({ uid: 'u1' });
     mocks.mintAuthHandoff.mockResolvedValue(`${ORIGIN}/board`);
     render(<AuthHandoffOrigin search={SEARCH} navigate={replace} timeoutMs={30} />);
@@ -230,6 +259,7 @@ describe('the central-origin page reaches a terminal state', () => {
   // Phase 4b P1: calling fail() alone left the continuations live, so a late
   // mint could navigate the browser away from the failure already on screen.
   it('a timed-out page cannot be navigated away by a late mint', async () => {
+    returningFromGoogle();
     withSession({ uid: 'u1' });
     let landMint: (v: string) => void = () => {};
     mocks.mintAuthHandoff.mockImplementation(
@@ -258,6 +288,7 @@ describe('the central-origin page reaches a terminal state', () => {
 // less truthful the longer the player looked at it.
 describe('the first real failure is the one that sticks', () => {
   it('keeps the mint-failure message instead of letting the deadline overwrite it', async () => {
+    returningFromGoogle();
     withSession({ uid: 'u1' });
     mocks.mintAuthHandoff.mockRejectedValue(new Error('invalid-argument'));
 
@@ -289,6 +320,7 @@ describe('the first real failure is the one that sticks', () => {
 // timeout, no way out.
 describe('a navigation that throws is still a failure', () => {
   it('shows the mint failure when replace() throws', async () => {
+    returningFromGoogle();
     withSession({ uid: 'u1' });
     mocks.mintAuthHandoff.mockResolvedValue(`${ORIGIN}/board`);
     const throwingNavigate = vi.fn(() => {
@@ -306,6 +338,7 @@ describe('a navigation that throws is still a failure', () => {
 // so "Google sign-in didn't finish / nothing was changed" is simply untrue.
 describe('the deadline reports the failure that actually happened', () => {
   it('says mint-failed when the hang is in minting, not sign-in', async () => {
+    returningFromGoogle();
     withSession({ uid: 'u1' });
     mocks.mintAuthHandoff.mockImplementation(() => new Promise(() => {}));
 
@@ -319,5 +352,77 @@ describe('the deadline reports the failure that actually happened', () => {
     mocks.getRedirectResult.mockImplementation(() => new Promise(() => {}));
     render(<AuthHandoffOrigin search={SEARCH} navigate={replace} timeoutMs={25} />);
     expect(await screen.findByText(/didn't finish/i)).toBeInTheDocument();
+  });
+});
+
+// A session that PREDATES this flow is never minted for silently. The `txn` in
+// the URL is caller-chosen, so minting on page load would let whoever opened the
+// URL receive a code for the account last signed in here — on a shared device,
+// the previous person's. The page asks first; "Use another account" signs the
+// central session out and sends the player through Google's account chooser.
+describe('an existing session is confirmed before anything is minted', () => {
+  it('shows the target host and the account, and mints nothing until Continue', async () => {
+    withSession({ uid: 'u1', email: 'first@example.com' });
+    mocks.mintAuthHandoff.mockResolvedValue(`${ORIGIN}/board`);
+
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} />);
+
+    const proceed = await screen.findByRole('button', {
+      name: 'Continue to summer-camp.fiveacross.app as first@example.com',
+    });
+    expect(screen.getByRole('button', { name: 'Use another account' })).toBeInTheDocument();
+    // Give any stray continuation a chance to run: still nothing minted.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(mocks.mintAuthHandoff).not.toHaveBeenCalled();
+    expect(replace).not.toHaveBeenCalled();
+    expect(mocks.signInWithRedirect).not.toHaveBeenCalled();
+
+    fireEvent.click(proceed);
+    await waitFor(() => expect(replace).toHaveBeenCalledWith(`${ORIGIN}/board`));
+    expect(mocks.mintAuthHandoff).toHaveBeenCalledTimes(1);
+  });
+
+  it('"Use another account" signs the central session out and opens Google’s account chooser', async () => {
+    withSession({ uid: 'u1', email: 'first@example.com' });
+
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Use another account' }));
+
+    await waitFor(() => expect(mocks.signInWithRedirect).toHaveBeenCalled());
+    expect(mocks.signOut).toHaveBeenCalledTimes(1);
+    expect(mocks.signOut.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.signInWithRedirect.mock.invocationCallOrder[0],
+    );
+    const provider = mocks.signInWithRedirect.mock.calls[0][1] as { params: Record<string, string> };
+    expect(provider.params).toEqual({ prompt: 'select_account' });
+    expect(mocks.mintAuthHandoff).not.toHaveBeenCalled();
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it('does not time out while the player is reading the confirmation', async () => {
+    withSession({ uid: 'u1', email: 'first@example.com' });
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} timeoutMs={20} />);
+    await screen.findByRole('button', { name: 'Use another account' });
+    await new Promise((r) => setTimeout(r, 60));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Use another account' })).toBeInTheDocument();
+  });
+
+  it('re-arms the deadline once the player chooses, so a hung mint still reaches a failure', async () => {
+    withSession({ uid: 'u1', email: 'first@example.com' });
+    mocks.mintAuthHandoff.mockImplementation(() => new Promise(() => {}));
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} timeoutMs={20} />);
+    fireEvent.click(await screen.findByRole('button', { name: /^Continue to/ }));
+    expect(await screen.findByText(/couldn't return you to your event/i)).toBeInTheDocument();
+  });
+
+  it('reports a sign-out that fails instead of minting for the old account', async () => {
+    withSession({ uid: 'u1', email: 'first@example.com' });
+    mocks.signOut.mockRejectedValue(new Error('network'));
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Use another account' }));
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(mocks.mintAuthHandoff).not.toHaveBeenCalled();
+    expect(mocks.signInWithRedirect).not.toHaveBeenCalled();
   });
 });

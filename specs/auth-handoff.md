@@ -26,7 +26,7 @@ Four properties, and removing any one turns a URL-borne credential into account 
 1. **Single use, enforced transactionally.** This is why the code is a Firestore document rather than a signed stateless blob: a signature proves authenticity, but nothing stateless can prove *first* use. The read and the consuming write happen in one Firestore transaction, so a concurrent second exchange is aborted, re-runs, and finds the code already spent.
 2. **Short TTL, enforced server-side.** `HANDOFF_TTL_MS` is 120 seconds—the code has to survive one redirect and one page load, not a session. The deadline lives in the document and is compared against the server clock; nothing the caller sends influences it.
 3. **Origin bound.** The document names the exact origin it may be redeemed at, and that origin was checked against the hostname registry *before* the code existed.
-4. **Transaction bound.** The code alone cannot be redeemed. An attacker who reads it out of browser history, over a shoulder, or from a `Referer` leak still cannot produce the verifier, which never leaves the origin that generated it.
+4. **Transaction bound.** The code alone cannot be redeemed. An attacker who reads it out of browser history, over a shoulder, or from a `Referer` leak still cannot produce the verifier, which never leaves the origin that generated it. The binding protects a code minted for a transaction the attacker did NOT choose; it does not stop an attacker who holds their OWN verifier from getting a code minted against its `txn`, because `txn` arrives in the central page's query string. That is why the central page never mints silently for a session that predates the flow (§ "The central page confirms an existing session").
 
 ## Wire contract
 
@@ -56,7 +56,11 @@ Called **at the central auth origin**, by a caller who has just completed Google
 
 **The response carries a URL, not a code.** The caller supplies an origin and a path and gets back the exact URL to redirect to. It never gets to assemble a redirect target of its own, which is what keeps the return leg from being an open redirect—the one place caller input could otherwise steer a navigation.
 
-Minting is otherwise unconstrained: there is no check that the caller is at the central origin, because there is nothing to protect against. A code binds to the caller's *own* UID, so the only thing an attacker can mint is a way to sign in as themselves.
+Minting is otherwise unconstrained server-side: there is no check that the caller is at the central origin. A code binds to the caller's *own* UID, so a caller cannot mint for somebody else's identity—but the `txn` a code binds to is caller-chosen, so whoever holds a browser with a live central session can have a code minted for THAT session against any transaction. The protection against that is the central page, not the callable: it mints on page load only when the flow itself just came back from Google, and otherwise asks the person at the keyboard to confirm the account (see below).
+
+## The central page confirms an existing session
+
+`auth.fiveacross.app/auth/handoff` mints without asking only when `getRedirectResult` returns the credential of a Google sign-in completed in this flow. A session that predates the flow—a second Event, a reload, or the previous user of a shared device, whose central session survives signing out on an Event origin—gets a confirmation instead: "Continue to `<target host>` as `<email>`" mints and bounces; "Use another account" signs the central session out and restarts sign-in through Google's account chooser (`prompt: select_account`), so nothing is ever minted for the account that was there. The page's deadline is disarmed while the confirmation is on screen and re-armed when the player chooses.
 
 Every rejection is `invalid-argument` with one message, except a missing session, which is `unauthenticated`.
 

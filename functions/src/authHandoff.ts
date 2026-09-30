@@ -330,6 +330,14 @@ export function validateReturnPath(raw: unknown, targetOrigin: string): string |
     return null;
   }
   if (resolved.origin !== targetOrigin) return null;
+  // DOT SEGMENTS can manufacture the protocol-relative shape the prefix checks
+  // above refuse: `/..//evil.test` starts with one slash, resolves on the target
+  // origin, and normalises to the pathname `//evil.test`. That value is then
+  // both the path of the URL carrying the code AND what the Event origin hands
+  // `history.replaceState` when it strips the fragment, where a leading `//`
+  // names another host. So the NORMALISED path is held to the same one-slash
+  // rule as the raw one.
+  if (resolved.pathname.startsWith('//')) return null;
   return `${resolved.pathname}${resolved.search}`;
 }
 
@@ -450,9 +458,15 @@ export interface MintDeps {
  * Mint a handoff code for the authenticated caller.
  *
  * Minting is deliberately self-service and unconstrained beyond being signed in:
- * there is no check that the caller is at the central origin, because there is
- * nothing to protect against. A code binds to the CALLER'S OWN uid, so the only
- * thing an attacker can mint is a way to sign in as themselves.
+ * there is no check that the caller is at the central origin. A code binds to
+ * the CALLER'S OWN uid, so no caller can mint for another identity — but the
+ * `transactionId` is caller-chosen, so a browser holding a live central session
+ * can be made to mint for THAT session against a transaction someone else
+ * holds the verifier for. The central page (`AuthHandoffOrigin`) is what stands
+ * between the two: it mints unprompted only right after this flow's own Google
+ * round trip, and otherwise asks the person at the keyboard to confirm the
+ * account (specs/auth-handoff.md § "The central page confirms an existing
+ * session").
  */
 export async function mintHandoff(input: MintInput, deps: MintDeps): Promise<HandoffMintResult> {
   const uid = input.uid;
