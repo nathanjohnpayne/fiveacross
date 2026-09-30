@@ -3,9 +3,10 @@
 // `render*Html` the Functions send — over invented data, and photographs the
 // HTML. Writes PNGs to artifacts/marketing/.
 //
-// It needs no emulator and no app build, but it runs under the marketing config
-// beside the app capture, so `scripts/marketing-shots.sh --grep email` is the
-// way to run it alone.
+// It reads no emulator data and no app page, but it shares the marketing config,
+// whose webServer builds the app and whose runner script boots the emulators,
+// so `scripts/marketing-shots.sh --grep email` runs it alone with the same
+// prerequisites as the app capture.
 //
 // The Event is the Bodega Bay seed — general-audience throughout, the same
 // posture fixture.ts takes — and the roster is fixture.ts's invented names, so

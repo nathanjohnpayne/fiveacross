@@ -64,7 +64,7 @@ The distinction matters for the next person to change this file: the loose versi
 
 ## The email mockups
 
-`tests/marketing/email-shots.spec.ts` photographs the two player emails by rendering the **real templates**—`buildDailyEmailModel` / `renderDailyEmailHtml` and `buildPodiumEmailModel` / `renderPodiumEmailHtml`, the same code the Functions send—into a 640px page and taking a full-page capture. It needs no emulator and no app build, so `scripts/marketing-shots.sh --grep email` runs it alone in seconds; a plain run takes it along with the app shots.
+`tests/marketing/email-shots.spec.ts` photographs the two player emails by rendering the **real templates**—`buildDailyEmailModel` / `renderDailyEmailHtml` and `buildPodiumEmailModel` / `renderPodiumEmailHtml`, the same code the Functions send—into a 640px page and taking a full-page capture. The capture itself reads no emulator data and no app page, but it shares the marketing Playwright config, so any run still boots the emulators and builds the app first. `scripts/marketing-shots.sh --grep email` runs only the email capture, with the same JDK 21 and emulator prerequisites as the app shots; a plain run takes both.
 
 The same safety rules hold, from different inputs:
 
