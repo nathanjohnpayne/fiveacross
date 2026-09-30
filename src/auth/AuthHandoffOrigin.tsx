@@ -72,7 +72,12 @@ type Phase =
  * navigates here by hand — they arrive from a Sign in tap on an Event origin, so
  * anything that goes wrong is a provisioning or configuration fault.
  */
-type FailureKind = 'bad-request' | 'sign-in-failed' | 'mint-failed' | 'account-changed';
+type FailureKind =
+  | 'bad-request'
+  | 'sign-in-failed'
+  | 'switch-failed'
+  | 'mint-failed'
+  | 'account-changed';
 
 const COPY: Record<FailureKind, { headline: string; detail: string }> = {
   'bad-request': {
@@ -82,7 +87,18 @@ const COPY: Record<FailureKind, { headline: string; detail: string }> = {
   },
   'sign-in-failed': {
     headline: "Google sign-in didn't finish",
-    detail: 'Nothing was changed. Try again, or go back to the event address and start over.',
+    // No "nothing was changed": a cancelled Google return after "Use another
+    // account" lands here on a fresh page load that cannot know the previous
+    // page signed the session out.
+    detail: 'Try again, or go back to the event address and start over.',
+  },
+  // "Use another account" signs the central session out BEFORE it leaves for
+  // Google, so a failure after that point has changed something: the copy
+  // says so rather than "Nothing was changed" (Codex on #1350).
+  'switch-failed': {
+    headline: "Google sign-in didn't finish",
+    detail:
+      'You were signed out here, but choosing another account did not finish. Go back to the event address and tap Sign in again.',
   },
   'mint-failed': {
     headline: "We couldn't return you to your event",
@@ -219,6 +235,9 @@ export default function AuthHandoffOrigin({
      * sent to the server, which refuses to mint for any other uid.
      */
     let confirmedUid: string | null = null;
+    /** Set once "Use another account" has signed the central session out, so
+     *  every later failure reports that something DID change. */
+    let switched = false;
     let minted = false;
     let settled = false;
 
@@ -267,7 +286,10 @@ export default function AuthHandoffOrigin({
     // untrue — the accurate statement is that we could not return them.
     const arm = () => {
       clearTimeout(deadline);
-      deadline = setTimeout(() => terminate(minted ? 'mint-failed' : 'sign-in-failed'), timeoutMs);
+      deadline = setTimeout(
+        () => terminate(minted ? 'mint-failed' : switched ? 'switch-failed' : 'sign-in-failed'),
+        timeoutMs,
+      );
     };
     arm();
 
@@ -282,7 +304,7 @@ export default function AuthHandoffOrigin({
       // the player.
       setPhase('authenticating');
       void signInWithRedirect(auth, provider).catch(() => {
-        terminate('sign-in-failed');
+        terminate(switched ? 'switch-failed' : 'sign-in-failed');
       });
     };
 
@@ -325,6 +347,11 @@ export default function AuthHandoffOrigin({
         // credential of a sign-in the player completed seconds ago, for this
         // very request; `null` means the session below (if any) predates it.
         const cameBackFromGoogle = redirectResult != null;
+        // The account THIS flow's Google round trip signed in. The automatic
+        // mint is bound to it, not to whatever the shared session reports by
+        // the time the observer fires: another same-origin tab can switch the
+        // session in between (CodeRabbit / Codex on #1350).
+        const redirectUid = redirectResult?.user?.uid ?? null;
         // Then ask the session itself rather than trusting the result above.
         unsubscribe = onAuthStateChanged(auth, (user) => {
           if (cancelled) return;
@@ -342,7 +369,13 @@ export default function AuthHandoffOrigin({
           }
           handled = true;
           if (user !== null && cameBackFromGoogle) {
-            void bounce(request, user.uid);
+            if (user.uid !== redirectUid) {
+              terminate('account-changed');
+              return;
+            }
+            // `expectedUid` is the redirect credential's uid, so the server
+            // refuses too if the session moves again before the call runs.
+            void bounce(request, redirectUid);
             return;
           }
           if (user !== null) {
@@ -382,6 +415,7 @@ export default function AuthHandoffOrigin({
                 // with a fresh redirect result and mints for the chosen account.
                 void signOut(auth).then(
                   () => {
+                    switched = true;
                     if (!cancelled) sendToGoogle(accountChooserProvider());
                   },
                   () => terminate('sign-in-failed'),

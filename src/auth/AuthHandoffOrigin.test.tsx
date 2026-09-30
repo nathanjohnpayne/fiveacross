@@ -474,3 +474,54 @@ describe('an existing session is confirmed before anything is minted', () => {
     expect(mocks.signInWithRedirect).not.toHaveBeenCalled();
   });
 });
+
+// Round 2 on #1350 (CodeRabbit / Codex): the AUTOMATIC mint after a Google
+// round trip is bound to the redirect credential's account, not to whatever
+// the shared session reports when the observer fires.
+describe('the automatic mint is bound to the redirect credential', () => {
+  it('mints with the redirect uid as expectedUid when the session agrees', async () => {
+    returningFromGoogle();
+    withSession({ uid: 'u1' });
+    mocks.mintAuthHandoff.mockResolvedValue(`${ORIGIN}/board`);
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} />);
+    await waitFor(() => expect(replace).toHaveBeenCalled());
+    expect(mocks.mintAuthHandoff).toHaveBeenCalledWith(expect.anything(), { expectedUid: 'u1' });
+  });
+
+  it('refuses when another tab switched the session between the redirect and the observer', async () => {
+    returningFromGoogle(); // this flow signed in u1…
+    withSession({ uid: 'u2', email: 'second@example.com' }); // …but the session now reports u2
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} />);
+    expect(await screen.findByText(/signed-in account changed/i)).toBeInTheDocument();
+    expect(mocks.mintAuthHandoff).not.toHaveBeenCalled();
+    expect(replace).not.toHaveBeenCalled();
+  });
+});
+
+// Codex on #1350: after "Use another account" the central session HAS been
+// signed out, so a later failure must not say nothing changed.
+describe('a failed account switch says the session was signed out', () => {
+  it('reports switch-failed when the chooser redirect is refused after the sign-out', async () => {
+    withSession({ uid: 'u1', email: 'first@example.com' });
+    mocks.signInWithRedirect.mockRejectedValue(new Error('blocked'));
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Use another account' }));
+    expect(await screen.findByText(/You were signed out here/i)).toBeInTheDocument();
+  });
+
+  it('reports switch-failed when the chooser redirect hangs past the deadline', async () => {
+    withSession({ uid: 'u1', email: 'first@example.com' });
+    mocks.signInWithRedirect.mockImplementation(() => new Promise(() => {}));
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} timeoutMs={20} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Use another account' }));
+    expect(await screen.findByText(/You were signed out here/i)).toBeInTheDocument();
+  });
+
+  it('never claims nothing changed on an ordinary failed sign-in either', async () => {
+    withSession(null);
+    mocks.signInWithRedirect.mockRejectedValue(new Error('blocked'));
+    render(<AuthHandoffOrigin search={SEARCH} navigate={replace} />);
+    expect(await screen.findByText(/didn't finish/i)).toBeInTheDocument();
+    expect(screen.queryByText(/nothing was changed/i)).toBeNull();
+  });
+});

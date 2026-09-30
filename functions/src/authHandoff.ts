@@ -334,11 +334,13 @@ export function validateReturnPath(raw: unknown, targetOrigin: string): string |
   if (resolved.origin !== targetOrigin) return null;
   // DOT SEGMENTS can manufacture the protocol-relative shape the prefix checks
   // above refuse: `/..//evil.test` starts with one slash, resolves on the target
-  // origin, and normalises to the pathname `//evil.test`. That value is then
-  // both the path of the URL carrying the code AND what the Event origin hands
-  // `history.replaceState` when it strips the fragment, where a leading `//`
-  // names another host. So the NORMALISED path is held to the same one-slash
-  // rule as the raw one.
+  // origin, and normalises to the pathname `//evil.test`. The wire contract
+  // promises a path beginning with exactly ONE slash, and this is the value the
+  // Event origin ends up on; any consumer that treats it as a relative URL (a
+  // bare-path `history.replaceState`, a router link) reads a leading `//` as
+  // another host. `clearUrlFragmentAndConfirm` now hands `replaceState` an
+  // absolute same-origin URL as a second line, but the contract is held here:
+  // the NORMALISED path obeys the same one-slash rule as the raw one.
   if (resolved.pathname.startsWith('//')) return null;
   return `${resolved.pathname}${resolved.search}`;
 }

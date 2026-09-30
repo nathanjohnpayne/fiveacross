@@ -42,6 +42,12 @@ Called **at the central auth origin**, by a caller who has just completed Google
   targetOrigin: string;   // exactly `window.location.origin` of the Event origin
   transactionId: string;  // base64url(SHA-256(verifier)) — 43 chars
   returnPath?: string;    // deep link, default "/"
+  expectedUid?: string;   // the account the central page showed / just signed in;
+                          // when present and not the caller's verified uid, the
+                          // mint is refused (`account-changed`). A guard only —
+                          // the code always binds to the verified caller. The
+                          // central page always sends it; omitting it skips the
+                          // cross-tab account-switch guard.
 }
 
 // Response
@@ -142,7 +148,7 @@ This one check is simultaneously the whole of "unrecognised slugs rejected" and 
 
 Beyond the registry lookup, an origin must be plain HTTPS on the default port with no path, query, fragment, port, or credentials. The check is a single comparison against `URL.origin`, which is a normalisation—requiring it to equal the input verbatim rejects every decoration at once, with no list to keep current. Loopback origins are accepted only when the process is running against emulators, so the arm is unreachable in production.
 
-`returnPath` is the one caller-controlled component of the redirect URL and so the one that has to be airtight: it must begin with a single `/`, carry no control characters and no `#`, stay under 512 characters, and resolve back to the target origin. `//evil.test` and `/\evil.test` are rejected explicitly *and* caught again by the resolve check—a browser reads both as a different origin, which is the payload a naive "must start with /" check waves straight through.
+`returnPath` is the one caller-controlled component of the redirect URL and so the one that has to be airtight: it must begin with a single `/`, carry no control characters and no `#`, stay under 512 characters, resolve back to the target origin, and still begin with a single `/` AFTER resolution—dot segments such as `/..//evil.test` start with one slash and resolve on the target origin but normalise to the pathname `//evil.test`, which is refused. `//evil.test` and `/\evil.test` are rejected explicitly *and* caught again by the resolve check—a browser reads both as a different origin, which is the payload a naive "must start with /" check waves straight through.
 
 ## Ordering: consume, then check, then mint
 
@@ -160,7 +166,7 @@ A rejection that happens *before* the transaction commits—wrong origin, wrong 
 - **Given** a code minted for one origin, **when** it is exchanged from another—or with an `Origin` header disagreeing with the claimed origin—**then** it is rejected and left redeemable by its rightful origin. (Test: origin-mismatch, header-mismatch.)
 - **Given** a code without its transaction verifier, **when** it is exchanged, **then** it is rejected. (Test: transaction-mismatch.)
 - **Given** a target origin with no active hostname document, **when** a mint is attempted, **then** it is rejected and no code is written. (Test: unknown-slug, inactive-host.)
-- **Given** a `returnPath` that resolves off the target origin, **when** a mint is attempted, **then** it is rejected. (Test: open-redirect.)
+- **Given** a `returnPath` that resolves off the target origin, or whose resolved pathname begins with `//` (dot segments), **when** a mint is attempted, **then** it is rejected. (Test: open-redirect, including the dot-segment cases.)
 - **Given** any client—unauthenticated, signed-in, or an Event admin—**when** it reads, lists, creates, updates, or deletes an `authHandoffs` document, **then** it is denied. (Test: rules-deny-all.)
 - **Given** any rejection, **when** the caller inspects the error, **then** it cannot distinguish which check failed. (Enforced at the `index.ts` seam; the reason is logged, never returned.)
 
