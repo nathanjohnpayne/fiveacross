@@ -453,6 +453,11 @@ The platform already handles most of this: Days unlock on arbitrary dates with a
 - `LaunchIntro`, `More`, `ReshuffleSheet`
 - `FarewellPodium` and `ShareCard` ("Weekly honors")
 - `lastCallCopy`, with its mirror in `functions/src/finaleContent.ts`
+- the signed-out preview's Day line (`src/eventPreview.ts`, "Day N: title")
+- Feed chips and Notices (`src/components/ProofFeed.tsx`)
+- the offline saved-card fallback (`src/components/CachedCardFallback.tsx`)
+
+Each surface gets a copy test for the weekly register, so a later hard-coded "Day" fails a test rather than shipping.
 
 Also add a `firestore.rules` shape check for the new field.
 
@@ -461,7 +466,7 @@ Also add a `firestore.rules` shape check for the new field.
 - A schedule write declares `scheduleEditFrom: k` and may change only Days k and k+1.
 - The rules prove that every Day outside the window is unchanged with two list-slice comparisons (`days[0:k]` and `days[k+2:n]`), then run the existing per-Day lock on the two Days inside the window. The cost is constant regardless of schedule length. On the emulator, a two-Day edit on a 2000-entry list stays under Firestore's 1000-expression cap.
 - Gotcha found in testing: an empty slice errors and denies the write, so both ends are guarded.
-- `MAX_DAYS` goes from 10 to 20. The setup wizard stays at 10.
+- The runtime ceiling and the setup ceiling split: `eventLimits.MAX_DAYS` goes from 10 to 20, while `draftValidation` keeps its own ten-Day `MAX_DAYS` (named for the rules' unroll, `UNROLLED_SCHEDULE_LOCK_DAYS`), so the wizard, `draftSquares`, and `StepSquares` still stop at 10. #1359 implements it this way.
 - A schedule longer than 10 Days must state `standingsFreezeAt` at seed time; a client can't add one later. The seed module (T5) already does.
 - The admin console keeps working on long Events, two Days per save.
 
@@ -486,10 +491,10 @@ This is a protected path, so the change needs full Phase 4.
 **T3—Week-scheduled organiser Prompts.** `targetDayIndex` already admits a Prompt to one Day's snapshot, but it means "Community Prompt": a targeted square gets the community ring, a "Suggested by" lookup, and the community reservation. Seeding the weekly squares with it would show 120 organiser squares as player suggestions. Instead:
 
 - Add a separate optional `ItemDoc.dayIndexes?: number[]`, admitted only to the listed Days' snapshots. Put the predicate in `functions/src/unlockDay.ts` with a local client mirror, as `targetsDay` does.
-- Add a deal-time reservation (`settings.scheduledReserve`, about 6) so the week's squares actually appear.
+- Add a deal-time reservation (`settings.scheduledReserve`, about 6) so the week's squares actually appear. It composes with the Community Prompt quota (`specs/community-squares-quota.md`, up to four placeable suggestions inside the easy/main capacities) by precedence: Community Prompts are placed first, scheduled squares fill their reservation next, and the evergreen remainder shrinks to absorb both. So "6 evergreen" is the most a card gets, not a promise. Dealer and Reshuffle tests cover a week with both reservations full.
 - Never flag these Prompts as Community.
-- Add a rules check: a bounded list of in-range integers.
-- Teach the seed script to write the new field.
+- Keep the field organiser-only, like `retainedAt`. Reject `dayIndexes` on every non-admin create (extend `nonAdminPendingMainItemCreate()`'s excluded fields) so a modified client can't pre-schedule its own suggestion. Have the approval callable strip it from an approved Community Prompt. The admin arm checks it is a bounded list of in-range integers.
+- Teach the seed script to write the new field, and the drift verifier to check it: `verifySeedPool` (`scripts/seed.mjs`) projects and compares `dayIndexes` alongside text/spicy/pool, with a registry test that moves one Prompt to a different week and expects drift.
 
 **T4—The weekly email.** The schedule needs no new logic (one send per Day date is already one per week), but the copy does: a weekly register in `dailyEmailContent.ts` ("This week's card is live", "Standings through Week N", subject "Week N · Marathon Week—standings + this week's card"), the "Morning, X." greeting, the "Tonight:" line, and the unsubscribe page ("Stop the weekly email"). Two related changes:
 
@@ -512,7 +517,7 @@ Two content rules: every Day sets `freeText`, and Prompt text stays unique acros
 
 - **Before the first Day:** the first upcoming Day, unchanged, so the pre-launch teaser still shows Week 1.
 - **During the schedule:** the latest Day whose `date` is today or earlier, so the current week is what's previewed.
-- **After the schedule:** no Day, unchanged, so the post-Event quiet state still holds. For a daily Event that's after the last Day's date. For a weekly Event the last Day runs a week, so the end has to come from the Event: carry `endsOn` (or the cadence) on the preview payload, which today carries only each Day's `date` and title.
+- **After the schedule:** no Day, unchanged, so the post-Event quiet state still holds. For a daily Event that's after the last Day's date. For a weekly Event the last Day runs a week, so the end has to come from the Event: carry `endsOn` on the preview payload (it carries only each Day's `date` and title today) and return no Day once the device date passes it. Use `endsOn` for every cadence rather than inferring the end from the final Day's date.
 
 Update `specs/hostnames-lookup.md` and extend `src/eventPreview.test.ts` (the before-first and after-last cases are pinned at `:126-139`) with the mid-schedule case.
 
@@ -540,7 +545,10 @@ T3's themed reserve changes the arithmetic (6 new squares a week that can never 
 - **Echo off.** A Mark on one week's card never touches another week's: no deal-time echo, no mark-time propagation, no open-time reconcile. (A card holds each Prompt once, so "Echo scoped to the same card" would be a no-op and is the same thing as off.) Make it an explicit `settings.echoMarks?: boolean` (absent means on, so nothing live changes) rather than inferring it from `cadence`, so a daily Event can opt out too. The seed module (T5) sets it false. The change is one predicate beside `achievedItemIds`, checked at every echo site: `api.ts:948` (deal), `api.ts:1348` (re-deal after a Reshuffle), `runSetMark` (mark-time), `api.ts:2599` (open-time reconcile), and the Admin-confirmed path, where `confirmClaim` independently runs `applyEchoes` over every sibling card (`src/data/admin.ts:1853-1909`, the call at `:1881`). Plus a `firestore.rules` shape check for the field.
 - **Repeats allowed across weeks.** The easy half already repeats by design, and 12 of 40 a week means each easy square lands about 4.5 times over 15 weeks. For the main half, replace the all-or-nothing reset with a rolling window: exclude only the main squares on the Player's last **4** cards, so no everyday square comes back within a month. The window applies at both places `excludeIds` is built: the deal (`api.ts:823-830`) and the Reshuffle replacement (`api.ts:1322-1326`, which today excludes every kept card and would otherwise trip the same reset late in the term). Four is safe with or without T3: without it, 4 × 12 = 48 of 80 evergreen squares are excluded, leaving 32 against the 12 a card needs (the ceiling would be 5); with T3 only about 6 are used a week.
 - **Shrink, don't reset.** If fewer squares survive than the main half needs, drop the oldest card from the window and retry, down to no exclusion, instead of `applyExclusion`'s all-or-nothing discard (`logic.ts:459-467`). That turns the cliff into a slope for every Event, daily ones included.
-- **Specs and tests.** `specs/echo-marks.md` gains a "disabled" contract, `specs/easy-mix.md` notes the windowed exclusion, and `src/data/echo-marks.test.ts` gains the disabled path. The rules change is on a protected path, so this ticket needs full Phase 4.
+- **Specs and tests.** `specs/echo-marks.md` gains a "disabled" contract, `specs/easy-mix.md` notes the windowed exclusion, and `src/data/echo-marks.test.ts` gains the disabled path, including the Admin-confirm site. The window gets deterministic coverage in the dealer tests:
+  - more than four other cards, where only the nearest four are excluded
+  - the Reshuffle path
+  - an undersized surviving pool, which drops the farthest card first rather than resetting The rules change is on a protected path, so this ticket needs full Phase 4.
 
 *Decided (2026-10-01), tracked in [#1360](https://github.com/nathanjohnpayne/fiveacross/issues/1360).* A window of 4 cards with the shrinking fallback. Repeats are fine once Echo is off: a repeated square has to be done again rather than arriving free, and week-to-week freshness comes mainly from the themed squares (T3). Week 16's Victory Lap is unaffected: its Prompts appear on no earlier card, so there is nothing to echo or exclude.
 
