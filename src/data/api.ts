@@ -39,6 +39,9 @@ import {
   foldDayStat,
   achievedItemIds,
   applyEchoes,
+  echoMarksEnabled,
+  repeatExclusionTiers,
+  repeatWindowFor,
   firstLineCompletionAt,
   foldEchoStats,
   standingsFrozen,
@@ -815,19 +818,28 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
   // day-board paths key on d.index everywhere, so a schedule whose indexes
   // aren't exactly 0..n must not read the wrong sibling docs for the exclusion
   // set or the deal-time achieved set.
-  const otherBoardRefs = days
-    .map((d) => d.index)
-    .filter((i) => i !== dayIndex)
-    .map((i) => rawDayBoard(i, u.uid, eventId));
+  const otherDayIndexes = days.map((d) => d.index).filter((i) => i !== dayIndex);
+  const otherBoardRefs = otherDayIndexes.map((i) => rawDayBoard(i, u.uid, eventId));
   const otherCards = await Promise.all(otherBoardRefs.map((ref) => getDoc(ref).catch(() => null)));
-  const excludeIds = new Set<string>();
   const otherCardCells: Cell[][] = [];
-  for (const snap of otherCards) {
-    if (!snap || !snap.exists()) continue;
+  const otherCardsByDay: Array<{ dayIndex: number; cells: Cell[] }> = [];
+  otherCards.forEach((snap, i) => {
+    if (!snap || !snap.exists()) return;
     const cells = cellsFromData((snap.data() as { cells?: unknown }).cells);
     otherCardCells.push(cells);
-    for (const c of cells) if (c.itemId) excludeIds.add(c.itemId);
-  }
+    otherCardsByDay.push({ dayIndex: otherDayIndexes[i], cells });
+  });
+  // The repeat window (#1360, specs/easy-mix.md § "The repeat window"): one
+  // exclusion tier per other card, nearest Day first, cut to
+  // `settings.repeatWindow` cards when the Event sets one. With no window every
+  // other card is a tier, so the union is exactly the old whole-history set; the
+  // tiers only matter when that union would starve the pool, where `dealBoard`
+  // now drops the farthest card first instead of discarding the whole exclusion.
+  const excludeTiers = repeatExclusionTiers(
+    otherCardsByDay,
+    dayIndex,
+    repeatWindowFor(eventData?.settings),
+  );
   // Echo Marks (specs/echo-marks.md, #446): the preflight reads give the
   // no-repeat exclusion its current card view. The transaction re-reads these
   // refs and derives the achieved set it commits against, so a concurrent unmark
@@ -849,7 +861,7 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
   // Card has its own deterministic layout rather than repeating Day 0's.
   const seed = (seedFromUid(u.uid) ^ Math.imul(dayIndex + 1, 0x9e3779b1)) >>> 0;
   const cells = dealBoard(pool, day.freeText ?? FREE_TEXT, seed, spicyRatio, {
-    excludeIds,
+    excludeTiers,
     stratify,
     easyMixRatio,
   });
@@ -944,12 +956,17 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
     // Echo Marks: pre-mark every dealt Prompt the Player has already achieved
     // (specs/echo-marks.md § Deal-time). `applyEchoes` is idempotent and
     // returns the ORIGINAL cells untouched when nothing echoes, so a Player
-    // with no repeated Prompts deals byte-identically to today.
-    const achieved = achievedItemIds(
-      latestOtherCardSnaps
-        .filter((snap) => snap.exists())
-        .map((snap) => cellsFromData((snap.data() as { cells?: unknown }).cells)),
-    );
+    // with no repeated Prompts deals byte-identically to today. An Event with
+    // Echo switched off (#1360, `settings.echoMarks: false`, read off the
+    // transaction's own Event re-read) deals with an EMPTY achieved set, so a
+    // repeated Prompt arrives unmarked and has to be done again.
+    const achieved = echoMarksEnabled(latestEventData?.settings)
+      ? achievedItemIds(
+          latestOtherCardSnaps
+            .filter((snap) => snap.exists())
+            .map((snap) => cellsFromData((snap.data() as { cells?: unknown }).cells)),
+        )
+      : new Set<string>();
     const rawEchoRes = applyEchoes(cells, achieved, now);
     const echoRes = {
       ...rawEchoRes,
@@ -1224,10 +1241,8 @@ export async function reshuffleBoard(params: {
   // exclusion set from committed state.
   // Canonical DayDef.index values, not array positions (Phase 4b P1 on #447)
   // — the same fix as dealDayCard's sibling refs.
-  const peerRefs = days
-    .map((d) => d.index)
-    .filter((i) => i !== dayIndex)
-    .map((i) => rawDayBoard(i, uid, eventId));
+  const peerDayIndexes = days.map((d) => d.index).filter((i) => i !== dayIndex);
+  const peerRefs = peerDayIndexes.map((i) => rawDayBoard(i, uid, eventId));
 
   // Same composition rules as the first deal (daily-cards-spec § "Unlock
   // mechanics"): tutorial pools are all-tame so they deal unstratified; main Days
@@ -1319,18 +1334,25 @@ export async function reshuffleBoard(params: {
     // so the loser retries — and a peer set captured before the transaction would
     // still describe the winner's OLD card, letting this deal duplicate Prompts the
     // winner just placed on their new, still-kept one.
-    const excludeIds = new Set<string>();
-    for (const snap of peerSnaps) {
-      if (!snap.exists()) continue;
-      const peerCells = cellsFromData((snap.data() as { cells?: unknown }).cells);
-      for (const c of peerCells) if (c.itemId) excludeIds.add(c.itemId);
-    }
+    // The same repeat window as the first deal (#1360): one tier per KEPT card,
+    // nearest Day first, cut to `settings.repeatWindow`. Without the window a
+    // late-term Reshuffle would exclude every kept card and hit the same
+    // all-or-nothing reset the first deal no longer has.
+    const excludeTiers = repeatExclusionTiers(
+      peerSnaps.flatMap((snap, i) =>
+        snap.exists()
+          ? [{ dayIndex: peerDayIndexes[i], cells: cellsFromData((snap.data() as { cells?: unknown }).cells) }]
+          : [],
+      ),
+      dayIndex,
+      repeatWindowFor(eventData?.settings),
+    );
 
     const nextUsed = used + 1;
     const seed = reshuffleSeed(uid, dayIndex, nextUsed, board.seed ?? 0);
     const boardEasyMixRatio = typeof board.easyMixRatio === 'number' ? board.easyMixRatio : easyMixRatio;
     const cells = dealBoard(pool, day.freeText ?? FREE_TEXT, seed, spicyRatio, {
-      excludeIds,
+      excludeTiers,
       stratify,
       easyMixRatio: boardEasyMixRatio,
     });
@@ -1345,9 +1367,12 @@ export async function reshuffleBoard(params: {
     // survives as a phantom stat. A no-echo reshuffle (empty achieved set,
     // zeroed prior bucket) keeps the exact two-write shape of today.
     const now = Date.now();
-    const achieved = achievedItemIds(
-      peerSnaps.filter((s) => s.exists()).map((s) => cellsFromData((s.data() as { cells?: unknown }).cells)),
-    );
+    // Echo switched off (#1360): the replacement card re-echoes nothing.
+    const achieved = echoMarksEnabled(eventData?.settings)
+      ? achievedItemIds(
+          peerSnaps.filter((s) => s.exists()).map((s) => cellsFromData((s.data() as { cells?: unknown }).cells)),
+        )
+      : new Set<string>();
     // Pending claims are not confirmed achievements, so they must not echo onto
     // the replacement card. They are still marked carriers for the shared Tally
     // marker and must keep that marker alive when an echo is traded away.
@@ -1827,6 +1852,11 @@ export async function setMark(params: {
   // stamped as markSeed would have the rules deny that one write and roll
   // back the whole batch, acted Mark included.
   echoDayIndexes?: number[];
+  // #1360: `false` when the Event switched Echo Marks off (`settings.echoMarks`,
+  // read through `echoMarksEnabled`) — the Mark lands on its own card only and
+  // fans out to no sibling. Absent means ON. `echoDayIndexes` keeps its OTHER
+  // job either way (the unmark blackout re-derivation across the schedule).
+  echoMarks?: boolean;
   database?: Firestore;
 }): Promise<{
   cells: Cell[];
@@ -1882,6 +1912,7 @@ async function runSetMark(
     daily?: boolean;
     boardSeed?: number;
     echoDayIndexes?: number[];
+    echoMarks?: boolean;
   },
   database: Firestore,
   eventId: string,
@@ -2048,6 +2079,7 @@ async function runSetMark(
   // admin_confirmed-mode Mark starts `pending` and echoes from `confirmClaim`
   // instead. Unmarks never cascade.
   const echoItemId =
+    params.echoMarks !== false &&
     params.nextMarked && params.claimMode !== 'admin_confirmed' && toggled && !toggled.free
       ? toggled.itemId
       : null;
@@ -2528,6 +2560,9 @@ export async function reconcileEchoes(params: {
   tutorialDayIndexes?: number[];
   ceremonialDayIndexes?: number[];
   statsFrozen?: boolean;
+  /** #1360: `false` when the Event switched Echo Marks off — the reconcile then
+   *  applies NO echo (an empty achieved set), so it can only re-derive stats. */
+  echoMarks?: boolean;
   database?: Firestore;
 }): Promise<{ changed: boolean; bingoTransition: boolean; blackoutTransition: boolean; complete: boolean }> {
   assertSupportedDayIndexes(params.dayIndexes, 'reconcileEchoes');
@@ -2557,6 +2592,7 @@ async function runReconcileEchoes(
     tutorialDayIndexes?: number[];
     ceremonialDayIndexes?: number[];
     statsFrozen?: boolean;
+    echoMarks?: boolean;
   },
   database: Firestore,
   eventId: string,
@@ -2596,7 +2632,7 @@ async function runReconcileEchoes(
     if (snap.status !== 'fulfilled' || !snap.value.exists()) continue;
     allBoards.push(cellsFromData((snap.value.data() as { cells?: unknown }).cells));
   }
-  const achieved = achievedItemIds(allBoards);
+  const achieved = params.echoMarks === false ? new Set<string>() : achievedItemIds(allBoards);
   const now = Date.now();
   const rawRes = applyEchoes(boardCells, achieved, now);
   const res = {

@@ -1,7 +1,7 @@
 import { addDoc, collection, doc, getDoc, getDocFromServer, getDocs, getDocsFromServer, limit, query, where, updateDoc, deleteDoc, runTransaction, arrayUnion, arrayRemove } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { db, functions, EVENT_ID } from '../firebase';
-import { completedLines, countMarked, isBlackout, foldDayStat, foldEchoStats, applyEchoes, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, type DayStats, type EchoBucket, type StatWrite } from '../game/logic';
+import { completedLines, countMarked, isBlackout, foldDayStat, foldEchoStats, applyEchoes, echoMarksEnabled, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, type DayStats, type EchoBucket, type StatWrite } from '../game/logic';
 import { cellsPatch, changedCells, cellsFromData } from '../game/cells';
 import { cellsMergeSet } from './cellsMerge';
 import { stampEchoAnalyticsTransitions } from './echoAnalytics';
@@ -1776,6 +1776,10 @@ async function resolve(
   // deltas folded into the ONE player write below. A reject uses the same reads
   // only to preserve a standing sibling's Tally marker; it never echoes.
   let echoSiblingDays: number[] = [];
+  // #1360: an Event with Echo switched off (`settings.echoMarks: false`)
+  // confirms the Claim on its own card only. The sibling reads still happen —
+  // a reject uses them to keep a standing sibling's Tally marker alive.
+  let echoOn = true;
   // The freeze gate is a GETTER re-evaluated inside the transaction callback
   // (Codex P2 on #278 round 4): a resolve started seconds before 08:00 must
   // fold with the post-boundary truth on retry/commit, not a pre-read capture.
@@ -1783,6 +1787,7 @@ async function resolve(
   if (daily) {
     const evSnap = await getDoc(evt(eventId));
     const days = (evSnap?.data()?.days as DayDef[] | undefined) ?? [];
+    echoOn = echoMarksEnabled(evSnap?.data()?.settings as { echoMarks?: unknown } | undefined);
     const set = tutorialDayIndexSet(days);
     isTutorialDay = (i: number) => set.has(i);
     // The freeze + ceremonial gates apply to the ADMIN resolve fold too (#265,
@@ -1867,7 +1872,7 @@ async function resolve(
     // (Firestore's reads-before-writes transaction contract).
     const confirmedCell = status === 'confirmed' ? next.find((x) => isClaimCell(x, c)) : undefined;
     const echoItemId =
-      confirmedCell && !confirmedCell.free && confirmedCell.marked ? confirmedCell.itemId : null;
+      echoOn && confirmedCell && !confirmedCell.free && confirmedCell.marked ? confirmedCell.itemId : null;
     const echoBuckets: EchoBucket[] = [];
     const echoWrites: Array<{ ref: ReturnType<typeof dayBoard>; set: ReturnType<typeof cellsMergeSet> }> = [];
     const echoPinDays: number[] = [];

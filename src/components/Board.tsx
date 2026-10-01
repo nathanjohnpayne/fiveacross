@@ -37,7 +37,7 @@ import {
 // the proofed-mark completion verdict ProofSheet reports back (PR #110 round 2
 // finding 1), same shape as setMark's return.
 import type { AttachProofResult } from '../data/proofs';
-import { hasBingo, isBlackout, winningCells, completedLines, countMarked, isPristine, MIN_POOL, bingoLineEdge, boardFirstBingoAt, dayDealState, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, standingsFreezeAtFor, resolvedStandingsFreezeAt, earlierEligibleHeadlineBingoExists, playerRowRootLag } from '../game/logic';
+import { hasBingo, isBlackout, winningCells, completedLines, countMarked, isPristine, MIN_POOL, bingoLineEdge, boardFirstBingoAt, dayDealState, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, standingsFreezeAtFor, resolvedStandingsFreezeAt, earlierEligibleHeadlineBingoExists, playerRowRootLag, echoMarksEnabled } from '../game/logic';
 import { dealDelayMs, winOrder } from '../game/motion';
 
 // Board identities whose deal-in cascade has already played this session
@@ -1247,6 +1247,8 @@ export default function Board() {
       tutorialDayIndexes: [...tutorialDayIndexSet(schedule)],
       ceremonialDayIndexes: [...ceremonialDayIndexSet(schedule)],
       statsFrozen: standingsFrozen(event),
+      // #1360: an Event with Echo Marks off reconciles stats only, echoing nothing.
+      echoMarks: echoMarksEnabled(event?.settings),
     })
       .then((res) => settle(Boolean(res.complete)))
       // A synchronous failure (nothing written) may retry on the next open.
@@ -2244,6 +2246,8 @@ export default function Board() {
         // that lands confirmed can auto-mark its Prompt on the Player's other
         // Day Cards in the same batch. Legacy events pass nothing (no echo).
         echoDayIndexes: hasDays ? days.map((d) => d.index) : undefined,
+        // #1360: `settings.echoMarks: false` keeps each Mark on its own card.
+        echoMarks: echoMarksEnabled(event?.settings),
       });
       // Mark-transition instrumentation (#721): `doMark` is reachable from
       // exactly two call sites — `onPledge` below (always `nextMarked: true`,

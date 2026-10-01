@@ -489,6 +489,14 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     expectNoClientEchoTrack();
   });
 
+  it('#1360: with Echo switched off the Mark stays on its own card — no sibling write', async () => {
+    seedBoards();
+    await markShared({ echoMarks: false });
+    expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 2))).toBe(true);
+    expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 3))).toBe(false);
+    expectNoClientEchoTrack();
+  });
+
   it('a Mark that echoes onto TWO siblings stamps one durable identity per receiving Day', async () => {
     // Day 2 (acted) carries the shared Prompt; Days 1 AND 3 both carry it too
     // — a Mark on Day 2 must echo onto BOTH, and #721's reconciliation
@@ -976,6 +984,16 @@ describe('dealDayCard — deal-time echo (spec § Deal-time)', () => {
     expectNoClientEchoTrack();
   });
 
+  it('#1360: with settings.echoMarks false the repeated Prompt arrives UNMARKED', async () => {
+    seedDeal({ 0: { marked: true, markedAt: 1, status: 'confirmed' } }); // s0 achieved on Day 1
+    H.event = { ...H.event, settings: { spicyRatio: 0.4, echoMarks: false } };
+    await expect(dealDayCard(u, 0)).resolves.toBe(true);
+    const boardWrite = H.txSet.mock.calls.find((c) => isDayBoardWrite(c, 0));
+    const cells = cellsFromData((boardWrite![1] as { cells: unknown }).cells);
+    expect(cells.find((c) => c.itemId === 's0')).toMatchObject({ marked: false });
+    expect(cells.some((c) => c.echo)).toBe(false);
+  });
+
   it('revalidates achieved prompts inside the deal transaction before it writes Echoes', async () => {
     seedDeal({ 0: { marked: true, markedAt: 1, status: 'confirmed' } });
     H.transactionRunner = async (fn, tx) => {
@@ -1072,6 +1090,20 @@ describe('reshuffleBoard — the post-Reshuffle re-deal echo (spec § Reshuffle 
     // Reconciliation: `squaresMarked[d] = markCount[d] + echoCount[d]`).
     await new Promise((r) => setTimeout(r, 0)); // let every microtask continuation settle
     expect(H.track).not.toHaveBeenCalledWith('echo_mark', expect.objectContaining({ trigger: 'reshuffle' }));
+  });
+
+  it('#1360: with settings.echoMarks false the replacement card re-echoes nothing', async () => {
+    seedShuffle({
+      day1Cells: { 0: { marked: true, markedAt: 1, status: 'confirmed', echo: true } },
+      day0Overrides: { 0: { marked: true, markedAt: 1, status: 'confirmed' } },
+      playerExtra: { dayStats: { 1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null } } },
+    });
+    H.event = { ...H.event, settings: { spicyRatio: 0.4, echoMarks: false } };
+    await expect(reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 })).resolves.toBe(1);
+    const raw = H.txSet.mock.calls.find((c) => isDayBoardWrite(c, 1))![1] as { cells: unknown };
+    const cells = cellsFromData(raw.cells);
+    expect(cells.some((c) => c.echo)).toBe(false);
+    expect(cells.find((c) => c.itemId === 's0')).toMatchObject({ marked: false });
   });
 
   it('a reshuffle that echoes a genuinely new Prompt stamps a server-observed transition', async () => {
@@ -1366,6 +1398,13 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
     });
     expect(boardWrite.cells['9']).toMatchObject({ echoAnalyticsTrigger: 'open_reconcile', echoAnalyticsId: expect.any(String) });
     expectNoClientEchoTrack();
+  });
+
+  it('#1360: with Echo switched off the open-time reconcile writes no echo', async () => {
+    seedReconcile();
+    const res = await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [0, 1, 2], echoMarks: false });
+    expect(res.changed).toBe(false);
+    expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 2))).toBe(false);
   });
 
   it('#491: a stats-lagged board heals on open — cells ahead of the cached bucket trigger a server-derived stats write, stamped from the CELLS and re-pinning the honor', async () => {
@@ -2123,6 +2162,14 @@ describe('confirmClaim — the admin_confirmed echo moment (spec § Contract)', 
     expectNoClientEchoTrack();
   });
 
+  it('#1360: with settings.echoMarks false a confirm resolves its own card only', async () => {
+    seedClaim();
+    H.event = { ...H.event, settings: { ...(H.event?.settings ?? {}), echoMarks: false } };
+    await confirmClaim(claim(), 'admin-1');
+    expect(H.txSet.mock.calls.some((c) => isDayBoardWrite(c, 1))).toBe(true);
+    expect(H.txSet.mock.calls.some((c) => isDayBoardWrite(c, 2))).toBe(false);
+  });
+
   it('a stale claim (no matching board/cell) resolves without firing mark_square or echo_mark (Codex round 1 finding 3, #727; round 3)', async () => {
     seedClaim();
     // The claim's cellIndex/proofId no longer matches anything on the board —
@@ -2229,5 +2276,66 @@ describe('confirmClaim — the admin_confirmed echo moment (spec § Contract)', 
     });
     expect(metaWrite).toBeDefined();
     expect((metaWrite![1] as { firstBingo: { uid: string } }).firstBingo.uid).toBe('u1');
+  });
+});
+
+// #1360 — the repeat window, end to end through both deal paths. Day 1 (nearest
+// to Day 0) holds s0..s23 and Day 2 holds s24..s47; the snapshot is s0..s71.
+// With no window the whole history (48) is excluded, which leaves exactly
+// s48..s71 — no s24..s47 can appear. A window of ONE card excludes only Day 1,
+// so the 48 survivors include s24..s47 and the card draws from them.
+describe('the repeat window reaches dealDayCard and reshuffleBoard (#1360)', () => {
+  const SNAP = Array.from({ length: 72 }, (_, i) => `s${i}`);
+  const cardOf = (ids: string[]) => {
+    let cursor = 0;
+    return card((i) => (i === 12 ? 'free' : ids[cursor++]));
+  };
+  const seedWindow = (settings: Record<string, unknown>, withDay0Card: boolean) => {
+    for (const id of SNAP) H.itemsById.set(id, { text: `P ${id}`, spicy: false, isFreeSpace: false });
+    H.event = {
+      days: [0, 1, 2].map((i) => day(i, { snapshotItemIds: SNAP })),
+      settings: { spicyRatio: 0.4, ...settings },
+    };
+    H.dayBoards.set(1, { uid: 'u1', seed: 111, dayIndex: 1, cells: cardOf(SNAP.slice(0, 24)) });
+    H.dayBoards.set(2, { uid: 'u1', seed: 222, dayIndex: 2, cells: cardOf(SNAP.slice(24, 48)) });
+    if (withDay0Card) {
+      H.dayBoards.set(0, { uid: 'u1', seed: 100, dayIndex: 0, cells: cardOf(SNAP.slice(48, 72)) });
+    }
+    H.player = { uid: 'u1', joinedAt: 1, reshufflesUsed: 0, dayStats: {} };
+  };
+  const day2Ids = new Set(SNAP.slice(24, 48));
+  const dealt = (write: unknown) =>
+    cellsFromData((write as { cells: unknown }).cells)
+      .filter((c) => !c.free)
+      .map((c) => c.itemId as string);
+  const u = { uid: 'u1', displayName: 'Alice', photoURL: null } as never;
+
+  it('dealDayCard: no window keeps Day 2 off the card; a 1-card window lets it back', async () => {
+    seedWindow({}, false);
+    await expect(dealDayCard(u, 0)).resolves.toBe(true);
+    const whole = dealt(H.txSet.mock.calls.find((c) => isDayBoardWrite(c, 0))![1]);
+    expect(whole.some((id) => day2Ids.has(id))).toBe(false);
+
+    H.txSet.mockClear();
+    H.dayBoards.delete(0);
+    seedWindow({ repeatWindow: 1 }, false);
+    await expect(dealDayCard(u, 0)).resolves.toBe(true);
+    const windowed = dealt(H.txSet.mock.calls.find((c) => isDayBoardWrite(c, 0))![1]);
+    expect(windowed.some((id) => SNAP.slice(0, 24).includes(id))).toBe(false); // Day 1 still excluded
+    expect(windowed.some((id) => day2Ids.has(id))).toBe(true);
+  });
+
+  it('reshuffleBoard: the replacement honours the same window over the KEPT cards', async () => {
+    seedWindow({}, true);
+    await expect(reshuffleBoard({ uid: 'u1', dayIndex: 0, expectedSeed: 100 })).resolves.toBe(1);
+    const whole = dealt(H.txSet.mock.calls.find((c) => isDayBoardWrite(c, 0))![1]);
+    expect(whole.some((id) => day2Ids.has(id))).toBe(false);
+
+    H.txSet.mockClear();
+    seedWindow({ repeatWindow: 1 }, true);
+    await expect(reshuffleBoard({ uid: 'u1', dayIndex: 0, expectedSeed: 100 })).resolves.toBe(1);
+    const windowed = dealt(H.txSet.mock.calls.find((c) => isDayBoardWrite(c, 0))![1]);
+    expect(windowed.some((id) => SNAP.slice(0, 24).includes(id))).toBe(false);
+    expect(windowed.some((id) => day2Ids.has(id))).toBe(true);
   });
 });
