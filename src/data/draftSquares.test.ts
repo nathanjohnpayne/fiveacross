@@ -101,7 +101,7 @@ describe('setCardFormat', () => {
 describe('the ten-Day ceiling', () => {
   const tenDays = Array.from({ length: MAX_DAYS }, (_unused, i) => day(i));
 
-  it('refuses an eleventh Day rather than creating one the schedule lock cannot cover', () => {
+  it('refuses an eleventh Day rather than creating a schedule the wizard cannot launch', () => {
     const full = draftWith({ cardFormat: 'daily_cards', days: tenDays });
     expect(canAddDay(full)).toBe(false);
     expect(addDay(full)).toBe(full);

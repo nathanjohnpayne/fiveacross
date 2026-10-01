@@ -104,6 +104,7 @@ import {
   renderBingoShareCard,
   renderLeaderboardShareCard,
   renderFarewellShareCard,
+  SHARE_CARD_HONOR_ROWS,
   shareCardBlob,
   shareCardAppName,
   type FarewellShareCardData,
@@ -781,6 +782,49 @@ describe('ShareCard — renderFarewellShareCard', () => {
       'Gay Cruise Bingo · Day 10 · Barcelona',
     );
     expect(node.querySelector('.share-card-stat')?.textContent).toBe('Final standings · 10 days');
+  });
+
+  // #1357: a schedule can now hold up to MAX_DAYS = 20 Days, but the fixed
+  // 600x750 frame budgets two honoree blocks plus TEN honor rows. Past ten the
+  // honors flow into two columns, filled top to bottom, so the block is never
+  // taller than ten rows and the stat line and footer stay on the raster.
+  it('keeps ten or fewer honors in one column', async () => {
+    const honors = Array.from({ length: SHARE_CARD_HONOR_ROWS }, (_, i) => ({
+      dayLabel: `Week ${i + 1}`,
+      displayName: `Player ${i + 1}`,
+    }));
+    await renderFarewellShareCard({ ...data, honors });
+    const block = toBlobNode().querySelector<HTMLElement>('.share-card-honors');
+    expect(block?.classList.contains('share-card-honors-two-col')).toBe(false);
+    expect(block?.style.gridTemplateRows).toBe('');
+    expect(block?.querySelectorAll('.share-card-honor-row')).toHaveLength(SHARE_CARD_HONOR_ROWS);
+  });
+
+  it('flows more than ten honors into two columns of at most ten rows (#1357)', async () => {
+    for (const count of [16, 20]) {
+      const honors = Array.from({ length: count }, (_, i) => ({
+        dayLabel: `Week ${i + 1}`,
+        displayName: `Player ${i + 1}`,
+      }));
+      await renderFarewellShareCard({ ...data, honors });
+      const block = latestToBlobNode().querySelector<HTMLElement>('.share-card-honors');
+      expect(block?.classList.contains('share-card-honors-two-col')).toBe(true);
+      expect(block?.style.gridTemplateRows).toBe(`repeat(${count / 2}, auto)`);
+      const rows = block!.querySelectorAll('.share-card-honor-row');
+      expect(rows).toHaveLength(count);
+      // Source order is Week 1..N; column-major flow puts Week 1..N/2 on the left.
+      expect(rows[0].textContent).toContain('Week 1');
+      expect(rows[count - 1].textContent).toContain(`Player ${count}`);
+    }
+  });
+
+  it('styles the two-column honors as a column-major grid that ellipsizes (#1357)', () => {
+    const rule = indexCss.match(/\.share-card-honors-two-col\s*\{([^}]*)\}/);
+    expect(rule, '.share-card-honors-two-col rule not found in src/index.css').not.toBeNull();
+    expect(rule![1]).toMatch(/display:\s*grid/);
+    expect(rule![1]).toMatch(/grid-auto-flow:\s*column/);
+    const day = indexCss.match(/\.share-card-honors-two-col \.share-card-honor-day\s*\{([^}]*)\}/);
+    expect(day![1]).toMatch(/text-overflow:\s*ellipsis/);
   });
 
   it('isolates every emoji run in its own inline-block .emoji-run span (#603)', async () => {

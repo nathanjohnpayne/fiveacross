@@ -1215,7 +1215,7 @@ export function nextDisplayBumpTime(
 // --- Cruise-wide scoring aggregation (daily-cards-spec § "Scoring and social
 // surfaces", #212) -----------------------------------------------------------
 //
-// With ten Day Cards, a Player's `PlayerDoc.bingoCount`/`squaresMarked`/
+// With one Day Card per Day, a Player's `PlayerDoc.bingoCount`/`squaresMarked`/
 // `firstBingoAt` root fields are no longer one Board's totals — they are
 // cruise-wide aggregates over `PlayerDoc.dayStats`, one bucket per Day Card.
 // These pure helpers own that derivation so the write path (`foldDayStat` in

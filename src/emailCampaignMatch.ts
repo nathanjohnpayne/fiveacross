@@ -11,7 +11,7 @@ import { supportedDayIndex } from './data/eventLimits';
  * The taxonomy is the one `functions/src/emailCampaign.ts` produces, matched
  * as exact strings rather than a shape: `utm_medium=email`, plus either
  * `utm_source=daily-email` with `utm_campaign=<eventId>-day-<index>` (a
- * supported Day index, 0–9, in canonical decimal) or `utm_source=podium-email`
+ * supported Day index, `0 … MAX_DAYS - 1`, in canonical decimal) or `utm_source=podium-email`
  * with `utm_campaign=<eventId>-podium`, where `<eventId>` is the resolved
  * Event's id. Anything else (identifier-shaped free text, an email address,
  * another Event, a mismatched source/suffix pair, an out-of-range Day) is not

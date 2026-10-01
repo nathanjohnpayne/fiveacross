@@ -417,7 +417,7 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     expect(writeBatch).not.toHaveBeenCalled();
   });
 
-  it('emits the full supported ten-Day Mark batch: ten Boards, one Player, and the acted marker', async () => {
+  it('emits the full supported MAX_DAYS Mark batch: one Board per Day, one Player, and the acted marker', async () => {
     const dayIndexes = Array.from({ length: MAX_DAYS }, (_unused, index) => index);
     const sourceCells = card((index) => (index === 5 ? 'shared' : `day-0-${index}`));
     for (const dayIndex of dayIndexes) {

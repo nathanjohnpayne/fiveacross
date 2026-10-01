@@ -31,14 +31,19 @@ import { validateSlug } from '../slug';
 // The SAME bound `parseEventDraft` enforces on the stored blob, so the
 // in-memory gate and the persistence gate cannot drift apart.
 import { MAX_PROMPT_TEXT } from './eventDraft';
-import { MAX_DAYS } from './eventLimits';
+import { UNROLLED_SCHEDULE_LOCK_DAYS } from './eventLimits';
 // The SAME conversion the Day header uses, so "which calendar day is this
 // instant on" has one answer across the gate and its consumers.
 import { isoDateInTz } from './tzDate';
 
-// Preserve draftValidation's public import surface while the dependency-free
-// definition also serves Firestore writers without pulling in the setup graph.
-export { MAX_DAYS } from './eventLimits';
+/**
+ * The setup wizard's Day ceiling — deliberately the rules' unrolled-lock size,
+ * NOT the platform's `MAX_DAYS` (20, `src/data/eventLimits.ts`). A schedule
+ * longer than the unroll must state its Standings Freeze when it is born and
+ * can only change two Days per write (#1357, `scheduleEditWindowOk`); the
+ * wizard can set neither, so a long schedule is seeded by script instead.
+ */
+export const MAX_DAYS = UNROLLED_SCHEDULE_LOCK_DAYS;
 
 export type DraftIssueCode =
   | 'pool-below-minimum'
@@ -398,7 +403,7 @@ export function dayCountIssues(draft: EventDraft): DraftIssue[] {
     return [
       {
         code: 'too-many-days',
-        message: `An Event can have at most ${MAX_DAYS} Days; this schedule has ${draft.days.length}. The Firestore schedule lock only covers Day indexes 0–${MAX_DAYS - 1}.`,
+        message: `An Event can have at most ${MAX_DAYS} Days; this schedule has ${draft.days.length}. The Firestore schedule lock checks Day indexes 0–${MAX_DAYS - 1} one by one; a longer schedule needs a stated standings freeze and is set up by script.`,
       },
     ];
   }

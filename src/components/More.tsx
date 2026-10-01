@@ -393,7 +393,7 @@ function MorePanel({ title, onClose, children }: { title: string; onClose: () =>
 }
 
 /**
- * The read-only schedule (issue #208 § Play): the ten Days — place,
+ * The read-only schedule (issue #208 § Play): every Day — place,
  * party, unlock time. Editing the schedule is #221's Admin console job, not
  * this row's. Formats each Day's unlock time in the Event's own IANA
  * `timezone` (falls back to the browser's local zone while the Event doc is
