@@ -1895,6 +1895,47 @@ export async function setMark(params: {
   return next;
 }
 
+/**
+ * "Latest week wins" for the Tally (#1360, specs/echo-marks.md § Disabled): after
+ * an unmark is ACKNOWLEDGED, re-point the Player's one marker for `itemId` to the
+ * sibling card that still carries it with the latest Mark. Reads the SERVER's
+ * marker and boards in one transaction, so a marker an Admin deleted is left
+ * deleted (no recreate) and a sibling missing from this device's cache cannot
+ * win by omission. Best-effort: the unmark has already committed, so a failure
+ * here only leaves the marker's previous attribution in place.
+ */
+async function repointMarkerFromServer(params: {
+  database: Firestore;
+  eventId: string;
+  uid: string;
+  itemId: string;
+  dayIndexes: number[];
+}): Promise<void> {
+  const { database, eventId, uid, itemId, dayIndexes } = params;
+  const markerRef = doc(database, 'events', eventId, 'tally', itemId, 'markers', uid);
+  await runTransaction(database, async (tx) => {
+    const marker = await tx.get(markerRef);
+    if (!marker.exists()) return;
+    let best: { dayIndex: number; markedAt: number; text: string } | null = null;
+    for (const dayIndex of dayIndexes) {
+      const board = await tx.get(doc(database, 'events', eventId, 'days', String(dayIndex), 'boards', uid));
+      if (!board.exists()) continue;
+      const carrier = cellsFromData((board.data() as { cells?: unknown }).cells).find(
+        (c) => !c.free && c.marked && c.itemId === itemId,
+      );
+      if (!carrier) continue;
+      const markedAt = typeof carrier.markedAt === 'number' ? carrier.markedAt : 0;
+      if (!best || markedAt > best.markedAt || (markedAt === best.markedAt && dayIndex > best.dayIndex)) {
+        best = { dayIndex, markedAt, text: carrier.text };
+      }
+    }
+    if (!best) return;
+    const current = marker.data() as Record<string, unknown>;
+    if (current.dayIndex === best.dayIndex && current.markedAt === best.markedAt) return;
+    tx.set(markerRef, { ...current, dayIndex: best.dayIndex, markedAt: best.markedAt, itemText: best.text });
+  });
+}
+
 async function runSetMark(
   params: {
     uid: string;
@@ -2228,6 +2269,8 @@ async function runSetMark(
   // Tally is a separate surface (ADR 0002).
   const tallyItemId = toggled && !toggled.free ? toggled.itemId : null;
   let markerRepairCandidate: string | null = null;
+  // #1360: the Prompt whose marker re-points once this unmark is acknowledged.
+  let repointMarkerItemId: string | null = null;
   if (tallyItemId) {
     const markerRef = doc(database, 'events', eventId, 'tally', tallyItemId, 'markers', uid);
     if (params.nextMarked) {
@@ -2301,28 +2344,14 @@ async function runSetMark(
           }
         });
       }
-      // Re-point ONLY a marker this device knows still exists (Codex P2 on #1363):
-      // an Admin may have deleted it for moderation, and an unmark must never
-      // recreate a moderated marker — the same posture the open-time reconcile
-      // takes toward cache tombstones. Unknown (cache miss) also skips: the
-      // marker then keeps its old attribution, the pre-#1360 behaviour.
-      const markerKnown =
-        stillAchievedElsewhere && params.echoMarks === false && latestRemaining
-          ? await getDocFromCache(markerRef)
-              .then((snap) => snap.exists())
-              .catch(() => false)
-          : false;
-      if (markerKnown && latestRemaining) {
-        const remaining: { dayIndex: number; markedAt: number; text: string } = latestRemaining;
-        batch.set(markerRef, {
-          uid,
-          eventId,
-          displayName: markerDisplayName(params.displayName, cachedPlayerName),
-          markedAt: remaining.markedAt,
-          itemText: remaining.text,
-          dayIndex: remaining.dayIndex,
-        });
-      }
+      // Re-point the marker AFTER the server acks this unmark, never inside this
+      // offline-queueable batch (#1363 review): an Admin may delete the marker
+      // for moderation while this device is offline, and a queued `set` would
+      // recreate it on sync. The post-ack transaction reads the SERVER's marker
+      // and sibling boards, so it also cannot be misled by a partially cached
+      // sibling set. Only with Echo off, and only when a sibling still carries it.
+      repointMarkerItemId =
+        stillAchievedElsewhere && params.echoMarks === false && latestRemaining ? tallyItemId : null;
       if (!stillAchievedElsewhere) {
         batch.delete(markerRef);
         if (siblingKnowledgeIncomplete) {
@@ -2358,6 +2387,12 @@ async function runSetMark(
           database,
         }),
       )
+      .catch(() => undefined);
+  }
+  if (repointMarkerItemId) {
+    const itemId = repointMarkerItemId;
+    void committed
+      .then(() => repointMarkerFromServer({ database, eventId, uid, itemId, dayIndexes: echoDayIndexes }))
       .catch(() => undefined);
   }
   void committed.catch((err: unknown) => {

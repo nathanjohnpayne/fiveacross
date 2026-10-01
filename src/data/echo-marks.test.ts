@@ -31,6 +31,9 @@ const H = vi.hoisted(() => ({
   // cached, the production common case); `false` → a cached TOMBSTONE (this
   // device deleted it); `true` → a cached live marker.
   markerCache: new Map<string, boolean>(),
+  // #1360: the SERVER's Tally marker docs per itemId (read by the post-ack re-point
+  // transaction). Absent means the marker does not exist on the server.
+  markerServer: new Map<string, Record<string, unknown>>(),
   // The default getDocFromCache implementation, exposed so a test that
   // overrides it can restore EXACTLY this (a lookalike without the tally
   // branch would silently change marker-cache semantics for later tests).
@@ -140,6 +143,10 @@ function route(ref: { args?: unknown[] }) {
     return board ? snap(true, a[5], board) : snap(false);
   }
   if (a[2] === 'players') return H.player ? snap(true, a[3], H.player) : snap(false);
+  if (a[2] === 'tally' && a[4] === 'markers') {
+    const m = H.markerServer.get(a[3]);
+    return m ? snap(true, a[5], m) : snap(false);
+  }
   return snap(false);
 }
 
@@ -231,6 +238,7 @@ beforeEach(() => {
   H.itemsById.clear();
   H.dayBoards = new Map();
   H.markerCache.clear();
+  H.markerServer.clear();
   H.player = null;
   H.transactionRunner = null;
   __resetPendingMarkerRepairsForTests();
@@ -910,11 +918,11 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     expect(H.batchDelete).toHaveBeenCalledTimes(1);
   });
 
-  it('#1360: with Echo off an unmark RE-POINTS the marker to the latest remaining week', async () => {
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+  const seedRepeats = () => {
     seedBoards();
-    // `shared` was re-marked by hand on Day 1 (t=20) and Day 3 (t=30); the
-    // acted Day 2 copy is being unmarked. The marker must land on Day 3 — the
-    // latest Mark still standing — not stay attributed to the unmarked Day 2.
+    // `shared` re-marked by hand on Day 1 (t=20) and Day 3 (t=30); the acted
+    // Day 2 copy (t=25) is the one being unmarked.
     H.dayBoards.set(1, {
       uid: 'u1', seed: 111, dayIndex: 1,
       cells: card((i) => (i === 4 ? 'shared' : `c${i}`), { 4: { marked: true, markedAt: 20, status: 'confirmed' } }),
@@ -927,39 +935,54 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       uid: 'u1', seed: 222, dayIndex: 2,
       cells: card((i) => (i === 5 ? 'shared' : `a${i}`), { 5: { marked: true, markedAt: 25 } }),
     });
-    H.markerCache.set('shared', true); // the marker is known to exist
+  };
+  const markerTxWrite = () =>
+    H.txSet.mock.calls.find((c) => segs(c)[2] === 'tally' && segs(c)[4] === 'markers');
+  const serverMarker = () => ({ uid: 'u1', eventId: EVENT_ID, displayName: 'Alice', dayIndex: 2, markedAt: 25, itemText: 'P' });
+
+  it('#1360: with Echo off an unmark RE-POINTS the marker to the latest remaining week, after the ack', async () => {
+    seedRepeats();
+    H.markerServer.set('shared', serverMarker());
     await markShared({ nextMarked: false, echoMarks: false });
+    // Never inside the offline batch: a queued set could recreate a moderated marker.
+    expect(H.batchSet.mock.calls.some((c) => isMarkerWrite(c))).toBe(false);
     expect(H.batchDelete).not.toHaveBeenCalled();
-    const markerWrite = H.batchSet.mock.calls.find(isMarkerWrite);
-    expect(markerWrite).toBeDefined();
-    expect(markerWrite![1]).toMatchObject({ uid: 'u1', dayIndex: 3, markedAt: 30 });
+    await settle();
+    expect(markerTxWrite()?.[1]).toMatchObject({ uid: 'u1', displayName: 'Alice', dayIndex: 3, markedAt: 30 });
   });
 
-  it('#1360: an unmark never RECREATES a moderated marker (cached tombstone or cache miss)', async () => {
-    const seedRepeats = () => {
-      seedBoards();
-      H.dayBoards.set(3, {
-        uid: 'u1', seed: 333, dayIndex: 3,
-        cells: card((i) => (i === 8 ? 'shared' : `b${i}`), { 8: { marked: true, markedAt: 30, status: 'confirmed' } }),
-      });
-      H.dayBoards.set(2, {
-        uid: 'u1', seed: 222, dayIndex: 2,
-        cells: card((i) => (i === 5 ? 'shared' : `a${i}`), { 5: { marked: true, markedAt: 25 } }),
-      });
-    };
-    // An Admin deleted the marker (the cache holds the tombstone).
+  it('#1360: the re-point never RECREATES a marker the server no longer has (moderation)', async () => {
     seedRepeats();
-    H.markerCache.set('shared', false);
+    // An Admin deleted the marker on the server; this device still caches it.
+    H.markerCache.set('shared', true);
     await markShared({ nextMarked: false, echoMarks: false });
+    await settle();
+    expect(markerTxWrite()).toBeUndefined();
     expect(H.batchSet.mock.calls.some((c) => isMarkerWrite(c))).toBe(false);
-    expect(H.batchDelete).not.toHaveBeenCalled();
+  });
 
-    // The cache does not know the marker at all: skip rather than guess.
-    vi.clearAllMocks();
-    H.markerCache.clear();
+  it('#1360: the re-point reads siblings from the SERVER, so an uncached later Mark still wins', async () => {
     seedRepeats();
-    await markShared({ nextMarked: false, echoMarks: false });
-    expect(H.batchSet.mock.calls.some((c) => isMarkerWrite(c))).toBe(false);
+    // Day 1's real Mark is the latest (t=40), but this device's cache cannot read Day 1.
+    H.dayBoards.set(1, {
+      uid: 'u1', seed: 111, dayIndex: 1,
+      cells: card((i) => (i === 4 ? 'shared' : `c${i}`), { 4: { marked: true, markedAt: 40, status: 'confirmed' } }),
+    });
+    const { getDocFromCache } = await import('firebase/firestore');
+    const cacheRead = vi.mocked(getDocFromCache);
+    cacheRead.mockImplementation((async (ref: { args?: unknown[] }) => {
+      const a = (ref.args ?? []).filter((x): x is string => typeof x === 'string');
+      if (a[2] === 'days' && a[3] === '1') throw new Error('not cached');
+      return H.defaultGetDocFromCache(ref);
+    }) as never);
+    H.markerServer.set('shared', serverMarker());
+    try {
+      await markShared({ nextMarked: false, echoMarks: false });
+      await settle();
+      expect(markerTxWrite()?.[1]).toMatchObject({ dayIndex: 1, markedAt: 40 });
+    } finally {
+      cacheRead.mockImplementation(((ref: { args?: unknown[] }) => H.defaultGetDocFromCache(ref)) as never);
+    }
   });
 
   it('#1360: with Echo ON an unmark keeps the marker exactly as before (no re-point write)', async () => {
@@ -972,9 +995,12 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       uid: 'u1', seed: 222, dayIndex: 2,
       cells: card((i) => (i === 5 ? 'shared' : `a${i}`), { 5: { marked: true, markedAt: 25 } }),
     });
+    H.markerServer.set('shared', serverMarker());
     await markShared({ nextMarked: false });
+    await settle();
     expect(H.batchDelete).not.toHaveBeenCalled();
     expect(H.batchSet.mock.calls.some((c) => isMarkerWrite(c))).toBe(false);
+    expect(markerTxWrite()).toBeUndefined();
   });
 
   it('preserves root blackout when an unmark leaves a sibling Echo blacked out', async () => {
