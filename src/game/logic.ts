@@ -590,7 +590,12 @@ export function dealBoard(
     // byte-for-byte untouched even with easyMixRatio set on the event.
     const easyCount = easyItems.length > 0 ? Math.round(24 * requestedEasy) : 0;
     const mainCount = 24 - easyCount;
-    const mainUsable = excludeFor(mainItems, opts, mainCount);
+    // The main half must also cover any easy-pool SHORTFALL (CodeRabbit on #1363):
+    // with fewer easy items than `easyCount`, main backfills them, so a tier
+    // prefix that leaves exactly `mainCount` would pass here and then fail the
+    // MIN_POOL guard below. Identical to `mainCount` whenever the easy pool can
+    // fill its share, so every such deal is unchanged.
+    const mainUsable = excludeFor(mainItems, opts, Math.max(mainCount, MIN_POOL - easyItems.length));
     // A full board needs 24 non-free squares. At easyCount 0 the deal is main-only, so
     // the thin-pool guard is the main pool alone — preserving the pre-existing throw;
     // with a mix the two pools backfill each other, so the guard is their union.

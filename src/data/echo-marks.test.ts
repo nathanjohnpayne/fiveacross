@@ -910,6 +910,45 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     expect(H.batchDelete).toHaveBeenCalledTimes(1);
   });
 
+  it('#1360: with Echo off an unmark RE-POINTS the marker to the latest remaining week', async () => {
+    seedBoards();
+    // `shared` was re-marked by hand on Day 1 (t=20) and Day 3 (t=30); the
+    // acted Day 2 copy is being unmarked. The marker must land on Day 3 — the
+    // latest Mark still standing — not stay attributed to the unmarked Day 2.
+    H.dayBoards.set(1, {
+      uid: 'u1', seed: 111, dayIndex: 1,
+      cells: card((i) => (i === 4 ? 'shared' : `c${i}`), { 4: { marked: true, markedAt: 20, status: 'confirmed' } }),
+    });
+    H.dayBoards.set(3, {
+      uid: 'u1', seed: 333, dayIndex: 3,
+      cells: card((i) => (i === 8 ? 'shared' : `b${i}`), { 8: { marked: true, markedAt: 30, status: 'confirmed' } }),
+    });
+    H.dayBoards.set(2, {
+      uid: 'u1', seed: 222, dayIndex: 2,
+      cells: card((i) => (i === 5 ? 'shared' : `a${i}`), { 5: { marked: true, markedAt: 25 } }),
+    });
+    await markShared({ nextMarked: false, echoMarks: false });
+    expect(H.batchDelete).not.toHaveBeenCalled();
+    const markerWrite = H.batchSet.mock.calls.find(isMarkerWrite);
+    expect(markerWrite).toBeDefined();
+    expect(markerWrite![1]).toMatchObject({ uid: 'u1', dayIndex: 3, markedAt: 30 });
+  });
+
+  it('#1360: with Echo ON an unmark keeps the marker exactly as before (no re-point write)', async () => {
+    seedBoards();
+    H.dayBoards.set(3, {
+      uid: 'u1', seed: 333, dayIndex: 3,
+      cells: card((i) => (i === 8 ? 'shared' : `b${i}`), { 8: { marked: true, markedAt: 30, status: 'confirmed', echo: true } }),
+    });
+    H.dayBoards.set(2, {
+      uid: 'u1', seed: 222, dayIndex: 2,
+      cells: card((i) => (i === 5 ? 'shared' : `a${i}`), { 5: { marked: true, markedAt: 25 } }),
+    });
+    await markShared({ nextMarked: false });
+    expect(H.batchDelete).not.toHaveBeenCalled();
+    expect(H.batchSet.mock.calls.some((c) => isMarkerWrite(c))).toBe(false);
+  });
+
   it('preserves root blackout when an unmark leaves a sibling Echo blacked out', async () => {
     seedBoards();
     H.dayBoards.set(2, {

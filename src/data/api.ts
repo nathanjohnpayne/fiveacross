@@ -2270,6 +2270,11 @@ async function runSetMark(
       // unknowable sibling reads as "no carrier", matching today's delete.
       let stillAchievedElsewhere = false;
       let siblingKnowledgeIncomplete = false;
+      // #1360: with Echo off a Player re-marks a repeated Prompt on several
+      // Days, and the ONE marker follows their most recent Mark ("latest week
+      // wins"). Unmarking that Day must not leave the marker attributed to it,
+      // so the marker re-points to the remaining carrier with the latest Mark.
+      let latestRemaining: { dayIndex: number; markedAt: number; text: string } | null = null;
       if (echoDayIndexes.length > 0) {
         const sibSnaps = await Promise.allSettled(
           echoDayIndexes.map((d) =>
@@ -2277,14 +2282,34 @@ async function runSetMark(
           ),
         );
         siblingKnowledgeIncomplete = sibSnaps.some((snap) => snap.status !== 'fulfilled');
-        stillAchievedElsewhere = sibSnaps.some(
-          (snap) =>
-            snap.status === 'fulfilled' &&
-            snap.value.exists() &&
-            cellsFromData((snap.value.data() as { cells?: unknown }).cells).some(
-              (c) => !c.free && c.marked && c.itemId === tallyItemId,
-            ),
-        );
+        sibSnaps.forEach((snap, i) => {
+          if (snap.status !== 'fulfilled' || !snap.value.exists()) return;
+          const carrier = cellsFromData((snap.value.data() as { cells?: unknown }).cells).find(
+            (c) => !c.free && c.marked && c.itemId === tallyItemId,
+          );
+          if (!carrier) return;
+          stillAchievedElsewhere = true;
+          const markedAt = typeof carrier.markedAt === 'number' ? carrier.markedAt : 0;
+          const dayIndex = echoDayIndexes[i];
+          if (
+            !latestRemaining ||
+            markedAt > latestRemaining.markedAt ||
+            (markedAt === latestRemaining.markedAt && dayIndex > latestRemaining.dayIndex)
+          ) {
+            latestRemaining = { dayIndex, markedAt, text: carrier.text };
+          }
+        });
+      }
+      if (stillAchievedElsewhere && params.echoMarks === false && latestRemaining) {
+        const remaining: { dayIndex: number; markedAt: number; text: string } = latestRemaining;
+        batch.set(markerRef, {
+          uid,
+          eventId,
+          displayName: markerDisplayName(params.displayName, cachedPlayerName),
+          markedAt: remaining.markedAt,
+          itemText: remaining.text,
+          dayIndex: remaining.dayIndex,
+        });
       }
       if (!stillAchievedElsewhere) {
         batch.delete(markerRef);

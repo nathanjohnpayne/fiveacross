@@ -230,6 +230,18 @@ describe('easy mix — the repeat window (#1360)', () => {
     for (const id of [...tiers[0], ...tiers[1]]) expect(main).not.toContain(id);
   });
 
+  it('keeps enough main prompts to backfill a SHORT easy pool before accepting a tier prefix', () => {
+    // 40 main + only 6 easy at ratio 0.5: main must supply 18, not 12. Tiers of
+    // 14/14/12 exclude everything; dropping the farthest (12) leaves 12 — enough
+    // for a 12-square main half but not for the 18 the short easy pool needs —
+    // so a second tier drops and only the nearest card (14) stays excluded.
+    const pool = [...mainPool(0, 40), ...embarkPool(6)];
+    const tiers = [ids('mt', 0, 14), ids('mt', 14, 14), ids('mt', 28, 12)];
+    const dealt = dealtIds(pool, 9, { stratify: true, easyMixRatio: 0.5, excludeTiers: tiers });
+    expect(dealt).toHaveLength(24);
+    for (const id of tiers[0]) expect(dealt).not.toContain(id);
+  });
+
   it('keeps the legacy single-set exclusion as the all-or-nothing reset', () => {
     const pool = [...mainPool(0, 40), ...embarkPool(20)];
     const all = ids('mt', 0, 40);
