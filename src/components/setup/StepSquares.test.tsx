@@ -11,7 +11,7 @@ import StepSquares from './StepSquares';
 // Covers specs/event-setup-wizard.md § "Squares" (#791) — the UI half of the
 // contract facts #785 catalogues: the per-ASSIGNED-pool minimum, spicy scoped
 // to the main pool, a Day that is not a calendar date, `tutorial` independent
-// of `pool`, and the ten-Day rules ceiling.
+// of `pool`, and the wizard's ten-Day ceiling.
 
 const NOW = Date.UTC(2026, 7, 1, 12, 0, 0);
 
@@ -515,7 +515,7 @@ describe('Days & pools', () => {
     expect(current().days[1]!.pool).toBe('closing');
   });
 
-  it('blocks an eleventh Day and explains the rules ceiling rather than just refusing', async () => {
+  it('blocks an eleventh Day and explains the wizard ceiling rather than just refusing', async () => {
     const { current } = renderStep(
       draftWith({
         days: Array.from({ length: MAX_DAYS }, (_unused, i) =>

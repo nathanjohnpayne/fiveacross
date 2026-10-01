@@ -1706,7 +1706,9 @@ export interface EventDraft {
 /** The schedule an occasion PROPOSES. Shape only — turning it into absolute
  *  `unlockAt` instants needs the Event timezone and belongs to Step 4 (#792). */
 export interface OccasionScheduleShape {
-  /** 1..MAX_DAYS (`src/data/eventLimits.ts`). */
+  /** 1..10 — the setup wizard's ceiling (`draftValidation`'s `MAX_DAYS`), which
+   *  `daysFromOccasion` clamps to. Not the platform's `MAX_DAYS` (20,
+   *  `src/data/eventLimits.ts`): a longer schedule is seeded by script (#1357). */
   dayCount: number;
   /** Local time-of-day each Day opens, `HH:MM` in the Event's timezone. */
   unlockTime: string;
