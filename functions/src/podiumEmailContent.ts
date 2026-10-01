@@ -94,7 +94,7 @@ export interface PodiumEmailModel {
   /** "👋 So Long, Farewell" — Theme emoji + label, or the platform band's own
    *  headline for an Edition whose closing Day carries no vignette Theme. */
   themeHeadline: string;
-  /** "Final standings · Day 10 of 10 · Friday, Jul 24 · 🇪🇸 Barcelona" */
+  /** e.g. "Final standings · Day 10 of 10 · Friday, Jul 24 · 🇪🇸 Barcelona" */
   contextLine: string;
   standingsHeading: string;
   /** Top three (or fewer). Empty when the Event's board was empty, and also
@@ -189,7 +189,7 @@ export interface BuildPodiumEmailArgs {
   /** The closing Day's Theme id, and its position in the schedule. */
   closingDay: {
     themeId?: string | null;
-    /** 1-based, for the "Day 10 of 10" context line. */
+    /** 1-based, for the "Day N of M" context line. */
     dayNumber: number;
     dayCount: number;
     /** "Friday, Jul 24", already formatted in the Event's timezone. */

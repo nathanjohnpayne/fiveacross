@@ -16,6 +16,7 @@ import {
 } from './eventArchive';
 import { migrateClaimMode, migrateDayFields } from './converters';
 import { dayMetaRef, playersCol } from './paths';
+import { scheduleEditFromFor } from './eventLimits';
 import { normalizePool } from '../game/pool';
 import type { ApprovalOutcome, ApprovalPlacement, ApprovePromptsRequest, Cell, ClaimMode, ThemeId, ClaimDoc, DayMetaDoc, EventDoc, ItemDoc, DayDef, PlayerDoc, ProofDoc } from '../types';
 
@@ -695,9 +696,24 @@ export const setDayTheme = (days: DayDef[], dayIndex: number, theme: ThemeId): P
       (snap.exists() ? (snap.data().days as DayDef[] | undefined) : undefined) ?? days;
     tx.update(eventRef, {
       days: current.map((d) => (d.index === dayIndex ? { ...d, theme } : d)),
+      ...scheduleEditWindow(current, dayIndex),
     });
   });
 };
+
+/**
+ * The `scheduleEditFrom` marker a one-Day schedule write carries on a schedule
+ * longer than the rules' unrolled lock, or nothing at all on a shorter one
+ * (#1357, `firestore.rules`' `scheduleEditWindowOk`). Keyed off the array's
+ * POSITION of the Day being written, which is what the rules' slices index;
+ * a Day missing from the array changes nothing, so it opens no window.
+ */
+function scheduleEditWindow(current: DayDef[], dayIndex: number): { scheduleEditFrom?: number } {
+  const position = current.findIndex((d) => d.index === dayIndex);
+  if (position < 0) return {};
+  const from = scheduleEditFromFor(current.length, position);
+  return from === undefined ? {} : { scheduleEditFrom: from };
+}
 
 function normalizeTonightEntries(tonight: string[]): string[] {
   return tonight.map((entry) => entry.trim());
@@ -739,6 +755,7 @@ export const setDayTonight = (days: DayDef[], dayIndex: number, tonight: string[
     const nextTonight = normalizeTonightEntries(tonight);
     tx.update(eventRef, {
       days: current.map((d) => (d.index === dayIndex ? { ...d, tonight: nextTonight } : d)),
+      ...scheduleEditWindow(current, dayIndex),
     });
   });
 };
@@ -1450,11 +1467,11 @@ export async function archiveEvent(
   // read refusals do.
   //
   // AN INTEGER OUTSIDE THE SUPPORTED RANGE IS THE SAME REFUSAL, and the more
-  // dangerous half (Codex P2 on PR #1162, round 7). `-1`, `10` and an unsafe
+  // dangerous half (Codex P2 on PR #1162, round 7). `-1`, `MAX_DAYS` and an unsafe
   // large integer read a document that genuinely EXISTS as a path — the honour
   // pin fetch below succeeds, quietly, at `days/-1/meta/-1` — while naming no Day
   // the `DayDef` contract has, so a hand-edited or legacy schedule could freeze
-  // an `ArchivedDayHonor` labelled `D0` or `D11` into a `dailyHonors` list the
+  // an `ArchivedDayHonor` labelled `D0` or `D{MAX_DAYS + 1}` into a `dailyHonors` list the
   // rules cannot look inside. `usableDayIndexes` asks `supportedDayIndex` of every
   // entry, which is the one place the range is stated.
   //

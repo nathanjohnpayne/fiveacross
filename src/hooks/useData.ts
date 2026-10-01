@@ -494,7 +494,7 @@ export function useDayMetas(dayIndexes: readonly number[]): ReadonlyMap<number, 
  *    tolerates an entry it cannot read (`migrateDayFields` treats a nullish one
  *    as `{}`), so an index can be `undefined` or fractional. `dayMetaRef` would
  *    then address `days/undefined/meta/undefined` — a document that is not
- *    there, delivered as a perfectly ordinary "no pin here". `-1`, `10` and an
+ *    there, delivered as a perfectly ordinary "no pin here". `-1`, `MAX_DAYS` and an
  *    unsafe large integer are dropped by the same clause and for a sharper
  *    reason (Codex P2 on PR #1162, round 7): each is a REAL path this fan would
  *    otherwise subscribe to, on a Day the `DayDef` contract does not have, so

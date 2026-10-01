@@ -681,7 +681,7 @@ function FarewellPodiumInner({
 
   // No share affordance until the day-meta honors settle (Codex P2, PR
   // #450): on a cold farewell load the roster snapshot can produce a
-  // champion before all ten day-meta listeners answer, and buildPodium
+  // champion before every day-meta listener answers, and buildPodium
   // deliberately withholds derived honors while `dayMetasLoaded` is false —
   // an immediate tap would bake a permanently incomplete honors list into
   // the shared image. The podium itself still renders; only sharing waits.

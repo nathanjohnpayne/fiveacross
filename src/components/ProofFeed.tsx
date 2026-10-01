@@ -111,7 +111,7 @@ const MOMENT_COPY: Record<MomentKind, { icon: string; line: string }> = {
   // Phase 1.5 finale beats (daily-cards-spec § "Scoring and social surfaces").
   // The scheduler (#202) posts these; the copy here keeps the exhaustive
   // Record compiling and the Feed rendering them until #207 refines the finale
-  // presentation. `last_call` = 20:00 Day 9 standings; `podium` = the Day 10
+  // presentation. `last_call` = the pre-freeze standings; `podium` = the
   // freeze champion beat.
   last_call: { icon: '📣', line: 'posted the final-night standings!' },
   podium: { icon: '🏆', line: 'took the podium!' },

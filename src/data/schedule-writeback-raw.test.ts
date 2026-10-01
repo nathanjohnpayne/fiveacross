@@ -193,3 +193,42 @@ describe('admin schedule writeback stays RAW (ADR 0011)', () => {
     ]);
   });
 });
+
+// #1357 — a schedule longer than the rules' ten-index unroll changes ONLY
+// through the two-Day edit window, so each one-Day write must declare where its
+// window starts. A short schedule must NOT carry the marker: it rides the
+// unchanged unrolled lock and its doc shape stays exactly what it was.
+describe('admin schedule writes declare the two-Day edit window on long schedules (#1357)', () => {
+  const semester = Array.from({ length: 16 }, (_, index) => ({
+    index,
+    place: `Week ${index + 1}`,
+    placeEmoji: '📚',
+    theme: 'marquee',
+    tonight: ['a', 'b'],
+    pool: index === 15 ? 'farewell' : 'main',
+    tutorial: false,
+    unlockAt: NOW + (index + 1) * HOUR,
+  }));
+  const payload = (): Record<string, unknown> => updateMock.mock.calls.at(-1)![1] as Record<string, unknown>;
+
+  beforeEach(() => {
+    eventDataMock.mockReturnValue({ days: semester });
+  });
+
+  it('setDayTheme opens the window at the edited Day', async () => {
+    await setDayTheme(semester.map((d) => migrateDayFields(d)), 12, 'afterglow');
+    expect(payload().scheduleEditFrom).toBe(12);
+    expect(writtenDays()[12].theme).toBe('afterglow');
+  });
+
+  it('setDayTonight on the LAST Day opens the window one Day earlier so it fits', async () => {
+    await setDayTonight(semester.map((d) => migrateDayFields(d)), 15, ['🏆 Podium', '🎓 Last class']);
+    expect(payload().scheduleEditFrom).toBe(14);
+  });
+
+  it('a short schedule carries no marker at all', async () => {
+    eventDataMock.mockReturnValue({ days: STORED_LEGACY_DAYS });
+    await setDayTheme(convertedDays(), 1, 'neon-pink-playground');
+    expect('scheduleEditFrom' in payload()).toBe(false);
+  });
+});
