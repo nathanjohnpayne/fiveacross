@@ -457,6 +457,7 @@ The platform already handles most of this: Days unlock on arbitrary dates with a
 - the signed-out preview's Day line (`src/eventPreview.ts`, "Day N: title")
 - Feed chips and Notices (`src/components/ProofFeed.tsx`)
 - the offline saved-card fallback (`src/components/CachedCardFallback.tsx`)
+- the My Suggestions status label (`src/components/ItemPool.tsx`, "scheduled · Day N"), with the matching `specs/community-prompt-targeting.md` contract and component test
 
 Each surface gets a copy test for the weekly register, so a later hard-coded "Day" fails a test rather than shipping.
 
@@ -501,6 +502,7 @@ This is a protected path, so the change needs full Phase 4.
 
 - Give weekly sends a `weekly-email` campaign source. The server and client matchers must change together, along with `specs/posthog-analytics.md`.
 - Re-anchor last call for weekly Events. Today it lands at the previous Day's unlock plus 12 hours, which for weekly Days is six days before the freeze. It should be the freeze minus 12 hours (Sunday, May 16, 7:00 p.m.).
+- Thread the cadence-aware label into the email template too. `functions/src/dailyEmailTemplate.ts` hard-codes "Tonight:" in both the HTML and plain-text renderers, separately from `dailyEmailContent.ts`, so changing the content file alone leaves it daily. Cover both outputs in the email spec and tests.
 - Migrate the winner-announcement email too. Week 16's email is the podium email, a separate path: `functions/src/podiumEmailContent.ts` builds "Final standings · Day N of M", and `functions/src/podiumEmail.ts` hard-codes "Day N" in its honor and photo labels. Route both through the weekly register, update `specs/daily-engagement-email.md`'s podium section, and extend `tests/functions/podium-email.test.ts`.
 
 **T5—Seed module.** Add `scripts/seed-data/hbs-spring-2027.mjs` holding this document's pools and 16 Days, and register it in `SEED_EVENTS`. Event fields:
@@ -557,7 +559,7 @@ T3's themed reserve changes the arithmetic (6 new squares a week that can never 
 
 *The Tally with Echo off (decided 2026-10-01: "latest week wins").* The Tally keeps one marker per player per Prompt, stamped with one Day (`tally/{itemId}/markers/{uid}`). `specs/d15-tally-cards.md` relied on a player never marking the same Prompt on two Days, which stops holding once Echo is off and repeats are real re-marks. The marker follows each player's latest Mark. The Prompt's Tally count and who-list stay right, because they're per Prompt, but the Feed's Tally Card for an earlier week drops anyone who re-marked the square later. Unmarking re-points the marker to the latest week where the square is still marked, so it never stays on an unmarked week. Both are implemented in #1363 (`specs/echo-marks.md` § Disabled). Per-week markers would keep every week's Feed card whole, but they need a marker schema and rules change; deferred unless the earlier-week Feed cards turn out to matter.
 
-**Dry run.** Before launch, seed a throwaway weekly Event in the emulator with compressed unlocks, an hour apart instead of a week, to exercise the unlocks, the email sends, last call, the freeze, and the podium end to end. Compressing only `unlockAt` is not enough for the emails: `dueDayForDailyEmail` picks mail by each Day's Event-local calendar `date`, and one date owns one email. So give each test Day its own consecutive calendar date (a fake clock stepping one day per test Day), or drive the email send core directly per Day, so all sixteen engagement emails and the podium email are actually exercised.
+**Dry run.** Before launch, seed a throwaway weekly Event in the emulator with compressed unlocks, an hour apart instead of a week, to exercise the unlocks, the email sends, last call, the freeze, and the podium end to end. Compressing only `unlockAt` is not enough for the emails: `dueDayForDailyEmail` picks mail by each Day's Event-local calendar `date`, and one date owns one email. So give each test Day its own consecutive calendar date (a fake clock stepping one day per test Day), or drive the email send core directly per Day, so all fifteen engagement emails (Weeks 1–15) and the podium email are actually exercised. Week 16 sends only the podium email: its unlock is the Standings Freeze, where the engagement sender correctly returns `not-due`, so the dry run must not expect a sixteenth engagement email or bypass that cutoff to get one.
 
 ## Open questions for the Host
 
