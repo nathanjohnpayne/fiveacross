@@ -452,6 +452,7 @@ The platform already handles most of this: Days unlock on arbitrary dates with a
 - `unlockCopy` ("24 fresh squares land Monday at 7 a.m.")
 - `LaunchIntro`, `More`, `ReshuffleSheet`
 - `FarewellPodium` and `ShareCard` ("Weekly honors")
+- the frozen archive. `draftEventArchive` stores each honor's `dayHonorChipLabel` ("D12") permanently, `ArchivedLeaderboard` renders it, and `ArchiveEvent` calls them "daily honors", so archiving with daily labels freezes the wrong vocabulary into the record. Make the archive-time label cadence-aware ("W12"), update the archived and admin surfaces and `specs/post-sailing-archive.md`, and add an archive regression test.
 - `lastCallCopy`, with its mirror in `functions/src/finaleContent.ts`
 - the signed-out preview's Day line (`src/eventPreview.ts`, "Day N: title")
 - Feed chips and Notices (`src/components/ProofFeed.tsx`)
@@ -556,7 +557,7 @@ T3's themed reserve changes the arithmetic (6 new squares a week that can never 
 
 *The Tally with Echo off (decided 2026-10-01: "latest week wins").* The Tally keeps one marker per player per Prompt, stamped with one Day (`tally/{itemId}/markers/{uid}`). `specs/d15-tally-cards.md` relied on a player never marking the same Prompt on two Days, which stops holding once Echo is off and repeats are real re-marks. The marker follows each player's latest Mark. The Prompt's Tally count and who-list stay right, because they're per Prompt, but the Feed's Tally Card for an earlier week drops anyone who re-marked the square later. Unmarking re-points the marker to the latest week where the square is still marked, so it never stays on an unmarked week. Both are implemented in #1363 (`specs/echo-marks.md` § Disabled). Per-week markers would keep every week's Feed card whole, but they need a marker schema and rules change; deferred unless the earlier-week Feed cards turn out to matter.
 
-**Dry run.** Before launch, seed a throwaway weekly Event in the emulator with compressed unlocks, an hour apart instead of a week, to exercise the unlocks, the email sends, last call, the freeze, and the podium end to end.
+**Dry run.** Before launch, seed a throwaway weekly Event in the emulator with compressed unlocks, an hour apart instead of a week, to exercise the unlocks, the email sends, last call, the freeze, and the podium end to end. Compressing only `unlockAt` is not enough for the emails: `dueDayForDailyEmail` picks mail by each Day's Event-local calendar `date`, and one date owns one email. So give each test Day its own consecutive calendar date (a fake clock stepping one day per test Day), or drive the email send core directly per Day, so all sixteen engagement emails and the podium email are actually exercised.
 
 ## Open questions for the Host
 

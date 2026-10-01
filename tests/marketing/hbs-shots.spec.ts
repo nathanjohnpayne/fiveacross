@@ -102,6 +102,19 @@ test.describe('HBS spring 2027 mockups', () => {
         doc(ctx.firestore(), 'events', HERO_EVENT_ID, 'days', String(HBS_TODAY_INDEX), 'boards', uid),
         { uid, dayIndex: HBS_TODAY_INDEX, seed: HBS_FIXED_SEED, createdAt: unlockAt(HBS_TODAY_INDEX) + 30 * 3_600_000, cells: marked, easyMixRatio: 0.5 },
       );
+      // Fold the seeded Marks into the Player's stats the way a real Mark does
+      // (root totals + this Day's bucket), so the Ranks shot agrees with the card
+      // instead of showing the signed-in Player at 0 squares (Codex P2 on #1358).
+      const squaresMarked = marked.filter((c) => !c.free && c.marked).length;
+      await setDoc(
+        doc(ctx.firestore(), 'events', HERO_EVENT_ID, 'players', uid),
+        {
+          squaresMarked,
+          bingoCount: 0,
+          dayStats: { [HBS_TODAY_INDEX]: { bingoCount: 0, squaresMarked, firstBingoAt: null } },
+        },
+        { merge: true },
+      );
     });
 
     await page.reload();
@@ -141,6 +154,11 @@ test.describe('HBS spring 2027 mockups', () => {
     }
     await expect(page.getByText(SIGNED_IN_NAME, { exact: false }).first()).toBeVisible({ timeout: 30_000 });
     await expect(page.locator('.rank')).toHaveCount(hbsRoster().length + 1, { timeout: 30_000 });
+    // The signed-in Player's row must agree with the card shot above.
+    const seededSquares = marked.filter((c) => !c.free && c.marked).length;
+    await expect(page.locator('.rank', { hasText: SIGNED_IN_NAME })).toContainText(`${seededSquares} squares`, {
+      timeout: 30_000,
+    });
     await shoot(page, 'ranks');
   });
 
