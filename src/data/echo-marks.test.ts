@@ -927,11 +927,39 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       uid: 'u1', seed: 222, dayIndex: 2,
       cells: card((i) => (i === 5 ? 'shared' : `a${i}`), { 5: { marked: true, markedAt: 25 } }),
     });
+    H.markerCache.set('shared', true); // the marker is known to exist
     await markShared({ nextMarked: false, echoMarks: false });
     expect(H.batchDelete).not.toHaveBeenCalled();
     const markerWrite = H.batchSet.mock.calls.find(isMarkerWrite);
     expect(markerWrite).toBeDefined();
     expect(markerWrite![1]).toMatchObject({ uid: 'u1', dayIndex: 3, markedAt: 30 });
+  });
+
+  it('#1360: an unmark never RECREATES a moderated marker (cached tombstone or cache miss)', async () => {
+    const seedRepeats = () => {
+      seedBoards();
+      H.dayBoards.set(3, {
+        uid: 'u1', seed: 333, dayIndex: 3,
+        cells: card((i) => (i === 8 ? 'shared' : `b${i}`), { 8: { marked: true, markedAt: 30, status: 'confirmed' } }),
+      });
+      H.dayBoards.set(2, {
+        uid: 'u1', seed: 222, dayIndex: 2,
+        cells: card((i) => (i === 5 ? 'shared' : `a${i}`), { 5: { marked: true, markedAt: 25 } }),
+      });
+    };
+    // An Admin deleted the marker (the cache holds the tombstone).
+    seedRepeats();
+    H.markerCache.set('shared', false);
+    await markShared({ nextMarked: false, echoMarks: false });
+    expect(H.batchSet.mock.calls.some((c) => isMarkerWrite(c))).toBe(false);
+    expect(H.batchDelete).not.toHaveBeenCalled();
+
+    // The cache does not know the marker at all: skip rather than guess.
+    vi.clearAllMocks();
+    H.markerCache.clear();
+    seedRepeats();
+    await markShared({ nextMarked: false, echoMarks: false });
+    expect(H.batchSet.mock.calls.some((c) => isMarkerWrite(c))).toBe(false);
   });
 
   it('#1360: with Echo ON an unmark keeps the marker exactly as before (no re-point write)', async () => {

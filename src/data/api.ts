@@ -812,8 +812,8 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
   // NOT just lower indexes. A mid-cruise joiner opens the LATEST unlocked Day
   // first (the Board's default), so an earlier Day can be dealt AFTER a later
   // one; reading only days 0..dayIndex-1 would let that later card's Prompts
-  // repeat. `dealBoard`'s exclusion resets on its own once the pool is exhausted,
-  // so we always pass the full cross-cruise history.
+  // repeat. We pass every other card as a tier (cut to the Event's repeat window,
+  // #1360); `dealBoard` drops the farthest tier first once the pool runs short.
   // Canonical DayDef.index values, NOT array positions (Phase 4b P1 on #447):
   // day-board paths key on d.index everywhere, so a schedule whose indexes
   // aren't exactly 0..n must not read the wrong sibling docs for the exclusion
@@ -1323,7 +1323,8 @@ export async function reshuffleBoard(params: {
     }
 
     // No-repeat exclusion computed from KEPT cards only (the ticket's decision):
-    // every OTHER Day Card this Player holds is excluded, but the card being
+    // every OTHER Day Card this Player holds is excluded (within the repeat window,
+    // #1360), but the card being
     // DISCARDED is not — its Prompts return to the eligible pool and may legitimately
     // land on the replacement. Excluding them would be worse than pointless: it would
     // shrink the drawable pool on every reroll and make a "fresh" card systematically
@@ -2300,7 +2301,18 @@ async function runSetMark(
           }
         });
       }
-      if (stillAchievedElsewhere && params.echoMarks === false && latestRemaining) {
+      // Re-point ONLY a marker this device knows still exists (Codex P2 on #1363):
+      // an Admin may have deleted it for moderation, and an unmark must never
+      // recreate a moderated marker — the same posture the open-time reconcile
+      // takes toward cache tombstones. Unknown (cache miss) also skips: the
+      // marker then keeps its old attribution, the pre-#1360 behaviour.
+      const markerKnown =
+        stillAchievedElsewhere && params.echoMarks === false && latestRemaining
+          ? await getDocFromCache(markerRef)
+              .then((snap) => snap.exists())
+              .catch(() => false)
+          : false;
+      if (markerKnown && latestRemaining) {
         const remaining: { dayIndex: number; markedAt: number; text: string } = latestRemaining;
         batch.set(markerRef, {
           uid,
