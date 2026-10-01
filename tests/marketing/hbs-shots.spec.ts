@@ -6,7 +6,7 @@
 // Opt-in: it runs only with `HERO_EVENT=hbs`, so a default capture never touches
 // it. Run it with
 //
-//   HERO_EDITION=fiveacross HERO_EVENT=hbs scripts/marketing-shots.sh --grep hbs
+//   HERO_EDITION=fiveacross HERO_EVENT=hbs scripts/marketing-shots.sh --grep HBS
 //
 // These are MOCKUPS of a proposed Event. The weekly vocabulary (plan ticket T1)
 // does not exist, so the UI still says "Day 12", "today" and "Tonight" — the

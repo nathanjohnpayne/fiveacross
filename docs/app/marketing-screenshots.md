@@ -64,7 +64,7 @@ The distinction matters for the next person to change this file: the loose versi
 
 ## The HBS weekly mockups
 
-`HERO_EDITION=fiveacross HERO_EVENT=hbs scripts/marketing-shots.sh --grep hbs` runs `tests/marketing/hbs-shots.spec.ts` over `tests/marketing/support/hbs-fixture.ts` and writes `hbs-card.png`, `hbs-switcher.png`, `hbs-ranks.png` and `hbs-email.png`. They back the mockups in [`plans/hbs-spring-2027.md`](../../plans/hbs-spring-2027.md), whose committed copies live in `docs/images/hbs-spring-2027/`. The spec is opt-in: without `HERO_EVENT=hbs` it skips itself, so a default capture is unchanged.
+`HERO_EDITION=fiveacross HERO_EVENT=hbs scripts/marketing-shots.sh --grep HBS` runs `tests/marketing/hbs-shots.spec.ts` over `tests/marketing/support/hbs-fixture.ts` and writes `hbs-card.png`, `hbs-switcher.png`, `hbs-ranks.png` and `hbs-email.png`. They back the mockups in [`plans/hbs-spring-2027.md`](../../plans/hbs-spring-2027.md), whose committed copies live in `docs/images/hbs-spring-2027/`. The spec is opt-in: without `HERO_EVENT=hbs` it skips itself, so a default capture is unchanged.
 
 It is a mockup of a *proposed* Event, so it differs from the captures above in four ways:
 
