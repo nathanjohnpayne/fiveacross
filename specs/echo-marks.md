@@ -78,6 +78,6 @@ Implements [`plans/echo-marks-ticket.md`](../plans/echo-marks-ticket.md) (#446) 
 - Given admin_confirmed mode, nothing echoes while the Claim is pending; the confirm echoes in its own transaction with echoed cells born confirmed (`src/data/echo-marks.test.ts`).
 - Given a Reshuffle, prior echoes never cost pristine-ness (client predicate and rules gate agree) and the fresh card re-echoes with its bucket re-derived (`tests/rules/echo-marks.test.ts`, `src/data/echo-marks.test.ts`).
 - Given an echoed board write, it carries that board's own `markSeed`; a stale or borrowed seed is rejected by rules (`tests/rules/echo-marks.test.ts`).
-- Given the supported ten-Day schedule, the maximum Mark and reconciliation batches pass the membership-budget preview; an eleven-entry schedule is rejected before any Firestore read or batch construction (`tests/rules/membership-mark-batch-budget.test.ts`, `src/data/echo-marks.test.ts`).
+- Given a schedule at the supported maximum (`MAX_DAYS`, twenty Days since #1357), the maximum Mark and reconciliation batches pass the membership-budget preview; a `MAX_DAYS + 1`-entry schedule is rejected before any Firestore read or batch construction (`tests/rules/membership-mark-batch-budget.test.ts`, `src/data/echo-marks.test.ts`).
 - Given a Player with no repeated Prompts across boards, every write path is byte-identical to today (`src/data/echo-marks.test.ts`).
 - Given a Mark made offline, its echoes and stat deltas ride the same durable batch and sync on reconnect (`tests/offline/echo-marks.test.ts`).
