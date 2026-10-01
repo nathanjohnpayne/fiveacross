@@ -508,6 +508,7 @@ This is a protected path, so the change needs full Phase 4.
 - `timezone: 'America/New_York'`
 - `startsOn: '2027-01-25'`, `endsOn: '2027-05-19'`
 - `standingsFreezeAt` = Week 16's `unlockAt`
+- Seed-time validation applies the scoring contract to every Day, indexes 10–19 included. The rules' `daysScoringValid` covers only indexes 0–9, and the seed bypasses rules anyway, so the seed module (or a registry test over it) must check each Day's `scoring` itself.
 - `settings: { spicyRatio: 0, easyMixRatio: 0.5, dailyEmailEnabled: true, scheduledReserve: 6, echoMarks: false }`. `echoMarks` is T9's switch, and absent means Echo is on, so the seed must state it.
 
 Two content rules: every Day sets `freeText`, and Prompt text stays unique across pools, because seed ids are hashed from the text.
