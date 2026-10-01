@@ -156,7 +156,7 @@ test.describe('HBS spring 2027 mockups', () => {
     await expect(page.locator('.rank')).toHaveCount(hbsRoster().length + 1, { timeout: 30_000 });
     // The signed-in Player's row must agree with the card shot above.
     const seededSquares = marked.filter((c) => !c.free && c.marked).length;
-    await expect(page.locator('.rank', { hasText: SIGNED_IN_NAME })).toContainText(`${seededSquares} squares`, {
+    await expect(page.locator('.list .row', { hasText: SIGNED_IN_NAME })).toContainText(`${seededSquares} squares`, {
       timeout: 30_000,
     });
     await shoot(page, 'ranks');

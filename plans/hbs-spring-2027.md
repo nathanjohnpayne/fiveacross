@@ -47,7 +47,7 @@ Four mockups of the proposed Event, made with the repo's marketing screenshot to
 
 <img src="../docs/images/hbs-spring-2027/hbs-ranks.png" alt="The leaderboard in Week 12 with four invented players" width="393">
 
-*The leaderboard in Week 12, with invented players. Current daily wording: "Daily first to bingo", chips "D1" to "D16". The chips from D11 on are blank because today's client only supports Day indexes 0–9, one of the places T2 has to move (the honours read). The signed-in demo player is the one at 0 bingos.*
+*The leaderboard in Week 12, with invented players. Current daily wording: "Daily first to bingo", chips "D1" to "D16". Weeks 1–12 show their first-to-BINGO winners (the D11 and D12 chips render because #1359 raised the Day ceiling to 20); weeks 13–16 are still ahead. The signed-in demo player is Alex W., at 0 bingos and the 7 squares marked on the card above.*
 
 <img src="../docs/images/hbs-spring-2027/hbs-email.png" alt="The Monday engagement email for Week 12" width="480">
 
