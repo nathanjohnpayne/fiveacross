@@ -294,7 +294,7 @@ describe('firstUnlockIssues', () => {
   });
 });
 
-describe('dayCountIssues — the ten-Day ceiling is a rules fact', () => {
+describe('dayCountIssues — the wizard ten-Day ceiling (the rules unrolled lock, #1357)', () => {
   it('fails an eleven-Day schedule', () => {
     const days = Array.from({ length: MAX_DAYS + 1 }, (_, i) =>
       day(i, { pool: i === MAX_DAYS ? 'closing' : 'main' }),
