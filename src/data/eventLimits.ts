@@ -6,20 +6,51 @@
 // a cycle (#1152, Codex P2 on PR #1165). Keep it dependency-free.
 
 /**
- * The Event schedule ceiling shared by setup validation and runtime writers.
- * `daysThemeLockOk` (`firestore.rules`) unrolls its schedule lock over indexes
- * 0–9 only, so an eleventh Day is unsupported rather than merely undesirable.
+ * The Event schedule ceiling shared by setup validation and runtime writers,
+ * restated by `firestore.rules`' archive `dailyHonors` bound.
+ *
+ * It used to be 10 because `daysThemeLockOk` unrolls its schedule lock over
+ * indexes 0–9 only. That unroll still exists (see
+ * `UNROLLED_SCHEDULE_LOCK_DAYS`), but a longer schedule is now locked by the
+ * rules' `scheduleEditWindowOk`, whose cost does not grow with the schedule
+ * (#1357). What still bounds a schedule is the per-Day fan-out — the honour
+ * reads, the frozen archive's honours list — so the ceiling is a deliberate
+ * size, room for a sixteen-week semester plus slack, not a rules fact.
  */
-export const MAX_DAYS = 10;
+export const MAX_DAYS = 20;
+
+/**
+ * How many Days `firestore.rules` checks one by one (`daysThemeLockOk`,
+ * `daysScoringValid`, `firstDerivedFreezeAt`, all unrolled over indexes 0–9).
+ * A schedule no longer than this changes through that unroll, exactly as it
+ * always has; a longer one can change ONLY through the two-Day edit window
+ * (`scheduleEditFrom`, see `scheduleEditFromFor`), cannot gain a client-written
+ * `standingsFreezeAt`, and must therefore state its freeze at seed time.
+ */
+export const UNROLLED_SCHEDULE_LOCK_DAYS = 10;
+
+/**
+ * The `scheduleEditFrom` a write changing ONE Day must carry, or `undefined`
+ * when the schedule is short enough for the unrolled lock to cover it (#1357).
+ *
+ * The rules' window spans `[k, k + 2)` and must fit inside the schedule, so a
+ * write to the LAST Day opens the window one Day earlier — the Day before it is
+ * re-sent unchanged and costs nothing. A one-Day schedule has no two-Day window
+ * and needs none: it is far below the unroll.
+ */
+export function scheduleEditFromFor(dayCount: number, dayIndex: number): number | undefined {
+  if (dayCount <= UNROLLED_SCHEDULE_LOCK_DAYS) return undefined;
+  return Math.min(dayIndex, dayCount - 2);
+}
 
 /**
  * Is this a Day index the shared `DayDef` contract actually supports? (#1151,
  * Codex P2 on PR #1162.)
  *
- * `DayDef.index` is declared `0..9` (`src/domainTypes.d.ts`) and the ceiling
- * above says why that is a RULES FACT rather than a preference: `daysThemeLockOk`
- * unrolls the schedule lock over exactly ten array positions, so a Day at index
- * 10 sits outside the lock the moment it is written. Every other bound in the
+ * `DayDef.index` is declared `0..MAX_DAYS - 1` (`src/domainTypes.d.ts`) and the ceiling
+ * above says where that bound comes from: the archive's `dailyHonors` bound in
+ * `firestore.rules` restates it, and a Day at index `MAX_DAYS` is one no
+ * schedule can hold. Every other bound in the
  * estate keys off the same number, and this is the predicate that asks the
  * question of ONE index — `MAX_DAYS` bounds how many Days a schedule may have,
  * which is a different question about a different value.
@@ -38,7 +69,7 @@ export const MAX_DAYS = 10;
  *
  * SAFE-INTEGER as well as ranged, stated rather than implied. The range bound
  * already refuses every unsafe value, because an unsafe integer is by definition
- * far outside `0..9`; asking both keeps the predicate correct on its own terms if
+ * far outside `0..MAX_DAYS - 1`; asking both keeps the predicate correct on its own terms if
  * the range is ever widened, and says out loud which shapes the callers were
  * getting wrong.
  *

@@ -220,7 +220,7 @@ export type ThemeId =
 // days[]). Each Day names a date, place, ThemeId, and item pool; the tutorial
 // Days sit at the ends but that placement is data, not a code assumption.
 export interface DayDef {
-  index: number;        // 0..9
+  index: number;        // 0..MAX_DAYS - 1 (src/data/eventLimits.ts)
   date: string;         // ISO date, e.g. '2026-07-16'
   // Where this Day happens — 'Split', 'Bodega Bay'. Docs written before the
   // #566 rename persist `port`/`portEmoji`; `migrateDayFields`
@@ -453,6 +453,15 @@ export interface EventDoc {
    * "legacy events never freeze" behaviour, unchanged.
    */
   standingsFreezeAt?: number;
+  /**
+   * The first of the two Days the most recent schedule write was allowed to
+   * change (#1357). Written only alongside `days`, and only on a schedule
+   * longer than `UNROLLED_SCHEDULE_LOCK_DAYS` — `firestore.rules`'
+   * `scheduleEditWindowOk` proves every Day outside `[k, k + 2)` unchanged
+   * and locks the two inside it. Never read by the app: a stale value left
+   * on the doc only narrows what the next schedule write may change.
+   */
+  scheduleEditFrom?: number;
   // Finale freeze stamp (ms epoch): set by the Day 10 08:00 scheduler run when
   // the standings freeze. Absent until the finale. It records THAT ONE BEAT and
   // nothing more — the podium Moment is posted afterwards, as a separate
@@ -1697,7 +1706,7 @@ export interface EventDraft {
 /** The schedule an occasion PROPOSES. Shape only — turning it into absolute
  *  `unlockAt` instants needs the Event timezone and belongs to Step 4 (#792). */
 export interface OccasionScheduleShape {
-  /** 1..10. The ceiling is a rules fact (`daysThemeLockOk` unrolls 0–9). */
+  /** 1..MAX_DAYS (`src/data/eventLimits.ts`). */
   dayCount: number;
   /** Local time-of-day each Day opens, `HH:MM` in the Event's timezone. */
   unlockTime: string;

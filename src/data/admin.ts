@@ -16,6 +16,7 @@ import {
 } from './eventArchive';
 import { migrateClaimMode, migrateDayFields } from './converters';
 import { dayMetaRef, playersCol } from './paths';
+import { scheduleEditFromFor } from './eventLimits';
 import { normalizePool } from '../game/pool';
 import type { ApprovalOutcome, ApprovalPlacement, ApprovePromptsRequest, Cell, ClaimMode, ThemeId, ClaimDoc, DayMetaDoc, EventDoc, ItemDoc, DayDef, PlayerDoc, ProofDoc } from '../types';
 
@@ -695,9 +696,24 @@ export const setDayTheme = (days: DayDef[], dayIndex: number, theme: ThemeId): P
       (snap.exists() ? (snap.data().days as DayDef[] | undefined) : undefined) ?? days;
     tx.update(eventRef, {
       days: current.map((d) => (d.index === dayIndex ? { ...d, theme } : d)),
+      ...scheduleEditWindow(current, dayIndex),
     });
   });
 };
+
+/**
+ * The `scheduleEditFrom` marker a one-Day schedule write carries on a schedule
+ * longer than the rules' unrolled lock, or nothing at all on a shorter one
+ * (#1357, `firestore.rules`' `scheduleEditWindowOk`). Keyed off the array's
+ * POSITION of the Day being written, which is what the rules' slices index;
+ * a Day missing from the array changes nothing, so it opens no window.
+ */
+function scheduleEditWindow(current: DayDef[], dayIndex: number): { scheduleEditFrom?: number } {
+  const position = current.findIndex((d) => d.index === dayIndex);
+  if (position < 0) return {};
+  const from = scheduleEditFromFor(current.length, position);
+  return from === undefined ? {} : { scheduleEditFrom: from };
+}
 
 function normalizeTonightEntries(tonight: string[]): string[] {
   return tonight.map((entry) => entry.trim());
@@ -739,6 +755,7 @@ export const setDayTonight = (days: DayDef[], dayIndex: number, tonight: string[
     const nextTonight = normalizeTonightEntries(tonight);
     tx.update(eventRef, {
       days: current.map((d) => (d.index === dayIndex ? { ...d, tonight: nextTonight } : d)),
+      ...scheduleEditWindow(current, dayIndex),
     });
   });
 };

@@ -644,7 +644,7 @@ describe('#1079/#804 membership enforcement — Mark/Echo rule budget', () => {
     await assertSucceeds(unmark.commit());
   });
 
-  it('accepts the real maximum 10-Day setMark shape: 10 Boards + Player + marker (12 writes)', async () => {
+  it('accepts the real maximum MAX_DAYS setMark shape: every Board + Player + marker', async () => {
     const database = db(ALICE);
     const batch = writeBatch(database);
     const markedAt = NOW();
@@ -681,7 +681,9 @@ describe('#1079/#804 membership enforcement — Mark/Echo rule budget', () => {
     );
     writes += 1;
 
-    expect(writes).toBe(12);
+    // Every Board of a maximal schedule (20 Days since #1357) echoes in ONE
+    // batch, so this is the access-call/expression ceiling for a single Mark.
+    expect(writes).toBe(MAX_DAYS + 2);
     await assertSucceeds(batch.commit());
   });
 
