@@ -1479,7 +1479,7 @@ export type OccasionId =
  * `days[]`; `one_card` is an Event with an EMPTY `days[]` — the legacy
  * single-Board shape ("One card, one celebration", the Wedding occasion).
  * The distinction is load-bearing for validation: every Day-shaped predicate
- * (the ten-Day ceiling, the closing-pool finale, the future first unlock,
+ * (the wizard's ten-Day ceiling, the closing-pool finale, the future first unlock,
  * per-Day completeness) is scoped to `daily_cards`, because a one-card Event
  * has no Day to fail them.
  */
