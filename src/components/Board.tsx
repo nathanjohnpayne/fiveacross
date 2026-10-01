@@ -2024,7 +2024,7 @@ export default function Board() {
   const tutorialDayIndexes = hasDays ? [...tutorialDayIndexSet(days)] : undefined;
   // The ceremonial (farewell) Day indexes + the standings freeze (#265): the
   // farewell bucket never enters the summed root totals, and once `frozenAt`
-  // is stamped (the Day-10 08:00 scheduler beat) marks stop folding player
+  // is stamped (the scheduler's freeze beat) marks stop folding player
   // stats entirely — cells and Tally stay live (past Days stay markable), the
   // standings don't move. `frozenAt` is only ever stamped when reached, so its
   // presence IS the freeze.

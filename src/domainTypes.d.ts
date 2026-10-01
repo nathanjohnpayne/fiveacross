@@ -462,7 +462,7 @@ export interface EventDoc {
    * on the doc only narrows what the next schedule write may change.
    */
   scheduleEditFrom?: number;
-  // Finale freeze stamp (ms epoch): set by the Day 10 08:00 scheduler run when
+  // Finale freeze stamp (ms epoch): set by the scheduler's freeze run when
   // the standings freeze. Absent until the finale. It records THAT ONE BEAT and
   // nothing more — the podium Moment is posted afterwards, as a separate
   // best-effort write with its own retry guard — so it is not evidence the
@@ -1325,8 +1325,8 @@ export interface DoubtDoc {
 }
 
 // The finale adds two scheduler-posted beats (daily-cards-spec § "Scoring and
-// social surfaces"): `last_call` at 20:00 on Day 9 (going-into-the-final-night
-// standings) and `podium` at the 08:00 Day 10 freeze (champion + honors).
+// social surfaces"): `last_call` before the Standings Freeze (going-into-the-final-night
+// standings) and `podium` at the freeze (champion + honors).
 export type MomentKind =
   | 'bingo'
   | 'blackout'
@@ -1350,7 +1350,7 @@ export interface MomentDoc {
   // #266 — the finale beats' CONTENT, written by the scheduler
   // (functions/src/unlockDay.ts). `line` is the last-call standings copy
   // ("X leads by 2 bingos—standings freeze at 8 a.m."); `podium` is the
-  // Day-10 freeze payload. Both optional: an older minimal beat (or a
+  // freeze payload. Both optional: an older minimal beat (or a
   // content-build failure) renders the generic line.
   line?: string;
   lastCall?: LastCallMomentPayload;
