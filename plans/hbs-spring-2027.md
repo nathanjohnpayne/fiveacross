@@ -500,6 +500,7 @@ This is a protected path, so the change needs full Phase 4.
 
 - Give weekly sends a `weekly-email` campaign source. The server and client matchers must change together, along with `specs/posthog-analytics.md`.
 - Re-anchor last call for weekly Events. Today it lands at the previous Day's unlock plus 12 hours, which for weekly Days is six days before the freeze. It should be the freeze minus 12 hours (Sunday, May 16, 7:00 p.m.).
+- Migrate the winner-announcement email too. Week 16's email is the podium email, a separate path: `functions/src/podiumEmailContent.ts` builds "Final standings · Day N of M", and `functions/src/podiumEmail.ts` hard-codes "Day N" in its honor and photo labels. Route both through the weekly register, update `specs/daily-engagement-email.md`'s podium section, and extend `tests/functions/podium-email.test.ts`.
 
 **T5—Seed module.** Add `scripts/seed-data/hbs-spring-2027.mjs` holding this document's pools and 16 Days, and register it in `SEED_EVENTS`. Event fields:
 
@@ -516,7 +517,7 @@ Two content rules: every Day sets `freeText`, and Prompt text stays unique acros
 **T7—Event preview picks the current card.** The sign-in preview picks one Day from `days`: the first whose `date` is today or later (`src/eventPreview.ts`; contract in `specs/hostnames-lookup.md` § "What the gate renders from `preview`"). For a weekly Event, mid-week that is next week's card. The rule should change only in the middle and keep both ends:
 
 - **Before the first Day:** the first upcoming Day, unchanged, so the pre-launch teaser still shows Week 1.
-- **During the schedule:** the latest Day whose `date` is today or earlier, so the current week is what's previewed.
+- **During the schedule:** the latest Day that has *unlocked*. Compare against each Day's `unlockAt`, not its `date`: a weekly card dated Monday unlocks at 7:00 a.m., and a date-only rule would advance the preview at midnight, seven hours before the new card exists. The preview payload therefore needs each Day's `unlockAt` (or the Event's timezone and unlock time). Add a Monday-before-7 a.m. regression case alongside the boundary tests.
 - **After the schedule:** no Day, unchanged, so the post-Event quiet state still holds. For a daily Event that's after the last Day's date. For a weekly Event the last Day runs a week, so the end has to come from the Event: carry `endsOn` on the preview payload (it carries only each Day's `date` and title today) and return no Day once the device date passes it. Use `endsOn` for every cadence rather than inferring the end from the final Day's date.
 
 Update `specs/hostnames-lookup.md` and extend `src/eventPreview.test.ts` (the before-first and after-last cases are pinned at `:126-139`) with the mid-schedule case.
@@ -551,6 +552,8 @@ T3's themed reserve changes the arithmetic (6 new squares a week that can never 
   - an undersized surviving pool, which drops the farthest card first rather than resetting The rules change is on a protected path, so this ticket needs full Phase 4.
 
 *Decided (2026-10-01), tracked in [#1360](https://github.com/nathanjohnpayne/fiveacross/issues/1360).* A window of 4 cards with the shrinking fallback. Repeats are fine once Echo is off: a repeated square has to be done again rather than arriving free, and week-to-week freshness comes mainly from the themed squares (T3). Week 16's Victory Lap is unaffected: its Prompts appear on no earlier card, so there is nothing to echo or exclude.
+
+*The Tally with Echo off (decided 2026-10-01: "latest week wins").* The Tally keeps one marker per player per Prompt, stamped with one Day (`tally/{itemId}/markers/{uid}`). `specs/d15-tally-cards.md` relied on a player never marking the same Prompt on two Days, which stops holding once Echo is off and repeats are real re-marks. The marker follows each player's latest Mark. The Prompt's Tally count and who-list stay right, because they're per Prompt, but the Feed's Tally Card for an earlier week drops anyone who re-marked the square later. Unmarking re-points the marker to the latest week where the square is still marked, so it never stays on an unmarked week. Both are implemented in #1363 (`specs/echo-marks.md` § Disabled). Per-week markers would keep every week's Feed card whole, but they need a marker schema and rules change; deferred unless the earlier-week Feed cards turn out to matter.
 
 **Dry run.** Before launch, seed a throwaway weekly Event in the emulator with compressed unlocks, an hour apart instead of a week, to exercise the unlocks, the email sends, last call, the freeze, and the podium end to end.
 
