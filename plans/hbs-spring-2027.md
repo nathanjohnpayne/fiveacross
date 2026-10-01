@@ -441,7 +441,7 @@ Week 16's whole card. Ceremonial: marks don't move the standings, which froze at
 
 ## Engineering
 
-The platform already handles most of this: Days unlock on arbitrary dates with arbitrary gaps, the current card stays current until the next unlock, past cards stay markable, and the engagement email is sent once per Day's date, so weekly Days already produce weekly email. What's missing is below, in dependency order. T2 is decided and being implemented; T9 is the open gameplay question and should be settled before anyone seeds a card.
+The platform already handles most of this: Days unlock on arbitrary dates with arbitrary gaps, the current card stays current until the next unlock, past cards stay markable, and the engagement email is sent once per Day's date, so weekly Days already produce weekly email. What's missing is below, in dependency order. T2 is decided and being implemented (#1357). T9 is decided too (#1360): Echo off and a 4-card repeat window for this Event. It must land before the seed (T5), because the seed sets `echoMarks: false`.
 
 **T1—Weekly cadence on the Event.** Add `EventDoc.cadence?: 'daily' | 'weekly'` (absent means daily, so nothing live changes). It's a property of the Event, not the Edition: a Five Across wedding is still daily. Add one vocabulary helper, the cadence counterpart of the Lexicon (`day`/`week`, `today`/`this week`, `tomorrow's card`/`next week's card`, `tonight`/`this week`), and sweep the hard-coded copy through it:
 
@@ -502,13 +502,19 @@ This is a protected path, so the change needs full Phase 4.
 - `timezone: 'America/New_York'`
 - `startsOn: '2027-01-25'`, `endsOn: '2027-05-19'`
 - `standingsFreezeAt` = Week 16's `unlockAt`
-- `settings: { spicyRatio: 0, easyMixRatio: 0.5, dailyEmailEnabled: true, scheduledReserve: 6 }`
+- `settings: { spicyRatio: 0, easyMixRatio: 0.5, dailyEmailEnabled: true, scheduledReserve: 6, echoMarks: false }`. `echoMarks` is T9's switch, and absent means Echo is on, so the seed must state it.
 
 Two content rules: every Day sets `freeText`, and Prompt text stays unique across pools, because seed ids are hashed from the text.
 
 **T6—Hostname.** Provision `<slug>.fiveacross.app` through `applyHostnameMutation` (provision as `disabled`, wait for the edge to confirm, then activate), plus the sign-in card preview. `fiveacross.app` is already an allowed edge domain, so DNS needs nothing.
 
-**T7—Event preview picks the current card.** `src/eventPreview.ts` previews the first Day whose date is today or later. Mid-week that is next week's card; it should be the latest unlocked one.
+**T7—Event preview picks the current card.** The sign-in preview picks one Day from `days`: the first whose `date` is today or later (`src/eventPreview.ts`; contract in `specs/hostnames-lookup.md` § "What the gate renders from `preview`"). For a weekly Event, mid-week that is next week's card. The rule should change only in the middle and keep both ends:
+
+- **Before the first Day:** the first upcoming Day, unchanged, so the pre-launch teaser still shows Week 1.
+- **During the schedule:** the latest Day whose `date` is today or earlier, so the current week is what's previewed.
+- **After the schedule:** no Day, unchanged, so the post-Event quiet state still holds. For a daily Event that's after the last Day's date. For a weekly Event the last Day runs a week, so the end has to come from the Event: carry `endsOn` (or the cadence) on the preview payload, which today carries only each Day's `date` and title.
+
+Update `specs/hostnames-lookup.md` and extend `src/eventPreview.test.ts` (the before-first and after-last cases are pinned at `:126-139`) with the mid-schedule case.
 
 **Optional T8—a Chalkboard Theme** for the Five Across Edition (deep green, chalk white, yellow accent) for a classroom-native look. It needs the full token set and must pass the contrast suites. Nice to have; the three existing Themes are enough to launch.
 
