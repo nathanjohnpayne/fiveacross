@@ -1024,7 +1024,7 @@ export interface BoardDoc {
 // `DayDef` (never re-declared) and keeps `ThemeId`, so the stored and live Day
 // contracts cannot diverge without a type error.
 export interface CardSnapshotDay extends Pick<DayDef, 'place' | 'placeEmoji' | 'theme'> {
-  number: number; // day.index + 1 (1..10) — the 1-based label the header shows
+  number: number; // day.index + 1 (1..MAX_DAYS) — the 1-based label the header shows
   label: string; // resolved ThemeMeta label for the header line (themeLabel(theme))
 }
 
@@ -1698,7 +1698,7 @@ export interface EventDraft {
   // nothing Event-wide. Per-Day copy lives on `DraftDayDef.freeText`.
   //
   prompts: DraftPromptPools;
-  /** Empty for `one_card`; 1..10 Days for `daily_cards`. */
+  /** Empty for `one_card`; 1..10 Days for `daily_cards` (the wizard's ceiling, not the platform's `MAX_DAYS`). */
   days: DraftDayDef[];
   settings: EventDraftSettings;
 }

@@ -764,7 +764,7 @@ export function podiumStandings(
  *     play was recorded;
  *   - firstBingo: the Event-wide First to BINGO, non-Tutorial Days only — pool
  *     identity alone never decides the headline honor;
- *   - dailyHonors: the ten Days' own pinned First to BINGO honors, straight from the
+ *   - dailyHonors: every Day's own pinned First to BINGO honors, straight from the
  *     `meta.firstBingo` docs, sorted by Day index (a Day with no bingo is omitted);
  *   - playRecorded: whether ANY Marks were recorded, ceremonial and Tutorial Days
  *     included — the "did anybody play" fact, stated rather than left to be

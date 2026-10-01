@@ -56,12 +56,12 @@ export function scheduleEditFromFor(dayCount: number, dayIndex: number): number 
  * which is a different question about a different value.
  *
  * `Number.isInteger` was what the archive asked instead, and it is the wrong
- * question in three ways that all end in the same permanent record. `-1`, `10`
+ * question in three ways that all end in the same permanent record. `-1`, `MAX_DAYS`
  * and `Number.MAX_SAFE_INTEGER + 2` are all integers by that test, none of them
  * names a Day, and each is the `days/{dayIndex}` path segment an honour pin is
  * addressed by — so a hand-edited, seeded or legacy schedule carrying one was
  * read as USABLE, an arbitrary meta path was fetched, and an `ArchivedDayHonor`
- * labelled `D0` or `D11` could be frozen into `dailyHonors`, where
+ * labelled `D0` or `D{MAX_DAYS + 1}` could be frozen into `dailyHonors`, where
  * `firestore.rules` cannot look inside a list to refuse it. The same integer can
  * arrive from the other side too, off a `dayStats` KEY: that map is
  * Player-written under ADR 0001 and its rules arm validates none of its stats, so a row can
