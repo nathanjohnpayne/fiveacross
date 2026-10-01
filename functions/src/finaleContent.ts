@@ -593,7 +593,8 @@ export function freezePhraseForUnlock(freezeAt: number | undefined, timeZone: st
 }
 
 /**
- * The going-into-the-final-night last-call line posted at 20:00 on Day 9. Names
+ * The going-into-the-final-night last-call line posted before the Standings Freeze
+ * (20:00 on Day 9 in the original ten-Day shape; `LAST_CALL_LEAD_MS`). Names
  * the current leader and their margin over the runner-up — by bingos when they
  * lead on bingos, else by squares when the bingos tie — degrading gracefully:
  *
@@ -602,7 +603,7 @@ export function freezePhraseForUnlock(freezeAt: number | undefined, timeZone: st
  *   - a dead heat at the top (leader and runner-up tie on bingos AND squares) →
  *     a generic "neck and neck" line.
  *
- * Ranks by the players' cruise-wide root aggregates — at 20:00 Day 9 the farewell
+ * Ranks by the players' cruise-wide root aggregates — at last call the farewell
  * Day has not unlocked, so no ceremonial exclusion is needed. Em dashes take no
  * surrounding spaces (CMOS), matching the spec's example.
  */
@@ -757,14 +758,15 @@ export function podiumStandings(
 }
 
 /**
- * Build the podium payload posted at the 08:00 Day 10 freeze:
+ * Build the podium payload posted at the Standings Freeze (`standingsFreezeAtFor`;
+ * 08:00 on Day 10 in the original ten-Day shape):
  *
  *   - champion: the top of the standings re-aggregated to EXCLUDE every ceremonial Day
  *     (its marks are all post-freeze and ceremonial), `null` when no ranking-eligible
  *     play was recorded;
  *   - firstBingo: the Event-wide First to BINGO, non-Tutorial Days only — pool
  *     identity alone never decides the headline honor;
- *   - dailyHonors: the ten Days' own pinned First to BINGO honors, straight from the
+ *   - dailyHonors: every Day's own pinned First to BINGO honors, straight from the
  *     `meta.firstBingo` docs, sorted by Day index (a Day with no bingo is omitted);
  *   - playRecorded: whether ANY Marks were recorded, ceremonial and Tutorial Days
  *     included — the "did anybody play" fact, stated rather than left to be

@@ -1912,7 +1912,7 @@ describe('draftEventArchive — the inputs are validated BEFORE the Event is shu
   // Codex P2 on PR #1162, round 9. `completeArchiveRecord` accepted a
   // `dailyHonors` of ANY length, so a direct admin flip could freeze thousands of
   // entries into a field whose contract is at most one honour per Day on an Event
-  // that supports at most ten. The boundary bounds it now — a list's SIZE is one
+  // that supports at most `MAX_DAYS` Days (ten then; twenty since #1357). The boundary bounds it now — a list's SIZE is one
   // expression, not a walk — and this is the writer's own copy of that clause.
   it('bounds the frozen honours list at MAX_DAYS, which the ORDER does not imply', () => {
     const record = draftEventArchive({

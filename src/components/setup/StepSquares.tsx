@@ -186,9 +186,9 @@ function CardFormatSection({
         </div>
       )}
       <p className="squares-note">
-        Maximum {MAX_DAYS} Days — the Firestore schedule lock (<code>daysThemeLockOk</code>) only
-        covers Day indexes 0–{MAX_DAYS - 1}, so an eleventh Day would stay editable after it
-        unlocked.
+        Maximum {MAX_DAYS} Days here — the Firestore schedule lock (<code>daysThemeLockOk</code>)
+        checks Day indexes 0–{MAX_DAYS - 1} one by one. A longer schedule needs a stated standings
+        freeze and is set up by script.
       </p>
       <IssueList issues={issues} label="Schedule problems" />
     </>
@@ -659,10 +659,10 @@ function DaysAndPools({
       </div>
       {atCeiling && (
         <p className="squares-note squares-ceiling" role="status">
-          That is the {MAX_DAYS}-Day maximum. It is a rules fact, not a preference:
-          <code> daysThemeLockOk</code> in <code>firestore.rules</code> unrolls its schedule lock
-          over Day indexes 0–{MAX_DAYS - 1} only, so Day {MAX_DAYS + 1} would sit outside the lock
-          and stay editable after it had unlocked.
+          That is the {MAX_DAYS}-Day maximum for this wizard. <code>daysThemeLockOk</code> in{' '}
+          <code>firestore.rules</code> checks Day indexes 0–{MAX_DAYS - 1} one by one; a longer
+          schedule is locked two Days at a time instead, needs a stated standings freeze, and is set
+          up by script.
         </p>
       )}
       <p className="squares-note">

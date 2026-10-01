@@ -331,7 +331,7 @@ const RESULT_COPY: Record<ArchiveOutcome, string> = {
   // they are already looking at.
   // …and it names WHY the day is unusable rather than only that it is (Codex P2
   // on PR #1162, round 7). "Could not be read" was true of a missing or
-  // fractional index and false of the ones that matter most: `-1` and `10` read
+  // fractional index and false of the ones that matter most: `-1` and `MAX_DAYS` read
   // perfectly well, they simply are not days this Event can have — so an Admin
   // sent looking for an unreadable day would have found one that looks fine.
   'schedule-unusable': `One of the days in the schedule above is not a day this Event can have—its number is missing, or outside the ${MAX_DAYS} a schedule holds—or the same day is listed twice, so the daily honours could not be looked up one per day and nothing was frozen. Fix or re-save that day, then archive again.`,

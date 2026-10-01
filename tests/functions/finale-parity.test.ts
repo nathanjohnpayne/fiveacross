@@ -34,6 +34,7 @@ import {
 import { scoringForDay } from '../../src/game/scoring';
 import { buildPodium } from '../../src/data/finale';
 import { withReadableDayStats } from '../../src/data/eventArchive';
+import { MAX_DAYS } from '../../src/data/eventLimits';
 import {
   ARCHIVE_NUMBER_BOUND,
   MAX_ARCHIVE_NUMBER,
@@ -1148,7 +1149,8 @@ describe('client/functions parity — the dayStats ENTRY rule (#1168)', () => {
     // have no Functions counterpart: `buildPodiumPayload` takes its Day honours
     // from pinned `days/{i}/meta/{i}` docs and never derives them from
     // `dayStats`. Neither `podiumStandingRow` asks it either, so a bucket under
-    // Day 10 or Day -1 is a canonical entry both sides KEEP and SUM. The range is
+    // Day `MAX_DAYS` (just past the ceiling — 20 since #1357) or Day -1 is a
+    // canonical entry both sides KEEP and SUM. The range is
     // not this rule's question; this pins that it is nobody's on the podium path.
     const players = [
       oversized('wide', 'Wide', {
@@ -1158,7 +1160,7 @@ describe('client/functions parity — the dayStats ENTRY rule (#1168)', () => {
         dayStats: {
           0: { bingoCount: 1, squaresMarked: 1, firstBingoAt: 100 },
           1: { bingoCount: 9, squaresMarked: 9, firstBingoAt: 50 },
-          10: { bingoCount: 3, squaresMarked: 4, firstBingoAt: null },
+          [MAX_DAYS]: { bingoCount: 3, squaresMarked: 4, firstBingoAt: null },
           '-1': { bingoCount: 4, squaresMarked: 4, firstBingoAt: null },
         },
       }),
