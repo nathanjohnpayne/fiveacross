@@ -646,6 +646,18 @@ describe('attachProof — the preserved first-bingo stamp is the DAY’s, not th
     expect(write.dayStats[9].firstBingoAt).not.toBe(300);
   });
 
+  it.each([null, 'bad bucket', { bingoCount: 1, squaresMarked: 4, firstBingoAt: { forged: true } }])(
+    'normalizes malformed persisted Day stats before a proof completes a line: %j', async (bucket) => {
+      playerState = { firstBingoAt: { forged: true }, dayStats: { 2: bucket } };
+      boardState = { cells: withMarked([0, 1, 2, 3]) };
+      await attachProof({ ...baseArgs, cellIndex: 4, itemId: 'i4', claimMode: 'proof_required',
+        daily: true, dayIndex: 2, currentFirstBingoAt: 300, proof: { type: 'text', text: 'completed' } });
+      const write = setPayload('/players/') as { dayStats: Record<number, { firstBingoAt: number | null }>; firstBingoAt: number | null };
+      expect(write.dayStats[2].firstBingoAt).toBe(1000);
+      expect(write.firstBingoAt).toBe(1000);
+    },
+  );
+
   it('falls back to the caller prop only when the Player row itself is unreadable', async () => {
     // No Player document at all in the transaction read — the one case the prop
     // is the best knowledge available, so it must still be honoured.

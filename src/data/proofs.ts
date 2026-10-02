@@ -9,12 +9,13 @@ import { boardFirstBingoAt, completedLines, countMarked, isBlackout, foldDayStat
 import { cellsPatch, changedCells, cellsFromData } from '../game/cells';
 import { cellsMergeSet } from './cellsMerge';
 import { directMarkAnalyticsRequest } from './markAnalytics';
-import { isEventArchived, isEventArchiving } from './eventArchive';
+import { isEventArchived, isEventArchiving, withReadableDayStats } from './eventArchive';
 import type {
   Cell,
   ClaimMode,
   EventDoc,
   ProofDoc,
+  PlayerDoc,
   ProofStorageDeleteDoc,
   ProofType,
 } from '../types';
@@ -301,6 +302,8 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
     // that needs a read the transaction contract forbids once anything is written.
     const boardSnap = await tx.get(boardRef);
     const playerSnap = await tx.get(playerRef);
+    const rawPlayerData = playerSnap.data() as PlayerDoc | undefined;
+    const livePlayer = rawPlayerData ? withReadableDayStats(rawPlayerData) : undefined;
     const markerSnap = markerRef ? await tx.get(markerRef) : null;
     const boardData = boardSnap.data() as { cells?: unknown; seed?: number } | undefined;
     const liveRaw = cellsFromData(boardData?.cells);
@@ -331,9 +334,6 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
     // clear it when no bingo stands (mirrors setMark/deleteProof). In daily mode
     // the stamp being preserved is the VIEWED Day's bucket, never the Event-wide
     // root (#1049) — `boardFirstBingoAt` owns that choice for every write path.
-    const livePlayer = playerSnap.data() as
-      | { firstBingoAt?: number | null; dayStats?: DayStats }
-      | undefined;
     // The caller's sheet prop is a fallback for an UNREADABLE Player row ONLY —
     // never for a live row whose Board stamp is explicitly absent (Codex P2,
     // round 2). A `??` chain over the live value cannot tell those apart, so it
@@ -393,7 +393,7 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
       const statWrite = playerStatWrite({
         daily: daily === true,
         dayIndex: dayIndex ?? 0,
-        priorDayStats: playerSnap.data()?.dayStats as DayStats | undefined,
+        priorDayStats: livePlayer?.dayStats,
         bingoCount,
         squaresMarked: squares,
         firstBingoAt,
@@ -441,7 +441,7 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
         {
           uid,
           eventId,
-          displayName: markerDisplayName(displayName, playerSnap.data()?.displayName),
+          displayName: markerDisplayName(displayName, livePlayer?.displayName),
           markedAt: typeof priorMarkedAt === 'number' ? priorMarkedAt : now,
           itemText,
           ...(typeof dayIndex === 'number' ? { dayIndex } : {}),
@@ -771,8 +771,10 @@ export async function deleteProof(
         // Deletion takes no caller-supplied stamp at all, so there is no stale
         // prop to fall back to and none of `attachProof`'s revival hazard: the
         // live row IS the only source, and an unreadable one reads as no stamp.
+        const rawPlayerData = playerSnap.data() as PlayerDoc | undefined;
+        const livePlayer = rawPlayerData ? withReadableDayStats(rawPlayerData) : undefined;
         const existingFirst = boardFirstBingoAt(
-          playerSnap.data() as { firstBingoAt?: number | null; dayStats?: DayStats } | undefined,
+          livePlayer,
           daily,
           proofDayIndex,
         );
@@ -813,7 +815,7 @@ export async function deleteProof(
           const statWrite = playerStatWrite({
             daily,
             dayIndex: proofDayIndex,
-            priorDayStats: playerSnap.data()?.dayStats as DayStats | undefined,
+            priorDayStats: livePlayer?.dayStats,
             bingoCount,
             squaresMarked: squares,
             firstBingoAt,
