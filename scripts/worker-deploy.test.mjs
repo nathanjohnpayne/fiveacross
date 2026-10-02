@@ -27,6 +27,11 @@ const realGit = execFileSync('bash', ['-c', 'command -v git'], { encoding: 'utf8
  * the guard does with a fetch is covered against a throwaway remote in
  * `scripts/deploy-main-guard.test.mjs`.
  */
+/** Single-quote `value` for Bash, so no path can expand inside the stub. */
+function shellQuote(value) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
 function writeLiveCheckoutGit(bin, fetchLog) {
   const stub = join(bin, 'git');
   writeFileSync(
@@ -34,10 +39,10 @@ function writeLiveCheckoutGit(bin, fetchLog) {
     [
       '#!/usr/bin/env bash',
       'if [[ "${1:-}" == "fetch" ]]; then',
-      `  printf '%s\\n' "$*" >> ${JSON.stringify(fetchLog)}`,
+      `  printf '%s\\n' "$*" >> ${shellQuote(fetchLog)}`,
       '  exit 0',
       'fi',
-      `exec ${JSON.stringify(realGit)} "$@"`,
+      `exec ${shellQuote(realGit)} "$@"`,
       '',
     ].join('\n'),
     'utf8',
