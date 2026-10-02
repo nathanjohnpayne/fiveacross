@@ -508,6 +508,7 @@ This is a protected path, so the change needs full Phase 4.
 
 **T5—Seed module.** Add `scripts/seed-data/hbs-spring-2027.mjs` holding this document's pools and 16 Days, and register it in `SEED_EVENTS`. Event fields:
 
+- `status: 'active'`. `eventWritePayload` writes `EVENT_SEED` verbatim, and the unlock, engagement-email, podium-email and admin-digest sweeps all select only Events whose `status` is exactly `active`, so without it no card unlocks and no email sends.
 - `cadence: 'weekly'`
 - `timezone: 'America/New_York'`
 - `startsOn: '2027-01-25'`, `endsOn: '2027-05-19'`
