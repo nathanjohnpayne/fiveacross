@@ -936,6 +936,12 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       cells: card((i) => (i === 5 ? 'shared' : `a${i}`), { 5: { marked: true, markedAt: 25 } }),
     });
   };
+  // The mocked batch does not apply writes to the fake server, so a test of the
+  // post-ack pass applies the committed unmark of the acted Day 2 copy itself.
+  const commitDay2Unmark = () => {
+    const b = H.dayBoards.get(2)!;
+    H.dayBoards.set(2, { ...b, cells: (b.cells as Cell[]).map((c) => (c.index === 5 ? { ...c, marked: false, markedAt: null } : c)) });
+  };
   const markerTxWrite = () =>
     H.txSet.mock.calls.find((c) => segs(c)[2] === 'tally' && segs(c)[4] === 'markers');
   const serverMarker = () => ({ uid: 'u1', eventId: EVENT_ID, displayName: 'Alice', dayIndex: 2, markedAt: 25, itemText: 'P' });
@@ -947,6 +953,7 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     // Never inside the offline batch: a queued set could recreate a moderated marker.
     expect(H.batchSet.mock.calls.some((c) => isMarkerWrite(c))).toBe(false);
     expect(H.batchDelete).not.toHaveBeenCalled();
+    commitDay2Unmark();
     await settle();
     expect(markerTxWrite()?.[1]).toMatchObject({ uid: 'u1', displayName: 'Alice', dayIndex: 3, markedAt: 30 });
   });
@@ -956,6 +963,7 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     // An Admin deleted the marker on the server; this device still caches it.
     H.markerCache.set('shared', true);
     await markShared({ nextMarked: false, echoMarks: false });
+    commitDay2Unmark();
     await settle();
     expect(markerTxWrite()).toBeUndefined();
     expect(H.batchSet.mock.calls.some((c) => isMarkerWrite(c))).toBe(false);
@@ -978,6 +986,7 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     H.markerServer.set('shared', serverMarker());
     try {
       await markShared({ nextMarked: false, echoMarks: false });
+      commitDay2Unmark();
       await settle();
       expect(markerTxWrite()?.[1]).toMatchObject({ dayIndex: 1, markedAt: 40 });
     } finally {
@@ -1018,6 +1027,7 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     await withUncachedDay(1, async () => {
       await markShared({ nextMarked: false, echoMarks: false });
       expect(H.batchDelete).not.toHaveBeenCalled();
+      commitDay2Unmark();
       await settle();
     });
     expect(markerTxWrite()?.[1]).toMatchObject({ dayIndex: 1, markedAt: 40 });
@@ -1029,6 +1039,7 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     await withUncachedDay(1, async () => {
       await markShared({ nextMarked: false, echoMarks: false });
       expect(H.batchDelete).not.toHaveBeenCalled();
+      commitDay2Unmark();
       await settle();
     });
     expect(markerTxWrite()).toBeUndefined();
@@ -1044,8 +1055,24 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     });
     H.markerServer.set('shared', serverMarker());
     await markShared({ nextMarked: false, echoMarks: false });
+    commitDay2Unmark();
     await settle();
     expect(markerTxWrite()?.[1]).toMatchObject({ dayIndex: 1, markedAt: 20 });
+  });
+
+  it('#1360: a same-Day re-mark that lands before the server pass wins (the acted Day is scanned too)', async () => {
+    onlyCarrierOnDay1(false);
+    await withUncachedDay(1, async () => {
+      await markShared({ nextMarked: false, echoMarks: false });
+      // Before the post-ack pass reads, the Player re-marks the same Day 2 square.
+      H.dayBoards.set(2, {
+        uid: 'u1', seed: 222, dayIndex: 2,
+        cells: card((i) => (i === 5 ? 'shared' : `a${i}`), { 5: { marked: true, markedAt: 50, status: 'confirmed' } }),
+      });
+      await settle();
+    });
+    expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(false);
+    expect(markerTxWrite()?.[1]).toMatchObject({ dayIndex: 2, markedAt: 50 });
   });
 
   it('#1360: with Echo ON an unmark keeps the marker exactly as before (no re-point write)', async () => {

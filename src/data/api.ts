@@ -2418,7 +2418,11 @@ async function runSetMark(
           eventId,
           uid,
           itemId,
-          dayIndexes: echoDayIndexes,
+          // The ACTED Day too (CodeRabbit on #1363): `setMark` releases its chain
+          // before this post-ack pass runs, so the same Day can be re-marked
+          // first, and that new Mark must win rather than be re-pointed away or
+          // deleted.
+          dayIndexes: typeof params.dayIndex === 'number' ? [...echoDayIndexes, params.dayIndex] : echoDayIndexes,
           deleteIfNoCarrier: repointDeleteIfNoCarrier,
         }),
       )
