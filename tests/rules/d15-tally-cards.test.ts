@@ -21,7 +21,7 @@ import {
 // specs/d15-tally-cards.md — day-scoped Tally Cards (#216). A Mark stamps the
 // viewed `dayIndex` and the Prompt `itemText` as ADDITIVE fields on the same
 // `tally/{itemId}/markers/{uid}` doc (the marker create rule validates
-// uid/displayName/markedAt but not the full key set), so the Feed groups markers
+// the known keys, target, Day, text, name and timestamp), so the Feed groups markers
 // into per-(itemId, dayIndex) cards while the Square badge (`useTally`) and the
 // Doubt `exists()` gate keep reading the unchanged path. This suite pins that the
 // day-scoped marker is still self-writable + attributed + publicly readable, and
@@ -73,7 +73,7 @@ beforeEach(async () => {
     await setDoc(doc(s, `events/${EVENT}`), {
       name: 'Cruise', sailStart: '2026-01-01', sailEnd: '2026-01-07', status: 'active',
       defaultTheme: 'neon-playground', claimMode: 'honor', admins: [ADMIN],
-      settings: { reportHideThreshold: 3 },
+      settings: { reportHideThreshold: 3 }, days: [0, 1, 2].map((index) => ({ index, unlockAt: 0 })),
     });
     await setDoc(doc(s, at(`items/${ITEM}`)), {
       text: 'Balcony or porthole photo', createdBy: ALICE, createdAt: NOW(), isFreeSpace: false,
@@ -84,6 +84,32 @@ beforeEach(async () => {
 });
 
 describe('firestore.rules — day-scoped Tally Card markers (specs/d15-tally-cards.md)', () => {
+  it('rejects the audit reproduction: phantom target, object text and far-future sort time', async () => {
+    await assertFails(setDoc(doc(db(ALICE), markerPath('phantom', ALICE)), marker(ALICE)));
+    const mine = doc(db(ALICE), markerPath(ITEM, ALICE));
+    await assertFails(setDoc(mine, marker(ALICE, { itemText: { boom: true } })));
+    await assertFails(setDoc(mine, marker(ALICE, { markedAt: 1e15 })));
+  });
+
+  it.each([
+    { itemText: '' }, { itemText: 'x'.repeat(81) }, { itemText: ['text'] },
+    { dayIndex: -1 }, { dayIndex: 0.5 }, { dayIndex: 3 }, { dayIndex: 20 },
+    { markedAt: 0 }, { markedAt: -1 }, { markedAt: 1.5 },
+    { extra: 'unvalidated' },
+  ])('rejects invalid persisted shape on create and update: %j', async (over) => {
+    const mine = doc(db(ALICE), markerPath(ITEM, ALICE));
+    await assertFails(setDoc(mine, marker(ALICE, over)));
+    await assertSucceeds(setDoc(mine, marker(ALICE)));
+    await assertFails(setDoc(mine, marker(ALICE, over)));
+  });
+
+  it('keeps long-offline queued marks and legacy square-only markers admissible', async () => {
+    const mine = doc(db(ALICE), markerPath(ITEM, ALICE));
+    await assertSucceeds(setDoc(mine, marker(ALICE, { markedAt: NOW() - 7 * 86400000 })));
+    const { dayIndex: _day, itemText: _text, ...legacy } = marker(ALICE);
+    await assertSucceeds(setDoc(mine, legacy));
+  });
+
   it('a Player self-publishes their OWN day-scoped marker (dayIndex + itemText), then unmarks it', async () => {
     const mine = doc(db(ALICE), markerPath(ITEM, ALICE));
     await assertSucceeds(setDoc(mine, marker(ALICE))); // additive fields are accepted

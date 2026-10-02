@@ -85,6 +85,8 @@ beforeAll(async () => {
       projectId: 'demo-mark-wire-compat',
       acceptLegacyUntil: Date.now() + HOUR,
     });
+    for (let index = 0; index < 25; index++)
+      await setDoc(doc(db, 'events', EVENT, 'items', `i${index}`), { text: 'Existing prompt', status: 'active' });
     for (const uid of [ALICE, BOB]) {
       await setDoc(doc(db, 'events', EVENT, 'days', String(DAY), 'boards', uid), {
         uid,

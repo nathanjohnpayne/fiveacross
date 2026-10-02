@@ -67,6 +67,7 @@ const collectionSnapshot = (values: object[]) => ({
 const markerSnapshot = (eventId: string, itemId: string, markedAt = 10) => ({
   docs: [
     {
+      id: `${eventId}-uid`,
       data: () => ({
         uid: `${eventId}-uid`,
         eventId,
@@ -171,17 +172,40 @@ describe('manual Event-scoped listener lifecycles (#807)', () => {
         const source = sub.target.args?.[0] as { kind?: string; args?: unknown[] } | undefined;
         return sub.target.kind === 'query' && source?.kind === 'collectionGroup' && source.args?.[1] === 'markers';
       });
-    const a = tallySubs()[0];
+    const seedContext = (eventId: string) => {
+      const subs = H.subscriptions.filter((sub) => !sub.unsubscribe.mock.calls.length);
+      act(() => {
+        for (const sub of subs) {
+          if (sub.target.kind === 'doc') sub.listener(docSnapshot({ days: [{ index: 0 }], bannedUids: [] }));
+        }
+      });
+      act(() => {
+      for (const sub of H.subscriptions.filter((sub) => !sub.unsubscribe.mock.calls.length)) {
+        const source = sub.target.args?.[0] as { kind?: string; args?: unknown[] } | undefined;
+        if (source?.kind === 'collection' && source.args?.includes('items'))
+          sub.listener({ ...collectionSnapshot([]), docs: [{ id: 'same-item', data: () => ({ status: 'active', text: `${eventId} trusted prompt` }) }] });
+      }
+      });
+    };
+    seedContext('event-a');
+    const a = tallySubs().at(-1)!;
     expect(a.target.kind).toBe('query');
     expect(a.target.args?.[1]).toEqual({ kind: 'where', args: ['eventId', '==', 'event-a'] });
     act(() => a.listener(markerSnapshot('event-a', 'same-item', 1_000)));
     expect(view.result.current.cards.map((card) => card.itemId)).toEqual(['same-item']);
+    expect(view.result.current.cards[0].itemText).toBe('event-a trusted prompt');
+    const aPrompts = H.subscriptions.filter((sub) => {
+      const source = sub.target.args?.[0] as { kind?: string; args?: unknown[] } | undefined;
+      return !sub.unsubscribe.mock.calls.length && source?.kind === 'collection' && source.args?.includes('items');
+    }).at(-1)!;
 
     H.eventId = 'event-b';
     view.rerender();
-    const b = tallySubs()[1];
+    seedContext('event-b');
+    const b = tallySubs().at(-1)!;
     expect(view.result.current.cards).toEqual([]);
     expect(a.unsubscribe).toHaveBeenCalledTimes(1);
+    expect(aPrompts.unsubscribe).toHaveBeenCalledTimes(1);
     expect(b).toBeDefined();
     expect(b.target.args?.[1]).toEqual({ kind: 'where', args: ['eventId', '==', 'event-b'] });
 
@@ -197,5 +221,20 @@ describe('manual Event-scoped listener lifecycles (#807)', () => {
     act(() => a.listener(markerSnapshot('event-a', 'same-item', 1_002)));
     expect(view.result.current.cards.map((card) => card.itemId)).toEqual(['same-item']);
     expect(view.result.current.cards[0].displayBump).toBe(1_001);
+    expect(view.result.current.cards[0].itemText).toBe('event-b trusted prompt');
+    act(() => aPrompts.listener(collectionSnapshot([])));
+    expect(view.result.current.cards[0].itemText).toBe('event-b trusted prompt');
+
+    const bPrompts = H.subscriptions.filter((sub) => {
+      const source = sub.target.args?.[0] as { kind?: string; args?: unknown[] } | undefined;
+      return !sub.unsubscribe.mock.calls.length && source?.kind === 'collection' && source.args?.includes('items');
+    }).at(-1)!;
+    // Prompt removal/moderation drops a Tally without another marker snapshot.
+    act(() => bPrompts.listener({ docs: [{ id: 'same-item', data: () => ({ status: 'rejected', text: 'hidden prompt' }) }] }));
+    expect(view.result.current.cards).toEqual([]);
+    act(() => bPrompts.listener({ docs: [{ id: 'same-item', data: () => ({ status: 'active', text: 'restored trusted prompt' }) }] }));
+    expect(view.result.current.cards[0].itemText).toBe('restored trusted prompt');
+    act(() => bPrompts.onError(new Error('denied')));
+    expect(view.result.current.cards).toEqual([]);
   });
 });

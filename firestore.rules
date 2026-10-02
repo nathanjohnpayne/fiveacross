@@ -594,6 +594,24 @@ service cloud.firestore {
         || (resource.data.eventId is string
             && resource.data.eventId == eventId);
     }
+
+    // Structural bounds only: the owner's Mark remains an honor attestation.
+    // No age floor: a queued offline Mark keeps its original positive timestamp.
+    function validTallyMarker(eventId, itemId) {
+      let marker = request.resource.data;
+      let days = eventData(eventId).get('days', []);
+      return marker.keys().hasOnly(['uid', 'eventId', 'displayName', 'markedAt', 'dayIndex', 'itemText'])
+        && marker.markedAt is int
+        && marker.markedAt > 0
+        && marker.markedAt <= request.time.toMillis() + 60000
+        && (!('itemText' in marker)
+            || (marker.itemText is string && marker.itemText.size() > 0 && marker.itemText.size() <= 80))
+        && (!('dayIndex' in marker)
+            || (marker.dayIndex is int && marker.dayIndex >= 0 && marker.dayIndex < 20
+                && days is list && marker.dayIndex < days.size()
+                && days[marker.dayIndex].index == marker.dayIndex))
+        && exists(/databases/$(database)/documents/events/$(eventId)/items/$(itemId));
+    }
     // The three Prompt pools (CONTEXT.md § Pool). Canonical values are
     // 'main' / 'easy' / 'closing'; 'embark' (= easy) and 'farewell'
     // (= closing) are the pre-#565 persisted spellings, which BOTH live
@@ -2954,7 +2972,7 @@ service cloud.firestore {
             && request.resource.data.displayName is string
             && request.resource.data.displayName.size() > 0
             && request.resource.data.displayName.size() <= 100
-            && request.resource.data.markedAt is number
+            && validTallyMarker(eventId, itemId)
             && markerWriteHasCompatibleEventId(eventId);
           // Unmarking removes exactly that Player's entry; admins can moderate.
           // #134: unmarking is a Mark in reverse, so it stops at the freeze too.

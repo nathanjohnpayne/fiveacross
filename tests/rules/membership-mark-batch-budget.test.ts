@@ -285,6 +285,10 @@ async function seedEvent(
       ? { membershipEnforcement: options.enforcement ?? 'enforced' }
       : {}),
   });
+  await Promise.all(Object.values(cells(0)).filter((value) => !value.free).map((value) =>
+    setDoc(doc(database, `${eventPath(eventId)}/items/${value.itemId}`), { text: value.text, status: 'active' })));
+  for (const itemId of ['prompt', 'admin-prompt', 'active-member', 'missing', 'revoked'])
+    await setDoc(doc(database, `${eventPath(eventId)}/items/${itemId}`), { text: 'Existing prompt', status: 'active' });
 }
 
 async function seedMembership(
@@ -687,7 +691,7 @@ describe('#1079/#804 membership enforcement — Mark/Echo rule budget', () => {
     await assertSucceeds(batch.commit());
   });
 
-  it('accepts the real maximum reconcile shape, including 24 fieldless legacy markers in-window', async () => {
+  it('accepts bounded chunks for the maximum reconcile shape, including fieldless legacy markers in-window', async () => {
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       await setDoc(doc(ctx.firestore(), COMPATIBILITY_PATH), {
         schemaVersion: 1,
@@ -702,7 +706,7 @@ describe('#1079/#804 membership enforcement — Mark/Echo rule budget', () => {
       (_, index) => index,
     ).filter((index) => index !== 12);
     const markedAt = NOW();
-    const makeRepairBatch = (fieldless = false) => {
+    const makeRepairBatch = (fieldless = false, indexes = changedIndexes) => {
       const batch = writeBatch(database);
       const overrides = Object.fromEntries(
         changedIndexes.map((index) => [
@@ -721,7 +725,7 @@ describe('#1079/#804 membership enforcement — Mark/Echo rule budget', () => {
       );
       let writes = 1;
 
-      for (const index of changedIndexes) {
+      for (const index of indexes) {
         const repairedCell = cell(0, index);
         const itemId = repairedCell.itemId;
         expect(typeof itemId).toBe('string');
@@ -736,32 +740,25 @@ describe('#1079/#804 membership enforcement — Mark/Echo rule budget', () => {
       return { batch, writes };
     };
 
-    const first = makeRepairBatch();
-    expect(first.writes).toBe(25);
-    await assertSucceeds(first.batch.commit());
-
-    // A lost acknowledgement may replay the same idempotent repair. The
-    // second maximum-size batch exercises Board and marker UPDATE arms.
-    const retry = makeRepairBatch();
-    expect(retry.writes).toBe(25);
-    await assertSucceeds(retry.batch.commit());
-
-    // The old bundle's full-set marker payloads omit eventId. All 24 marker
-    // authorizations share one deny-all compatibility lookup, in addition to
-    // the Event/Membership paths shared by the #804 preview. This maximum
-    // batch proves those cached reads stay below Firestore's aggregate budget.
-    const legacy = makeRepairBatch(true);
-    expect(legacy.writes).toBe(25);
-    await assertSucceeds(legacy.batch.commit());
+    await assertFails(makeRepairBatch().batch.commit());
+    // Each chunk retains the real maximum Board patch so both schema and
+    // aggregate access costs are exercised on create and repeat UPDATE arms.
+    for (const fieldless of [false, false, true]) {
+      for (const indexes of [changedIndexes.slice(0, 16), changedIndexes.slice(16)]) {
+        const chunk = makeRepairBatch(fieldless, indexes);
+        expect(chunk.writes).toBe(indexes.length + 1);
+        await assertSucceeds(chunk.batch.commit());
+      }
+    }
   });
 
-  it('pins the aggregate access boundary: 6 distinct Event/Membership paths pass and 7 deny', async () => {
+  it('pins the aggregate access boundary: 5 distinct Event/Membership/Prompt paths pass and 6 deny', async () => {
     const passEvents = Array.from(
-      { length: 6 },
+      { length: 5 },
       (_, index) => `distinct-pass-${index}`,
     );
     const denyEvents = Array.from(
-      { length: 7 },
+      { length: 6 },
       (_, index) => `distinct-deny-${index}`,
     );
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
@@ -769,26 +766,27 @@ describe('#1079/#804 membership enforcement — Mark/Echo rule budget', () => {
       for (const eventId of [...passEvents, ...denyEvents]) {
         await seedEvent(database, eventId, { dayCount: 1 });
         await seedMembership(database, eventId, ALICE, 'active');
+        await setDoc(doc(database, `${eventPath(eventId)}/items/prompt-${eventId}`), { text: eventId, status: 'active' });
       }
     });
 
     const database = db(ALICE);
-    const six = writeBatch(database);
+    const passing = writeBatch(database);
     for (const eventId of passEvents) {
-      six.set(
+      passing.set(
         doc(database, markerPath(eventId, `prompt-${eventId}`, ALICE)),
         marker(eventId, ALICE, eventId, 0),
       );
     }
-    await assertSucceeds(six.commit());
+    await assertSucceeds(passing.commit());
 
-    const seven = writeBatch(database);
+    const denied = writeBatch(database);
     for (const eventId of denyEvents) {
-      seven.set(
+      denied.set(
         doc(database, markerPath(eventId, `prompt-${eventId}`, ALICE)),
         marker(eventId, ALICE, eventId, 0),
       );
     }
-    await assertFails(seven.commit());
+    await assertFails(denied.commit());
   });
 });

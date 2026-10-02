@@ -64,7 +64,8 @@ type SnapCb = (snap: unknown) => void;
 // doc, so existing call sites — `sub.fire(colSnap([...]))` — keep working.
 const emptyDocSnap = { exists: () => false, data: () => undefined, metadata: { fromCache: false } };
 function captureOnNext(): { fire: (proofs: unknown, moments?: unknown, event?: unknown) => void } {
-  const captured: { proofs: SnapCb | null; moments: SnapCb | null; events: SnapCb[]; tally: SnapCb | null; doubtsAll: SnapCb | null; heartsAll: SnapCb | null; notices: SnapCb | null } = {
+  const captured: { prompts: SnapCb | null; proofs: SnapCb | null; moments: SnapCb | null; events: SnapCb[]; tally: SnapCb | null; doubtsAll: SnapCb | null; heartsAll: SnapCb | null; notices: SnapCb | null } = {
+    prompts: null,
     proofs: null,
     moments: null,
     events: [],
@@ -84,6 +85,7 @@ function captureOnNext(): { fire: (proofs: unknown, moments?: unknown, event?: u
     if (kind === 'query' && querySource?.kind === 'collectionGroup' && querySource.args?.[1] === 'markers') {
       captured.tally = onNext;
     }
+    else if (kind === 'query' && querySource?.args?.includes('items')) captured.prompts = onNext;
     else if (kind === 'query') captured.proofs = onNext;
     // #262: useAllDoubts' moderation read opens a SECOND event-doc sub — feed
     // them all so none starves the feed's loading gates.
@@ -105,10 +107,11 @@ function captureOnNext(): { fire: (proofs: unknown, moments?: unknown, event?: u
   return {
     fire: (proofs: unknown, moments: unknown = colSnap([]), event: unknown = emptyDocSnap) => {
       if (!captured.proofs || !captured.moments) throw new Error('feed not fully subscribed');
+      act(() => captured.events.forEach((fn) => fn(event)));
       act(() => {
+        captured.prompts?.(colSnap([]));
         captured.proofs!(proofs);
         captured.moments!(moments);
-        captured.events.forEach((fn) => fn(event));
         // Deliver an empty Tally-Card stream so useFeed's tally half stops loading;
         // this suite exercises the proof side (Tally Cards have their own suite).
         captured.tally?.(colSnap([]));

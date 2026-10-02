@@ -127,7 +127,7 @@ describe('#387 — a Mark on a past Day commits and persists', () => {
     // "today" (the Day the player is NOT viewing). Both unlocked an hour ago —
     // the rules' unlock gate reads `days[dayIndex].unlockAt`, and a past Day
     // passes it by definition.
-    await seedEventDoc(PROJECT_ID, EVENT_ID, 2);
+    await seedEventDoc(PROJECT_ID, EVENT_ID, 2, [SHARED]);
     const tab = await makeClient('gcb-past-day-tab');
     const pastBoardPath = `events/${EVENT_ID}/days/${PAST_DAY}/boards/${tab.uid}`;
     const currentBoardPath = `events/${EVENT_ID}/days/${CURRENT_DAY}/boards/${tab.uid}`;
