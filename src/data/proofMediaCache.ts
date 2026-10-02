@@ -29,7 +29,7 @@ export const PROOF_MEDIA_CACHE_NAME = 'proof-media';
 
 /**
  * Best-effort local purge alongside deleteProof (#373). The upgraded worker no
- * longer stores proof responses and deletes this legacy bucket on activation,
+ * longer stores proof responses and retires this legacy bucket plus its token-bearing Workbox expiration records on activation,
  * but an old worker may still own a cached copy on the deleting device. This
  * cannot recall another device's HTTP cache, old worker, or downloaded bytes.
  * Every failure is swallowed so it can never fail the authoritative delete.

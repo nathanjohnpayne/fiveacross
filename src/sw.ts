@@ -22,6 +22,7 @@
 import { cleanupOutdatedCaches, createHandlerBoundToURL, precacheAndRoute } from 'workbox-precaching';
 import { NavigationRoute, registerRoute } from 'workbox-routing';
 import { NetworkOnly } from 'workbox-strategies';
+import { CacheExpiration } from 'workbox-expiration';
 import {
   PROOF_MEDIA_CACHE_NAME,
   PROOF_MEDIA_URL_PATTERN,
@@ -283,10 +284,14 @@ self.addEventListener('install', (event: ExtendableEvent) => {
 self.addEventListener('activate', (event: ExtendableEvent) => {
   event.waitUntil(
     (async () => {
-      // Migrate only the legacy proof-media CacheStorage bucket. Never clear
-      // Firestore IndexedDB or queued offline Marks. Purge failure cannot make
-      // activation fail; the new NetworkOnly route never reads this bucket.
+      // Retire legacy responses and token-bearing Workbox expiration records,
+      // scoped only to proof-media. Never clear Firestore or queued Marks. Each
+      // operation is best-effort so one failure cannot prevent the other cleanup.
       try { await caches.delete(PROOF_MEDIA_CACHE_NAME); } catch { /* retry on the next upgrade */ }
+      try {
+        // Workbox requires a retention option even when only deleting metadata.
+        await new CacheExpiration(PROOF_MEDIA_CACHE_NAME, { maxEntries: 1 }).delete();
+      } catch { /* retry on the next upgrade */ }
       // Consume the persisted rescue decision — it is the source of truth across
       // a worker teardown, and consuming it clears the flag so a later ordinary
       // activation cannot inherit a stale force and re-navigate the player's

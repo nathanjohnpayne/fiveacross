@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import 'fake-indexeddb/auto';
+import { openDB } from 'idb';
 import { UNREGISTERED_CLIENT_CONFIRM_MS } from './sw-rescue';
 
 // Drives the ACTUAL install/activate handlers in src/sw.ts (#514), not just the
@@ -171,12 +173,37 @@ describe('the worker wires up its ported responsibilities', () => {
     expect(w.navigated).toEqual([]);
   });
 
-  it('activates even when legacy media cache removal fails; the new route cannot read it', async () => {
+  it('removes token-bearing legacy Workbox metadata while preserving another cache metadata', async () => {
     const w = installFakeWorker();
-    vi.mocked(caches.delete).mockRejectedValueOnce(new Error('storage unavailable'));
+    const { CacheExpiration } = await import('workbox-expiration');
+    const proof = new CacheExpiration('proof-media', { maxEntries: 1 });
+    const unrelated = new CacheExpiration('other-media', { maxEntries: 1 });
+    const proofUrl = 'https://firebasestorage.googleapis.com/v0/b/demo/o/proofs%2Fprivate.jpg?alt=media&token=retired-bearer';
+    const otherUrl = 'https://example.test/unrelated';
+    await proof.updateTimestamp(proofUrl);
+    await unrelated.updateTimestamp(otherUrl);
+    const db = await openDB('workbox-expiration');
+    expect((await db.getAll('cache-entries')).some(entry => entry.url === proofUrl)).toBe(true);
+    await import('./sw');
+    await fire(w.handlers, 'activate');
+    const remaining = await db.getAll('cache-entries');
+    expect(remaining.some(entry => entry.cacheName === 'proof-media')).toBe(false);
+    expect(remaining.some(entry => entry.url === otherUrl)).toBe(true);
+    db.close();
+  });
+
+  it.each(['responses', 'metadata'])('activates even when legacy %s removal fails', async failure => {
+    const w = installFakeWorker();
+    const { CacheExpiration } = await import('workbox-expiration');
+    const cleanup = vi.spyOn(CacheExpiration.prototype, 'delete');
+    if (failure === 'responses') vi.mocked(caches.delete).mockRejectedValueOnce(new Error('storage unavailable'));
+    else cleanup.mockRejectedValueOnce(new Error('metadata unavailable'));
+
     await import('./sw');
     await expect(fire(w.handlers, 'activate')).resolves.toBeUndefined();
     expect(NetworkOnly).toHaveBeenCalledOnce();
+    expect(cleanup).toHaveBeenCalled();
+    cleanup.mockRestore();
   });
 
   it.each(['deleted', 'hidden', 'offline'])('never returns a previously cached proof for %s media', async state => {
