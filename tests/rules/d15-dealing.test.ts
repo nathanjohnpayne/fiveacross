@@ -29,7 +29,7 @@ vi.mock('firebase/firestore', async (importOriginal) => {
     }))),
   };
 });
-import { dealDayCard } from '../../src/data/api';
+import { dealDayCard, reshuffleBoard } from '../../src/data/api';
 
 // A minimal CANONICAL cells map (#458: the board rule requires exactly the 25
 // decimal keys) — these suites test gates other than cell mechanics, so the
@@ -171,5 +171,32 @@ describe('frozen snapshot hydration through the real deal path (#1406)', () => {
     await expect(dealing).resolves.toBe(false);
     expect(dealSeam.eventRead.mock.calls.length).toBeGreaterThan(1);
     expect((await getDoc(doc(db(ALICE), at(`days/0/boards/${ALICE}`)))).exists()).toBe(false);
+  });
+
+  it('retries a real reshuffle transaction after re-snapshot without replacing the card or spending', async () => {
+    const ids = await seedSnapshot();
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), at(`days/0/boards/${ALICE}`)), { ...dayCard(ALICE, 0), seed: 111 });
+      await updateDoc(doc(ctx.firestore(), at(`players/${ALICE}`)), { reshufflesUsed: 0 });
+    });
+    let signalRead!: () => void;
+    let releaseRead!: () => void;
+    const read = new Promise<void>((resolve) => { signalRead = resolve; });
+    const release = new Promise<void>((resolve) => { releaseRead = resolve; });
+    dealSeam.eventRead.mockImplementationOnce(async () => { signalRead(); await release; });
+    const reshuffling = reshuffleBoard({ uid: ALICE, dayIndex: 0, expectedSeed: 111 });
+    await read;
+    try {
+      await testEnv.withSecurityRulesDisabled(async (ctx) => {
+        const ref = doc(ctx.firestore(), `events/${EVENT}`);
+        const event = (await getDoc(ref)).data()!;
+        await updateDoc(ref, { days: [{ ...event.days[0], snapshotItemIds: ids.slice(1) }] });
+      });
+    } finally { releaseRead(); }
+    await expect(reshuffling).rejects.toThrow('Day changed');
+    expect(dealSeam.eventRead.mock.calls.length).toBeGreaterThan(1);
+    expect((await getDoc(doc(db(ALICE), at(`days/0/boards/${ALICE}`)))).data()?.seed).toBe(111);
+    expect((await getDoc(doc(db(ALICE), at(`players/${ALICE}`)))).data()?.reshufflesUsed).toBe(0);
+    expect((await getDoc(doc(db(ALICE), at(`reshuffles/${ALICE}-1`)))).exists()).toBe(false);
   });
 });

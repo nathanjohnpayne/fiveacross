@@ -229,6 +229,29 @@ describe('reshuffleBoard — the happy path', () => {
     for (const id of dealt) expect(SNAPSHOT_IDS).toContain(id);
   });
 
+  it('refuses a missing frozen member without replacing the board or spending an allowance', async () => {
+    H.itemsById.delete(SNAPSHOT_IDS[0]);
+    await expect(reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 })).rejects.toThrow('frozen');
+    expect(H.txSet).not.toHaveBeenCalled();
+  });
+
+  it('refuses an unreadable frozen member without shrinking the pool', async () => {
+    H.getDoc.mockImplementation(async (ref: { args?: unknown[] }) => {
+      if (ref.args?.includes(SNAPSHOT_IDS[0])) throw new Error('permission-denied');
+      return route(ref);
+    });
+    await expect(reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 })).rejects.toThrow('frozen');
+    expect(H.txSet).not.toHaveBeenCalled();
+  });
+
+  it('refuses a snapshot changed after hydration without spending an allowance', async () => {
+    H.txGet.mockImplementationOnce(() => {
+      H.event = { ...H.event, days: [day(0), day(1, { snapshotItemIds: SNAPSHOT_IDS.slice(1) })] };
+    });
+    await expect(reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 })).rejects.toThrow('Day changed');
+    expect(H.txSet).not.toHaveBeenCalled();
+  });
+
   it('withholds explicit snapshot Prompts until the 18+ posture is published', async () => {
     for (const [i, id] of SNAPSHOT_IDS.entries()) {
       H.itemsById.set(id, { text: `Prompt ${id}`, spicy: i >= 24, isFreeSpace: false });

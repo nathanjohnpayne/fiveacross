@@ -1183,11 +1183,9 @@ export async function reshuffleBoard(params: {
 }): Promise<number> {
   const { uid, dayIndex, expectedSeed } = params;
   const eventId = EVENT_ID;
-  // The Event schedule and the Day Snapshot's items are read outside: neither is
-  // written here, and neither changes under a retry, so re-reading them per attempt
-  // would cost a round trip and buy nothing. Everything that CAN change — this
-  // Board, the counter, and the peer cards the exclusion set is built from — is
-  // read inside.
+  // Hydrate outside the transaction, then re-read the Event inside each attempt
+  // to fence this draw against a concurrent admin re-snapshot. The Board,
+  // counter, and peer cards are also read inside so retries re-decide.
   const eventSnap = await getDoc(rawEvent(eventId));
   const eventData = eventSnap.exists() ? (eventSnap.data() as Partial<EventDoc>) : null;
   const days = Array.isArray(eventData?.days) ? (eventData.days as DayDef[]) : [];
@@ -1216,6 +1214,9 @@ export async function reshuffleBoard(params: {
   const itemSnaps = await Promise.all(
     snapshotIds.map((id) => getDoc(rawItem(id, eventId)).catch(() => null)),
   );
+  if (itemSnaps.some((snapshot) => !snapshot || !snapshot.exists())) {
+    throw new Error("This Day's frozen prompts are unavailable. Try again once they are available.");
+  }
   // A reshuffle is another frozen-card publish path. During the asynchronous
   // window between approving the first explicit Prompt and publishing the 18+
   // hostname posture, it must fail closed exactly like the first Day deal.
@@ -1290,11 +1291,21 @@ export async function reshuffleBoard(params: {
     // re-runs on a retry — which is the point: a retry must re-decide from
     // committed state, never re-fire a verdict formed against a snapshot that has
     // since lost a race.
-    const [boardSnap, playerSnap, ...peerSnaps] = await Promise.all([
+    const [latestEventSnap, boardSnap, playerSnap, ...peerSnaps] = await Promise.all([
+      tx.get(rawEvent(eventId)),
       tx.get(boardRef),
       tx.get(playerRef),
       ...peerRefs.map((ref) => tx.get(ref)),
     ]);
+
+    const latestEventData = latestEventSnap.exists() ? (latestEventSnap.data() as Partial<EventDoc>) : null;
+    const latestDays = Array.isArray(latestEventData?.days) ? (latestEventData.days as DayDef[]) : [];
+    const latestDay = latestDays[dayIndex];
+    if (!latestDay || latestDay.unlockAt !== day.unlockAt ||
+        latestDay.snapshotEasyMixRatio !== day.snapshotEasyMixRatio ||
+        !sameStringArray(latestDay.snapshotItemIds, snapshotIds)) {
+      throw new Error('This Day changed while reshuffling. Try again.');
+    }
 
     if (!boardSnap.exists()) throw new Error('reshuffleBoard: no Day Card to reshuffle.');
     const board = boardSnap.data() as {
