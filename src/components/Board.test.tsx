@@ -116,6 +116,9 @@ vi.mock('../data/api', () => ({
   dealDayCard: H.dealDayCard,
   // Open-time echo reconcile (specs/echo-marks.md): a no-op stub — the reconcile
   // write path is proven in src/data/echo-marks.test.ts.
+  // #1370: Board retries pending Tally marker passes once per card visit; a
+  // no-op stub (the retry itself is proven in src/data/echo-marks.test.ts).
+  retryPendingMarkerRepoints: vi.fn(() => Promise.resolve()),
   reconcileEchoes: vi.fn(() =>
     Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false }),
   ),
@@ -655,6 +658,42 @@ describe('open-time reconcile churn gate (#492)', () => {
         Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
       );
     }
+  });
+
+  it('#1370: every card VISIT retries pending marker passes, even on a card the reconcile guard already settled', async () => {
+    const { reconcileEchoes, retryPendingMarkerRepoints } = await import('../data/api');
+    const reconcile = vi.mocked(reconcileEchoes);
+    const retry = vi.mocked(retryPendingMarkerRepoints);
+    reconcile.mockImplementation(() =>
+      Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+    );
+    retry.mockClear();
+    const now = Date.now();
+    H.event = { claimMode: 'honor', timezone: 'UTC', days: reconcileDays(now), settings: { echoMarks: false } } as unknown as EventDoc;
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+    const view = render(<Board />);
+    await act(async () => {});
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(retry.mock.calls[0][0]).toMatchObject({ uid: 'u1', dayIndexes: [0, 1] });
+
+    // Live snapshots of the same card: once per visit, not per snapshot.
+    H.board = { ...(H.board as object) } as typeof H.board;
+    view.rerender(<Board />);
+    await act(async () => {});
+    expect(retry).toHaveBeenCalledTimes(1);
+
+    // Another card (a new seed is a new identity, like another Day), then BACK:
+    // the completed reconcile stays guarded for the first card (no third
+    // reconcile), but the return visit still retries pending passes.
+    H.board = { uid: 'u1', dayIndex: 0, seed: 2, createdAt: 0, cells: dealt() };
+    view.rerender(<Board />);
+    await act(async () => {});
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+    view.rerender(<Board />);
+    await act(async () => {});
+    expect(reconcile).toHaveBeenCalledTimes(2);
+    expect(retry).toHaveBeenCalledTimes(3);
   });
 
   it('#1360: flipping settings.echoMarks while the card stays open re-runs the reconcile under the new value', async () => {
