@@ -1,5 +1,7 @@
 # Codex review latency audit—mergepath, 2026-07
 
+> **Provenance.** This document is a bootstrap-era copy of an audit run in `nathanjohnpayne/mergepath`. The pipeline it describes, `scripts/audit-codex-latency.sh` and its suite, lives only in mergepath and is not part of this repository. Run every command below from a mergepath checkout.
+
 Study deliverable for [#623](https://github.com/nathanjohnpayne/mergepath/issues/623) ("Measure actual Codex review latency and retune every folklore-tuned wait window from the data"). This document covers the **study** only; the retunes land as separate follow-up PRs per the issue's guardrails, each citing the percentile it is based on. No knob or `.github/review-policy.yml` value is changed here.
 
 **Headline: the folklore is wrong in both directions.**

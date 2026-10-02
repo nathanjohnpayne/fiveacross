@@ -1,5 +1,7 @@
 ## 1_trigger_to_ack
 
+> **Provenance.** This document is a bootstrap-era copy of an audit run in `nathanjohnpayne/mergepath`. The pipeline it describes, `scripts/audit-codex-latency.sh` and its suite, lives only in mergepath and is not part of this repository. Run every command below from a mergepath checkout.
+
 | segment | n | p50 | p90 | p99 | max |
 |---|---|---|---|---|---|
 | ALL | 14 | 9s | 11s | 13s | 13s |
