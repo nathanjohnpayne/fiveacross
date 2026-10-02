@@ -1910,6 +1910,8 @@ async function repointMarkerFromServer(params: {
   uid: string;
   itemId: string;
   dayIndexes: number[];
+  /** Delete the marker when no server carrier remains (the deferred-delete case). */
+  deleteIfNoCarrier?: boolean;
 }): Promise<void> {
   const { database, eventId, uid, itemId, dayIndexes } = params;
   const markerRef = doc(database, 'events', eventId, 'tally', itemId, 'markers', uid);
@@ -1920,16 +1922,21 @@ async function repointMarkerFromServer(params: {
     for (const dayIndex of dayIndexes) {
       const board = await tx.get(doc(database, 'events', eventId, 'days', String(dayIndex), 'boards', uid));
       if (!board.exists()) continue;
-      const carrier = cellsFromData((board.data() as { cells?: unknown }).cells).find(
-        (c) => !c.free && c.marked && c.itemId === itemId,
-      );
+      // A board whose stored owner does not match its path is not this Player's
+      // card (the same guard `reconcileEchoStatsFromServer` applies).
+      const data = board.data() as { uid?: string; cells?: unknown };
+      if (data.uid !== uid) continue;
+      const carrier = cellsFromData(data.cells).find((c) => !c.free && c.marked && c.itemId === itemId);
       if (!carrier) continue;
       const markedAt = typeof carrier.markedAt === 'number' ? carrier.markedAt : 0;
       if (!best || markedAt > best.markedAt || (markedAt === best.markedAt && dayIndex > best.dayIndex)) {
         best = { dayIndex, markedAt, text: carrier.text };
       }
     }
-    if (!best) return;
+    if (!best) {
+      if (params.deleteIfNoCarrier) tx.delete(markerRef);
+      return;
+    }
     const current = marker.data() as Record<string, unknown>;
     if (current.dayIndex === best.dayIndex && current.markedAt === best.markedAt) return;
     tx.set(markerRef, { ...current, dayIndex: best.dayIndex, markedAt: best.markedAt, itemText: best.text });
@@ -2269,8 +2276,10 @@ async function runSetMark(
   // Tally is a separate surface (ADR 0002).
   const tallyItemId = toggled && !toggled.free ? toggled.itemId : null;
   let markerRepairCandidate: string | null = null;
-  // #1360: the Prompt whose marker re-points once this unmark is acknowledged.
+  // #1360: the Prompt whose marker re-points once this unmark is acknowledged,
+  // and whether the server pass may DELETE it when no server carrier remains.
   let repointMarkerItemId: string | null = null;
+  let repointDeleteIfNoCarrier = false;
   if (tallyItemId) {
     const markerRef = doc(database, 'events', eventId, 'tally', tallyItemId, 'markers', uid);
     if (params.nextMarked) {
@@ -2350,9 +2359,20 @@ async function runSetMark(
       // recreate it on sync. The post-ack transaction reads the SERVER's marker
       // and sibling boards, so it also cannot be misled by a partially cached
       // sibling set. Only with Echo off, and only when a sibling still carries it.
+      //
+      // With Echo off and INCOMPLETE sibling knowledge but no cached carrier, the
+      // only remaining carrier may be on a sibling this device could not read
+      // (Codex P2 on #1363). Deleting here would drop the Player off the Tally
+      // until some later repair; instead the post-ack transaction decides from
+      // server truth: re-point to a server carrier, or delete when there is none.
+      const deferMarkerToServer =
+        params.echoMarks === false && !stillAchievedElsewhere && siblingKnowledgeIncomplete;
       repointMarkerItemId =
-        stillAchievedElsewhere && params.echoMarks === false && latestRemaining ? tallyItemId : null;
-      if (!stillAchievedElsewhere) {
+        params.echoMarks === false && ((stillAchievedElsewhere && latestRemaining) || deferMarkerToServer)
+          ? tallyItemId
+          : null;
+      repointDeleteIfNoCarrier = deferMarkerToServer;
+      if (!stillAchievedElsewhere && !deferMarkerToServer) {
         batch.delete(markerRef);
         if (siblingKnowledgeIncomplete) {
           rememberMarkerRepair(eventId, uid, tallyItemId);
@@ -2392,7 +2412,16 @@ async function runSetMark(
   if (repointMarkerItemId) {
     const itemId = repointMarkerItemId;
     void committed
-      .then(() => repointMarkerFromServer({ database, eventId, uid, itemId, dayIndexes: echoDayIndexes }))
+      .then(() =>
+        repointMarkerFromServer({
+          database,
+          eventId,
+          uid,
+          itemId,
+          dayIndexes: echoDayIndexes,
+          deleteIfNoCarrier: repointDeleteIfNoCarrier,
+        }),
+      )
       .catch(() => undefined);
   }
   void committed.catch((err: unknown) => {

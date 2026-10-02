@@ -985,6 +985,69 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     }
   });
 
+  const withUncachedDay = async <T,>(day: number, run: () => Promise<T>): Promise<T> => {
+    const { getDocFromCache } = await import('firebase/firestore');
+    const cacheRead = vi.mocked(getDocFromCache);
+    cacheRead.mockImplementation((async (ref: { args?: unknown[] }) => {
+      const a = (ref.args ?? []).filter((x): x is string => typeof x === 'string');
+      if (a[2] === 'days' && a[3] === String(day)) throw new Error('not cached');
+      return H.defaultGetDocFromCache(ref);
+    }) as never);
+    try {
+      return await run();
+    } finally {
+      cacheRead.mockImplementation(((ref: { args?: unknown[] }) => H.defaultGetDocFromCache(ref)) as never);
+    }
+  };
+  const onlyCarrierOnDay1 = (markedOnServer: boolean) => {
+    seedBoards();
+    H.dayBoards.set(3, { uid: 'u1', seed: 333, dayIndex: 3, cells: card((i) => `b${i}`) });
+    H.dayBoards.set(1, {
+      uid: 'u1', seed: 111, dayIndex: 1,
+      cells: card((i) => (i === 4 ? 'shared' : `c${i}`), markedOnServer ? { 4: { marked: true, markedAt: 40, status: 'confirmed' } } : {}),
+    });
+    H.dayBoards.set(2, {
+      uid: 'u1', seed: 222, dayIndex: 2,
+      cells: card((i) => (i === 5 ? 'shared' : `a${i}`), { 5: { marked: true, markedAt: 25 } }),
+    });
+    H.markerServer.set('shared', serverMarker());
+  };
+
+  it('#1360: an uncached ONLY carrier keeps the marker — the server pass re-points it, no in-batch delete', async () => {
+    onlyCarrierOnDay1(true);
+    await withUncachedDay(1, async () => {
+      await markShared({ nextMarked: false, echoMarks: false });
+      expect(H.batchDelete).not.toHaveBeenCalled();
+      await settle();
+    });
+    expect(markerTxWrite()?.[1]).toMatchObject({ dayIndex: 1, markedAt: 40 });
+    expect(H.txDelete).not.toHaveBeenCalled();
+  });
+
+  it('#1360: with no carrier on the server either, the deferred server pass deletes the marker', async () => {
+    onlyCarrierOnDay1(false);
+    await withUncachedDay(1, async () => {
+      await markShared({ nextMarked: false, echoMarks: false });
+      expect(H.batchDelete).not.toHaveBeenCalled();
+      await settle();
+    });
+    expect(markerTxWrite()).toBeUndefined();
+    expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(true);
+  });
+
+  it('#1360: the server pass ignores a board whose stored owner does not match its path', async () => {
+    seedRepeats();
+    // Day 3 carries the latest Mark but its stored uid is someone else's.
+    H.dayBoards.set(3, {
+      uid: 'intruder', seed: 333, dayIndex: 3,
+      cells: card((i) => (i === 8 ? 'shared' : `b${i}`), { 8: { marked: true, markedAt: 30, status: 'confirmed' } }),
+    });
+    H.markerServer.set('shared', serverMarker());
+    await markShared({ nextMarked: false, echoMarks: false });
+    await settle();
+    expect(markerTxWrite()?.[1]).toMatchObject({ dayIndex: 1, markedAt: 20 });
+  });
+
   it('#1360: with Echo ON an unmark keeps the marker exactly as before (no re-point write)', async () => {
     seedBoards();
     H.dayBoards.set(3, {

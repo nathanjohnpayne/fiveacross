@@ -1254,7 +1254,7 @@ export default function Board() {
       // A synchronous failure (nothing written) may retry on the next open.
       .catch(() => settle(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `schedule` derives from event?.days; deps track what the reconcile reads, plus the explicit retry nonce.
-  }, [eventId, hasDays, user, board, identityKnown, dayBoardConfirmed, event?.days, player, reconcileRetryNonce]);
+  }, [eventId, hasDays, user, board, identityKnown, dayBoardConfirmed, event?.days, event?.settings?.echoMarks, player, reconcileRetryNonce]);
   // Edge refs for the COSMETIC Celebration UI only (issue #104). The public Moment
   // broadcast moved OFF this snapshot-diffing machinery and ONTO the action path —
   // doMark reads `setMark`'s synchronous win-transition verdict and enqueues into a

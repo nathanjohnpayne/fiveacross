@@ -30,13 +30,13 @@ Order of operations on a main-day deal: `easyMixRatio` splits 24 → easy/main c
 
 ## The repeat window (#1360)
 
-The no-repeat exclusion used to be all-or-nothing: every Prompt on every other card the Player holds is kept off the main half, and the moment that would starve the main half the whole exclusion is thrown away (`applyExclusion`). On a long Event that is a cliff — on the simulated semester it reset at about Week 9, after which nearly every main square was a repeat.
+The no-repeat exclusion used to be all-or-nothing: every Prompt on every other card the Player holds is kept off the main half, and the moment that would starve the main half the whole exclusion is thrown away (`applyExclusion`). On a long Event that is a cliff—on the simulated semester it reset at about Week 9, after which nearly every main square was a repeat.
 
-- **Tiers, nearest first.** `DealOptions.excludeTiers` is the exclusion split one set per other card, ordered nearest Day first (`repeatExclusionTiers`, `src/game/logic.ts`: distance `|other − dayIndex|`, a tie to the earlier Day — so a mid-Event joiner who opens Days out of order still has a well-defined "nearest"). It takes precedence over `excludeIds`.
+- **Tiers, nearest first.** `DealOptions.excludeTiers` is the exclusion split one set per other card, ordered nearest Day first (`repeatExclusionTiers`, `src/game/logic.ts`: distance `|other − dayIndex|`, a tie to the earlier Day—so a mid-Event joiner who opens Days out of order still has a well-defined "nearest"). It takes precedence over `excludeIds`.
 - **Shrink, don't reset.** `applyTieredExclusion` tries the union of every tier; while it would leave fewer than the main half needs, it drops the FARTHEST tier and retries, down to no exclusion. Whenever the full union fits, the usable pool is identical to the single-set path, so every such deal is byte-identical to before. With one tier it is exactly the old reset.
-- **The window.** `EventDoc.settings.repeatWindow?: number`, read through `repeatWindowFor` (a positive integer, else no window), cuts the tiers to the nearest N cards. No window means every other card — the whole-history exclusion, now with the shrinking fallback. The HBS semester sets 4: no everyday square twice within a month.
+- **The window.** `EventDoc.settings.repeatWindow?: number`, read through `repeatWindowFor` (a positive integer, else no window), cuts the tiers to the nearest N cards. No window means every other card—the whole-history exclusion, now with the shrinking fallback. The HBS semester sets 4: no everyday square twice within a month.
 - **Both deal paths.** `dealDayCard` builds tiers from the other cards it already reads; `reshuffleBoard` builds them from the KEPT cards (the discarded card's Prompts stay eligible, as before), so a late-term Reshuffle cannot hit the cliff the first deal no longer has.
-- **The easy half is untouched** — still never excluded, by design.
+- **The easy half is untouched**—still never excluded, by design.
 
 ## Deploy race
 
