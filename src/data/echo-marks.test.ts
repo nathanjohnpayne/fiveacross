@@ -1141,7 +1141,9 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
 
   // #1367: the post-ack marker pass is an in-memory continuation, so it is backed
   // by a DURABLE record that survives a reload and is retried on the next open.
-  const REPOINT_KEY = 'gcb:echo-marker-repoint:test-event:u1:shared';
+  // One storage key per record: `...:{itemId}:{token}`.
+  const REPOINT_PREFIX = 'gcb:echo-marker-repoint:test-event:u1:shared:';
+  const repointKeys = (values: Map<string, string>) => [...values.keys()].filter((k) => k.startsWith(REPOINT_PREFIX));
   const stubStorage = () => {
     const values = new Map<string, string>();
     vi.stubGlobal('localStorage', {
@@ -1161,16 +1163,16 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     try {
       seedRepeats();
       H.markerServer.set('shared', serverMarker());
-      let recordedAtCommit: string | undefined;
+      let recordedAtCommit = 0;
       H.batchCommit.mockImplementationOnce(async () => {
-        recordedAtCommit = values.get(REPOINT_KEY);
+        recordedAtCommit = repointKeys(values).length;
       });
       await markShared({ nextMarked: false, echoMarks: false });
-      expect(recordedAtCommit).toBeTruthy();
+      expect(recordedAtCommit).toBe(1);
       commitDay2Unmark();
       await settle();
       expect(markerTxWrite()?.[1]).toMatchObject({ dayIndex: 3 });
-      expect(values.has(REPOINT_KEY)).toBe(false);
+      expect(repointKeys(values)).toEqual([]);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -1184,11 +1186,12 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       // The in-memory continuation never runs (the tab reloads before the ack).
       H.batchCommit.mockImplementationOnce(() => new Promise<void>(() => {}));
       await markShared({ nextMarked: false, echoMarks: false });
-      expect(values.get(REPOINT_KEY)).toBeTruthy();
+      const [persisted] = repointKeys(values);
+      expect(persisted).toBeTruthy();
 
       // "Reload": in-memory state is gone, the durable record survives.
       __resetPendingMarkerRepairsForTests();
-      values.set(REPOINT_KEY, '1');
+      values.set(persisted, '1');
       // The replayed unmark drains; both siblings have been unmarked elsewhere too.
       commitDay2Unmark();
       H.dayBoards.set(1, { uid: 'u1', seed: 111, dayIndex: 1, cells: card((i) => (i === 4 ? 'shared' : `c${i}`)) });
@@ -1200,12 +1203,12 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       await settle();
       // Nothing runs until this device's queued writes have drained.
       expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(false);
-      expect(values.get(REPOINT_KEY)).toBeTruthy();
+      expect(repointKeys(values)).toEqual([persisted]);
 
       drain!();
       await settle();
       expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(true);
-      expect(values.has(REPOINT_KEY)).toBe(false);
+      expect(repointKeys(values)).toEqual([]);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -1222,11 +1225,10 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
         .mockImplementationOnce(() => new Promise<void>((r) => { ackFirst = r; }))
         .mockImplementationOnce(() => new Promise<void>((r) => { ackSecond = r; }));
       await markShared({ nextMarked: false, echoMarks: false });
-      const firstToken = values.get(REPOINT_KEY);
+      const [firstKey] = repointKeys(values);
       await markShared({ nextMarked: false, echoMarks: false });
-      const secondToken = values.get(REPOINT_KEY);
-      expect(secondToken).toBeTruthy();
-      expect(secondToken).not.toBe(firstToken);
+      const secondKey = repointKeys(values).find((k) => k !== firstKey);
+      expect(secondKey).toBeTruthy();
 
       commitDay2Unmark();
       ackFirst!();
@@ -1234,12 +1236,34 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       await settle();
       // The first pass ran and succeeded, but the second unmark's record survives.
       expect(markerTxWrite()).toBeDefined();
-      expect(values.get(REPOINT_KEY)).toBe(secondToken);
+      expect(repointKeys(values)).toEqual([secondKey]);
 
       ackSecond!();
       await settle();
       await settle();
-      expect(values.has(REPOINT_KEY)).toBe(false);
+      expect(repointKeys(values)).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('#1367: a pass clears only its OWN record, never one another tab wrote for the same Prompt', async () => {
+    const values = stubStorage();
+    try {
+      seedRepeats();
+      H.markerServer.set('shared', serverMarker());
+      let ack: (() => void) | undefined;
+      H.batchCommit.mockImplementationOnce(() => new Promise<void>((r) => { ack = r; }));
+      await markShared({ nextMarked: false, echoMarks: false });
+      // Another tab records its own pending pass for the same Prompt meanwhile.
+      const otherTab = `${REPOINT_PREFIX}othertab.1.abc`;
+      values.set(otherTab, '1');
+      commitDay2Unmark();
+      ack!();
+      await settle();
+      await settle();
+      expect(markerTxWrite()).toBeDefined();
+      expect(repointKeys(values)).toEqual([otherTab]);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -1256,13 +1280,13 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       await markShared({ nextMarked: false, echoMarks: false });
       commitDay2Unmark();
       await settle();
-      expect(values.get(REPOINT_KEY)).toBeTruthy();
+      expect(repointKeys(values)).toHaveLength(1);
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
-  it('#1367: a REJECTED unmark keeps the record (an older unmark may share the slot); the retry re-points from server truth', async () => {
+  it('#1367: a REJECTED unmark keeps its record; the retry re-points from server truth', async () => {
     const values = stubStorage();
     try {
       seedRepeats();
@@ -1273,14 +1297,14 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       await markShared({ nextMarked: false, echoMarks: false });
       await settle();
       expect(markerTxWrite()).toBeUndefined();
-      expect(values.get(REPOINT_KEY)).toBeTruthy();
+      expect(repointKeys(values)).toHaveLength(1);
       // Next open: the rolled-back Day 2 Mark is still the server's state, so the
       // pass keeps a marker (latest carrier wins) rather than deleting it.
       await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [0, 1, 2, 3], echoMarks: false });
       await settle();
       expect(markerTxWrite()?.[1]).toMatchObject({ dayIndex: 3 });
       expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(false);
-      expect(values.has(REPOINT_KEY)).toBe(false);
+      expect(repointKeys(values)).toEqual([]);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -1291,7 +1315,7 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     try {
       seedRepeats();
       H.markerServer.set('shared', serverMarker());
-      values.set('gcb:echo-marker-repoint:test-event:u1:other', 'old');
+      values.set('gcb:echo-marker-repoint:test-event:u1:other:old.1.x', '1');
       let drain: (() => void) | undefined;
       H.waitForPendingWrites.mockImplementationOnce(() => new Promise<void>((r) => { drain = r; }));
       await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [0, 1, 2, 3], echoMarks: false });
@@ -1299,12 +1323,12 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       // A new unmark records `shared` while the retry is still waiting.
       H.batchCommit.mockImplementationOnce(() => new Promise<void>(() => {}));
       await markShared({ nextMarked: false, echoMarks: false });
-      const fresh = values.get(REPOINT_KEY);
-      expect(fresh).toBeTruthy();
+      const fresh = repointKeys(values);
+      expect(fresh).toHaveLength(1);
       drain!();
       await settle();
       await settle();
-      expect(values.get(REPOINT_KEY)).toBe(fresh);
+      expect(repointKeys(values)).toEqual(fresh);
     } finally {
       vi.unstubAllGlobals();
     }

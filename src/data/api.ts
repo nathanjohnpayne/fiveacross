@@ -1787,65 +1787,63 @@ function hasMarkerRepair(eventId: string, uid: string, itemId: string): boolean 
 // and retried by the open-time reconcile (`retryPendingMarkerRepoints`).
 const pendingMarkerRepoints = new Map<string, MarkerRepair & { token: string }>();
 const MARKER_REPOINT_STORAGE_PREFIX = 'gcb:echo-marker-repoint:';
-const markerRepointKey = (eventId: string, uid: string, itemId: string) =>
-  eventScopeKey(eventId, 'echo-marker-repoint', uid, itemId);
-const markerRepointStorageKey = (eventId: string, uid: string, itemId: string) =>
-  `${MARKER_REPOINT_STORAGE_PREFIX}${eventId}:${uid}:${itemId}`;
+// One storage KEY per record (`...:{itemId}:{token}`), never one shared slot per
+// Prompt: clearing is then a plain remove of the caller's own key, with no
+// read-compare-remove for another tab to interleave with (Firestore runs with
+// `persistentMultipleTabManager`, so concurrent tabs are supported), and an
+// older pass settling can never erase a newer unmark's record.
+const markerRepointStorageKey = (eventId: string, uid: string, itemId: string, token: string) =>
+  `${MARKER_REPOINT_STORAGE_PREFIX}${eventId}:${uid}:${itemId}:${token}`;
 
 let markerRepointSeq = 0;
 
-/** Records the pending pass and returns its token. Each write gets a fresh token
- *  so an OLDER pass finishing can never clear a NEWER unmark's record (unmark,
- *  re-mark, unmark again: the first pass must not erase the second's record). */
+/** Records the pending pass under a fresh token and returns the token. */
 function rememberMarkerRepoint(eventId: string, uid: string, itemId: string): string {
   markerRepointSeq += 1;
-  const token = `${Date.now().toString(36)}.${markerRepointSeq}`;
-  pendingMarkerRepoints.set(markerRepointKey(eventId, uid, itemId), { eventId, uid, itemId, token });
+  const token = `${Date.now().toString(36)}.${markerRepointSeq}.${Math.random().toString(36).slice(2, 8)}`;
+  const key = markerRepointStorageKey(eventId, uid, itemId, token);
+  pendingMarkerRepoints.set(key, { eventId, uid, itemId, token });
   try {
-    markerRepairStore()?.setItem(markerRepointStorageKey(eventId, uid, itemId), token);
+    markerRepairStore()?.setItem(key, '1');
   } catch {
     // Storage is an enhancement over the in-memory record (private mode etc.).
   }
   return token;
 }
 
-function storedMarkerRepointToken(eventId: string, uid: string, itemId: string): string | null {
-  try {
-    return markerRepairStore()?.getItem(markerRepointStorageKey(eventId, uid, itemId)) ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/** Clears the record only while it still carries `token` (i.e. no newer unmark
- *  has re-recorded it since). */
+/** Clears exactly one record: the one written under `token`. */
 function forgetMarkerRepoint(eventId: string, uid: string, itemId: string, token: string): void {
-  const key = markerRepointKey(eventId, uid, itemId);
-  if (pendingMarkerRepoints.get(key)?.token === token) pendingMarkerRepoints.delete(key);
+  const key = markerRepointStorageKey(eventId, uid, itemId, token);
+  pendingMarkerRepoints.delete(key);
   try {
-    if (storedMarkerRepointToken(eventId, uid, itemId) === token) {
-      markerRepairStore()?.removeItem(markerRepointStorageKey(eventId, uid, itemId));
-    }
+    markerRepairStore()?.removeItem(key);
   } catch {
     // Best-effort; the in-memory record is already cleared.
   }
 }
 
 /** Every Prompt with a pending re-point for this Player in this Event, with the
- *  token current at read time: the in-memory records plus any persisted by an
- *  earlier session. */
-function pendingMarkerRepointItems(eventId: string, uid: string): Map<string, string> {
-  const items = new Map<string, string>();
+ *  tokens of its records at read time: the in-memory records plus any persisted
+ *  by an earlier session or another tab. */
+function pendingMarkerRepointItems(eventId: string, uid: string): Map<string, Set<string>> {
+  const items = new Map<string, Set<string>>();
+  const add = (itemId: string, token: string) => {
+    const tokens = items.get(itemId) ?? new Set<string>();
+    tokens.add(token);
+    items.set(itemId, tokens);
+  };
   for (const r of pendingMarkerRepoints.values()) {
-    if (r.eventId === eventId && r.uid === uid) items.set(r.itemId, r.token);
+    if (r.eventId === eventId && r.uid === uid) add(r.itemId, r.token);
   }
   const prefix = `${MARKER_REPOINT_STORAGE_PREFIX}${eventId}:${uid}:`;
   try {
     const store = markerRepairStore();
     for (let i = 0; store && i < store.length; i += 1) {
       const key = store.key(i);
-      const token = key && key.startsWith(prefix) ? store.getItem(key) : null;
-      if (key && token) items.set(key.slice(prefix.length), token);
+      if (!key || !key.startsWith(prefix)) continue;
+      const rest = key.slice(prefix.length);
+      const cut = rest.lastIndexOf(':');
+      if (cut > 0 && cut < rest.length - 1) add(rest.slice(0, cut), rest.slice(cut + 1));
     }
   } catch {
     // A disabled store means only this session's records are known.
@@ -1883,10 +1881,10 @@ export async function retryPendingMarkerRepoints(params: {
   markerRepointRetries.add(retryKey);
   try {
     await waitForPendingWrites(database);
-    for (const [itemId, token] of pending) {
+    for (const [itemId, tokens] of pending) {
       try {
         await repointMarkerFromServer({ database, eventId, uid, itemId, dayIndexes, deleteIfNoCarrier: true });
-        forgetMarkerRepoint(eventId, uid, itemId, token);
+        for (const token of tokens) forgetMarkerRepoint(eventId, uid, itemId, token);
       } catch {
         // Kept for the next open.
       }
