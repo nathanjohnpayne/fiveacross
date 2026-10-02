@@ -1,10 +1,54 @@
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readFileSync, copyFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const script = resolve(process.cwd(), 'scripts/worker-deploy.sh');
+
+/** The real `git`, resolved before any case prepends its stub `bin/`. */
+const realGit = execFileSync('bash', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+
+/**
+ * A `git` for cases that run the wrapper against the LIVE checkout.
+ *
+ * Under `--force` the shared source guard still runs `git fetch --quiet origin
+ * main` before it waives the freshness verdict. Run for real, that fetch moves
+ * `refs/remotes/origin/main` in the checkout every parallel Vitest worker is
+ * reading — and on a pull-request checkout, which starts without that ref, it
+ * CREATES it. `scripts/single-endpoint-deploy-scope.test.mjs` classifies
+ * against the real checkout and refuses when the repository's git answers
+ * change mid-discovery (RepositoryMetadataDriftError), so this suite's fetches
+ * failed that case on PRs whenever the two overlapped (#1366).
+ *
+ * The stub records the fetch and reports success without touching the network
+ * or any ref; every other command passes through to the real `git`, so the
+ * guard's remaining questions are still answered by the actual checkout. What
+ * the guard does with a fetch is covered against a throwaway remote in
+ * `scripts/deploy-main-guard.test.mjs`.
+ */
+/** Single-quote `value` for Bash, so no path can expand inside the stub. */
+function shellQuote(value) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function writeLiveCheckoutGit(bin, fetchLog) {
+  const stub = join(bin, 'git');
+  writeFileSync(
+    stub,
+    [
+      '#!/usr/bin/env bash',
+      'if [[ "${1:-}" == "fetch" ]]; then',
+      `  printf '%s\\n' "$*" >> ${shellQuote(fetchLog)}`,
+      '  exit 0',
+      'fi',
+      `exec ${shellQuote(realGit)} "$@"`,
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  chmodSync(stub, 0o755);
+}
 
 /**
  * A throwaway repository root the wrapper can be run from.
@@ -160,6 +204,9 @@ exit 0
   // and here.
   const stagedRoot = workerDotenvFiles === null ? null : stageRepoRoot(dir, workerDotenvFiles, bin);
   const entry = stagedRoot === null ? script : join(stagedRoot, 'scripts/worker-deploy.sh');
+  const gitFetchLog = join(dir, 'git-fetch.log');
+  writeFileSync(gitFetchLog, '', 'utf8');
+  if (stagedRoot === null) writeLiveCheckoutGit(bin, gitFetchLog);
   const result = spawnSync('bash', [entry, '--force'], {
     encoding: 'utf8',
     env: {
@@ -173,8 +220,24 @@ exit 0
   return {
     ...result,
     npmCalls: readFileSync(npmCallLog, 'utf8').trim().split('\n').filter(Boolean),
+    gitFetches: readFileSync(gitFetchLog, 'utf8').trim().split('\n').filter(Boolean),
   };
 }
+
+describe('worker deploy guard — the live checkout is never fetched into (#1366)', () => {
+  it('intercepts the source guard\'s fetch and leaves every remote-tracking ref untouched', () => {
+    const refs = () =>
+      execFileSync(realGit, ['for-each-ref', 'refs/remotes', '--format=%(refname) %(objectname)'], {
+        encoding: 'utf8',
+      });
+    const before = refs();
+    const result = runWithStubbedNpm();
+    expect(result.status).toBe(0);
+    // The guard did ask to fetch, so the interception is what kept the refs still.
+    expect(result.gitFetches).toEqual(['fetch --quiet origin main']);
+    expect(refs()).toBe(before);
+  });
+});
 
 describe('worker deploy guard — ambient Wrangler environment', () => {
   it('refuses an ambient WRANGLER_CI_OVERRIDE_NAME before certifying the binding', () => {
