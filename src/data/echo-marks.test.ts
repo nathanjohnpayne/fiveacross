@@ -34,6 +34,8 @@ const H = vi.hoisted(() => ({
   // #1360: the SERVER's Tally marker docs per itemId (read by the post-ack re-point
   // transaction). Absent means the marker does not exist on the server.
   markerServer: new Map<string, Record<string, unknown>>(),
+  // #1367: `waitForPendingWrites` — resolves immediately unless a test holds it.
+  waitForPendingWrites: vi.fn(async (..._args: unknown[]) => {}),
   // The default getDocFromCache implementation, exposed so a test that
   // overrides it can restore EXACTLY this (a lookalike without the tally
   // branch would silently change marker-cache semantics for later tests).
@@ -90,6 +92,7 @@ vi.mock('firebase/firestore', () => {
     getDocs: vi.fn(),
     getDocsFromCache: vi.fn(),
     writeBatch: vi.fn(() => ({ set: H.batchSet, delete: H.batchDelete, commit: H.batchCommit })),
+    waitForPendingWrites: (...args: unknown[]) => H.waitForPendingWrites(...args),
     addDoc: vi.fn(),
     increment: vi.fn(),
     deleteField: vi.fn(),
@@ -1134,6 +1137,112 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     ack!();
     await settle();
     expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(true);
+  });
+
+  // #1367: the post-ack marker pass is an in-memory continuation, so it is backed
+  // by a DURABLE record that survives a reload and is retried on the next open.
+  const REPOINT_KEY = 'gcb:echo-marker-repoint:test-event:u1:shared';
+  const stubStorage = () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      get length() {
+        return values.size;
+      },
+      key: (i: number) => [...values.keys()][i] ?? null,
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    });
+    return values;
+  };
+
+  it('#1367: the pending marker pass is recorded durably before commit and cleared after it succeeds', async () => {
+    const values = stubStorage();
+    try {
+      seedRepeats();
+      H.markerServer.set('shared', serverMarker());
+      let recordedAtCommit: string | undefined;
+      H.batchCommit.mockImplementationOnce(async () => {
+        recordedAtCommit = values.get(REPOINT_KEY);
+      });
+      await markShared({ nextMarked: false, echoMarks: false });
+      expect(recordedAtCommit).toBe('1');
+      commitDay2Unmark();
+      await settle();
+      expect(markerTxWrite()?.[1]).toMatchObject({ dayIndex: 3 });
+      expect(values.has(REPOINT_KEY)).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('#1367: a pass lost to a reload is retried on the next open, after queued writes drain', async () => {
+    const values = stubStorage();
+    try {
+      seedRepeats();
+      H.markerServer.set('shared', serverMarker());
+      // The in-memory continuation never runs (the tab reloads before the ack).
+      H.batchCommit.mockImplementationOnce(() => new Promise<void>(() => {}));
+      await markShared({ nextMarked: false, echoMarks: false });
+      expect(values.get(REPOINT_KEY)).toBe('1');
+
+      // "Reload": in-memory state is gone, the durable record survives.
+      __resetPendingMarkerRepairsForTests();
+      values.set(REPOINT_KEY, '1');
+      // The replayed unmark drains; both siblings have been unmarked elsewhere too.
+      commitDay2Unmark();
+      H.dayBoards.set(1, { uid: 'u1', seed: 111, dayIndex: 1, cells: card((i) => (i === 4 ? 'shared' : `c${i}`)) });
+      H.dayBoards.set(3, { uid: 'u1', seed: 333, dayIndex: 3, cells: card((i) => (i === 8 ? 'shared' : `b${i}`)) });
+      let drain: (() => void) | undefined;
+      H.waitForPendingWrites.mockImplementationOnce(() => new Promise<void>((r) => { drain = r; }));
+
+      await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [0, 1, 2, 3], echoMarks: false });
+      await settle();
+      // Nothing runs until this device's queued writes have drained.
+      expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(false);
+      expect(values.get(REPOINT_KEY)).toBe('1');
+
+      drain!();
+      await settle();
+      expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(true);
+      expect(values.has(REPOINT_KEY)).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('#1367: a failed pass keeps the durable record for the next open', async () => {
+    const values = stubStorage();
+    try {
+      seedRepeats();
+      H.markerServer.set('shared', serverMarker());
+      H.transactionRunner = async () => {
+        throw new Error('unavailable');
+      };
+      await markShared({ nextMarked: false, echoMarks: false });
+      commitDay2Unmark();
+      await settle();
+      expect(values.get(REPOINT_KEY)).toBe('1');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('#1367: a REJECTED unmark clears the record (the unmark rolled back, nothing to reconcile)', async () => {
+    const values = stubStorage();
+    try {
+      seedRepeats();
+      H.markerServer.set('shared', serverMarker());
+      H.batchCommit.mockImplementationOnce(async () => {
+        throw new Error('permission-denied');
+      });
+      await markShared({ nextMarked: false, echoMarks: false });
+      await settle();
+      expect(values.has(REPOINT_KEY)).toBe(false);
+      expect(markerTxWrite()).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('#1360: with Echo ON an unmark keeps the marker exactly as before (no re-point write)', async () => {

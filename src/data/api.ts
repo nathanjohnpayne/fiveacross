@@ -14,6 +14,7 @@ import {
   runTransaction,
   setDoc,
   updateDoc,
+  waitForPendingWrites,
   where,
   writeBatch,
   type Firestore,
@@ -1778,11 +1779,103 @@ function hasMarkerRepair(eventId: string, uid: string, itemId: string): boolean 
   return false;
 }
 
+// #1367: a DURABLE record that a marker still needs the post-ack server pass
+// (`repointMarkerFromServer`). The pass itself is an in-memory continuation on
+// the unmark's ack, so a reload between the queued batch draining and that
+// continuation running would lose it and leave a marker with no Mark behind it.
+// Written before the unmark batch commits, cleared only when the pass succeeds,
+// and retried by the open-time reconcile (`retryPendingMarkerRepoints`).
+const pendingMarkerRepoints = new Map<string, MarkerRepair>();
+const MARKER_REPOINT_STORAGE_PREFIX = 'gcb:echo-marker-repoint:';
+const markerRepointKey = (eventId: string, uid: string, itemId: string) =>
+  eventScopeKey(eventId, 'echo-marker-repoint', uid, itemId);
+const markerRepointStorageKey = (eventId: string, uid: string, itemId: string) =>
+  `${MARKER_REPOINT_STORAGE_PREFIX}${eventId}:${uid}:${itemId}`;
+
+function rememberMarkerRepoint(eventId: string, uid: string, itemId: string): void {
+  pendingMarkerRepoints.set(markerRepointKey(eventId, uid, itemId), { eventId, uid, itemId });
+  try {
+    markerRepairStore()?.setItem(markerRepointStorageKey(eventId, uid, itemId), '1');
+  } catch {
+    // Storage is an enhancement over the in-memory record (private mode etc.).
+  }
+}
+
+function forgetMarkerRepoint(eventId: string, uid: string, itemId: string): void {
+  pendingMarkerRepoints.delete(markerRepointKey(eventId, uid, itemId));
+  try {
+    markerRepairStore()?.removeItem(markerRepointStorageKey(eventId, uid, itemId));
+  } catch {
+    // Best-effort; the in-memory record is already cleared.
+  }
+}
+
+/** Every Prompt with a pending re-point for this Player in this Event: the
+ *  in-memory records plus any persisted by an earlier session. */
+function pendingMarkerRepointItems(eventId: string, uid: string): string[] {
+  const items = new Set<string>();
+  for (const r of pendingMarkerRepoints.values()) {
+    if (r.eventId === eventId && r.uid === uid) items.add(r.itemId);
+  }
+  const prefix = `${MARKER_REPOINT_STORAGE_PREFIX}${eventId}:${uid}:`;
+  try {
+    const store = markerRepairStore();
+    for (let i = 0; store && i < store.length; i += 1) {
+      const key = store.key(i);
+      if (key && key.startsWith(prefix) && store.getItem(key) === '1') items.add(key.slice(prefix.length));
+    }
+  } catch {
+    // A disabled store means only this session's records are known.
+  }
+  return [...items];
+}
+
+const markerRepointRetries = new Set<string>();
+
+/**
+ * Re-run the post-ack marker pass for every pending re-point this Player has in
+ * this Event (#1367). Waits for this device's queued writes to drain FIRST, so
+ * a replayed unmark lands on the server before the pass reads it; offline that
+ * wait simply pends until reconnect. Deliberately NOT on the per-Player mark
+ * chain (an offline wait there would stall every later Mark), and de-duplicated
+ * per (Event, Player) so repeated opens do not stack waiters. Each record is
+ * cleared only when its pass succeeds.
+ */
+export async function retryPendingMarkerRepoints(params: {
+  database?: Firestore;
+  eventId?: string;
+  uid: string;
+  dayIndexes: number[];
+}): Promise<void> {
+  const database = params.database ?? db;
+  const eventId = params.eventId ?? EVENT_ID;
+  const { uid, dayIndexes } = params;
+  if (pendingMarkerRepointItems(eventId, uid).length === 0) return;
+  const retryKey = eventScopeKey(eventId, 'echo-marker-repoint-retry', uid);
+  if (markerRepointRetries.has(retryKey)) return;
+  markerRepointRetries.add(retryKey);
+  try {
+    await waitForPendingWrites(database);
+    for (const itemId of pendingMarkerRepointItems(eventId, uid)) {
+      try {
+        await repointMarkerFromServer({ database, eventId, uid, itemId, dayIndexes, deleteIfNoCarrier: true });
+        forgetMarkerRepoint(eventId, uid, itemId);
+      } catch {
+        // Kept for the next open.
+      }
+    }
+  } finally {
+    markerRepointRetries.delete(retryKey);
+  }
+}
+
 /** Test-only. */
 export function __resetPendingMarkerRepairsForTests(): void {
   for (const repair of pendingMarkerRepairs.values()) {
     forgetMarkerRepair(repair.eventId, repair.uid, repair.itemId);
   }
+  for (const r of pendingMarkerRepoints.values()) forgetMarkerRepoint(r.eventId, r.uid, r.itemId);
+  markerRepointRetries.clear();
 }
 
 // The shared marker-attribution helper (`markerDisplayName`) lives in the
@@ -2397,6 +2490,8 @@ async function runSetMark(
     }
   }
 
+  // #1367: record the pending marker pass durably BEFORE the unmark can drain.
+  if (repointMarkerItemId) rememberMarkerRepoint(eventId, uid, repointMarkerItemId);
   const committed = batch.commit();
   // #491: the echoed sibling buckets did not ride the batch (see the
   // aggregated-write comment above) — once the server ACKS the batch (which
@@ -2439,7 +2534,12 @@ async function runSetMark(
           deleteIfNoCarrier: repointDeleteIfNoCarrier,
         }),
       )
+      // Cleared only on success; a failed pass leaves the durable record for the
+      // open-time retry (#1367).
+      .then(() => forgetMarkerRepoint(eventId, uid, itemId))
       .catch(() => undefined);
+    // A REJECTED unmark is rolled back, so there is nothing to reconcile.
+    void committed.catch(() => forgetMarkerRepoint(eventId, uid, itemId));
   }
   void committed.catch((err: unknown) => {
     if (markerRepairCandidate) forgetMarkerRepair(eventId, uid, markerRepairCandidate);
@@ -2686,6 +2786,11 @@ export async function reconcileEchoes(params: {
   assertSupportedDayIndexes(params.dayIndexes, 'reconcileEchoes');
   const database = params.database ?? db;
   const eventId = EVENT_ID;
+  // #1367: an open is the retry point for a marker pass a reload interrupted.
+  // Fire-and-forget and off the mark chain: it waits for queued writes to drain.
+  void retryPendingMarkerRepoints({ database, eventId, uid: params.uid, dayIndexes: params.dayIndexes }).catch(
+    () => undefined,
+  );
   const chainKey = markChainKey(database, eventId, params.uid);
   const prev = markChains.get(chainKey) ?? Promise.resolve();
   const next = prev.then(
