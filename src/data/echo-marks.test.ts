@@ -1262,7 +1262,7 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     }
   });
 
-  it('#1367: a REJECTED unmark clears the record (the unmark rolled back, nothing to reconcile)', async () => {
+  it('#1367: a REJECTED unmark keeps the record (an older unmark may share the slot); the retry re-points from server truth', async () => {
     const values = stubStorage();
     try {
       seedRepeats();
@@ -1272,8 +1272,39 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       });
       await markShared({ nextMarked: false, echoMarks: false });
       await settle();
-      expect(values.has(REPOINT_KEY)).toBe(false);
       expect(markerTxWrite()).toBeUndefined();
+      expect(values.get(REPOINT_KEY)).toBeTruthy();
+      // Next open: the rolled-back Day 2 Mark is still the server's state, so the
+      // pass keeps a marker (latest carrier wins) rather than deleting it.
+      await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [0, 1, 2, 3], echoMarks: false });
+      await settle();
+      expect(markerTxWrite()?.[1]).toMatchObject({ dayIndex: 3 });
+      expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(false);
+      expect(values.has(REPOINT_KEY)).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('#1367: the open-time retry snapshots its records BEFORE waiting, so a newer unmark is never cleared by it', async () => {
+    const values = stubStorage();
+    try {
+      seedRepeats();
+      H.markerServer.set('shared', serverMarker());
+      values.set('gcb:echo-marker-repoint:test-event:u1:other', 'old');
+      let drain: (() => void) | undefined;
+      H.waitForPendingWrites.mockImplementationOnce(() => new Promise<void>((r) => { drain = r; }));
+      await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [0, 1, 2, 3], echoMarks: false });
+      await settle();
+      // A new unmark records `shared` while the retry is still waiting.
+      H.batchCommit.mockImplementationOnce(() => new Promise<void>(() => {}));
+      await markShared({ nextMarked: false, echoMarks: false });
+      const fresh = values.get(REPOINT_KEY);
+      expect(fresh).toBeTruthy();
+      drain!();
+      await settle();
+      await settle();
+      expect(values.get(REPOINT_KEY)).toBe(fresh);
     } finally {
       vi.unstubAllGlobals();
     }

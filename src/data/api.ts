@@ -1873,13 +1873,17 @@ export async function retryPendingMarkerRepoints(params: {
   const database = params.database ?? db;
   const eventId = params.eventId ?? EVENT_ID;
   const { uid, dayIndexes } = params;
-  if (pendingMarkerRepointItems(eventId, uid).size === 0) return;
+  // Snapshot BEFORE the wait: `waitForPendingWrites` covers only writes queued by
+  // now, so a record a later unmark writes during the wait is left to that
+  // unmark's own continuation (or the next open), never cleared by this pass.
+  const pending = pendingMarkerRepointItems(eventId, uid);
+  if (pending.size === 0) return;
   const retryKey = eventScopeKey(eventId, 'echo-marker-repoint-retry', uid);
   if (markerRepointRetries.has(retryKey)) return;
   markerRepointRetries.add(retryKey);
   try {
     await waitForPendingWrites(database);
-    for (const [itemId, token] of pendingMarkerRepointItems(eventId, uid)) {
+    for (const [itemId, token] of pending) {
       try {
         await repointMarkerFromServer({ database, eventId, uid, itemId, dayIndexes, deleteIfNoCarrier: true });
         forgetMarkerRepoint(eventId, uid, itemId, token);
@@ -2563,10 +2567,9 @@ async function runSetMark(
         if (repointToken) forgetMarkerRepoint(eventId, uid, itemId, repointToken);
       })
       .catch(() => undefined);
-    // A REJECTED unmark is rolled back, so there is nothing to reconcile.
-    void committed.catch(() => {
-      if (repointToken) forgetMarkerRepoint(eventId, uid, itemId, repointToken);
-    });
+    // A REJECTED unmark deliberately leaves its record: the one slot may also be
+    // carrying an OLDER unmark's still-pending pass, and the retry reads server
+    // truth, so after a rollback it just re-points to the latest carrier.
   }
   void committed.catch((err: unknown) => {
     if (markerRepairCandidate) forgetMarkerRepair(eventId, uid, markerRepairCandidate);
