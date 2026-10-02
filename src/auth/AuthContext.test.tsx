@@ -6,6 +6,7 @@ import {
   AUTH_BOOTSTRAP_TIMEOUT_MS,
   AuthProvider,
   DEAL_TIMEOUT_MS,
+  EXPLICIT_LOGOUT_KEY,
   PENDING_REDIRECT_ATTESTATION_KEY,
   REDIRECT_PENDING_KEY,
   SIGNIN_ADULT_ACK_KEY,
@@ -88,13 +89,15 @@ const HANDOFF_USER = { ...FAKE_USER, refreshToken: 'handoff-refresh-token' };
 let emitAuth: (u: unknown) => unknown = () => {};
 
 function Harness() {
-  const { dealError, dealing, retryDeal, signIn } = useAuth();
+  const { dealError, dealing, retryDeal, signIn, signOutUser, user } = useAuth();
   return (
     <div>
       {dealError ? <p role="alert">{dealError}</p> : null}
       <span data-testid="dealing">{dealing ? 'dealing' : 'idle'}</span>
       <button onClick={() => retryDeal()}>retry</button>
       <button onClick={() => void signIn(false)}>signin</button>
+      <button onClick={() => void signOutUser()}>signout</button>
+      <span data-testid="auth-user">{user?.uid ?? "signed out"}</span>
     </div>
   );
 }
@@ -2175,7 +2178,7 @@ describe('AuthContext deal-error hardening', () => {
     vi.unstubAllGlobals();
   });
 
-  it('hands off web.app on a mid-session sign-out, not only on first load (#353)', async () => {
+  it('hands off web.app on spontaneous mid-session session loss (#353)', async () => {
     const replace = vi.fn();
     vi.stubGlobal('location', {
       hostname: 'gaycruisebingo.web.app',
@@ -2189,9 +2192,7 @@ describe('AuthContext deal-error hardening', () => {
     await act(async () => void (await emitAuth(FAKE_USER)));
     expect(replace).not.toHaveBeenCalled(); // signed-in cached sessions stay put
 
-    // An explicit sign-out lands on the canonical origin: any sign-in tap from
-    // web.app would hand off anyway, so staying would only add a second
-    // acknowledgement screen before the same navigation.
+    // A null SDK callback without an explicit logout retains fallback recovery.
     await act(async () => void (await emitAuth(null)));
     expect(replace).toHaveBeenCalledOnce();
     expect(replace).toHaveBeenCalledWith('https://gaycruisebingo.firebaseapp.com/card');
@@ -2223,6 +2224,82 @@ describe('AuthContext deal-error hardening', () => {
     expect(replace).toHaveBeenCalledOnce();
     expect(replace).toHaveBeenCalledWith('https://gaycruisebingo.firebaseapp.com/more?tab=stats');
 
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps explicit logout on the current route through null settles, timers and a fresh mount', async () => {
+    const replace = vi.fn();
+    const location = { hostname: 'gaycruisebingo.web.app', pathname: '/card', search: '', hash: '', replace };
+    vi.stubGlobal('location', location);
+    const first = mount();
+    await act(async () => void (await emitAuth(FAKE_USER)));
+    location.pathname = '/more';
+    location.search = '?tab=stats';
+    mocks.signOut.mockImplementationOnce(async () => { await emitAuth(null); });
+    await userEvent.click(screen.getByText('signout'));
+    expect(mocks.signOut).toHaveBeenCalledWith(mockedAuth);
+    expect(localStorage.getItem(EXPLICIT_LOGOUT_KEY)).toBe('1');
+    expect(screen.getByTestId('auth-user')).toHaveTextContent('signed out');
+    await act(async () => void (await emitAuth(null)));
+    expect(replace).not.toHaveBeenCalled();
+    first.unmount();
+    // Browser reload creates a fresh provider while origin persistence survives.
+    vi.useFakeTimers();
+    mount();
+    await act(async () => void (await emitAuth(null)));
+    await vi.advanceTimersByTimeAsync(WEB_APP_AUTH_SETTLE_TIMEOUT_MS * 2);
+    expect(replace).not.toHaveBeenCalled();
+    expect(screen.getByTestId('auth-user')).toHaveTextContent('signed out');
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('does not restore another origin session when readable storage refuses intent writes', async () => {
+    const replace = vi.fn();
+    vi.stubGlobal('location', { hostname: 'gaycruisebingo.web.app', pathname: '/more', search: '', hash: '', replace });
+    const write = vi.spyOn(localStorage, 'setItem').mockImplementation(() => { throw new Error('quota exceeded'); });
+    const first = mount();
+    await act(async () => void (await emitAuth(FAKE_USER)));
+    mocks.signOut.mockImplementationOnce(async () => { await emitAuth(null); });
+    await userEvent.click(screen.getByText('signout'));
+    expect(replace).not.toHaveBeenCalled();
+    first.unmount();
+    mount();
+    await act(async () => void (await emitAuth(null)));
+    expect(replace).not.toHaveBeenCalled();
+    write.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
+  it('allows a deliberate sign-in after explicit logout and uses the current route', async () => {
+    const replace = vi.fn();
+    vi.stubGlobal('location', { hostname: 'gaycruisebingo.web.app', pathname: '/more', search: '?tab=stats', hash: '', replace });
+    localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
+    mount();
+    await act(async () => void (await emitAuth(null)));
+    expect(replace).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByText('signin'));
+    expect(localStorage.getItem(EXPLICIT_LOGOUT_KEY)).toBeNull();
+    expect(replace).toHaveBeenCalledOnce();
+    expect(replace).toHaveBeenCalledWith('https://gaycruisebingo.firebaseapp.com/more?tab=stats');
+    expect(mocks.signInWithPopup).not.toHaveBeenCalled();
+    expect(mocks.signInWithRedirect).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('honors another same-origin tab logout and does not automatically hop with unreadable storage', async () => {
+    const replace = vi.fn();
+    vi.stubGlobal('location', { hostname: 'gaycruisebingo.web.app', pathname: '/card', search: '', hash: '', replace });
+    mount();
+    await act(async () => void (await emitAuth(FAKE_USER)));
+    // Other tab's logout writes the shared origin marker before SDK publication.
+    localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
+    await act(async () => void (await emitAuth(null)));
+    expect(replace).not.toHaveBeenCalled();
+    const get = vi.spyOn(localStorage, 'getItem').mockImplementation(() => { throw new Error('storage denied'); });
+    await act(async () => void (await emitAuth(null)));
+    expect(replace).not.toHaveBeenCalled();
+    get.mockRestore();
     vi.unstubAllGlobals();
   });
 

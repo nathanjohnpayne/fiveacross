@@ -85,6 +85,26 @@ export const DEAL_TIMEOUT_MS = 20_000;
 // room for a slow device without preserving an unbounded signed-out stall.
 export const WEB_APP_AUTH_SETTLE_TIMEOUT_MS = 3_000;
 export const PENDING_REDIRECT_ATTESTATION_KEY = 'gcb:pending-redirect-attestation';
+// Firebase sessions and explicit logout intent are both origin-wide. This stores
+// no account data; it only prevents an automatic hop into another origin's session.
+export const EXPLICIT_LOGOUT_KEY = 'gcb:explicit-logout';
+
+function automaticAuthHandoffSuppressed(): boolean {
+  try {
+    if (localStorage.getItem(EXPLICIT_LOGOUT_KEY) === '1') return true;
+    // A prior logout may have failed to record intent in readable but full or
+    // write-denied storage. Do not automatically visit another session unless
+    // this origin can also persist logout intent; deliberate Sign in still works.
+    const probeKey = `${EXPLICIT_LOGOUT_KEY}:write-probe`;
+    localStorage.setItem(probeKey, '1');
+    localStorage.removeItem(probeKey);
+    return false;
+  } catch {
+    // Without readable persistence, do not guess whether logout happened before
+    // reload. The deliberate Sign in action still works.
+    return true;
+  }
+}
 
 // A random per-attempt identifier (Phase 4b P1 round 3 on #836), generated
 // once at redirect start and threaded through every durable AND session
@@ -772,6 +792,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // reconnect, which only happens if `online` flipping true re-runs that effect.
   const [online, setOnline] = useState(isOnline());
   const signInAttemptRef = useRef<Promise<void> | null>(null);
+  const explicitLogoutRef = useRef(false);
   // The token of the redirect attempt this tab most recently STARTED and has
   // not yet seen fail — the handle the bfcache recovery below needs to retire
   // that attempt's records without touching any other tab's (#1123).
@@ -936,7 +957,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // navigation (started now or earlier); false when this origin is already
   // canonical, or while an app-owned redirect return is completing (#357) — the
   // caller then renders normally and the settle timer re-arms on settlement.
-  const handoffSignedOutWebApp = useCallback((): boolean => {
+  // Explicit logout additionally suppresses automatic callers until a deliberate
+  // sign-in, including later tabs/reloads through the origin-wide intent marker.
+  const handoffSignedOutWebApp = useCallback((explicitSignIn = false): boolean => {
+    if (!explicitSignIn && (explicitLogoutRef.current || automaticAuthHandoffSuppressed())) return false;
     if (redirectReturnPendingRef.current) return false;
     if (webAppHandoffStartedRef.current) return true;
     // This hop fires from the auth callback, before SignIn renders, so neither
@@ -1471,11 +1495,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (handoffSignedOutWebApp()) {
           // Move a signed-out web.app visit before rendering SignIn, so the Player
           // sees one acknowledgement and one Google transaction on firebaseapp.com.
-          // Deliberately EVERY signed-out settle, not just first load (#353): a
-          // mid-session sign-out on web.app also lands on the canonical origin,
-          // because any sign-in tap from web.app would hand off anyway — leaving
-          // the Player on web.app's SignIn would only add a second
-          // acknowledgement screen before the same navigation.
+          // A spontaneous session loss still follows the existing fallback
+          // route (#353). Explicit logout suppresses this hop, including after
+          // reload, so another origin's cached User cannot undo the logout.
           return undefined;
         }
         // Signed out → App renders SignIn, never "Loading…".
@@ -2435,6 +2457,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signIn = useCallback((acknowledgedAdultContent: boolean): Promise<void> => {
     if (signInAttemptRef.current) return signInAttemptRef.current;
+    explicitLogoutRef.current = false;
+    try {
+      localStorage.removeItem(EXPLICIT_LOGOUT_KEY);
+    } catch {
+      // A deliberate sign-in bypasses automatic-hop suppression even if storage
+      // is unavailable. The guard on future automatic visits stays conservative.
+    }
 
     // Captured from SignIn's actual checkbox state BEFORE any auth transaction
     // starts, and threaded through both paths. The mutable Event posture answers
@@ -2453,7 +2482,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // suppressed (handoff already started, or a redirect return is
         // completing), the tap is a no-op and the chokepoint's owner — the
         // in-flight navigation or the re-armed settle timer — finishes the job.
-        handoffSignedOutWebApp();
+        handoffSignedOutWebApp(true);
         return;
       }
       const sameOriginHandler =
@@ -2570,6 +2599,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [attest, handoffSignedOutWebApp, onFallbackAuthOrigin]);
 
   const signOutUser = async () => {
+    // Install intent before Firebase publishes null (which may be synchronous).
+    explicitLogoutRef.current = true;
+    try {
+      localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
+    } catch {
+      // Keep this mount suppressed; unreadable storage also suppresses reload.
+    }
     await signOut(auth);
   };
 
