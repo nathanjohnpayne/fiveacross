@@ -2360,13 +2360,18 @@ async function runSetMark(
       // and sibling boards, so it also cannot be misled by a partially cached
       // sibling set. Only with Echo off, and only when a sibling still carries it.
       //
-      // With Echo off and INCOMPLETE sibling knowledge but no cached carrier, the
-      // only remaining carrier may be on a sibling this device could not read
-      // (Codex P2 on #1363). Deleting here would drop the Player off the Tally
-      // until some later repair; instead the post-ack transaction decides from
+      // With Echo off and no cached carrier, the only remaining carrier may be on
+      // a sibling this device could not read, or one another device marks before
+      // this batch commits (Codex P2 x2 on #1363). Deleting here would drop the
+      // Player off the Tally; instead the post-ack transaction decides from
       // server truth: re-point to a server carrier, or delete when there is none.
-      const deferMarkerToServer =
-        params.echoMarks === false && !stillAchievedElsewhere && siblingKnowledgeIncomplete;
+      //
+      // EVERY Echo-off no-carrier unmark defers (Codex P2 on #1363), not only the
+      // incomplete-knowledge case: another device may mark the Prompt on a
+      // sibling after these cache reads but before this batch commits, and an
+      // in-batch delete would wipe that device's fresh marker with no repair
+      // candidate left behind. The server pass sees that Mark and keeps it.
+      const deferMarkerToServer = params.echoMarks === false && !stillAchievedElsewhere;
       repointMarkerItemId =
         params.echoMarks === false && ((stillAchievedElsewhere && latestRemaining) || deferMarkerToServer)
           ? tallyItemId

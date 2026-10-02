@@ -1075,6 +1075,43 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     expect(markerTxWrite()?.[1]).toMatchObject({ dayIndex: 2, markedAt: 50 });
   });
 
+  it('#1360: an Echo-off no-carrier unmark never deletes in-batch; another device\'s later Mark survives', async () => {
+    // Every sibling is cached and none carries the Prompt...
+    seedBoards();
+    H.dayBoards.set(3, { uid: 'u1', seed: 333, dayIndex: 3, cells: card((i) => (i === 8 ? 'shared' : `b${i}`)) });
+    H.dayBoards.set(2, {
+      uid: 'u1', seed: 222, dayIndex: 2,
+      cells: card((i) => (i === 5 ? 'shared' : `a${i}`), { 5: { marked: true, markedAt: 25 } }),
+    });
+    H.markerServer.set('shared', serverMarker());
+    await markShared({ nextMarked: false, echoMarks: false });
+    expect(H.batchDelete).not.toHaveBeenCalled();
+    // ...but another device marks it on Day 3 before the server pass reads.
+    H.dayBoards.set(3, {
+      uid: 'u1', seed: 333, dayIndex: 3,
+      cells: card((i) => (i === 8 ? 'shared' : `b${i}`), { 8: { marked: true, markedAt: 60, status: 'confirmed' } }),
+    });
+    commitDay2Unmark();
+    await settle();
+    expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(false);
+    expect(markerTxWrite()?.[1]).toMatchObject({ dayIndex: 3, markedAt: 60 });
+  });
+
+  it('#1360: an Echo-off unmark of the last carrier deletes the marker in the server pass', async () => {
+    seedBoards();
+    H.dayBoards.set(3, { uid: 'u1', seed: 333, dayIndex: 3, cells: card((i) => (i === 8 ? 'shared' : `b${i}`)) });
+    H.dayBoards.set(2, {
+      uid: 'u1', seed: 222, dayIndex: 2,
+      cells: card((i) => (i === 5 ? 'shared' : `a${i}`), { 5: { marked: true, markedAt: 25 } }),
+    });
+    H.markerServer.set('shared', serverMarker());
+    await markShared({ nextMarked: false, echoMarks: false });
+    expect(H.batchDelete).not.toHaveBeenCalled();
+    commitDay2Unmark();
+    await settle();
+    expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(true);
+  });
+
   it('#1360: with Echo ON an unmark keeps the marker exactly as before (no re-point write)', async () => {
     seedBoards();
     H.dayBoards.set(3, {
