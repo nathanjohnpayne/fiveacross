@@ -1112,6 +1112,14 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(true);
   });
 
+  it('#1360: a LEGACY single-board Event with Echo off keeps the atomic in-batch marker delete', async () => {
+    seedBoards();
+    await markShared({ nextMarked: false, echoMarks: false, daily: false, echoDayIndexes: undefined });
+    await settle();
+    expect(H.batchDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(true);
+    expect(markerTxWrite()).toBeUndefined();
+  });
+
   it('#1360: with Echo ON an unmark keeps the marker exactly as before (no re-point write)', async () => {
     seedBoards();
     H.dayBoards.set(3, {

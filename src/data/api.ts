@@ -2371,9 +2371,13 @@ async function runSetMark(
       // sibling after these cache reads but before this batch commits, and an
       // in-batch delete would wipe that device's fresh marker with no repair
       // candidate left behind. The server pass sees that Mark and keeps it.
-      const deferMarkerToServer = params.echoMarks === false && !stillAchievedElsewhere;
+      // Daily mode only (Codex P2 on #1363): a legacy single-board Event has no
+      // sibling Days for the server pass to scan, so it keeps the atomic in-batch
+      // delete it always had.
+      const echoOffDaily = params.echoMarks === false && params.daily === true;
+      const deferMarkerToServer = echoOffDaily && !stillAchievedElsewhere;
       repointMarkerItemId =
-        params.echoMarks === false && ((stillAchievedElsewhere && latestRemaining) || deferMarkerToServer)
+        echoOffDaily && ((stillAchievedElsewhere && latestRemaining) || deferMarkerToServer)
           ? tallyItemId
           : null;
       repointDeleteIfNoCarrier = deferMarkerToServer;
