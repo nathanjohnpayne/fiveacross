@@ -6,7 +6,7 @@ import type { Cell, DayDef, EventDoc, ItemDoc } from '../types';
 // deal is snapshot-gated (drawn ONLY from `DayDef.snapshotItemIds`, never a live
 // `status: 'active'` query), lazy (no Board dealt before `unlockAt` or before the
 // snapshot is stamped), no-repeat-across-the-cruise (excludes Prompts on the
-// Player's earlier Day Cards), and idempotent (re-opening an already-dealt Day
+// Player's other Day Cards, later Days included when opened out of order), and idempotent (re-opening an already-dealt Day
 // never re-deals). The sampling/exclusion math itself is proven in
 // src/game/logic.test.ts; this file proves the Firestore-facing gate.
 
