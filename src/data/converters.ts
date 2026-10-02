@@ -4,6 +4,7 @@ import { scoringForDay } from '../game/scoring';
 import { standingsFreezeAtFor } from '../game/logic';
 import { normalizeEventTheme } from '../theme/themes';
 import { allowedPhotoUrlOrNull } from './photoUrl';
+import { withReadableDayStats } from './eventArchive';
 import type {
   FirestoreDataConverter,
   QueryDocumentSnapshot,
@@ -283,8 +284,13 @@ export const playerConverter: FirestoreDataConverter<PlayerDoc> = {
     };
     if ('displayName' in out && typeof out.displayName !== 'string') {
       delete (out as Partial<PlayerDoc>).displayName;
+    } else if (typeof out.displayName === 'string') {
+      // Legacy oversized values remain stored; read/render work is bounded.
+      out.displayName = out.displayName.slice(0, 100);
     }
-    return out;
+    // Every persisted-player consumer receives the same readable stats as the
+    // leaderboard and archive; this never recomputes or writes honor stats.
+    return withReadableDayStats(out);
   },
 };
 export const userConverter = passthrough<UserDoc>();

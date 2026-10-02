@@ -225,6 +225,10 @@ Runner: `npm test` (Vitest, jsdom). Test: `src/components/w2-share-cards.test.ts
 - **Given** a Player double-taps Share fast enough to start a second `shareCardBlob` call before the first has finished, **when** the first (older) call's fallback-sheet leg would otherwise resolve after the second (newer) call has already mounted its own sheet, **then** the older call is superseded instead of superseding—it returns `'cancelled'` and never touches the DOM, leaving the newer sheet's card/link exactly as mounted—`src/components/w2-share-cards.test.tsx` ("shareCardBlob" describe block) (issue #759).
 - **Given** a Player dismisses the terminal fallback sheet with a real pointer (not a keyboard), **when** the browser's own mousedown-default-action blur moves focus to `document.body` before the paired click fires—a sequence jsdom does not reproduce on its own—**then** focus still returns to the Share trigger, exactly as it does for Close/Escape/supersession, and an abandoned pointer-down that is never followed by its own click cannot later steal focus back on an unrelated Escape/Close dismissal—`src/components/w2-share-cards.test.tsx` ("shareCardBlob" describe block) (issue #760).
 
+## Defensive rendering inputs (#1413)
+
+Share-card text is bounded before emoji segmentation and DOM construction: Player names to 100 UTF-16 code units, other text to 256. A cut never leaves a trailing half surrogate pair. This protects rasterization from oversized legacy values without changing the current Firestore name-write policy, ordinary copy, ranks or the caller's row selection.
+
 ## Out of scope
 
 - No per-square proof cards (ADR 0005)—a Proof already carries its own shareable media.

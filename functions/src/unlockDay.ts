@@ -815,6 +815,15 @@ async function hasMoment(db: AdminFirestore, eventId: string, kind: FinaleMoment
   return snap.docs.length > 0;
 }
 
+/** Conservative content budget below Firestore's 1 MiB document ceiling. */
+export const FINALE_CONTENT_MAX_BYTES = 256 * 1024;
+
+/** Oversized content yields a generic beat, never a partial roster or podium. */
+export function boundedFinaleContent(extra?: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!extra) return undefined;
+  return Buffer.byteLength(JSON.stringify(extra), 'utf8') <= FINALE_CONTENT_MAX_BYTES ? extra : undefined;
+}
+
 async function postFinaleMoment(
   db: AdminFirestore,
   eventId: string,
@@ -862,7 +871,7 @@ async function postFinaleMoment(
       photoURL: null,
       createdAt: now,
       dayIndex,
-      ...(extra ?? {}),
+      ...(boundedFinaleContent(extra) ?? {}),
     });
   });
 }
@@ -907,7 +916,7 @@ export async function readFinaleRoster(
       const uid = d.id || (typeof data.uid === 'string' && data.uid ? data.uid : '');
       return {
         uid,
-        displayName: typeof data.displayName === 'string' && data.displayName ? data.displayName : 'Anonymous',
+        displayName: typeof data.displayName === 'string' && data.displayName ? data.displayName.slice(0, 100) : 'Anonymous',
         bingoCount: finiteNumber(data.bingoCount, 0),
         squaresMarked: finiteNumber(data.squaresMarked, 0),
         firstBingoAt: typeof data.firstBingoAt === 'number' && Number.isFinite(data.firstBingoAt) ? data.firstBingoAt : null,
