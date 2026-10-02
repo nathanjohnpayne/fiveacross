@@ -3291,7 +3291,9 @@ describe('ShareCard — legacy oversized text', () => {
       champion: { displayName: name, bingoCount: 1, squaresMarked: 5 },
       firstBingo: { displayName: name }, honors: [{ dayLabel: 'Day 1', displayName: name }],
     });
-    for (const node of toBlobNode().querySelectorAll('.share-card-honoree-name, .share-card-honor-name')) {
+    const nodes = toBlobNode().querySelectorAll('.share-card-honoree-name, .share-card-honor-name');
+    expect(nodes).toHaveLength(3);
+    for (const node of nodes) {
       expect(node.textContent).toBe('A'.repeat(99));
     }
   });
