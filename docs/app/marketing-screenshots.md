@@ -62,6 +62,17 @@ The distinction matters for the next person to change this file: the loose versi
 
 **The `fiveacross` capture deals the wireframes' wedding weekend.** With no Edition on top, the platform has no occasion of its own, and Bodega prompts under its chrome read as incoherent. So for `HERO_EDITION=fiveacross` the fixture swaps in the occasion `#fx-card-fa` draws in `plans/daily-cards-wireframes.html`: Kim & Jo's wedding at The Barn at Green Valley, its 24 prompts verbatim, "Kim & Jo said yes" in the free space, and the platform's Marquee / Confetti Hour / Afterglow Themes. Only the warm-up Day is ever captured; Days 1 and 2 stay locked and still carry Bodega's pools, which no capture shows.
 
+## The HBS weekly mockups
+
+`HERO_EDITION=fiveacross HERO_EVENT=hbs scripts/marketing-shots.sh --grep HBS` runs `tests/marketing/hbs-shots.spec.ts` over `tests/marketing/support/hbs-fixture.ts` and writes `hbs-card.png`, `hbs-switcher.png`, `hbs-ranks.png` and `hbs-email.png`. They back the mockups in [`plans/hbs-spring-2027.md`](../../plans/hbs-spring-2027.md), whose committed copies live in `docs/images/hbs-spring-2027/`. The spec is opt-in: without `HERO_EVENT=hbs` it skips itself, so a default capture is unchanged.
+
+It is a mockup of a *proposed* Event, so it differs from the captures above in four ways:
+
+- **Sixteen weekly Days** with the plan's week titles, Themes, free spaces and "this week" lines, each unlocking Monday at 7:00 a.m. Eastern in 2027. The page clock is frozen on Wednesday of Week 12 (April 21, 2027, 6:00 p.m.) and the browser zone is Eastern.
+- **A hand-composed card.** Only the 24 prompts on screen are seeded, in the plan's planned split of 12 easy, 6 themed and 6 evergreen, and the real `dealBoard` deals them. The card is written with rules disabled, because the emulator's server clock (the real one) is before Week 12's unlock and the rules would refuse the deal; the UI reads the frozen page clock.
+- **The same three safety rules**: invented names, `spicy: false` prompts only, and no photo proofs.
+- **Current daily wording.** The weekly vocabulary is plan ticket T1, so the UI still says "Day 12", "today" and "Tonight". Any caption on these images must say so; never present them as finished weekly UI.
+
 ## The email mockups
 
 `tests/marketing/email-shots.spec.ts` photographs the two player emails by rendering the **real templates**—`buildDailyEmailModel` / `renderDailyEmailHtml` and `buildPodiumEmailModel` / `renderPodiumEmailHtml`, the same code the Functions send—into a 640px page and taking a full-page capture. The capture itself reads no emulator data and no app page, but it shares the marketing Playwright config, so any run still boots the emulators and builds the app first. `scripts/marketing-shots.sh --grep email` runs only the email capture, with the same JDK 21 and emulator prerequisites as the app shots; a plain run takes both.

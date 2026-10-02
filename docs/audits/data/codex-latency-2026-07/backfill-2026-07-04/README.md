@@ -1,5 +1,7 @@
 # Backfill sample — 2026-07-04
 
+> **Provenance.** This document is a bootstrap-era copy of an audit run in `nathanjohnpayne/mergepath`. The pipeline it describes, `scripts/audit-codex-latency.sh` and its suite, lives only in mergepath and is not part of this repository. Run every command below from a mergepath checkout.
+
 Load-bearing raw + computed samples for the ack (pair 1) backfill that drives
 the `ack_wait_seconds` retune in `../../codex-latency-2026-07.md`.
 
