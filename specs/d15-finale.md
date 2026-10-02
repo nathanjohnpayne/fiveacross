@@ -56,7 +56,7 @@ Implements `plans/daily-cards-spec.md` § "Scoring and social surfaces" → "The
 
 ## Defensive public-data boundaries (#1413)
 
-`playerConverter` bounds legacy public names to 100 UTF-16 code units and applies the existing `withReadableDayStats` normalizer on every persisted Player read, so all ranking and honor consumers receive the same readable roots and buckets. No honor stat is recomputed or written, and the established malformed-key/bucket compatibility contract above remains unchanged. `readFinaleRoster` bounds legacy names to 100 UTF-16 code units. Each finale Moment accepts at most 256 KiB of serialized UTF-8 content, leaving substantial headroom below Firestore's document ceiling; content exceeding that budget is omitted entirely and the generic beat still posts. A partial roster or truncated podium must never imply complete standings or defeat subsequent ban-aware rendering.
+`playerConverter` bounds legacy public names to 100 UTF-16 code units and applies the existing `withReadableDayStats` normalizer on every persisted Player read, so all ranking and honor consumers receive the same readable roots and buckets. No honor stat is recomputed or written, and the established malformed-key/bucket compatibility contract above remains unchanged. `readFinaleRoster` bounds legacy names to 100 UTF-16 code units. Each complete finale Moment, including its metadata, accepts at most 256 KiB of serialized UTF-8 data, leaving substantial headroom below Firestore's document ceiling; content exceeding that budget is omitted entirely and the generic beat still posts. A partial roster or truncated podium must never imply complete standings or defeat subsequent ban-aware rendering.
 
 ## Test coverage
 

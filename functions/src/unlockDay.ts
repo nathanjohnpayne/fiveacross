@@ -819,9 +819,12 @@ async function hasMoment(db: AdminFirestore, eventId: string, kind: FinaleMoment
 export const FINALE_CONTENT_MAX_BYTES = 256 * 1024;
 
 /** Oversized content yields a generic beat, never a partial roster or podium. */
-export function boundedFinaleContent(extra?: Record<string, unknown>): Record<string, unknown> | undefined {
+export function boundedFinaleContent(
+  extra?: Record<string, unknown>,
+  metadata: Record<string, unknown> = {},
+): Record<string, unknown> | undefined {
   if (!extra) return undefined;
-  return Buffer.byteLength(JSON.stringify(extra), 'utf8') <= FINALE_CONTENT_MAX_BYTES ? extra : undefined;
+  return Buffer.byteLength(JSON.stringify({ ...metadata, ...extra }), 'utf8') <= FINALE_CONTENT_MAX_BYTES ? extra : undefined;
 }
 
 async function postFinaleMoment(
@@ -864,15 +867,15 @@ async function postFinaleMoment(
     if (eventClosedToPlay(event)) return;
     // No human author — a `system` uid keeps the MomentDoc shape intact without
     // impersonating a Player.
-    tx.set(momentRef, {
+    const metadata = {
       kind,
       uid: 'system',
       displayName: '',
       photoURL: null,
       createdAt: now,
       dayIndex,
-      ...(boundedFinaleContent(extra) ?? {}),
-    });
+    };
+    tx.set(momentRef, { ...metadata, ...(boundedFinaleContent(extra, metadata) ?? {}) });
   });
 }
 

@@ -1640,6 +1640,13 @@ describe('finale defensive payload budget', () => {
     const near = { text: 'x'.repeat(FINALE_CONTENT_MAX_BYTES - 11) };
     expect(Buffer.byteLength(JSON.stringify(near))).toBe(FINALE_CONTENT_MAX_BYTES);
     expect(boundedFinaleContent(near)).toBe(near);
+    expect(boundedFinaleContent(near, { kind: 'last_call', uid: 'system', createdAt: 1 })).toBeUndefined();
+    const metadata = { kind: 'last_call', uid: 'system', createdAt: 1 };
+    const overhead = Buffer.byteLength(JSON.stringify({ ...metadata, text: '' }));
+    const complete = { text: 'x'.repeat(FINALE_CONTENT_MAX_BYTES - overhead) };
+    expect(Buffer.byteLength(JSON.stringify({ ...metadata, ...complete }))).toBe(FINALE_CONTENT_MAX_BYTES);
+    expect(boundedFinaleContent(complete, metadata)).toBe(complete);
+    expect(boundedFinaleContent({ text: complete.text + 'x' }, metadata)).toBeUndefined();
     expect(boundedFinaleContent({ text: near.text + 'x' })).toBeUndefined();
     expect(boundedFinaleContent({ text: '😀'.repeat(FINALE_CONTENT_MAX_BYTES / 3) })).toBeUndefined();
   });
