@@ -1675,11 +1675,11 @@ describe('finale defensive payload budget', () => {
 
   it('bounds legacy roster names before both last-call and podium content', async () => {
     const db = makeDb({ eventId: 'e', event: { days: mainDays() },
-      players: [{ uid: 'u', displayName: 'x'.repeat(1_000_000), bingoCount: 3, squaresMarked: 9, firstBingoAt: 10 }],
+      players: [{ uid: 'u', displayName: 'x'.repeat(99) + '😀' + 'x'.repeat(1_000_000), bingoCount: 3, squaresMarked: 9, firstBingoAt: 10 }],
     });
     await runFinaleBeats(db, 'e', { now: () => D9_UNLOCK + 13 * 60 * 60 * 1000 });
-    expect(db.moments().find((m) => m.kind === 'last_call')?.lastCall).toMatchObject({ players: [{ displayName: 'x'.repeat(100) }] });
+    expect(db.moments().find((m) => m.kind === 'last_call')?.lastCall).toMatchObject({ players: [{ displayName: 'x'.repeat(99) }] });
     await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 1000 });
-    expect(db.moments().find((m) => m.kind === 'podium')?.podium).toMatchObject({ champion: { displayName: 'x'.repeat(100) } });
+    expect(db.moments().find((m) => m.kind === 'podium')?.podium).toMatchObject({ champion: { displayName: 'x'.repeat(99) } });
   });
 });

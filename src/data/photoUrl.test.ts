@@ -95,6 +95,7 @@ describe('playerConverter — malformed public stats', () => {
   it('bounds a legacy public name on read without changing stored data', () => {
     const raw = { displayName: 'x'.repeat(100_000) };
     expect(playerConverter.fromFirestore(snap('u1', raw)).displayName).toBe('x'.repeat(100));
+    expect(playerConverter.fromFirestore(snap('u1', { displayName: 'x'.repeat(99) + '😀' })).displayName).toBe('x'.repeat(99));
     expect(raw.displayName).toHaveLength(100_000);
   });
   it.each([null, 'bad', [], { 0: null }, { 0: [] }, { 0: 42 }])('drops unreadable dayStats %j', (dayStats) => {

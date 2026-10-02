@@ -287,6 +287,7 @@ export const playerConverter: FirestoreDataConverter<PlayerDoc> = {
     } else if (typeof out.displayName === 'string') {
       // Legacy oversized values remain stored; read/render work is bounded.
       out.displayName = out.displayName.slice(0, 100);
+      if (/[\uD800-\uDBFF]$/.test(out.displayName)) out.displayName = out.displayName.slice(0, -1);
     }
     // Every persisted-player consumer receives the same readable stats as the
     // leaderboard and archive; this never recomputes or writes honor stats.

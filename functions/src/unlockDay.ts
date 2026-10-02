@@ -880,6 +880,12 @@ function finiteNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
+function boundedFinaleName(value: unknown): string {
+  if (typeof value !== 'string' || !value) return 'Anonymous';
+  const name = value.slice(0, 100);
+  return /[\uD800-\uDBFF]$/.test(name) ? name.slice(0, -1) : name;
+}
+
 /** The canonical roster as `FinalePlayer[]` (#266) — the same shape the content
  *  builders and client-side podium consume. Ban filtering is applied only to the
  *  rendered view/copy, so reversible bans do not permanently erase finale data.
@@ -916,7 +922,7 @@ export async function readFinaleRoster(
       const uid = d.id || (typeof data.uid === 'string' && data.uid ? data.uid : '');
       return {
         uid,
-        displayName: typeof data.displayName === 'string' && data.displayName ? data.displayName.slice(0, 100) : 'Anonymous',
+        displayName: boundedFinaleName(data.displayName),
         bingoCount: finiteNumber(data.bingoCount, 0),
         squaresMarked: finiteNumber(data.squaresMarked, 0),
         firstBingoAt: typeof data.firstBingoAt === 'number' && Number.isFinite(data.firstBingoAt) ? data.firstBingoAt : null,
