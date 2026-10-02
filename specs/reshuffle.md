@@ -21,7 +21,7 @@ Implements [`plans/reshuffle-ticket.md`](../plans/reshuffle-ticket.md) and `plan
 
 **The new card is an ordinary card.** It draws from the SAME frozen `snapshotItemIds` Day Snapshot (never a live `status: 'active'` query), with the same stratification rules as the first deal—`stratify` off for all-tame tutorial pools, the Event's `spicyRatio` on main Days.
 
-**Discarded prompts return to the eligible pool.** The Event-wide no-repeat exclusion is computed from KEPT cards only: every OTHER Day Card the Player holds is excluded, the discarded one is not.
+**Discarded prompts return to the eligible pool.** The Event-wide no-repeat exclusion is computed from KEPT cards only: every OTHER Day Card the Player holds is excluded (within the Event's repeat window, nearest first, and shrinking farthest-first if the pool runs short—#1360, `specs/easy-mix.md` § The repeat window), the discarded one is not.
 
 **The chip renders only when every gate holds** (`src/components/Board.tsx`): card pristine, counter known and under the allowance, Day unlocked, card is the caller's own, and online. It reappears if the Player unmarks everything. It never renders on a locked-Day preview—`DayBar`'s chip prop is optional and `LockedDayPreview` passes none.
 

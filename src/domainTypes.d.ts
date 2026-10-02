@@ -726,6 +726,17 @@ export interface EventDoc {
     // — an Event doc seeded before this field existed, or one whose read
     // half-failed, must never start mailing a roster.
     dailyEmailEnabled?: boolean;
+    // Echo Marks on/off (#1360, specs/echo-marks.md § "Disabled"). Read through
+    // `echoMarksEnabled` (src/game/logic.ts): only an explicit `false` turns
+    // Echo off — absent or malformed is ON, so every Event written before the
+    // switch is unchanged. A weekly Event sets it false so each week is a fresh
+    // game: a repeated Prompt arrives unmarked and has to be done again.
+    echoMarks?: boolean;
+    // The repeat window (#1360, specs/easy-mix.md § "The repeat window"): how
+    // many of the Player's NEAREST other cards keep their main-half Prompts off
+    // a new card. Read through `repeatWindowFor`: a positive integer, otherwise
+    // no window (every other card, the pre-#1360 behaviour).
+    repeatWindow?: number;
   };
 }
 

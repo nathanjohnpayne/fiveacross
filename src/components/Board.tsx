@@ -37,7 +37,7 @@ import {
 // the proofed-mark completion verdict ProofSheet reports back (PR #110 round 2
 // finding 1), same shape as setMark's return.
 import type { AttachProofResult } from '../data/proofs';
-import { hasBingo, isBlackout, winningCells, completedLines, countMarked, isPristine, MIN_POOL, bingoLineEdge, boardFirstBingoAt, dayDealState, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, standingsFreezeAtFor, resolvedStandingsFreezeAt, earlierEligibleHeadlineBingoExists, playerRowRootLag } from '../game/logic';
+import { hasBingo, isBlackout, winningCells, completedLines, countMarked, isPristine, MIN_POOL, bingoLineEdge, boardFirstBingoAt, dayDealState, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, standingsFreezeAtFor, resolvedStandingsFreezeAt, earlierEligibleHeadlineBingoExists, playerRowRootLag, echoMarksEnabled } from '../game/logic';
 import { dealDelayMs, winOrder } from '../game/motion';
 
 // Board identities whose deal-in cascade has already played this session
@@ -1005,6 +1005,9 @@ export default function Board() {
   // the board, and any echo win it enqueued drains through the standard
   // cells-effect drain — nothing posts directly from here.
   const reconciledBoardsRef = useRef<Set<string>>(new Set());
+  // #1360: bumps on EVERY flip of settings.echoMarks, so a flip back to an
+  // earlier value still keys a fresh reconcile visit (CodeRabbit on #1363).
+  const echoGenerationRef = useRef<{ on: boolean; generation: number } | null>(null);
   // #492: the board VISIT whose last reconcile pass came back INCOMPLETE (or
   // failed). `board` is a NEW object on every snapshot, so deleting the
   // once-per-board key alone made every subsequent snapshot re-run the whole
@@ -1163,7 +1166,16 @@ export default function Board() {
       reconcileVisitRef.current = { key: null, generation: reconcileVisitRef.current.generation };
       return;
     }
-    const key = `${eventId}:${user.uid}:${board.dayIndex}:${board.seed}`;
+    // The Echo switch is part of the visit identity (#1360, Codex P2 on #1363):
+    // flipping `settings.echoMarks` while this card stays open must run a fresh
+    // reconcile under the new value, not hit the already-reconciled guard. A
+    // generation (not the bare value) so off→on→off→on re-arms every time.
+    const echoOn = echoMarksEnabled(event?.settings);
+    const prevEcho = echoGenerationRef.current;
+    if (!prevEcho || prevEcho.on !== echoOn) {
+      echoGenerationRef.current = { on: echoOn, generation: prevEcho ? prevEcho.generation + 1 : 0 };
+    }
+    const key = `${eventId}:${user.uid}:${board.dayIndex}:${board.seed}:echo-${echoGenerationRef.current!.generation}`;
     if (reconcileVisitRef.current.key !== key) {
       reconcileVisitRef.current = { key, generation: reconcileVisitRef.current.generation + 1 };
       // Any pin belongs to an ended visit now — inert by generation, dropped
@@ -1247,12 +1259,14 @@ export default function Board() {
       tutorialDayIndexes: [...tutorialDayIndexSet(schedule)],
       ceremonialDayIndexes: [...ceremonialDayIndexSet(schedule)],
       statsFrozen: standingsFrozen(event),
+      // #1360: an Event with Echo Marks off reconciles stats only, echoing nothing.
+      echoMarks: echoMarksEnabled(event?.settings),
     })
       .then((res) => settle(Boolean(res.complete)))
       // A synchronous failure (nothing written) may retry on the next open.
       .catch(() => settle(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `schedule` derives from event?.days; deps track what the reconcile reads, plus the explicit retry nonce.
-  }, [eventId, hasDays, user, board, identityKnown, dayBoardConfirmed, event?.days, player, reconcileRetryNonce]);
+  }, [eventId, hasDays, user, board, identityKnown, dayBoardConfirmed, event?.days, event?.settings?.echoMarks, player, reconcileRetryNonce]);
   // Edge refs for the COSMETIC Celebration UI only (issue #104). The public Moment
   // broadcast moved OFF this snapshot-diffing machinery and ONTO the action path —
   // doMark reads `setMark`'s synchronous win-transition verdict and enqueues into a
@@ -2244,6 +2258,8 @@ export default function Board() {
         // that lands confirmed can auto-mark its Prompt on the Player's other
         // Day Cards in the same batch. Legacy events pass nothing (no echo).
         echoDayIndexes: hasDays ? days.map((d) => d.index) : undefined,
+        // #1360: `settings.echoMarks: false` keeps each Mark on its own card.
+        echoMarks: echoMarksEnabled(event?.settings),
       });
       // Mark-transition instrumentation (#721): `doMark` is reachable from
       // exactly two call sites — `onPledge` below (always `nextMarked: true`,

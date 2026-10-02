@@ -31,6 +31,9 @@ const H = vi.hoisted(() => ({
   // cached, the production common case); `false` → a cached TOMBSTONE (this
   // device deleted it); `true` → a cached live marker.
   markerCache: new Map<string, boolean>(),
+  // #1360: the SERVER's Tally marker docs per itemId (read by the post-ack re-point
+  // transaction). Absent means the marker does not exist on the server.
+  markerServer: new Map<string, Record<string, unknown>>(),
   // The default getDocFromCache implementation, exposed so a test that
   // overrides it can restore EXACTLY this (a lookalike without the tally
   // branch would silently change marker-cache semantics for later tests).
@@ -140,6 +143,10 @@ function route(ref: { args?: unknown[] }) {
     return board ? snap(true, a[5], board) : snap(false);
   }
   if (a[2] === 'players') return H.player ? snap(true, a[3], H.player) : snap(false);
+  if (a[2] === 'tally' && a[4] === 'markers') {
+    const m = H.markerServer.get(a[3]);
+    return m ? snap(true, a[5], m) : snap(false);
+  }
   return snap(false);
 }
 
@@ -231,6 +238,7 @@ beforeEach(() => {
   H.itemsById.clear();
   H.dayBoards = new Map();
   H.markerCache.clear();
+  H.markerServer.clear();
   H.player = null;
   H.transactionRunner = null;
   __resetPendingMarkerRepairsForTests();
@@ -486,6 +494,14 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     // The non-carrier sibling (Day 1) is untouched.
     expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 1))).toBe(false);
     expect(echoed).toMatchObject({ echoAnalyticsTrigger: 'mark', echoAnalyticsId: expect.any(String) });
+    expectNoClientEchoTrack();
+  });
+
+  it('#1360: with Echo switched off the Mark stays on its own card — no sibling write', async () => {
+    seedBoards();
+    await markShared({ echoMarks: false });
+    expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 2))).toBe(true);
+    expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 3))).toBe(false);
     expectNoClientEchoTrack();
   });
 
@@ -902,6 +918,242 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     expect(H.batchDelete).toHaveBeenCalledTimes(1);
   });
 
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+  const seedRepeats = () => {
+    seedBoards();
+    // `shared` re-marked by hand on Day 1 (t=20) and Day 3 (t=30); the acted
+    // Day 2 copy (t=25) is the one being unmarked.
+    H.dayBoards.set(1, {
+      uid: 'u1', seed: 111, dayIndex: 1,
+      cells: card((i) => (i === 4 ? 'shared' : `c${i}`), { 4: { marked: true, markedAt: 20, status: 'confirmed' } }),
+    });
+    H.dayBoards.set(3, {
+      uid: 'u1', seed: 333, dayIndex: 3,
+      cells: card((i) => (i === 8 ? 'shared' : `b${i}`), { 8: { marked: true, markedAt: 30, status: 'confirmed' } }),
+    });
+    H.dayBoards.set(2, {
+      uid: 'u1', seed: 222, dayIndex: 2,
+      cells: card((i) => (i === 5 ? 'shared' : `a${i}`), { 5: { marked: true, markedAt: 25 } }),
+    });
+  };
+  // The mocked batch does not apply writes to the fake server, so a test of the
+  // post-ack pass applies the committed unmark of the acted Day 2 copy itself.
+  const commitDay2Unmark = () => {
+    const b = H.dayBoards.get(2)!;
+    H.dayBoards.set(2, { ...b, cells: (b.cells as Cell[]).map((c) => (c.index === 5 ? { ...c, marked: false, markedAt: null } : c)) });
+  };
+  const markerTxWrite = () =>
+    H.txSet.mock.calls.find((c) => segs(c)[2] === 'tally' && segs(c)[4] === 'markers');
+  const serverMarker = () => ({ uid: 'u1', eventId: EVENT_ID, displayName: 'Alice', dayIndex: 2, markedAt: 25, itemText: 'P' });
+
+  it('#1360: with Echo off an unmark RE-POINTS the marker to the latest remaining week, after the ack', async () => {
+    seedRepeats();
+    H.markerServer.set('shared', serverMarker());
+    await markShared({ nextMarked: false, echoMarks: false });
+    // Never inside the offline batch: a queued set could recreate a moderated marker.
+    expect(H.batchSet.mock.calls.some((c) => isMarkerWrite(c))).toBe(false);
+    expect(H.batchDelete).not.toHaveBeenCalled();
+    commitDay2Unmark();
+    await settle();
+    expect(markerTxWrite()?.[1]).toMatchObject({ uid: 'u1', displayName: 'Alice', dayIndex: 3, markedAt: 30 });
+  });
+
+  it('#1360: the re-point never RECREATES a marker the server no longer has (moderation)', async () => {
+    seedRepeats();
+    // An Admin deleted the marker on the server; this device still caches it.
+    H.markerCache.set('shared', true);
+    await markShared({ nextMarked: false, echoMarks: false });
+    commitDay2Unmark();
+    await settle();
+    expect(markerTxWrite()).toBeUndefined();
+    expect(H.batchSet.mock.calls.some((c) => isMarkerWrite(c))).toBe(false);
+  });
+
+  it('#1360: the re-point reads siblings from the SERVER, so an uncached later Mark still wins', async () => {
+    seedRepeats();
+    // Day 1's real Mark is the latest (t=40), but this device's cache cannot read Day 1.
+    H.dayBoards.set(1, {
+      uid: 'u1', seed: 111, dayIndex: 1,
+      cells: card((i) => (i === 4 ? 'shared' : `c${i}`), { 4: { marked: true, markedAt: 40, status: 'confirmed' } }),
+    });
+    const { getDocFromCache } = await import('firebase/firestore');
+    const cacheRead = vi.mocked(getDocFromCache);
+    cacheRead.mockImplementation((async (ref: { args?: unknown[] }) => {
+      const a = (ref.args ?? []).filter((x): x is string => typeof x === 'string');
+      if (a[2] === 'days' && a[3] === '1') throw new Error('not cached');
+      return H.defaultGetDocFromCache(ref);
+    }) as never);
+    H.markerServer.set('shared', serverMarker());
+    try {
+      await markShared({ nextMarked: false, echoMarks: false });
+      commitDay2Unmark();
+      await settle();
+      expect(markerTxWrite()?.[1]).toMatchObject({ dayIndex: 1, markedAt: 40 });
+    } finally {
+      cacheRead.mockImplementation(((ref: { args?: unknown[] }) => H.defaultGetDocFromCache(ref)) as never);
+    }
+  });
+
+  const withUncachedDay = async <T,>(day: number, run: () => Promise<T>): Promise<T> => {
+    const { getDocFromCache } = await import('firebase/firestore');
+    const cacheRead = vi.mocked(getDocFromCache);
+    cacheRead.mockImplementation((async (ref: { args?: unknown[] }) => {
+      const a = (ref.args ?? []).filter((x): x is string => typeof x === 'string');
+      if (a[2] === 'days' && a[3] === String(day)) throw new Error('not cached');
+      return H.defaultGetDocFromCache(ref);
+    }) as never);
+    try {
+      return await run();
+    } finally {
+      cacheRead.mockImplementation(((ref: { args?: unknown[] }) => H.defaultGetDocFromCache(ref)) as never);
+    }
+  };
+  const onlyCarrierOnDay1 = (markedOnServer: boolean) => {
+    seedBoards();
+    H.dayBoards.set(3, { uid: 'u1', seed: 333, dayIndex: 3, cells: card((i) => `b${i}`) });
+    H.dayBoards.set(1, {
+      uid: 'u1', seed: 111, dayIndex: 1,
+      cells: card((i) => (i === 4 ? 'shared' : `c${i}`), markedOnServer ? { 4: { marked: true, markedAt: 40, status: 'confirmed' } } : {}),
+    });
+    H.dayBoards.set(2, {
+      uid: 'u1', seed: 222, dayIndex: 2,
+      cells: card((i) => (i === 5 ? 'shared' : `a${i}`), { 5: { marked: true, markedAt: 25 } }),
+    });
+    H.markerServer.set('shared', serverMarker());
+  };
+
+  it('#1360: an uncached ONLY carrier keeps the marker — the server pass re-points it, no in-batch delete', async () => {
+    onlyCarrierOnDay1(true);
+    await withUncachedDay(1, async () => {
+      await markShared({ nextMarked: false, echoMarks: false });
+      expect(H.batchDelete).not.toHaveBeenCalled();
+      commitDay2Unmark();
+      await settle();
+    });
+    expect(markerTxWrite()?.[1]).toMatchObject({ dayIndex: 1, markedAt: 40 });
+    expect(H.txDelete).not.toHaveBeenCalled();
+  });
+
+  it('#1360: with no carrier on the server either, the deferred server pass deletes the marker', async () => {
+    onlyCarrierOnDay1(false);
+    await withUncachedDay(1, async () => {
+      await markShared({ nextMarked: false, echoMarks: false });
+      expect(H.batchDelete).not.toHaveBeenCalled();
+      commitDay2Unmark();
+      await settle();
+    });
+    expect(markerTxWrite()).toBeUndefined();
+    expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(true);
+  });
+
+  it('#1360: the server pass ignores a board whose stored owner does not match its path', async () => {
+    seedRepeats();
+    // Day 3 carries the latest Mark but its stored uid is someone else's.
+    H.dayBoards.set(3, {
+      uid: 'intruder', seed: 333, dayIndex: 3,
+      cells: card((i) => (i === 8 ? 'shared' : `b${i}`), { 8: { marked: true, markedAt: 30, status: 'confirmed' } }),
+    });
+    H.markerServer.set('shared', serverMarker());
+    await markShared({ nextMarked: false, echoMarks: false });
+    commitDay2Unmark();
+    await settle();
+    expect(markerTxWrite()?.[1]).toMatchObject({ dayIndex: 1, markedAt: 20 });
+  });
+
+  it('#1360: a same-Day re-mark that lands before the server pass wins (the acted Day is scanned too)', async () => {
+    onlyCarrierOnDay1(false);
+    await withUncachedDay(1, async () => {
+      await markShared({ nextMarked: false, echoMarks: false });
+      // Before the post-ack pass reads, the Player re-marks the same Day 2 square.
+      H.dayBoards.set(2, {
+        uid: 'u1', seed: 222, dayIndex: 2,
+        cells: card((i) => (i === 5 ? 'shared' : `a${i}`), { 5: { marked: true, markedAt: 50, status: 'confirmed' } }),
+      });
+      await settle();
+    });
+    expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(false);
+    expect(markerTxWrite()?.[1]).toMatchObject({ dayIndex: 2, markedAt: 50 });
+  });
+
+  it('#1360: an Echo-off no-carrier unmark never deletes in-batch; another device\'s later Mark survives', async () => {
+    // Every sibling is cached and none carries the Prompt...
+    seedBoards();
+    H.dayBoards.set(3, { uid: 'u1', seed: 333, dayIndex: 3, cells: card((i) => (i === 8 ? 'shared' : `b${i}`)) });
+    H.dayBoards.set(2, {
+      uid: 'u1', seed: 222, dayIndex: 2,
+      cells: card((i) => (i === 5 ? 'shared' : `a${i}`), { 5: { marked: true, markedAt: 25 } }),
+    });
+    H.markerServer.set('shared', serverMarker());
+    await markShared({ nextMarked: false, echoMarks: false });
+    expect(H.batchDelete).not.toHaveBeenCalled();
+    // ...but another device marks it on Day 3 before the server pass reads.
+    H.dayBoards.set(3, {
+      uid: 'u1', seed: 333, dayIndex: 3,
+      cells: card((i) => (i === 8 ? 'shared' : `b${i}`), { 8: { marked: true, markedAt: 60, status: 'confirmed' } }),
+    });
+    commitDay2Unmark();
+    await settle();
+    expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(false);
+    expect(markerTxWrite()?.[1]).toMatchObject({ dayIndex: 3, markedAt: 60 });
+  });
+
+  it('#1360: an Echo-off unmark of the last carrier deletes the marker in the server pass', async () => {
+    seedBoards();
+    H.dayBoards.set(3, { uid: 'u1', seed: 333, dayIndex: 3, cells: card((i) => (i === 8 ? 'shared' : `b${i}`)) });
+    H.dayBoards.set(2, {
+      uid: 'u1', seed: 222, dayIndex: 2,
+      cells: card((i) => (i === 5 ? 'shared' : `a${i}`), { 5: { marked: true, markedAt: 25 } }),
+    });
+    H.markerServer.set('shared', serverMarker());
+    await markShared({ nextMarked: false, echoMarks: false });
+    expect(H.batchDelete).not.toHaveBeenCalled();
+    commitDay2Unmark();
+    await settle();
+    expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(true);
+  });
+
+  it('#1360: a LEGACY single-board Event with Echo off keeps the atomic in-batch marker delete', async () => {
+    seedBoards();
+    await markShared({ nextMarked: false, echoMarks: false, daily: false, echoDayIndexes: undefined });
+    await settle();
+    expect(H.batchDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(true);
+    expect(markerTxWrite()).toBeUndefined();
+  });
+
+  it('#1360: a cached carrier unmarked elsewhere before the server pass still lets it delete the orphan marker', async () => {
+    seedRepeats();
+    H.markerServer.set('shared', serverMarker());
+    // Hold this unmark's server ack until the other device has acted.
+    let ack: (() => void) | undefined;
+    H.batchCommit.mockImplementationOnce(() => new Promise<void>((r) => { ack = r; }));
+    await markShared({ nextMarked: false, echoMarks: false });
+    // Day 1 and Day 3 were cached carriers, but another device unmarks both first.
+    H.dayBoards.set(1, { uid: 'u1', seed: 111, dayIndex: 1, cells: card((i) => (i === 4 ? 'shared' : `c${i}`)) });
+    H.dayBoards.set(3, { uid: 'u1', seed: 333, dayIndex: 3, cells: card((i) => (i === 8 ? 'shared' : `b${i}`)) });
+    commitDay2Unmark();
+    ack!();
+    await settle();
+    expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(true);
+  });
+
+  it('#1360: with Echo ON an unmark keeps the marker exactly as before (no re-point write)', async () => {
+    seedBoards();
+    H.dayBoards.set(3, {
+      uid: 'u1', seed: 333, dayIndex: 3,
+      cells: card((i) => (i === 8 ? 'shared' : `b${i}`), { 8: { marked: true, markedAt: 30, status: 'confirmed', echo: true } }),
+    });
+    H.dayBoards.set(2, {
+      uid: 'u1', seed: 222, dayIndex: 2,
+      cells: card((i) => (i === 5 ? 'shared' : `a${i}`), { 5: { marked: true, markedAt: 25 } }),
+    });
+    H.markerServer.set('shared', serverMarker());
+    await markShared({ nextMarked: false });
+    await settle();
+    expect(H.batchDelete).not.toHaveBeenCalled();
+    expect(H.batchSet.mock.calls.some((c) => isMarkerWrite(c))).toBe(false);
+    expect(markerTxWrite()).toBeUndefined();
+  });
+
   it('preserves root blackout when an unmark leaves a sibling Echo blacked out', async () => {
     seedBoards();
     H.dayBoards.set(2, {
@@ -974,6 +1226,16 @@ describe('dealDayCard — deal-time echo (spec § Deal-time)', () => {
     expect(playerWrite.squaresMarked).toBe(2); // Day 1 prior bucket + this echo
     expect(echoed).toMatchObject({ echoAnalyticsTrigger: 'deal', echoAnalyticsId: expect.any(String) });
     expectNoClientEchoTrack();
+  });
+
+  it('#1360: with settings.echoMarks false the repeated Prompt arrives UNMARKED', async () => {
+    seedDeal({ 0: { marked: true, markedAt: 1, status: 'confirmed' } }); // s0 achieved on Day 1
+    H.event = { ...H.event, settings: { spicyRatio: 0.4, echoMarks: false } };
+    await expect(dealDayCard(u, 0)).resolves.toBe(true);
+    const boardWrite = H.txSet.mock.calls.find((c) => isDayBoardWrite(c, 0));
+    const cells = cellsFromData((boardWrite![1] as { cells: unknown }).cells);
+    expect(cells.find((c) => c.itemId === 's0')).toMatchObject({ marked: false });
+    expect(cells.some((c) => c.echo)).toBe(false);
   });
 
   it('revalidates achieved prompts inside the deal transaction before it writes Echoes', async () => {
@@ -1072,6 +1334,20 @@ describe('reshuffleBoard — the post-Reshuffle re-deal echo (spec § Reshuffle 
     // Reconciliation: `squaresMarked[d] = markCount[d] + echoCount[d]`).
     await new Promise((r) => setTimeout(r, 0)); // let every microtask continuation settle
     expect(H.track).not.toHaveBeenCalledWith('echo_mark', expect.objectContaining({ trigger: 'reshuffle' }));
+  });
+
+  it('#1360: with settings.echoMarks false the replacement card re-echoes nothing', async () => {
+    seedShuffle({
+      day1Cells: { 0: { marked: true, markedAt: 1, status: 'confirmed', echo: true } },
+      day0Overrides: { 0: { marked: true, markedAt: 1, status: 'confirmed' } },
+      playerExtra: { dayStats: { 1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null } } },
+    });
+    H.event = { ...H.event, settings: { spicyRatio: 0.4, echoMarks: false } };
+    await expect(reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 })).resolves.toBe(1);
+    const raw = H.txSet.mock.calls.find((c) => isDayBoardWrite(c, 1))![1] as { cells: unknown };
+    const cells = cellsFromData(raw.cells);
+    expect(cells.some((c) => c.echo)).toBe(false);
+    expect(cells.find((c) => c.itemId === 's0')).toMatchObject({ marked: false });
   });
 
   it('a reshuffle that echoes a genuinely new Prompt stamps a server-observed transition', async () => {
@@ -1366,6 +1642,13 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
     });
     expect(boardWrite.cells['9']).toMatchObject({ echoAnalyticsTrigger: 'open_reconcile', echoAnalyticsId: expect.any(String) });
     expectNoClientEchoTrack();
+  });
+
+  it('#1360: with Echo switched off the open-time reconcile writes no echo', async () => {
+    seedReconcile();
+    const res = await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [0, 1, 2], echoMarks: false });
+    expect(res.changed).toBe(false);
+    expect(H.batchSet.mock.calls.some((c) => isDayBoardWrite(c, 2))).toBe(false);
   });
 
   it('#491: a stats-lagged board heals on open — cells ahead of the cached bucket trigger a server-derived stats write, stamped from the CELLS and re-pinning the honor', async () => {
@@ -2123,6 +2406,14 @@ describe('confirmClaim — the admin_confirmed echo moment (spec § Contract)', 
     expectNoClientEchoTrack();
   });
 
+  it('#1360: with settings.echoMarks false a confirm resolves its own card only', async () => {
+    seedClaim();
+    H.event = { ...H.event, settings: { ...(H.event?.settings ?? {}), echoMarks: false } };
+    await confirmClaim(claim(), 'admin-1');
+    expect(H.txSet.mock.calls.some((c) => isDayBoardWrite(c, 1))).toBe(true);
+    expect(H.txSet.mock.calls.some((c) => isDayBoardWrite(c, 2))).toBe(false);
+  });
+
   it('a stale claim (no matching board/cell) resolves without firing mark_square or echo_mark (Codex round 1 finding 3, #727; round 3)', async () => {
     seedClaim();
     // The claim's cellIndex/proofId no longer matches anything on the board —
@@ -2229,5 +2520,66 @@ describe('confirmClaim — the admin_confirmed echo moment (spec § Contract)', 
     });
     expect(metaWrite).toBeDefined();
     expect((metaWrite![1] as { firstBingo: { uid: string } }).firstBingo.uid).toBe('u1');
+  });
+});
+
+// #1360 — the repeat window, end to end through both deal paths. Day 1 (nearest
+// to Day 0) holds s0..s23 and Day 2 holds s24..s47; the snapshot is s0..s71.
+// With no window the whole history (48) is excluded, which leaves exactly
+// s48..s71 — no s24..s47 can appear. A window of ONE card excludes only Day 1,
+// so the 48 survivors include s24..s47 and the card draws from them.
+describe('the repeat window reaches dealDayCard and reshuffleBoard (#1360)', () => {
+  const SNAP = Array.from({ length: 72 }, (_, i) => `s${i}`);
+  const cardOf = (ids: string[]) => {
+    let cursor = 0;
+    return card((i) => (i === 12 ? 'free' : ids[cursor++]));
+  };
+  const seedWindow = (settings: Record<string, unknown>, withDay0Card: boolean) => {
+    for (const id of SNAP) H.itemsById.set(id, { text: `P ${id}`, spicy: false, isFreeSpace: false });
+    H.event = {
+      days: [0, 1, 2].map((i) => day(i, { snapshotItemIds: SNAP })),
+      settings: { spicyRatio: 0.4, ...settings },
+    };
+    H.dayBoards.set(1, { uid: 'u1', seed: 111, dayIndex: 1, cells: cardOf(SNAP.slice(0, 24)) });
+    H.dayBoards.set(2, { uid: 'u1', seed: 222, dayIndex: 2, cells: cardOf(SNAP.slice(24, 48)) });
+    if (withDay0Card) {
+      H.dayBoards.set(0, { uid: 'u1', seed: 100, dayIndex: 0, cells: cardOf(SNAP.slice(48, 72)) });
+    }
+    H.player = { uid: 'u1', joinedAt: 1, reshufflesUsed: 0, dayStats: {} };
+  };
+  const day2Ids = new Set(SNAP.slice(24, 48));
+  const dealt = (write: unknown) =>
+    cellsFromData((write as { cells: unknown }).cells)
+      .filter((c) => !c.free)
+      .map((c) => c.itemId as string);
+  const u = { uid: 'u1', displayName: 'Alice', photoURL: null } as never;
+
+  it('dealDayCard: no window keeps Day 2 off the card; a 1-card window lets it back', async () => {
+    seedWindow({}, false);
+    await expect(dealDayCard(u, 0)).resolves.toBe(true);
+    const whole = dealt(H.txSet.mock.calls.find((c) => isDayBoardWrite(c, 0))![1]);
+    expect(whole.some((id) => day2Ids.has(id))).toBe(false);
+
+    H.txSet.mockClear();
+    H.dayBoards.delete(0);
+    seedWindow({ repeatWindow: 1 }, false);
+    await expect(dealDayCard(u, 0)).resolves.toBe(true);
+    const windowed = dealt(H.txSet.mock.calls.find((c) => isDayBoardWrite(c, 0))![1]);
+    expect(windowed.some((id) => SNAP.slice(0, 24).includes(id))).toBe(false); // Day 1 still excluded
+    expect(windowed.some((id) => day2Ids.has(id))).toBe(true);
+  });
+
+  it('reshuffleBoard: the replacement honours the same window over the KEPT cards', async () => {
+    seedWindow({}, true);
+    await expect(reshuffleBoard({ uid: 'u1', dayIndex: 0, expectedSeed: 100 })).resolves.toBe(1);
+    const whole = dealt(H.txSet.mock.calls.find((c) => isDayBoardWrite(c, 0))![1]);
+    expect(whole.some((id) => day2Ids.has(id))).toBe(false);
+
+    H.txSet.mockClear();
+    seedWindow({ repeatWindow: 1 }, true);
+    await expect(reshuffleBoard({ uid: 'u1', dayIndex: 0, expectedSeed: 100 })).resolves.toBe(1);
+    const windowed = dealt(H.txSet.mock.calls.find((c) => isDayBoardWrite(c, 0))![1]);
+    expect(windowed.some((id) => SNAP.slice(0, 24).includes(id))).toBe(false);
+    expect(windowed.some((id) => day2Ids.has(id))).toBe(true);
   });
 });

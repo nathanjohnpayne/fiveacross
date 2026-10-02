@@ -39,6 +39,9 @@ import {
   foldDayStat,
   achievedItemIds,
   applyEchoes,
+  echoMarksEnabled,
+  repeatExclusionTiers,
+  repeatWindowFor,
   firstLineCompletionAt,
   foldEchoStats,
   standingsFrozen,
@@ -809,25 +812,34 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
   // NOT just lower indexes. A mid-cruise joiner opens the LATEST unlocked Day
   // first (the Board's default), so an earlier Day can be dealt AFTER a later
   // one; reading only days 0..dayIndex-1 would let that later card's Prompts
-  // repeat. `dealBoard`'s exclusion resets on its own once the pool is exhausted,
-  // so we always pass the full cross-cruise history.
+  // repeat. We pass every other card as a tier (cut to the Event's repeat window,
+  // #1360); `dealBoard` drops the farthest tier first once the pool runs short.
   // Canonical DayDef.index values, NOT array positions (Phase 4b P1 on #447):
   // day-board paths key on d.index everywhere, so a schedule whose indexes
   // aren't exactly 0..n must not read the wrong sibling docs for the exclusion
   // set or the deal-time achieved set.
-  const otherBoardRefs = days
-    .map((d) => d.index)
-    .filter((i) => i !== dayIndex)
-    .map((i) => rawDayBoard(i, u.uid, eventId));
+  const otherDayIndexes = days.map((d) => d.index).filter((i) => i !== dayIndex);
+  const otherBoardRefs = otherDayIndexes.map((i) => rawDayBoard(i, u.uid, eventId));
   const otherCards = await Promise.all(otherBoardRefs.map((ref) => getDoc(ref).catch(() => null)));
-  const excludeIds = new Set<string>();
   const otherCardCells: Cell[][] = [];
-  for (const snap of otherCards) {
-    if (!snap || !snap.exists()) continue;
+  const otherCardsByDay: Array<{ dayIndex: number; cells: Cell[] }> = [];
+  otherCards.forEach((snap, i) => {
+    if (!snap || !snap.exists()) return;
     const cells = cellsFromData((snap.data() as { cells?: unknown }).cells);
     otherCardCells.push(cells);
-    for (const c of cells) if (c.itemId) excludeIds.add(c.itemId);
-  }
+    otherCardsByDay.push({ dayIndex: otherDayIndexes[i], cells });
+  });
+  // The repeat window (#1360, specs/easy-mix.md § "The repeat window"): one
+  // exclusion tier per other card, nearest Day first, cut to
+  // `settings.repeatWindow` cards when the Event sets one. With no window every
+  // other card is a tier, so the union is exactly the old whole-history set; the
+  // tiers only matter when that union would starve the pool, where `dealBoard`
+  // now drops the farthest card first instead of discarding the whole exclusion.
+  const excludeTiers = repeatExclusionTiers(
+    otherCardsByDay,
+    dayIndex,
+    repeatWindowFor(eventData?.settings),
+  );
   // Echo Marks (specs/echo-marks.md, #446): the preflight reads give the
   // no-repeat exclusion its current card view. The transaction re-reads these
   // refs and derives the achieved set it commits against, so a concurrent unmark
@@ -849,7 +861,7 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
   // Card has its own deterministic layout rather than repeating Day 0's.
   const seed = (seedFromUid(u.uid) ^ Math.imul(dayIndex + 1, 0x9e3779b1)) >>> 0;
   const cells = dealBoard(pool, day.freeText ?? FREE_TEXT, seed, spicyRatio, {
-    excludeIds,
+    excludeTiers,
     stratify,
     easyMixRatio,
   });
@@ -944,12 +956,17 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
     // Echo Marks: pre-mark every dealt Prompt the Player has already achieved
     // (specs/echo-marks.md § Deal-time). `applyEchoes` is idempotent and
     // returns the ORIGINAL cells untouched when nothing echoes, so a Player
-    // with no repeated Prompts deals byte-identically to today.
-    const achieved = achievedItemIds(
-      latestOtherCardSnaps
-        .filter((snap) => snap.exists())
-        .map((snap) => cellsFromData((snap.data() as { cells?: unknown }).cells)),
-    );
+    // with no repeated Prompts deals byte-identically to today. An Event with
+    // Echo switched off (#1360, `settings.echoMarks: false`, read off the
+    // transaction's own Event re-read) deals with an EMPTY achieved set, so a
+    // repeated Prompt arrives unmarked and has to be done again.
+    const achieved = echoMarksEnabled(latestEventData?.settings)
+      ? achievedItemIds(
+          latestOtherCardSnaps
+            .filter((snap) => snap.exists())
+            .map((snap) => cellsFromData((snap.data() as { cells?: unknown }).cells)),
+        )
+      : new Set<string>();
     const rawEchoRes = applyEchoes(cells, achieved, now);
     const echoRes = {
       ...rawEchoRes,
@@ -1224,10 +1241,8 @@ export async function reshuffleBoard(params: {
   // exclusion set from committed state.
   // Canonical DayDef.index values, not array positions (Phase 4b P1 on #447)
   // — the same fix as dealDayCard's sibling refs.
-  const peerRefs = days
-    .map((d) => d.index)
-    .filter((i) => i !== dayIndex)
-    .map((i) => rawDayBoard(i, uid, eventId));
+  const peerDayIndexes = days.map((d) => d.index).filter((i) => i !== dayIndex);
+  const peerRefs = peerDayIndexes.map((i) => rawDayBoard(i, uid, eventId));
 
   // Same composition rules as the first deal (daily-cards-spec § "Unlock
   // mechanics"): tutorial pools are all-tame so they deal unstratified; main Days
@@ -1308,7 +1323,8 @@ export async function reshuffleBoard(params: {
     }
 
     // No-repeat exclusion computed from KEPT cards only (the ticket's decision):
-    // every OTHER Day Card this Player holds is excluded, but the card being
+    // every OTHER Day Card this Player holds is excluded (within the repeat window,
+    // #1360), but the card being
     // DISCARDED is not — its Prompts return to the eligible pool and may legitimately
     // land on the replacement. Excluding them would be worse than pointless: it would
     // shrink the drawable pool on every reroll and make a "fresh" card systematically
@@ -1319,18 +1335,25 @@ export async function reshuffleBoard(params: {
     // so the loser retries — and a peer set captured before the transaction would
     // still describe the winner's OLD card, letting this deal duplicate Prompts the
     // winner just placed on their new, still-kept one.
-    const excludeIds = new Set<string>();
-    for (const snap of peerSnaps) {
-      if (!snap.exists()) continue;
-      const peerCells = cellsFromData((snap.data() as { cells?: unknown }).cells);
-      for (const c of peerCells) if (c.itemId) excludeIds.add(c.itemId);
-    }
+    // The same repeat window as the first deal (#1360): one tier per KEPT card,
+    // nearest Day first, cut to `settings.repeatWindow`. Without the window a
+    // late-term Reshuffle would exclude every kept card and hit the same
+    // all-or-nothing reset the first deal no longer has.
+    const excludeTiers = repeatExclusionTiers(
+      peerSnaps.flatMap((snap, i) =>
+        snap.exists()
+          ? [{ dayIndex: peerDayIndexes[i], cells: cellsFromData((snap.data() as { cells?: unknown }).cells) }]
+          : [],
+      ),
+      dayIndex,
+      repeatWindowFor(eventData?.settings),
+    );
 
     const nextUsed = used + 1;
     const seed = reshuffleSeed(uid, dayIndex, nextUsed, board.seed ?? 0);
     const boardEasyMixRatio = typeof board.easyMixRatio === 'number' ? board.easyMixRatio : easyMixRatio;
     const cells = dealBoard(pool, day.freeText ?? FREE_TEXT, seed, spicyRatio, {
-      excludeIds,
+      excludeTiers,
       stratify,
       easyMixRatio: boardEasyMixRatio,
     });
@@ -1345,9 +1368,12 @@ export async function reshuffleBoard(params: {
     // survives as a phantom stat. A no-echo reshuffle (empty achieved set,
     // zeroed prior bucket) keeps the exact two-write shape of today.
     const now = Date.now();
-    const achieved = achievedItemIds(
-      peerSnaps.filter((s) => s.exists()).map((s) => cellsFromData((s.data() as { cells?: unknown }).cells)),
-    );
+    // Echo switched off (#1360): the replacement card re-echoes nothing.
+    const achieved = echoMarksEnabled(eventData?.settings)
+      ? achievedItemIds(
+          peerSnaps.filter((s) => s.exists()).map((s) => cellsFromData((s.data() as { cells?: unknown }).cells)),
+        )
+      : new Set<string>();
     // Pending claims are not confirmed achievements, so they must not echo onto
     // the replacement card. They are still marked carriers for the shared Tally
     // marker and must keep that marker alive when an echo is traded away.
@@ -1827,6 +1853,11 @@ export async function setMark(params: {
   // stamped as markSeed would have the rules deny that one write and roll
   // back the whole batch, acted Mark included.
   echoDayIndexes?: number[];
+  // #1360: `false` when the Event switched Echo Marks off (`settings.echoMarks`,
+  // read through `echoMarksEnabled`) — the Mark lands on its own card only and
+  // fans out to no sibling. Absent means ON. `echoDayIndexes` keeps its OTHER
+  // job either way (the unmark blackout re-derivation across the schedule).
+  echoMarks?: boolean;
   database?: Firestore;
 }): Promise<{
   cells: Cell[];
@@ -1864,6 +1895,54 @@ export async function setMark(params: {
   return next;
 }
 
+/**
+ * "Latest week wins" for the Tally (#1360, specs/echo-marks.md § Disabled): after
+ * an unmark is ACKNOWLEDGED, re-point the Player's one marker for `itemId` to the
+ * sibling card that still carries it with the latest Mark. Reads the SERVER's
+ * marker and boards in one transaction, so a marker an Admin deleted is left
+ * deleted (no recreate) and a sibling missing from this device's cache cannot
+ * win by omission. Best-effort: the unmark has already committed, so a failure
+ * here only leaves the marker's previous attribution in place.
+ */
+async function repointMarkerFromServer(params: {
+  database: Firestore;
+  eventId: string;
+  uid: string;
+  itemId: string;
+  dayIndexes: number[];
+  /** Delete the marker when no server carrier remains (the deferred-delete case). */
+  deleteIfNoCarrier?: boolean;
+}): Promise<void> {
+  const { database, eventId, uid, itemId, dayIndexes } = params;
+  const markerRef = doc(database, 'events', eventId, 'tally', itemId, 'markers', uid);
+  await runTransaction(database, async (tx) => {
+    const marker = await tx.get(markerRef);
+    if (!marker.exists()) return;
+    let best: { dayIndex: number; markedAt: number; text: string } | null = null;
+    for (const dayIndex of dayIndexes) {
+      const board = await tx.get(doc(database, 'events', eventId, 'days', String(dayIndex), 'boards', uid));
+      if (!board.exists()) continue;
+      // A board whose stored owner does not match its path is not this Player's
+      // card (the same guard `reconcileEchoStatsFromServer` applies).
+      const data = board.data() as { uid?: string; cells?: unknown };
+      if (data.uid !== uid) continue;
+      const carrier = cellsFromData(data.cells).find((c) => !c.free && c.marked && c.itemId === itemId);
+      if (!carrier) continue;
+      const markedAt = typeof carrier.markedAt === 'number' ? carrier.markedAt : 0;
+      if (!best || markedAt > best.markedAt || (markedAt === best.markedAt && dayIndex > best.dayIndex)) {
+        best = { dayIndex, markedAt, text: carrier.text };
+      }
+    }
+    if (!best) {
+      if (params.deleteIfNoCarrier) tx.delete(markerRef);
+      return;
+    }
+    const current = marker.data() as Record<string, unknown>;
+    if (current.dayIndex === best.dayIndex && current.markedAt === best.markedAt) return;
+    tx.set(markerRef, { ...current, dayIndex: best.dayIndex, markedAt: best.markedAt, itemText: best.text });
+  });
+}
+
 async function runSetMark(
   params: {
     uid: string;
@@ -1882,6 +1961,7 @@ async function runSetMark(
     daily?: boolean;
     boardSeed?: number;
     echoDayIndexes?: number[];
+    echoMarks?: boolean;
   },
   database: Firestore,
   eventId: string,
@@ -2048,6 +2128,7 @@ async function runSetMark(
   // admin_confirmed-mode Mark starts `pending` and echoes from `confirmClaim`
   // instead. Unmarks never cascade.
   const echoItemId =
+    params.echoMarks !== false &&
     params.nextMarked && params.claimMode !== 'admin_confirmed' && toggled && !toggled.free
       ? toggled.itemId
       : null;
@@ -2195,6 +2276,10 @@ async function runSetMark(
   // Tally is a separate surface (ADR 0002).
   const tallyItemId = toggled && !toggled.free ? toggled.itemId : null;
   let markerRepairCandidate: string | null = null;
+  // #1360: the Prompt whose marker re-points once this unmark is acknowledged,
+  // and whether the server pass may DELETE it when no server carrier remains.
+  let repointMarkerItemId: string | null = null;
+  let repointDeleteIfNoCarrier = false;
   if (tallyItemId) {
     const markerRef = doc(database, 'events', eventId, 'tally', tallyItemId, 'markers', uid);
     if (params.nextMarked) {
@@ -2238,6 +2323,11 @@ async function runSetMark(
       // unknowable sibling reads as "no carrier", matching today's delete.
       let stillAchievedElsewhere = false;
       let siblingKnowledgeIncomplete = false;
+      // #1360: with Echo off a Player re-marks a repeated Prompt on several
+      // Days, and the ONE marker follows their most recent Mark ("latest week
+      // wins"). Unmarking that Day must not leave the marker attributed to it,
+      // so the marker re-points to the remaining carrier with the latest Mark.
+      let latestRemaining: { dayIndex: number; markedAt: number; text: string } | null = null;
       if (echoDayIndexes.length > 0) {
         const sibSnaps = await Promise.allSettled(
           echoDayIndexes.map((d) =>
@@ -2245,16 +2335,57 @@ async function runSetMark(
           ),
         );
         siblingKnowledgeIncomplete = sibSnaps.some((snap) => snap.status !== 'fulfilled');
-        stillAchievedElsewhere = sibSnaps.some(
-          (snap) =>
-            snap.status === 'fulfilled' &&
-            snap.value.exists() &&
-            cellsFromData((snap.value.data() as { cells?: unknown }).cells).some(
-              (c) => !c.free && c.marked && c.itemId === tallyItemId,
-            ),
-        );
+        sibSnaps.forEach((snap, i) => {
+          if (snap.status !== 'fulfilled' || !snap.value.exists()) return;
+          const carrier = cellsFromData((snap.value.data() as { cells?: unknown }).cells).find(
+            (c) => !c.free && c.marked && c.itemId === tallyItemId,
+          );
+          if (!carrier) return;
+          stillAchievedElsewhere = true;
+          const markedAt = typeof carrier.markedAt === 'number' ? carrier.markedAt : 0;
+          const dayIndex = echoDayIndexes[i];
+          if (
+            !latestRemaining ||
+            markedAt > latestRemaining.markedAt ||
+            (markedAt === latestRemaining.markedAt && dayIndex > latestRemaining.dayIndex)
+          ) {
+            latestRemaining = { dayIndex, markedAt, text: carrier.text };
+          }
+        });
       }
-      if (!stillAchievedElsewhere) {
+      // Re-point the marker AFTER the server acks this unmark, never inside this
+      // offline-queueable batch (#1363 review): an Admin may delete the marker
+      // for moderation while this device is offline, and a queued `set` would
+      // recreate it on sync. The post-ack transaction reads the SERVER's marker
+      // and sibling boards, so it also cannot be misled by a partially cached
+      // sibling set. Only with Echo off, and only when a sibling still carries it.
+      //
+      // With Echo off and no cached carrier, the only remaining carrier may be on
+      // a sibling this device could not read, or one another device marks before
+      // this batch commits (Codex P2 x2 on #1363). Deleting here would drop the
+      // Player off the Tally; instead the post-ack transaction decides from
+      // server truth: re-point to a server carrier, or delete when there is none.
+      //
+      // EVERY Echo-off no-carrier unmark defers (Codex P2 on #1363), not only the
+      // incomplete-knowledge case: another device may mark the Prompt on a
+      // sibling after these cache reads but before this batch commits, and an
+      // in-batch delete would wipe that device's fresh marker with no repair
+      // candidate left behind. The server pass sees that Mark and keeps it.
+      // Daily mode only (Codex P2 on #1363): a legacy single-board Event has no
+      // sibling Days for the server pass to scan, so it keeps the atomic in-batch
+      // delete it always had.
+      const echoOffDaily = params.echoMarks === false && params.daily === true;
+      const deferMarkerToServer = echoOffDaily && !stillAchievedElsewhere;
+      repointMarkerItemId =
+        echoOffDaily && ((stillAchievedElsewhere && latestRemaining) || deferMarkerToServer)
+          ? tallyItemId
+          : null;
+      // Whenever the server pass runs it may delete on zero server carriers, not
+      // only when the cache saw none (Codex P2 on #1363): the cached carrier can
+      // be unmarked elsewhere before this pass reads, and a marker with no Mark
+      // behind it must not be left standing.
+      repointDeleteIfNoCarrier = repointMarkerItemId !== null;
+      if (!stillAchievedElsewhere && !deferMarkerToServer) {
         batch.delete(markerRef);
         if (siblingKnowledgeIncomplete) {
           rememberMarkerRepair(eventId, uid, tallyItemId);
@@ -2287,6 +2418,25 @@ async function runSetMark(
           ceremonialDayIndexes: params.ceremonialDayIndexes,
           statsFrozen: params.statsFrozen,
           database,
+        }),
+      )
+      .catch(() => undefined);
+  }
+  if (repointMarkerItemId) {
+    const itemId = repointMarkerItemId;
+    void committed
+      .then(() =>
+        repointMarkerFromServer({
+          database,
+          eventId,
+          uid,
+          itemId,
+          // The ACTED Day too (CodeRabbit on #1363): `setMark` releases its chain
+          // before this post-ack pass runs, so the same Day can be re-marked
+          // first, and that new Mark must win rather than be re-pointed away or
+          // deleted.
+          dayIndexes: typeof params.dayIndex === 'number' ? [...echoDayIndexes, params.dayIndex] : echoDayIndexes,
+          deleteIfNoCarrier: repointDeleteIfNoCarrier,
         }),
       )
       .catch(() => undefined);
@@ -2528,6 +2678,9 @@ export async function reconcileEchoes(params: {
   tutorialDayIndexes?: number[];
   ceremonialDayIndexes?: number[];
   statsFrozen?: boolean;
+  /** #1360: `false` when the Event switched Echo Marks off — the reconcile then
+   *  applies NO echo (an empty achieved set), so it can only re-derive stats. */
+  echoMarks?: boolean;
   database?: Firestore;
 }): Promise<{ changed: boolean; bingoTransition: boolean; blackoutTransition: boolean; complete: boolean }> {
   assertSupportedDayIndexes(params.dayIndexes, 'reconcileEchoes');
@@ -2557,6 +2710,7 @@ async function runReconcileEchoes(
     tutorialDayIndexes?: number[];
     ceremonialDayIndexes?: number[];
     statsFrozen?: boolean;
+    echoMarks?: boolean;
   },
   database: Firestore,
   eventId: string,
@@ -2596,7 +2750,7 @@ async function runReconcileEchoes(
     if (snap.status !== 'fulfilled' || !snap.value.exists()) continue;
     allBoards.push(cellsFromData((snap.value.data() as { cells?: unknown }).cells));
   }
-  const achieved = achievedItemIds(allBoards);
+  const achieved = params.echoMarks === false ? new Set<string>() : achievedItemIds(allBoards);
   const now = Date.now();
   const rawRes = applyEchoes(boardCells, achieved, now);
   const res = {
