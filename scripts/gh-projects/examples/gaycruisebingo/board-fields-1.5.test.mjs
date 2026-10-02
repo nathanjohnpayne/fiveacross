@@ -9,7 +9,7 @@ const script = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'board
 const fixtures = [];
 afterEach(() => fixtures.splice(0).forEach(path => rmSync(path, { recursive: true, force: true })));
 
-function fixture({ checker = 'author', env = {}, rejectAt = 0 } = {}) {
+function fixture({ checker = 'author', env = {}, rejectAt = 0, rejectOnly = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'board-author-'));
   fixtures.push(root);
   const example = join(root, 'scripts', 'gh-projects', 'examples', 'gaycruisebingo');
@@ -32,7 +32,7 @@ test "$1" = --expect-token-identity
 test "$2" = nathanjohnpayne
 test "$GH_TOKEN" = fixture-token
 test "$MOCK_LOGIN" = nathanjohnpayne
-if [ "$REJECT_AT" -gt 0 ] && [ "$n" -ge "$REJECT_AT" ]; then exit 1; fi
+if [ "$REJECT_AT" -gt 0 ] && { [ "$n" -eq "$REJECT_AT" ] || { [ "$REJECT_ONLY" = 0 ] && [ "$n" -gt "$REJECT_AT" ]; }; }; then exit 1; fi
 `);
     chmodSync(helper, checker === 'non-executable' ? 0o644 : 0o755);
   }
@@ -49,7 +49,7 @@ case "$1 $2" in
 esac
 `);
   chmodSync(join(bin, 'gh'), 0o755);
-  return { root, driver, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: root, GH_TOKEN: 'fixture-token', GITHUB_TOKEN: 'fixture-ambient', FIXTURE_ROOT: root, MOCK_LOGIN: checker === 'wrong' ? 'nathanpayne-codex' : 'nathanjohnpayne', REJECT_AT: String(rejectAt), ...env } };
+  return { root, driver, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: root, GH_TOKEN: 'fixture-token', GITHUB_TOKEN: 'fixture-ambient', FIXTURE_ROOT: root, MOCK_LOGIN: checker === 'wrong' ? 'nathanpayne-codex' : 'nathanjohnpayne', REJECT_AT: String(rejectAt), REJECT_ONLY: rejectOnly ? '1' : '0', ...env } };
 }
 
 function run(f) {
@@ -92,5 +92,13 @@ describe('Phase 1.5 board driver requires the fixed author identity', () => {
     expect(result.status).toBe(2);
     expect(calls.filter(c => c === 'project item-add')).toHaveLength(2);
     expect(calls.filter(c => c === 'project item-edit')).toHaveLength(0);
+  });
+
+  it('stops on a single rejected item-add check even though ordinary add failures are handled', () => {
+    const f = fixture({ rejectAt: 2, rejectOnly: true });
+    const { result, calls } = run(f);
+    expect(result.status).toBe(2);
+    expect(calls).toEqual([]);
+    expect(Number(readFileSync(join(f.root, 'checks'), 'utf8'))).toBe(2);
   });
 });

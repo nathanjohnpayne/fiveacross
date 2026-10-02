@@ -51,7 +51,11 @@ require_author() {
   GH_TOKEN="$GH_TOKEN" "$CHECKER" --expect-token-identity nathanjohnpayne \
     || { echo "Error: GH_TOKEN must resolve to nathanjohnpayne for project mutations." >&2; return 2; }
 }
-ghp_gh() ( unset GITHUB_TOKEN; require_author || exit 2; gh "$@"; )
+ghp_gh() {
+  # A rejected identity must stop this driver even when a caller handles a gh failure.
+  ( unset GITHUB_TOKEN; require_author ) || exit 2
+  ( unset GITHUB_TOKEN; gh "$@"; )
+}
 require_author
 WORK="$(mktemp -d)"
 
