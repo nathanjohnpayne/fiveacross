@@ -2019,8 +2019,10 @@ export async function setMark(params: {
  * sibling card that still carries it with the latest Mark. Reads the SERVER's
  * marker and boards in one transaction, so a marker an Admin deleted is left
  * deleted (no recreate) and a sibling missing from this device's cache cannot
- * win by omission. Best-effort: the unmark has already committed, so a failure
- * here only leaves the marker's previous attribution in place.
+ * win by omission. A failure does not abandon the work (#1367): the unmark has
+ * already committed, the marker keeps its previous attribution for now, and the
+ * durable record `setMark` wrote before the commit stays in place, so the next
+ * card open re-runs this pass via `retryPendingMarkerRepoints`.
  */
 async function repointMarkerFromServer(params: {
   database: Firestore;
