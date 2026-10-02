@@ -1497,8 +1497,8 @@ export async function hasPriorBingoWitness(
     momentId === selfWriteId &&
     selfBingoWriteGenerations.get(selfWriteKey(eventId, uid, momentId)) === opts.selfWriteGeneration;
 
-  // Per-card witnesses (#372) — cache-only and bounded by the schedule (ten Days
-  // on the seeded sailing), so this is ten local reads at worst, no network.
+  // Per-card witnesses (#372) — cache-only and bounded by the schedule (at most
+  // `MAX_DAYS` Days), so this is a handful of local reads at worst, no network.
   let sawSelfWrite = false;
   for (const day of opts?.dayIndexes ?? []) {
     if (opts?.excludeDayIndexes?.has(day)) continue;

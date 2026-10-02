@@ -206,7 +206,7 @@ export const eventConverter: FirestoreDataConverter<EventDoc> = {
       // `endsOn`, with the legacy `sailStart`/`sailEnd` as read fallbacks.
       ...migrateEventWindow(data as unknown as Record<string, unknown>),
       // `frozenAt` (the finale freeze stamp, #217) needs no default: it is
-      // optional and absent until the 08:00-Day-10 scheduler run sets it, so a
+      // optional and absent until the scheduler's freeze run sets it, so a
       // pre-finale/legacy Event doc reads it through the spread above as
       // `undefined` (unset), exactly the pre-freeze state consumers branch on.
       // `mostLovedPhoto` (#560) rides the same reasoning and passes through the

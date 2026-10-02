@@ -220,7 +220,7 @@ export type ThemeId =
 // days[]). Each Day names a date, place, ThemeId, and item pool; the tutorial
 // Days sit at the ends but that placement is data, not a code assumption.
 export interface DayDef {
-  index: number;        // 0..9
+  index: number;        // 0..MAX_DAYS - 1 (src/data/eventLimits.ts)
   date: string;         // ISO date, e.g. '2026-07-16'
   // Where this Day happens — 'Split', 'Bodega Bay'. Docs written before the
   // #566 rename persist `port`/`portEmoji`; `migrateDayFields`
@@ -453,7 +453,16 @@ export interface EventDoc {
    * "legacy events never freeze" behaviour, unchanged.
    */
   standingsFreezeAt?: number;
-  // Finale freeze stamp (ms epoch): set by the Day 10 08:00 scheduler run when
+  /**
+   * The first of the two Days the most recent schedule write was allowed to
+   * change (#1357). Written only alongside `days`, and only on a schedule
+   * longer than `UNROLLED_SCHEDULE_LOCK_DAYS` — `firestore.rules`'
+   * `scheduleEditWindowOk` proves every Day outside `[k, k + 2)` unchanged
+   * and locks the two inside it. Never read by the app: a stale value left
+   * on the doc only narrows what the next schedule write may change.
+   */
+  scheduleEditFrom?: number;
+  // Finale freeze stamp (ms epoch): set by the scheduler's freeze run when
   // the standings freeze. Absent until the finale. It records THAT ONE BEAT and
   // nothing more — the podium Moment is posted afterwards, as a separate
   // best-effort write with its own retry guard — so it is not evidence the
@@ -1015,7 +1024,7 @@ export interface BoardDoc {
 // `DayDef` (never re-declared) and keeps `ThemeId`, so the stored and live Day
 // contracts cannot diverge without a type error.
 export interface CardSnapshotDay extends Pick<DayDef, 'place' | 'placeEmoji' | 'theme'> {
-  number: number; // day.index + 1 (1..10) — the 1-based label the header shows
+  number: number; // day.index + 1 (1..MAX_DAYS) — the 1-based label the header shows
   label: string; // resolved ThemeMeta label for the header line (themeLabel(theme))
 }
 
@@ -1316,8 +1325,8 @@ export interface DoubtDoc {
 }
 
 // The finale adds two scheduler-posted beats (daily-cards-spec § "Scoring and
-// social surfaces"): `last_call` at 20:00 on Day 9 (going-into-the-final-night
-// standings) and `podium` at the 08:00 Day 10 freeze (champion + honors).
+// social surfaces"): `last_call` before the Standings Freeze (going-into-the-final-night
+// standings) and `podium` at the freeze (champion + honors).
 export type MomentKind =
   | 'bingo'
   | 'blackout'
@@ -1341,7 +1350,7 @@ export interface MomentDoc {
   // #266 — the finale beats' CONTENT, written by the scheduler
   // (functions/src/unlockDay.ts). `line` is the last-call standings copy
   // ("X leads by 2 bingos—standings freeze at 8 a.m."); `podium` is the
-  // Day-10 freeze payload. Both optional: an older minimal beat (or a
+  // freeze payload. Both optional: an older minimal beat (or a
   // content-build failure) renders the generic line.
   line?: string;
   lastCall?: LastCallMomentPayload;
@@ -1470,7 +1479,7 @@ export type OccasionId =
  * `days[]`; `one_card` is an Event with an EMPTY `days[]` — the legacy
  * single-Board shape ("One card, one celebration", the Wedding occasion).
  * The distinction is load-bearing for validation: every Day-shaped predicate
- * (the ten-Day ceiling, the closing-pool finale, the future first unlock,
+ * (the wizard's ten-Day ceiling, the closing-pool finale, the future first unlock,
  * per-Day completeness) is scoped to `daily_cards`, because a one-card Event
  * has no Day to fail them.
  */
@@ -1689,7 +1698,7 @@ export interface EventDraft {
   // nothing Event-wide. Per-Day copy lives on `DraftDayDef.freeText`.
   //
   prompts: DraftPromptPools;
-  /** Empty for `one_card`; 1..10 Days for `daily_cards`. */
+  /** Empty for `one_card`; 1..10 Days for `daily_cards` (the wizard's ceiling, not the platform's `MAX_DAYS`). */
   days: DraftDayDef[];
   settings: EventDraftSettings;
 }
@@ -1697,7 +1706,9 @@ export interface EventDraft {
 /** The schedule an occasion PROPOSES. Shape only — turning it into absolute
  *  `unlockAt` instants needs the Event timezone and belongs to Step 4 (#792). */
 export interface OccasionScheduleShape {
-  /** 1..10. The ceiling is a rules fact (`daysThemeLockOk` unrolls 0–9). */
+  /** 1..10 — the setup wizard's ceiling (`draftValidation`'s `MAX_DAYS`), which
+   *  `daysFromOccasion` clamps to. Not the platform's `MAX_DAYS` (20,
+   *  `src/data/eventLimits.ts`): a longer schedule is seeded by script (#1357). */
   dayCount: number;
   /** Local time-of-day each Day opens, `HH:MM` in the Event's timezone. */
   unlockTime: string;

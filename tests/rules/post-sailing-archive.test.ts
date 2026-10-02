@@ -17,6 +17,7 @@ import { clearStorageDeep } from '../support/storage-emulator';
 // accepts. (`src/data/eventLimits.ts` is already imported this way by
 // `tests/rules/membership-mark-batch-budget.test.ts`.)
 import { MAX_ARCHIVE_NUMBER } from '../../src/data/eventArchive';
+import { MAX_DAYS } from '../../src/data/eventLimits';
 
 // specs/post-sailing-archive.md, rules layer (#1149, epic #134). Three claims,
 // proved in pairs so none can pass vacuously:
@@ -897,24 +898,25 @@ describe('post-sailing-archive — the archive write must carry the whole record
   });
 
   it('DENIES more archived honours than an Event has Days', async () => {
-    // Eleven, which is `MAX_DAYS + 1` — the eleventh Day sits outside the
-    // schedule lock `daysThemeLockOk` unrolls, so it is unsupported rather than
-    // merely undesirable.
+    // `MAX_DAYS + 1` — one honour per Day, and no schedule can hold that many
+    // Days. The rules restate MAX_DAYS as a literal (20 since #1357), so this
+    // pins the two together.
     await assertFails(
       archiveWith({
         ...FROZEN_RECORD,
-        dailyHonors: Array.from({ length: 11 }, (_, i) => honor(i)),
+        dailyHonors: Array.from({ length: MAX_DAYS + 1 }, (_, i) => honor(i)),
       }),
     );
   });
 
   it('ALLOWS an honour for every Day the Event can have', async () => {
-    // Ten is the boundary case rather than an exception: a full schedule with a
-    // pinned holder on every Day is exactly what `draftEventArchive` produces.
+    // `MAX_DAYS` is the boundary case rather than an exception: a full schedule
+    // with a pinned holder on every Day is exactly what `draftEventArchive`
+    // produces.
     await assertSucceeds(
       archiveWith({
         ...FROZEN_RECORD,
-        dailyHonors: Array.from({ length: 10 }, (_, i) => honor(i)),
+        dailyHonors: Array.from({ length: MAX_DAYS }, (_, i) => honor(i)),
       }),
     );
   });

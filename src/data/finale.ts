@@ -278,7 +278,7 @@ function anyMarksRecorded(player: PlayerDoc): boolean {
  * AND AN HONOUR IS ONLY EVER DERIVED FOR A DAY THE CONTRACT HAS (#1151, Codex P2
  * on PR #1162, round 7). `perDayHonors` reads its `dayIndex` off a `dayStats`
  * KEY, and that map is Player-written under ADR 0001 with a rules arm that
- * validates nothing inside it — so a row can name Day `-1`, Day `10` or Day
+ * validates nothing inside it — so a row can name Day `-1`, Day `MAX_DAYS` or Day
  * `4000`, and on an Event with NO schedule this function returned that list
  * straight through. The honour then rode onto the live strip as a chip labelled
  * `D0` or `D4001`, and into the frozen record's `dailyHonors`, where

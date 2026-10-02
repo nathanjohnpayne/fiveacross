@@ -3661,7 +3661,9 @@ body:has(.sheet-backdrop) .guidelines-trigger {
   word-break: break-word;
   display: -webkit-box;
   /* One line each: two honoree blocks + ten honor rows leave no wrap
-     budget in the fixed frame — a long name clips, like the compact rows. */
+     budget in the fixed frame — a long name clips, like the compact rows.
+     More than ten honors flow into two columns (.share-card-honors-two-col),
+     so the frame never holds more than ten honor rows. */
   -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
 }
@@ -3700,6 +3702,30 @@ body:has(.sheet-backdrop) .guidelines-trigger {
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.share-card-honors-two-col {
+  /* More than ten Daily honors (#1357, schedules up to MAX_DAYS = 20): two
+     columns, filled top to bottom (grid-template-rows is set inline to
+     ceil(n / 2)), so the block is never taller than ten rows. Labels and
+     names both ellipsize — each column is half the single-column width. */
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 18px;
+  row-gap: 3px;
+  width: 540px;
+}
+.share-card-honors-two-col .share-card-honor-row {
+  min-width: 0;
+  gap: 8px;
+  padding: 1px 4px;
+  font-size: 14px;
+}
+.share-card-honors-two-col .share-card-honor-day {
+  min-width: 0;
+  max-width: 62%;
+  overflow: hidden;
   text-overflow: ellipsis;
 }
 /* ---- Final standings, photo-hero composition (#534/#561) ----
