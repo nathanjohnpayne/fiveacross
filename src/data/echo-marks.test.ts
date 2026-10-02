@@ -1120,6 +1120,22 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     expect(markerTxWrite()).toBeUndefined();
   });
 
+  it('#1360: a cached carrier unmarked elsewhere before the server pass still lets it delete the orphan marker', async () => {
+    seedRepeats();
+    H.markerServer.set('shared', serverMarker());
+    // Hold this unmark's server ack until the other device has acted.
+    let ack: (() => void) | undefined;
+    H.batchCommit.mockImplementationOnce(() => new Promise<void>((r) => { ack = r; }));
+    await markShared({ nextMarked: false, echoMarks: false });
+    // Day 1 and Day 3 were cached carriers, but another device unmarks both first.
+    H.dayBoards.set(1, { uid: 'u1', seed: 111, dayIndex: 1, cells: card((i) => (i === 4 ? 'shared' : `c${i}`)) });
+    H.dayBoards.set(3, { uid: 'u1', seed: 333, dayIndex: 3, cells: card((i) => (i === 8 ? 'shared' : `b${i}`)) });
+    commitDay2Unmark();
+    ack!();
+    await settle();
+    expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(true);
+  });
+
   it('#1360: with Echo ON an unmark keeps the marker exactly as before (no re-point write)', async () => {
     seedBoards();
     H.dayBoards.set(3, {

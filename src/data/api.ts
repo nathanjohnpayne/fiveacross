@@ -2380,7 +2380,11 @@ async function runSetMark(
         echoOffDaily && ((stillAchievedElsewhere && latestRemaining) || deferMarkerToServer)
           ? tallyItemId
           : null;
-      repointDeleteIfNoCarrier = deferMarkerToServer;
+      // Whenever the server pass runs it may delete on zero server carriers, not
+      // only when the cache saw none (Codex P2 on #1363): the cached carrier can
+      // be unmarked elsewhere before this pass reads, and a marker with no Mark
+      // behind it must not be left standing.
+      repointDeleteIfNoCarrier = repointMarkerItemId !== null;
       if (!stillAchievedElsewhere && !deferMarkerToServer) {
         batch.delete(markerRef);
         if (siblingKnowledgeIncomplete) {
