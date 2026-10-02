@@ -1166,7 +1166,7 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
         recordedAtCommit = values.get(REPOINT_KEY);
       });
       await markShared({ nextMarked: false, echoMarks: false });
-      expect(recordedAtCommit).toBe('1');
+      expect(recordedAtCommit).toBeTruthy();
       commitDay2Unmark();
       await settle();
       expect(markerTxWrite()?.[1]).toMatchObject({ dayIndex: 3 });
@@ -1184,7 +1184,7 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       // The in-memory continuation never runs (the tab reloads before the ack).
       H.batchCommit.mockImplementationOnce(() => new Promise<void>(() => {}));
       await markShared({ nextMarked: false, echoMarks: false });
-      expect(values.get(REPOINT_KEY)).toBe('1');
+      expect(values.get(REPOINT_KEY)).toBeTruthy();
 
       // "Reload": in-memory state is gone, the durable record survives.
       __resetPendingMarkerRepairsForTests();
@@ -1200,11 +1200,45 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       await settle();
       // Nothing runs until this device's queued writes have drained.
       expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(false);
-      expect(values.get(REPOINT_KEY)).toBe('1');
+      expect(values.get(REPOINT_KEY)).toBeTruthy();
 
       drain!();
       await settle();
       expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(true);
+      expect(values.has(REPOINT_KEY)).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('#1367: an OLDER pass finishing never clears a NEWER unmark\'s record', async () => {
+    const values = stubStorage();
+    try {
+      seedRepeats();
+      H.markerServer.set('shared', serverMarker());
+      let ackFirst: (() => void) | undefined;
+      let ackSecond: (() => void) | undefined;
+      H.batchCommit
+        .mockImplementationOnce(() => new Promise<void>((r) => { ackFirst = r; }))
+        .mockImplementationOnce(() => new Promise<void>((r) => { ackSecond = r; }));
+      await markShared({ nextMarked: false, echoMarks: false });
+      const firstToken = values.get(REPOINT_KEY);
+      await markShared({ nextMarked: false, echoMarks: false });
+      const secondToken = values.get(REPOINT_KEY);
+      expect(secondToken).toBeTruthy();
+      expect(secondToken).not.toBe(firstToken);
+
+      commitDay2Unmark();
+      ackFirst!();
+      await settle();
+      await settle();
+      // The first pass ran and succeeded, but the second unmark's record survives.
+      expect(markerTxWrite()).toBeDefined();
+      expect(values.get(REPOINT_KEY)).toBe(secondToken);
+
+      ackSecond!();
+      await settle();
+      await settle();
       expect(values.has(REPOINT_KEY)).toBe(false);
     } finally {
       vi.unstubAllGlobals();
@@ -1222,7 +1256,7 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       await markShared({ nextMarked: false, echoMarks: false });
       commitDay2Unmark();
       await settle();
-      expect(values.get(REPOINT_KEY)).toBe('1');
+      expect(values.get(REPOINT_KEY)).toBeTruthy();
     } finally {
       vi.unstubAllGlobals();
     }
