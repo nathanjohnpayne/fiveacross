@@ -1,3 +1,5 @@
+> **Provenance.** This document is a bootstrap-era copy of an audit run in `nathanjohnpayne/mergepath`. The pipeline it describes, `scripts/audit-codex-latency.sh` and its suite, lives only in mergepath and is not part of this repository. Run every command below from a mergepath checkout.
+
 <!--
 Posted to issue #623 on 2026-07-04 (nathanpayne-claude). This file mirrors
 the published comment, completed with the pair-1/2/4 reactions backfill.

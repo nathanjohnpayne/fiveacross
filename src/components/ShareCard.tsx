@@ -418,6 +418,10 @@ function buildMostLovedRow(opts: {
   return row;
 }
 
+/** Honor rows the photo-less farewell card fits in ONE column; past this the
+ *  rows flow into two columns (#1357). */
+export const SHARE_CARD_HONOR_ROWS = 10;
+
 function buildFarewellCardNode(data: FarewellShareCardData): HTMLDivElement {
   // Sanitize the hero URL at the sink, the safeMediaUrl-last rule (PR #95's
   // CodeQL barrier; blob: is allow-listed). A value the guard rejects renders
@@ -494,7 +498,18 @@ function buildFarewellCardNode(data: FarewellShareCardData): HTMLDivElement {
 
     if (data.honors.length > 0) {
       card.append(el('div', 'share-card-honors-title', 'Daily honors'));
-      const honors = el('div', 'share-card-honors');
+      // The fixed 600x750 frame budgets two honoree blocks plus TEN honor rows.
+      // A longer schedule (up to MAX_DAYS = 20 since #1357) flows into two
+      // columns, filled top to bottom, so it never takes more than ten rows
+      // and the stat line and footer stay inside the rasterized bounds.
+      const twoColumn = data.honors.length > SHARE_CARD_HONOR_ROWS;
+      const honors = el(
+        'div',
+        twoColumn ? 'share-card-honors share-card-honors-two-col' : 'share-card-honors',
+      );
+      if (twoColumn) {
+        honors.style.gridTemplateRows = `repeat(${Math.ceil(data.honors.length / 2)}, auto)`;
+      }
       for (const h of data.honors) {
         const row = el('div', 'share-card-honor-row');
         row.append(el('span', 'share-card-honor-day', h.dayLabel));

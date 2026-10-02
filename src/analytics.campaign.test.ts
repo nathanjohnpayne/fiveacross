@@ -72,12 +72,16 @@ describe('campaignQuery (#632)', () => {
     expect(campaignQuery(withValue('utm_campaign', 'bodega-bay-2026-day-3 alice'), EVENT_ID)).toBe('');
     expect(campaignQuery(withValue('utm_campaign', 'bodega-bay-2026-day-alice'), EVENT_ID)).toBe('');
     expect(campaignQuery(withValue('utm_campaign', 'bodega-bay-2026-day-1234'), EVENT_ID)).toBe('');
-    // Outside the supported Day range (0–9, `supportedDayIndex`) or not canonical decimal.
-    expect(campaignQuery(withValue('utm_campaign', 'bodega-bay-2026-day-10'), EVENT_ID)).toBe('');
+    // Outside the supported Day range (0–19, `supportedDayIndex`) or not canonical decimal.
+    expect(campaignQuery(withValue('utm_campaign', 'bodega-bay-2026-day-20'), EVENT_ID)).toBe('');
     expect(campaignQuery(withValue('utm_campaign', 'bodega-bay-2026-day-999'), EVENT_ID)).toBe('');
     expect(campaignQuery(withValue('utm_campaign', 'bodega-bay-2026-day-03'), EVENT_ID)).toBe('');
     expect(campaignQuery(withValue('utm_campaign', 'bodega-bay-2026-day-9'), EVENT_ID)).toBe(
       '?utm_source=daily-email&utm_medium=email&utm_campaign=bodega-bay-2026-day-9',
+    );
+    // A week-16 card of a semester Event (#1357): past the old ten-Day range.
+    expect(campaignQuery(withValue('utm_campaign', 'bodega-bay-2026-day-15'), EVENT_ID)).toBe(
+      '?utm_source=daily-email&utm_medium=email&utm_campaign=bodega-bay-2026-day-15',
     );
     // Identifier-shaped free text that is not THIS Event's id.
     expect(

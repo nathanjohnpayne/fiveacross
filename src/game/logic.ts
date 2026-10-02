@@ -429,11 +429,18 @@ function unstratifiedPicks(pool: DealItem[], rnd: () => number): DealItem[] {
  *     if honoring it would drop the usable pool below `MIN_POOL`, the pool is
  *     exhausted (~80 main items ÷ 24/day ≈ 3⅓ Days) and the exclusion RESETS —
  *     the full pool is used again, exactly the spec's reset boundary.
+ *   - `excludeTiers` (#1360): the same exclusion split per other card, NEAREST
+ *     card first (`repeatExclusionTiers`). Takes precedence over `excludeIds`.
+ *     When the full union would starve the pool, the FARTHEST card's tier is
+ *     dropped and the union retried, down to no exclusion — a slope instead of
+ *     the all-or-nothing reset. Whenever the full union fits, the usable pool is
+ *     identical to the single-set path, so the deal is byte-identical.
  *   - `stratify`: false for all-tame tutorial pools (no spicy/tame target); the
  *     default (true) keeps the 10-spicy/14-tame stratified composition.
  */
 export interface DealOptions {
   excludeIds?: ReadonlySet<string>;
+  excludeTiers?: ReadonlyArray<ReadonlySet<string>>;
   stratify?: boolean;
   /**
    * Share of the 24 non-free squares dealt from the EASY (embark) pool instead of the
@@ -466,6 +473,79 @@ function applyExclusion(
   return remaining.length >= requiredCount ? remaining : pool;
 }
 
+/**
+ * The tiered form of `applyExclusion` (#1360, specs/easy-mix.md § "The repeat
+ * window"). `tiers` is one id set per other card, NEAREST first. Try the union of
+ * every tier; while it would leave fewer than `requiredCount` Prompts, drop the
+ * farthest tier and retry. With one tier this IS `applyExclusion` — the old reset.
+ */
+function applyTieredExclusion(
+  pool: DealItem[],
+  tiers: ReadonlyArray<ReadonlySet<string>>,
+  requiredCount: number = MIN_POOL,
+): DealItem[] {
+  for (let keep = tiers.length; keep > 0; keep -= 1) {
+    const excluded = new Set<string>();
+    for (const tier of tiers.slice(0, keep)) for (const id of tier) excluded.add(id);
+    if (excluded.size === 0) return pool;
+    const remaining = pool.filter((p) => !excluded.has(p.id));
+    if (remaining.length >= requiredCount) return remaining;
+  }
+  return pool;
+}
+
+/** The exclusion a deal applies: tiers when given, else the legacy single set. */
+function excludeFor(pool: DealItem[], opts: DealOptions, requiredCount?: number): DealItem[] {
+  return opts.excludeTiers
+    ? applyTieredExclusion(pool, opts.excludeTiers, requiredCount)
+    : applyExclusion(pool, opts.excludeIds, requiredCount);
+}
+
+/**
+ * The repeat window as `excludeTiers` (#1360): one id set per OTHER card of the
+ * Player's, ordered nearest Day first (distance `|other - dayIndex|`; a tie goes
+ * to the earlier Day), and cut to the nearest `window` cards when a window is
+ * set. No window means every other card, which is today's whole-history
+ * exclusion. A Player who opens Days out of order (a mid-Event joiner) still gets
+ * a well-defined "nearest" set.
+ */
+export function repeatExclusionTiers(
+  otherCards: ReadonlyArray<{ dayIndex: number; cells: readonly Cell[] }>,
+  dayIndex: number,
+  window?: number,
+): Array<Set<string>> {
+  const ordered = [...otherCards].sort(
+    (a, b) =>
+      Math.abs(a.dayIndex - dayIndex) - Math.abs(b.dayIndex - dayIndex) || a.dayIndex - b.dayIndex,
+  );
+  const kept = window === undefined ? ordered : ordered.slice(0, window);
+  return kept.map(({ cells }) => {
+    const ids = new Set<string>();
+    for (const c of cells) if (c.itemId) ids.add(c.itemId);
+    return ids;
+  });
+}
+
+/**
+ * `settings.repeatWindow` read defensively (#1360): a positive integer is the
+ * number of nearest other cards whose main-half Prompts stay off a new card;
+ * anything else (absent, 0, fractional, malformed) means no window — every other
+ * card, as before.
+ */
+export function repeatWindowFor(settings: { repeatWindow?: unknown } | null | undefined): number | undefined {
+  const w = settings?.repeatWindow;
+  return typeof w === 'number' && Number.isSafeInteger(w) && w >= 1 ? w : undefined;
+}
+
+/**
+ * Do Echo Marks run on this Event? (#1360, specs/echo-marks.md § "Disabled".)
+ * Only an explicit `settings.echoMarks === false` turns them off; absent or
+ * malformed reads as ON, so every Event written before the switch is unchanged.
+ */
+export function echoMarksEnabled(settings: { echoMarks?: unknown } | null | undefined): boolean {
+  return settings?.echoMarks !== false;
+}
+
 /** Deal a frozen 5x5 board: 24 sampled prompts + free center (index 12). */
 export function dealBoard(
   pool: DealItem[],
@@ -488,7 +568,7 @@ export function dealBoard(
     // Tutorial pools (embark/farewell) — the whole-pool unstratified deal, unchanged.
     // Easy mix never applies here: these Days ARE the embark/farewell card, not a main
     // card blending embark in. Honor the exclusion + MIN_POOL guard exactly as before.
-    const usablePool = applyExclusion(pool, opts.excludeIds);
+    const usablePool = excludeFor(pool, opts);
     if (usablePool.length < MIN_POOL) {
       throw new Error(`dealBoard needs at least ${MIN_POOL} prompts, received ${usablePool.length}.`);
     }
@@ -510,7 +590,12 @@ export function dealBoard(
     // byte-for-byte untouched even with easyMixRatio set on the event.
     const easyCount = easyItems.length > 0 ? Math.round(24 * requestedEasy) : 0;
     const mainCount = 24 - easyCount;
-    const mainUsable = applyExclusion(mainItems, opts.excludeIds, mainCount);
+    // The main half must also cover any easy-pool SHORTFALL (CodeRabbit on #1363):
+    // with fewer easy items than `easyCount`, main backfills them, so a tier
+    // prefix that leaves exactly `mainCount` would pass here and then fail the
+    // MIN_POOL guard below. Identical to `mainCount` whenever the easy pool can
+    // fill its share, so every such deal is unchanged.
+    const mainUsable = excludeFor(mainItems, opts, Math.max(mainCount, MIN_POOL - easyItems.length));
     // A full board needs 24 non-free squares. At easyCount 0 the deal is main-only, so
     // the thin-pool guard is the main pool alone — preserving the pre-existing throw;
     // with a mix the two pools backfill each other, so the guard is their union.
@@ -1130,7 +1215,7 @@ export function nextDisplayBumpTime(
 // --- Cruise-wide scoring aggregation (daily-cards-spec § "Scoring and social
 // surfaces", #212) -----------------------------------------------------------
 //
-// With ten Day Cards, a Player's `PlayerDoc.bingoCount`/`squaresMarked`/
+// With one Day Card per Day, a Player's `PlayerDoc.bingoCount`/`squaresMarked`/
 // `firstBingoAt` root fields are no longer one Board's totals — they are
 // cruise-wide aggregates over `PlayerDoc.dayStats`, one bucket per Day Card.
 // These pure helpers own that derivation so the write path (`foldDayStat` in

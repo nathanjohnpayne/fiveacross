@@ -510,17 +510,18 @@ service cloud.firestore {
         // Rules cannot walk a list, so what is IN it stays the stated residual —
         // but its SIZE is one expression, exactly as `standingsSizeMatches`
         // spends one, and `dailyHonors` had no bound at all. An Event supports at
-        // most ten Days and the archive contract is at most one honour per Day,
+        // most twenty Days (#1357) and the archive contract is at most one honour per Day,
         // so a direct admin flip carrying thousands of scalar or duplicate
         // entries was a record no builder can produce, frozen permanently on the
         // write that locks `archive`, and unrepairable by any client.
         //
-        // 10 is `MAX_DAYS` in `src/data/eventLimits.ts`, restated here because
+        // 20 is `MAX_DAYS` in `src/data/eventLimits.ts`, restated here because
         // the writer and this arm have to agree about it — the same
         // shared-contract discipline the 200 above and `finiteArchiveNumber`
-        // already carry, and the same number `daysThemeLockOk` already unrolls
-        // its schedule lock over.
-        && archive.dailyHonors.size() <= 10
+        // already carry. It is no longer the number `daysThemeLockOk` unrolls
+        // over (that is `UNROLLED_SCHEDULE_LOCK_DAYS`, still 10): a longer
+        // schedule is locked by `scheduleEditWindowOk` instead (#1357).
+        && archive.dailyHonors.size() <= 20
         && firstBingoPairComplete(archive)
         && (archive.freezeAt == null || finiteArchiveNumber(archive.freezeAt))
         && archive.archivedAt == stamp;
@@ -1102,8 +1103,10 @@ service cloud.firestore {
     // has no general loop/iteration construct, so this unrolls explicit
     // indices — capped at 10, the fixed length of the seeded July sailing
     // (DayDef[] "length 10... but the model assumes no fixed length",
-    // src/types.ts). A future cruise with more than 10 Days needs this cap
-    // raised alongside its own EventDoc. A size mismatch between the incoming
+    // src/types.ts). A schedule longer than 10 Days is NOT handled by raising
+    // this cap — the arm sits at Firestore's expression cap — but by
+    // `scheduleEditWindowOk`, whose cost is independent of length (#1357).
+    // A size mismatch between the incoming
     // and existing arrays is rejected outright (`days[]` length is fixed at
     // seed — this ticket builds no row add/remove editor).
     // Every present `scoring` on a created or CHANGED schedule is one of the
@@ -1252,8 +1255,13 @@ service cloud.firestore {
       return exists(/databases/$(database)/documents/events/$(eventId)/moments/last_call);
     }
 
+    // The unroll below names Day indexes 0–9 and nothing after, so a longer
+    // schedule would leave Days 10+ outside the lock entirely (#1357). The
+    // size bound makes it refuse such a schedule outright instead; a long
+    // schedule is locked by `scheduleEditWindowOk` below.
     function daysThemeLockOk(newDays, oldDays) {
       return newDays.size() == oldDays.size()
+        && newDays.size() <= 10
         && (newDays.size() < 1  || dayThemeChangeOk(newDays[0], oldDays[0]))
         && (newDays.size() < 2  || dayThemeChangeOk(newDays[1], oldDays[1]))
         && (newDays.size() < 3  || dayThemeChangeOk(newDays[2], oldDays[2]))
@@ -1264,6 +1272,34 @@ service cloud.firestore {
         && (newDays.size() < 8  || dayThemeChangeOk(newDays[7], oldDays[7]))
         && (newDays.size() < 9  || dayThemeChangeOk(newDays[8], oldDays[8]))
         && (newDays.size() < 10 || dayThemeChangeOk(newDays[9], oldDays[9]));
+    }
+
+    // THE EDIT WINDOW (#1357): the schedule lock for a schedule of ANY length,
+    // at a cost that does not grow with it. The write declares the first of the
+    // two Days it may change (`scheduleEditFrom: k`); everything outside
+    // [k, k+2) must be byte-identical, proved by two list-slice comparisons
+    // (`x[i:j]` is the rules.List range operator, and a list `==` is one
+    // expression however long the list is — measured on the emulator against a
+    // 2000-entry list), and the two Days inside the window take the same
+    // per-Day lock as the unroll above. A wrong `k` cannot widen anything: it
+    // only moves which two Days may differ, and both still pay the full lock.
+    //
+    // THE BOUNDARY GUARDS ARE LOAD-BEARING. An EMPTY slice errors in the rules
+    // runtime — `days[0:0] == days[0:0]` and even `days[0:0].size() == 0` deny
+    // — so a window at the very start (k == 0) or the very end (k + 2 == size)
+    // must skip the comparison on its empty side rather than make it.
+    // `k is int` comes first so a missing (the -1 default), negative, fractional
+    // or non-numeric start is refused before it reaches an index.
+    function scheduleEditWindowOk(newDays, oldDays, k) {
+      return k is int
+        && k >= 0
+        && k + 2 <= newDays.size()
+        && newDays.size() == oldDays.size()
+        && (k == 0 || newDays[0:k] == oldDays[0:k])
+        && (k + 2 == newDays.size()
+            || newDays[k + 2:newDays.size()] == oldDays[k + 2:oldDays.size()])
+        && dayThemeChangeOk(newDays[k], oldDays[k])
+        && dayThemeChangeOk(newDays[k + 1], oldDays[k + 1]);
     }
 
     // Server-owned intake queue. Players submit through the callable Function,
@@ -1788,13 +1824,21 @@ service cloud.firestore {
             // (#934/#940). Creates and legacy docs with no prior schedule still
             // need the standalone resulting-state validation below.
             || (resource != null && 'days' in resource.data)
-            || daysScoringValid(request.resource.data.days))
+            // `daysScoringValid` unrolls Days 0–9 only, so a schedule it
+            // cannot see all of is refused here; the Admin SDK seed (which
+            // bypasses rules) is the only way a long schedule is born (#1357).
+            || (request.resource.data.days.size() <= 10
+                && daysScoringValid(request.resource.data.days)))
         && (!('days' in request.resource.data)
             || resource == null
             || !('days' in resource.data)
             || request.resource.data.days == resource.data.days
             || tenDayFutureThemesOnlyOk(request.resource.data.days, resource.data.days)
-            || daysThemeLockOk(request.resource.data.days, resource.data.days))
+            || daysThemeLockOk(request.resource.data.days, resource.data.days)
+            // Last, so no write the paths above already allow pays for it:
+            // the only way a schedule longer than ten Days changes (#1357).
+            || scheduleEditWindowOk(request.resource.data.days, resource.data.days,
+                                    request.resource.data.get('scheduleEditFrom', -1)))
         // The configured freeze is LOCKED once it has passed (ADR 0011, Codex
         // P2 on PR #841). Between the cutoff and the scheduler's `frozenAt`
         // stamp — precisely the window the client-side stale-cache belt exists
@@ -1850,7 +1894,12 @@ service cloud.firestore {
             || 'standingsFreezeAt' in resource.data
             || !('standingsFreezeAt' in request.resource.data)
             || !('days' in resource.data)
-            || derivedFreezeStillFuture(resource.data.days))
+            // `firstDerivedFreezeAt` scans Days 0–9 only, so on a longer
+            // schedule it could miss an already-settled ceremonial Day and call
+            // the boundary future. Fail closed: a long schedule states its
+            // freeze at seed time, and a client cannot add one later (#1357).
+            || (resource.data.days.size() <= 10
+                && derivedFreezeStillFuture(resource.data.days)))
         // ONCE THE FINALE HAS BEEN ANNOUNCED, its clock is immutable (Phase 4b
         // P1). The `last_call` Moment persists the freeze phrase it announced
         // and is deduped on every later scheduler run, so a freeze moved after

@@ -189,10 +189,11 @@ export function setCardFormat(draft: EventDraft, cardFormat: DraftCardFormat): E
   });
 }
 
-/** Whether another Day may be added. The ceiling is a RULES fact, not a
- *  product preference: `daysThemeLockOk` (`firestore.rules`) unrolls its
- *  schedule lock over indexes 0–9 only, so an eleventh Day would sit outside
- *  the lock and stay editable after it had unlocked. */
+/** Whether another Day may be added. The ceiling is the setup wizard's
+ *  (`draftValidation`'s `MAX_DAYS`, ten): `daysThemeLockOk` (`firestore.rules`)
+ *  checks indexes 0–9 one by one, and a longer schedule must state its freeze
+ *  at birth and change through the two-Day edit window (#1357), neither of
+ *  which the wizard does — so a long schedule is seeded by script. */
 export function canAddDay(draft: EventDraft): boolean {
   return draft.cardFormat === 'daily_cards' && denseDays(draft).length < MAX_DAYS;
 }

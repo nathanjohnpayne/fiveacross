@@ -1,7 +1,7 @@
 import { addDoc, collection, doc, getDoc, getDocFromServer, getDocs, getDocsFromServer, limit, query, where, updateDoc, deleteDoc, runTransaction, arrayUnion, arrayRemove } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { db, functions, EVENT_ID } from '../firebase';
-import { completedLines, countMarked, isBlackout, foldDayStat, foldEchoStats, applyEchoes, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, type DayStats, type EchoBucket, type StatWrite } from '../game/logic';
+import { completedLines, countMarked, isBlackout, foldDayStat, foldEchoStats, applyEchoes, echoMarksEnabled, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, type DayStats, type EchoBucket, type StatWrite } from '../game/logic';
 import { cellsPatch, changedCells, cellsFromData } from '../game/cells';
 import { cellsMergeSet } from './cellsMerge';
 import { stampEchoAnalyticsTransitions } from './echoAnalytics';
@@ -16,6 +16,7 @@ import {
 } from './eventArchive';
 import { migrateClaimMode, migrateDayFields } from './converters';
 import { dayMetaRef, playersCol } from './paths';
+import { scheduleEditFromFor } from './eventLimits';
 import { normalizePool } from '../game/pool';
 import type { ApprovalOutcome, ApprovalPlacement, ApprovePromptsRequest, Cell, ClaimMode, ThemeId, ClaimDoc, DayMetaDoc, EventDoc, ItemDoc, DayDef, PlayerDoc, ProofDoc } from '../types';
 
@@ -695,9 +696,24 @@ export const setDayTheme = (days: DayDef[], dayIndex: number, theme: ThemeId): P
       (snap.exists() ? (snap.data().days as DayDef[] | undefined) : undefined) ?? days;
     tx.update(eventRef, {
       days: current.map((d) => (d.index === dayIndex ? { ...d, theme } : d)),
+      ...scheduleEditWindow(current, dayIndex),
     });
   });
 };
+
+/**
+ * The `scheduleEditFrom` marker a one-Day schedule write carries on a schedule
+ * longer than the rules' unrolled lock, or nothing at all on a shorter one
+ * (#1357, `firestore.rules`' `scheduleEditWindowOk`). Keyed off the array's
+ * POSITION of the Day being written, which is what the rules' slices index;
+ * a Day missing from the array changes nothing, so it opens no window.
+ */
+function scheduleEditWindow(current: DayDef[], dayIndex: number): { scheduleEditFrom?: number } {
+  const position = current.findIndex((d) => d.index === dayIndex);
+  if (position < 0) return {};
+  const from = scheduleEditFromFor(current.length, position);
+  return from === undefined ? {} : { scheduleEditFrom: from };
+}
 
 function normalizeTonightEntries(tonight: string[]): string[] {
   return tonight.map((entry) => entry.trim());
@@ -739,6 +755,7 @@ export const setDayTonight = (days: DayDef[], dayIndex: number, tonight: string[
     const nextTonight = normalizeTonightEntries(tonight);
     tx.update(eventRef, {
       days: current.map((d) => (d.index === dayIndex ? { ...d, tonight: nextTonight } : d)),
+      ...scheduleEditWindow(current, dayIndex),
     });
   });
 };
@@ -1450,11 +1467,11 @@ export async function archiveEvent(
   // read refusals do.
   //
   // AN INTEGER OUTSIDE THE SUPPORTED RANGE IS THE SAME REFUSAL, and the more
-  // dangerous half (Codex P2 on PR #1162, round 7). `-1`, `10` and an unsafe
+  // dangerous half (Codex P2 on PR #1162, round 7). `-1`, `MAX_DAYS` and an unsafe
   // large integer read a document that genuinely EXISTS as a path — the honour
   // pin fetch below succeeds, quietly, at `days/-1/meta/-1` — while naming no Day
   // the `DayDef` contract has, so a hand-edited or legacy schedule could freeze
-  // an `ArchivedDayHonor` labelled `D0` or `D11` into a `dailyHonors` list the
+  // an `ArchivedDayHonor` labelled `D0` or `D{MAX_DAYS + 1}` into a `dailyHonors` list the
   // rules cannot look inside. `usableDayIndexes` asks `supportedDayIndex` of every
   // entry, which is the one place the range is stated.
   //
@@ -1776,6 +1793,10 @@ async function resolve(
   // deltas folded into the ONE player write below. A reject uses the same reads
   // only to preserve a standing sibling's Tally marker; it never echoes.
   let echoSiblingDays: number[] = [];
+  // #1360: an Event with Echo switched off (`settings.echoMarks: false`)
+  // confirms the Claim on its own card only. The sibling reads still happen —
+  // a reject uses them to keep a standing sibling's Tally marker alive.
+  let echoOn = true;
   // The freeze gate is a GETTER re-evaluated inside the transaction callback
   // (Codex P2 on #278 round 4): a resolve started seconds before 08:00 must
   // fold with the post-boundary truth on retry/commit, not a pre-read capture.
@@ -1783,6 +1804,7 @@ async function resolve(
   if (daily) {
     const evSnap = await getDoc(evt(eventId));
     const days = (evSnap?.data()?.days as DayDef[] | undefined) ?? [];
+    echoOn = echoMarksEnabled(evSnap?.data()?.settings as { echoMarks?: unknown } | undefined);
     const set = tutorialDayIndexSet(days);
     isTutorialDay = (i: number) => set.has(i);
     // The freeze + ceremonial gates apply to the ADMIN resolve fold too (#265,
@@ -1867,7 +1889,7 @@ async function resolve(
     // (Firestore's reads-before-writes transaction contract).
     const confirmedCell = status === 'confirmed' ? next.find((x) => isClaimCell(x, c)) : undefined;
     const echoItemId =
-      confirmedCell && !confirmedCell.free && confirmedCell.marked ? confirmedCell.itemId : null;
+      echoOn && confirmedCell && !confirmedCell.free && confirmedCell.marked ? confirmedCell.itemId : null;
     const echoBuckets: EchoBucket[] = [];
     const echoWrites: Array<{ ref: ReturnType<typeof dayBoard>; set: ReturnType<typeof cellsMergeSet> }> = [];
     const echoPinDays: number[] = [];

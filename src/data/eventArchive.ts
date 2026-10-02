@@ -594,9 +594,9 @@ function usableUid(uid: unknown): uid is string {
  *    every honour pin is addressed by, so a missing or fractional one reads
  *    `days/undefined/meta/undefined` — a document that is not there, delivered
  *    as a perfectly ordinary "no pin here" — and the record would freeze that
- *    absence as the Day's honour. `-1`, `10` and an unsafe large integer are the
+ *    absence as the Day's honour. `-1`, `MAX_DAYS` and an unsafe large integer are the
  *    same defect wearing an integer's clothes: each addresses a real, arbitrary
- *    meta path, and each can freeze an `ArchivedDayHonor` labelled `D0` or `D11`
+ *    meta path, and each can freeze an `ArchivedDayHonor` labelled `D0` or `D{MAX_DAYS + 1}`
  *    into `dailyHonors`, where the rules cannot look inside a list to refuse it.
  *    The question is therefore the shared `supportedDayIndex` — a safe integer
  *    inside the `DayDef` contract's own `0 … MAX_DAYS - 1` — not
@@ -1082,7 +1082,7 @@ function writableStandingsSize(archive: EventArchive): boolean {
  * strictly increase, and `writableDayHonor` asks only `Number.isInteger` of each
  * one — deliberately, so this predicate refuses a shape rather than adjudicating
  * a Day the builder's own `supportedDayIndex` filter has already dropped — so
- * `[100, 200, 300, …]` is a strictly ascending list of any length. At most ten
+ * `[100, 200, 300, …]` is a strictly ascending list of any length. At most `MAX_DAYS`
  * does not follow, and the bound has to be stated to be had.
  *
  * Everything else here MIRRORS the boundary, the First-BINGO holder's place in
@@ -1414,9 +1414,9 @@ export function draftEventArchive(params: {
   // because the record is permanent.
   //
   // ASKED AS `supportedDayIndex`, not as `Number.isInteger` (Codex P2 on PR
-  // #1162, round 7). `-1`, `10` and an unsafe large integer all pass the integer
+  // #1162, round 7). `-1`, `MAX_DAYS` and an unsafe large integer all pass the integer
   // test while naming no Day the `DayDef` contract has, and a record carrying one
-  // freezes an honour labelled `D0` or `D11` that no schedule can ever label and
+  // freezes an honour labelled `D0` or `D{MAX_DAYS + 1}` that no schedule can ever label and
   // no rules arm can look inside `dailyHonors` to refuse. `pinnedOrDerivedDailyHonors`
   // now refuses to DERIVE one, so the derived side is closed at its source; this
   // is the same question asked of the PINNED side, which arrives off

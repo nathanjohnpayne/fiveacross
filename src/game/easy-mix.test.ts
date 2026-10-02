@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { dealBoard, CENTER, type DealItem } from './logic';
+import {
+  dealBoard,
+  CENTER,
+  echoMarksEnabled,
+  repeatExclusionTiers,
+  repeatWindowFor,
+  type DealItem,
+} from './logic';
+import type { Cell } from '../types';
 
 // specs/easy-mix.md — the main-day easy mix. From Day 4 onward a main-day Board's 24
 // non-free Squares are a `settings.easyMixRatio` split: an EASY half sampled from the
@@ -184,6 +192,91 @@ describe('easy mix — exclusion applies to the MAIN half only', () => {
     });
     const noExclusion = dealtIds(pool, 71, { stratify: true, easyMixRatio: 0.5 });
     expect(withEmbarkExcluded).toEqual(noExclusion);
+  });
+});
+
+// #1360 — the repeat window. `excludeTiers` is one id set per other card,
+// nearest Day first; the union is tried whole and, only when it would starve the
+// main half, the FARTHEST card's tier drops off first — a slope, not the old
+// all-or-nothing reset.
+describe('easy mix — the repeat window (#1360)', () => {
+  const ids = (prefix: string, from: number, n: number) =>
+    new Set(Array.from({ length: n }, (_, i) => `${prefix}${from + i}`));
+  const cellsOf = (set: Set<string>): Cell[] =>
+    [...set].map((itemId, index) => ({ index, itemId, text: itemId, marked: false, free: false }) as Cell);
+
+  it('deals byte-identically to the single-set path whenever the full union fits', () => {
+    const pool = [...mainPool(0, 100), ...embarkPool(20)];
+    const tiers = [ids('mt', 0, 12), ids('mt', 12, 12), ids('mt', 24, 12)];
+    const union = new Set(tiers.flatMap((t) => [...t]));
+    for (const seed of [3, 19, 71, 404]) {
+      expect(dealtIds(pool, seed, { stratify: true, easyMixRatio: 0.5, excludeTiers: tiers })).toEqual(
+        dealtIds(pool, seed, { stratify: true, easyMixRatio: 0.5, excludeIds: union }),
+      );
+    }
+  });
+
+  it('drops the FARTHEST card first when the union would starve the main half', () => {
+    // 40 main prompts, 12 needed. Four 10-prompt tiers exclude all 40; dropping the
+    // farthest tier frees mt30..mt39 — 10, still short — so the next-farthest
+    // drops too, freeing mt20..mt29. The two NEAREST cards stay excluded.
+    const pool = [...mainPool(0, 40), ...embarkPool(20)];
+    const by = classifier(pool);
+    const tiers = [ids('mt', 0, 10), ids('mt', 10, 10), ids('mt', 20, 10), ids('mt', 30, 10)];
+    const main = dealtIds(pool, 5, { stratify: true, easyMixRatio: 0.5, excludeTiers: tiers }).filter(
+      (id) => id && by.get(id)?.pool === 'main',
+    );
+    expect(main).toHaveLength(12);
+    for (const id of [...tiers[0], ...tiers[1]]) expect(main).not.toContain(id);
+  });
+
+  it('keeps enough main prompts to backfill a SHORT easy pool before accepting a tier prefix', () => {
+    // 40 main + only 6 easy at ratio 0.5: main must supply 18, not 12. Tiers of
+    // 14/14/12 exclude everything; dropping the farthest (12) leaves 12 — enough
+    // for a 12-square main half but not for the 18 the short easy pool needs —
+    // so a second tier drops and only the nearest card (14) stays excluded.
+    const pool = [...mainPool(0, 40), ...embarkPool(6)];
+    const tiers = [ids('mt', 0, 14), ids('mt', 14, 14), ids('mt', 28, 12)];
+    const dealt = dealtIds(pool, 9, { stratify: true, easyMixRatio: 0.5, excludeTiers: tiers });
+    expect(dealt).toHaveLength(24);
+    for (const id of tiers[0]) expect(dealt).not.toContain(id);
+  });
+
+  it('keeps the legacy single-set exclusion as the all-or-nothing reset', () => {
+    const pool = [...mainPool(0, 40), ...embarkPool(20)];
+    const all = ids('mt', 0, 40);
+    // One tier that starves the pool resets to the full pool — the pre-#1360 behaviour.
+    expect(dealtIds(pool, 5, { stratify: true, easyMixRatio: 0.5, excludeTiers: [all] })).toEqual(
+      dealtIds(pool, 5, { stratify: true, easyMixRatio: 0.5 }),
+    );
+  });
+
+  it('orders tiers nearest Day first and cuts to the window', () => {
+    const other = [0, 1, 2, 3, 4, 5, 7, 9].map((d) => ({ dayIndex: d, cells: cellsOf(ids(`d${d}-`, 0, 1)) }));
+    const firstIds = (tiers: Set<string>[]) => tiers.map((t) => [...t][0]);
+    // Dealing Day 6: distances 1 (5, 7), 2 (4), 3 (3, 9), … — ties go to the earlier Day.
+    expect(firstIds(repeatExclusionTiers(other, 6))).toEqual([
+      'd5-0', 'd7-0', 'd4-0', 'd3-0', 'd9-0', 'd2-0', 'd1-0', 'd0-0',
+    ]);
+    expect(firstIds(repeatExclusionTiers(other, 6, 4))).toEqual(['d5-0', 'd7-0', 'd4-0', 'd3-0']);
+  });
+
+  it('reads settings.repeatWindow defensively — only a positive integer is a window', () => {
+    expect(repeatWindowFor({ repeatWindow: 4 })).toBe(4);
+    for (const bad of [undefined, 0, -1, 2.5, '4', Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(repeatWindowFor({ repeatWindow: bad })).toBeUndefined();
+    }
+    expect(repeatWindowFor(undefined)).toBeUndefined();
+  });
+});
+
+describe('Echo Marks switch (#1360)', () => {
+  it('is ON unless settings.echoMarks is exactly false', () => {
+    expect(echoMarksEnabled(undefined)).toBe(true);
+    expect(echoMarksEnabled({})).toBe(true);
+    expect(echoMarksEnabled({ echoMarks: true })).toBe(true);
+    expect(echoMarksEnabled({ echoMarks: 'false' })).toBe(true);
+    expect(echoMarksEnabled({ echoMarks: false })).toBe(false);
   });
 });
 

@@ -347,3 +347,151 @@ describe('firestore.rules — Admin Schedule editor day-theme lock (specs/d15-ad
     await assertFails(updateDoc(eventDoc(db(ADMIN)), { days: edited }));
   });
 });
+
+// #1357 — schedules longer than the ten-index unroll. `daysThemeLockOk` names
+// Days 0–9 and nothing after, so before this ticket Days 10+ of a long schedule
+// sat outside the lock entirely. A long schedule now changes ONLY through the
+// two-Day edit window (`scheduleEditWindowOk`): the write declares
+// `scheduleEditFrom: k`, every Day outside [k, k + 2) must be identical (two
+// list-slice comparisons), and the two Days inside take the full per-Day lock.
+describe('firestore.rules — long schedules lock through the two-Day edit window (#1357)', () => {
+  const WEEK = 7 * 24 * 3600_000;
+  // A sixteen-week semester: weeks 0–11 already unlocked, 12–15 still ahead,
+  // the last one the ceremonial closing-pool Day. `pastThrough` moves the line.
+  const semester = (pastThrough = 11) =>
+    Array.from({ length: 16 }, (_, index) => ({
+      index,
+      date: `2027-W${index + 1}`,
+      place: `Week ${index + 1}`,
+      placeEmoji: '📚',
+      theme: index % 2 === 0 ? 'marquee' : 'afterglow',
+      tonight: ['One', 'Two'],
+      pool: index === 15 ? 'farewell' : 'main',
+      tutorial: false,
+      scoring: index === 15 ? 'ceremonial' : 'competitive',
+      unlockAt: index <= pastThrough ? PAST() - (pastThrough - index) * WEEK : FUTURE() + index * WEEK,
+    }));
+
+  const seedSemester = async (days = semester(), extra: Record<string, unknown> = {}) => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), {
+        days,
+        standingsFreezeAt: days[15].unlockAt,
+        ...extra,
+      });
+    });
+  };
+  const withDay = (days: ReturnType<typeof semester>, i: number, patch: Record<string, unknown>) =>
+    days.map((d, j) => (j === i ? { ...d, ...patch } : d));
+
+  it('CAN change a still-future Day through a window that covers it', async () => {
+    await seedSemester();
+    const days = withDay(semester(), 13, { theme: 'confetti-hour' });
+    await assertSucceeds(updateDoc(eventDoc(db(ADMIN)), { days, scheduleEditFrom: 13 }));
+  });
+
+  it('CAN edit both Days inside one window', async () => {
+    await seedSemester();
+    const days = withDay(withDay(semester(), 12, { theme: 'confetti-hour' }), 13, {
+      tonight: ['Marathon Monday', 'Earth Day'],
+    });
+    await assertSucceeds(updateDoc(eventDoc(db(ADMIN)), { days, scheduleEditFrom: 12 }));
+  });
+
+  it('CAN edit the LAST Day — a window ending at the schedule end skips the empty tail slice', async () => {
+    await seedSemester();
+    const days = withDay(semester(), 15, { tonight: ['Podium reveal', 'Last RC classes'] });
+    await assertSucceeds(updateDoc(eventDoc(db(ADMIN)), { days, scheduleEditFrom: 14 }));
+  });
+
+  it('CAN edit the FIRST Day — a window at k = 0 skips the empty head slice', async () => {
+    const allFuture = semester(-1);
+    await seedSemester(allFuture);
+    const days = withDay(allFuture, 0, { theme: 'confetti-hour' });
+    await assertSucceeds(updateDoc(eventDoc(db(ADMIN)), { days, scheduleEditFrom: 0 }));
+  });
+
+  it('DENIES a long-schedule change that declares no window', async () => {
+    await seedSemester();
+    const days = withDay(semester(), 13, { theme: 'confetti-hour' });
+    await assertFails(updateDoc(eventDoc(db(ADMIN)), { days }));
+  });
+
+  it('DENIES a change outside the declared window', async () => {
+    await seedSemester();
+    const days = withDay(semester(), 13, { theme: 'confetti-hour' });
+    await assertFails(updateDoc(eventDoc(db(ADMIN)), { days, scheduleEditFrom: 10 }));
+  });
+
+  it('DENIES two changed Days that no single two-Day window covers', async () => {
+    await seedSemester();
+    const days = withDay(withDay(semester(), 13, { theme: 'confetti-hour' }), 15, {
+      tonight: ['Podium reveal', 'Last RC classes'],
+    });
+    await assertFails(updateDoc(eventDoc(db(ADMIN)), { days, scheduleEditFrom: 13 }));
+  });
+
+  it('DENIES a malformed window start (negative, past the end, string, fractional)', async () => {
+    await seedSemester();
+    const days = withDay(semester(), 14, { theme: 'confetti-hour' });
+    for (const scheduleEditFrom of [-1, 15, '14', 13.5]) {
+      await assertFails(updateDoc(eventDoc(db(ADMIN)), { days, scheduleEditFrom }));
+    }
+  });
+
+  it('REGRESSION: an unlocked Day past index 9 is locked — no unlock move, theme, or scoring flip', async () => {
+    // Before #1357 the unroll never looked at Day 10, so each of these passed.
+    await seedSemester();
+    for (const patch of [{ unlockAt: FUTURE() }, { theme: 'confetti-hour' }, { scoring: 'ceremonial' }]) {
+      const days = withDay(semester(), 10, patch);
+      await assertFails(updateDoc(eventDoc(db(ADMIN)), { days }));
+      await assertFails(updateDoc(eventDoc(db(ADMIN)), { days, scheduleEditFrom: 10 }));
+      await assertFails(updateDoc(eventDoc(db(ADMIN)), { days, scheduleEditFrom: 9 }));
+    }
+  });
+
+  it('DENIES an unlocked Day inside a window even when its neighbour is a legal edit', async () => {
+    await seedSemester();
+    const days = withDay(withDay(semester(), 11, { theme: 'confetti-hour' }), 12, { theme: 'confetti-hour' });
+    await assertFails(updateDoc(eventDoc(db(ADMIN)), { days, scheduleEditFrom: 11 }));
+  });
+
+  it('DENIES a malformed scoring value inside the window', async () => {
+    await seedSemester();
+    const days = withDay(semester(), 13, { scoring: 'ceremoniall' });
+    await assertFails(updateDoc(eventDoc(db(ADMIN)), { days, scheduleEditFrom: 13 }));
+  });
+
+  it('DENIES growing or shrinking a long schedule', async () => {
+    await seedSemester();
+    const longer = [...semester(), { ...semester()[15], index: 16 }];
+    await assertFails(updateDoc(eventDoc(db(ADMIN)), { days: longer, scheduleEditFrom: 14 }));
+    await assertFails(updateDoc(eventDoc(db(ADMIN)), { days: semester().slice(0, 15), scheduleEditFrom: 13 }));
+  });
+
+  it('an Admin write that leaves a long schedule untouched (e.g. claimMode) is unaffected', async () => {
+    await seedSemester();
+    await assertSucceeds(updateDoc(eventDoc(db(ADMIN)), { claimMode: 'proof_required' }));
+  });
+
+  it('a non-admin cannot write a long schedule even through a valid window', async () => {
+    await seedSemester();
+    const days = withDay(semester(), 13, { theme: 'confetti-hour' });
+    await assertFails(updateDoc(eventDoc(db(ALICE)), { days, scheduleEditFrom: 13 }));
+  });
+
+  it('DENIES adding a stated freeze to a long schedule that has none (the derived scan stops at Day 9)', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'events', EVENT), {
+        name: 'Semester',
+        status: 'active',
+        claimMode: 'honor',
+        admins: [ADMIN],
+        timezone: 'America/New_York',
+        settings: { reportHideThreshold: 4 },
+        days: semester(),
+      });
+    });
+    await assertFails(updateDoc(eventDoc(db(ADMIN)), { standingsFreezeAt: FUTURE() + 30 * WEEK }));
+  });
+});

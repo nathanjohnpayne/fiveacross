@@ -8,9 +8,11 @@
  *      `status: 'active'` item in that Day's pool at that moment. Idempotent: a
  *      Day that already carries a snapshot (even an empty one) is never
  *      re-stamped, so retries and a second same-day run are no-ops.
- *   2. The finale two-beat finish — at 20:00 on Day 9 post exactly one
- *      `last_call` Moment (frozenAt untouched); at 08:00 on Day 10 (the farewell
- *      Day's `unlockAt`) set `EventDoc.frozenAt` and post exactly one `podium`
+ *   2. The finale two-beat finish — at last call (`LAST_CALL_LEAD_MS` before
+ *      the freeze; 20:00 on Day 9 in the original ten-Day shape) post exactly
+ *      one `last_call` Moment (frozenAt untouched); at the Standings Freeze (the
+ *      configured `standingsFreezeAt`, else the first ceremonial Day's
+ *      `unlockAt` — 08:00 on Day 10 in that shape) set `EventDoc.frozenAt` and post exactly one `podium`
  *      Moment, and stamp `EventDoc.finaleCompletedAt` once BOTH have landed
  *      (#1151). The standings / podium CONTENT is #212 / #217; these Moments
  *      carry only the minimal payload those tickets render.
@@ -434,7 +436,8 @@ export function activeSnapshotIds(items: SnapshotItem[], filter: SnapshotFilter)
     .map((it) => it.id);
 }
 
-/** 20:00 Day 9 sits 12h after Day 9's 08:00 `unlockAt`; 08:00 Day 10 → freeze. */
+/** In the original ten-Day shape, 20:00 Day 9 sits 12h after Day 9's 08:00 `unlockAt`;
+ *  08:00 Day 10 → freeze. */
 export const LAST_CALL_LEAD_MS = 12 * 60 * 60 * 1000;
 
 export interface FinaleTimes {

@@ -54,7 +54,7 @@ Three propagation moments cover all cases with no migration:
 
 ## Acceptance criteria
 
-- **Given** Prompt P confirmed on any of my cards, **then** every other card of mine carrying P shows it marked (`echo`), immediately (mark-time) or on arrival (deal-time) or on open (reconcile).
+- **Given** Prompt P confirmed on any of my cards (and Echo on—an Event can switch it off since #1360, `specs/echo-marks.md` § Disabled), **then** every other card of mine carrying P shows it marked (`echo`), immediately (mark-time) or on arrival (deal-time) or on open (reconcile).
 - **Given** echoes complete new lines, **then** `bingoCount`/`squaresMarked`/`blackout`/`firstBingoAt` update in one aggregated write, and the wins enter the existing confirm-to-Feed queue.
 - **Given** admin_confirmed mode, **then** nothing echoes until the claim confirms.
 - **Given** a Reshuffle, **then** prior echoes never cost pristine-ness and the fresh card re-echoes.
