@@ -996,8 +996,8 @@ export interface BoardDoc {
   // Which Day this Board belongs to — one Board per Player per Day
   // (daily-cards-spec § "Data model"). Path wiring for the day-scoped location
   // `events/{eventId}/days/{dayIndex}/boards/{uid}` is added by #204; this
-  // field is what lets the dealer look up a Player's earlier Day Cards to
-  // exclude repeats across the cruise.
+  // field is what lets the dealer look up a Player's other Day Cards (earlier,
+  // or later when Days are opened out of order) to exclude repeats.
   dayIndex: number;
   seed: number;
   // The latest direct Board-toggle request. A server trigger compares its

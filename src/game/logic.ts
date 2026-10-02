@@ -424,7 +424,8 @@ function unstratifiedPicks(pool: DealItem[], rnd: () => number): DealItem[] {
 
 /**
  * Options for a per-Day deal (daily-cards-spec § "Unlock mechanics").
- *   - `excludeIds`: Prompt ids already on this Player's earlier Day Cards, to be
+ *   - `excludeIds`: Prompt ids already on this Player's other Day Cards (later
+ *     Days too, when opened out of order), to be
  *     kept off the new card (no-repeat-across-the-cruise). Exclusion is best-effort:
  *     if honoring it would drop the usable pool below `MIN_POOL`, the pool is
  *     exhausted (~80 main items ÷ 24/day ≈ 3⅓ Days) and the exclusion RESETS —
