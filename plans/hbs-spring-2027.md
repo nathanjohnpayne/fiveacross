@@ -506,15 +506,22 @@ This is a protected path, so the change needs full Phase 4.
 - Thread the cadence-aware label into the email template too. `functions/src/dailyEmailTemplate.ts` hard-codes "Tonight:" in both the HTML and plain-text renderers, separately from `dailyEmailContent.ts`, so changing the content file alone leaves it daily. Cover both outputs in the email spec and tests.
 - Migrate the winner-announcement email too. Week 16's email is the podium email, a separate path: `functions/src/podiumEmailContent.ts` builds "Final standings · Day N of M", and `functions/src/podiumEmail.ts` hard-codes "Day N" in its honor and photo labels. Route both through the weekly register, update `specs/daily-engagement-email.md`'s podium section, and extend `tests/functions/podium-email.test.ts`.
 
-**T5—Seed module.** Add `scripts/seed-data/hbs-spring-2027.mjs` holding this document's pools and 16 Days, and register it in `SEED_EVENTS`. Event fields:
+**T5—Seed module.** Add `scripts/seed-data/hbs-spring-2027.mjs` holding this document's pools and 16 Days, and register it in `SEED_EVENTS`. `eventWritePayload` writes `EVENT_SEED` verbatim (no defaults are filled in), so the module states every field itself, modelled on `bodega-bay-2026.mjs` and held to `specs/w1-event-seed.md`'s every-registered-Event contract:
 
-- `status: 'active'`. `eventWritePayload` writes `EVENT_SEED` verbatim, and the unlock, engagement-email, podium-email and admin-digest sweeps all select only Events whose `status` is exactly `active`, so without it no card unlocks and no email sends.
+- `name: 'HBS Spring 2027'`
+- `status: 'active'`. The unlock, engagement-email, podium-email and admin-digest sweeps all select only Events whose `status` is exactly `active`, so without it no card unlocks and no email sends.
 - `cadence: 'weekly'`
+- `defaultTheme: 'marquee'` (the Five Across Edition's default) and `claimMode: 'honor'`
 - `timezone: 'America/New_York'`
-- `startsOn: '2027-01-25'`, `endsOn: '2027-05-19'`
-- `standingsFreezeAt` = Week 16's `unlockAt`
+- `startsOn: '2027-01-25'`, `endsOn: '2027-05-19'`. Also add the legacy `sailStart` / `sailEnd` pair with the same values if the #566 read-coercion still isn't deployed when this is seeded, as Bodega's seed does.
+- `standingsFreezeAt` = Week 16's `unlockAt`. Required for a schedule longer than 10 Days (T2).
+- `settings: { reportHideThreshold: 4, spicyRatio: 0, easyMixRatio: 0.5, dailyEmailEnabled: true, scheduledReserve: 6, echoMarks: false, repeatWindow: 4 }`:
+  - `reportHideThreshold` is required: `firestore.rules` denies admin updates to an Event whose `settings` lack a numeric threshold, and it drives report-based auto-hide.
+  - `echoMarks` and `repeatWindow` are T9's settings. Absent means Echo on and no window, so the seed must state both.
+- `days`: the 16 Days in the calendar above.
 - Seed-time validation applies the scoring contract to every Day, indexes 10–19 included. The rules' `daysScoringValid` covers only indexes 0–9, and the seed bypasses rules anyway, so the seed module (or a registry test over it) must check each Day's `scoring` itself.
-- `settings: { spicyRatio: 0, easyMixRatio: 0.5, dailyEmailEnabled: true, scheduledReserve: 6, echoMarks: false }`. `echoMarks` is T9's switch, and absent means Echo is on, so the seed must state it.
+
+Pin the full field set in the seed registry test, so a missing field fails a test instead of shipping.
 
 Two content rules: every Day sets `freeText`, and Prompt text stays unique across pools, because seed ids are hashed from the text.
 
