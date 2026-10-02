@@ -43,6 +43,7 @@ README_ADD="$SCRIPT_DIR/additions/readme-phase-1.5.md"
 # This driver mutates the real Project #7. Require the fixed author identity
 # at startup and before every gh call; it has no test or identity bypass.
 CHECKER="$SCRIPT_DIR/../../../identity-check.sh"
+AUTHOR_WRAPPER="$SCRIPT_DIR/../../../gh-as-author.sh"
 require_author() {
   if [ ! -x "$CHECKER" ]; then
     echo "Error: identity-check helper missing or non-executable: $CHECKER" >&2
@@ -54,7 +55,12 @@ require_author() {
 ghp_gh() {
   # A rejected identity must stop this driver even when a caller handles a gh failure.
   ( unset GITHUB_TOKEN; require_author ) || exit 2
-  ( unset GITHUB_TOKEN; gh "$@"; )
+  if [[ "$1" == project && ( "$2" == item-add || "$2" == item-edit ) ]]; then
+    [[ -x "$AUTHOR_WRAPPER" ]] || { echo "Error: author wrapper missing or non-executable." >&2; exit 2; }
+    ( unset GITHUB_TOKEN; "$AUTHOR_WRAPPER" -- gh "$@"; )
+  else
+    ( unset GITHUB_TOKEN; gh "$@"; )
+  fi
 }
 require_author
 WORK="$(mktemp -d)"

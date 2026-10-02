@@ -9,13 +9,18 @@ const script = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'board
 const fixtures = [];
 afterEach(() => fixtures.splice(0).forEach(path => rmSync(path, { recursive: true, force: true })));
 
-function fixture({ checker = 'author', env = {}, rejectAt = 0, rejectOnly = false } = {}) {
+function fixture({ checker = 'author', env = {}, rejectAt = 0, rejectOnly = false, wrapper = true } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'board-author-'));
   fixtures.push(root);
   const example = join(root, 'scripts', 'gh-projects', 'examples', 'gaycruisebingo');
   const bin = join(root, 'bin');
   mkdirSync(example, { recursive: true });
   mkdirSync(bin);
+  if (wrapper) {
+    const wrapperPath = join(root, 'scripts', 'gh-as-author.sh');
+    writeFileSync(wrapperPath, '#!/bin/bash\nset -eu\ntest "$1" = --\nshift\nprintf "%s\\n" "$*" >>"$FIXTURE_ROOT/wrapper-calls"\nexec "$@"\n');
+    chmodSync(wrapperPath, 0o755);
+  }
   const driver = join(example, 'board-fields-1.5.sh');
   writeFileSync(driver, script);
   writeFileSync(join(example, 'slug-num-1.5.map'), 'd15-epic=1\nd15-tab-contract=2\n');
@@ -85,6 +90,15 @@ describe('Phase 1.5 board driver requires the fixed author identity', () => {
     expect(calls.filter(c => c === 'project item-add')).toHaveLength(2);
     expect(calls.filter(c => c === 'project item-edit')).toHaveLength(2);
     expect(Number(readFileSync(join(f.root, 'checks'), 'utf8'))).toBe(calls.length + 1);
+    const wrapped = readFileSync(join(f.root, 'wrapper-calls'), 'utf8').trim().split('\n');
+    expect(wrapped).toHaveLength(4);
+    expect(wrapped.every(c => /^gh project item-(add|edit) /.test(c))).toBe(true);
+  });
+
+  it('rejects a missing author wrapper before any mutation', () => {
+    const { result, calls } = run(fixture({ wrapper: false }));
+    expect(result.status).toBe(2);
+    expect(calls.filter(c => /project item-(add|edit)/.test(c))).toEqual([]);
   });
 
   it('blocks a later field mutation when identity verification stops succeeding', () => {
