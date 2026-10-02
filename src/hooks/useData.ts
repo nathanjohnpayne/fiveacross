@@ -416,7 +416,7 @@ export function useItems(enabled = true) {
       (i) =>
         i.status === 'active' &&
         (i.pool ?? 'main') === 'main' &&
-        !isReportHidden(i.reportCount, threshold) &&
+        !isReportHidden(i.reportCount, threshold, i.reportHideSuppressed) &&
         !isExplicitWithheld(i.spicy, adultRequired) &&
         !isBanned(i.createdBy, bannedUids),
     )
@@ -1034,7 +1034,7 @@ export function useProofFeed(max: number | null = 60, moderation?: ProofFeedMode
       const visible = data
         .filter(
           (p) =>
-            !isReportHidden(p.reportCount, threshold) &&
+            !isReportHidden(p.reportCount, threshold, p.reportHideSuppressed) &&
             !isBanned(p.uid, bannedUids) &&
             !isHiddenFor(p.uid, hidden),
         )
@@ -1773,7 +1773,7 @@ export function useMyProofs(uid: string | null | undefined) {
     uid ? query(proofsCol(), where('uid', '==', uid), where('status', '==', 'active')) : null,
     eventSubscriptionKey('proofs:mine', uid ?? 'none'),
   );
-  const proofs = data.filter((p) => !isReportHidden(p.reportCount, threshold));
+  const proofs = data.filter((p) => !isReportHidden(p.reportCount, threshold, p.reportHideSuppressed));
   return { proofs, loading, hasServerData };
 }
 
@@ -1810,7 +1810,7 @@ export function useProofsForItemText(itemText: string | null | undefined) {
   const proofs = ready
     ? data.filter(
         (p) =>
-          !isReportHidden(p.reportCount, threshold) &&
+          !isReportHidden(p.reportCount, threshold, p.reportHideSuppressed) &&
           !isBanned(p.uid, bannedUids) &&
           !isHiddenFor(p.uid, hidden),
       )

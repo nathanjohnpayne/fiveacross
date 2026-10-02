@@ -1054,6 +1054,12 @@ describe('alertsForWrite', () => {
     expect(kinds(undefined, { status: 'active' })).toEqual([]);
   });
 
+  it('keeps new reports admin-visible on a restored incarnation (#1405)', () => {
+    const before = { ...ITEM({ status: 'active', reportCount: 5 }), reportHideSuppressed: true };
+    const after = { ...before, reportCount: 6 };
+    expect(alertsForWrite('items', 'i1', before, after).map((a) => a.kind)).toEqual(['content-reported']);
+  });
+
   it('queues both alerts for a single hide-plus-report write', () => {
     const kinds = alertsForWrite(
       'items',

@@ -103,9 +103,9 @@ beforeEach(async () => {
 });
 
 describe('firestore.rules — moderation surface (specs/w2-admin-console.md)', () => {
-  it('a non-admin report increments reportCount by exactly 1 — Prompt and Proof', async () => {
-    await assertSucceeds(updateDoc(doc(db(BOB), at('items/i1')), { reportCount: 1 }));
-    await assertSucceeds(updateDoc(doc(db(BOB), at('proofs/p1')), { reportCount: 1 }));
+  it('bare non-admin report increments are denied — Prompt and Proof (#1405)', async () => {
+    await assertFails(updateDoc(doc(db(BOB), at('items/i1')), { reportCount: 1 }));
+    await assertFails(updateDoc(doc(db(BOB), at('proofs/p1')), { reportCount: 1 }));
   });
 
   it('a non-admin cannot jump the counter, decrement it, bundle other fields, or moderate', async () => {

@@ -151,7 +151,7 @@ function ProofQueueRow({
   // rather than falling back to the ceremonial-Day derivation.
   standingsFreezeAt?: number;
 }) {
-  const autoHidden = isReportHidden(p.reportCount, threshold);
+  const autoHidden = isReportHidden(p.reportCount, threshold, p.reportHideSuppressed);
   // #133: the AI screen's verdict, and whether the Proof is currently hidden —
   // two independent facts, so the pill never claims the AI screen caused a hide
   // that the report threshold or an admin actually made.
@@ -265,7 +265,7 @@ function ItemQueueRow({
   bannedUids: string[];
   admins: string[];
 }) {
-  const autoHidden = isReportHidden(it.reportCount, threshold);
+  const autoHidden = isReportHidden(it.reportCount, threshold, it.reportHideSuppressed);
   return (
     <div className="row">
       <div className="grow">

@@ -24,6 +24,7 @@
 export interface ReportableDoc {
   status?: string;
   reportCount?: number;
+  reportHideSuppressed?: boolean;
 }
 
 /** A candidate doc surfaced by the backfill query (id + the two fields it gates on). */
@@ -63,7 +64,7 @@ export type ModeratedCollection = 'items' | 'proofs';
  *     `restoreItem`/`restoreProof` (src/data/admin.ts) set `status → 'active'`
  *     but deliberately leave `reportCount` over the threshold. That write does
  *     NOT raise `reportCount`, so it is not a rise and is NOT re-hidden — the
- *     restore sticks (until the community reports it AGAIN and the count rises).
+ *     restore remains protected by its report-hide suppression marker even when a later distinct report raises the count.
  *   - Retry-safe under the transaction. Broadening to "rose" is safe because the
  *     actual write still goes through `hideIfQualifies`, which re-reads live state
  *     — a doc an admin Cleared below threshold between the bump and the write
@@ -79,6 +80,7 @@ export function shouldHideAtThreshold(
   threshold: number | null | undefined,
 ): boolean {
   if (!after) return false; // delete — nothing to hide
+  if (after.reportHideSuppressed === true) return false;
   if (after.status !== 'active') return false; // active-only (F2) + loop guard: never downgrade flagged/pending/hidden
   if (typeof threshold !== 'number' || threshold <= 0) return false; // fail-safe: unset/non-positive hides nothing
   const beforeCount = before?.reportCount ?? 0;
@@ -99,6 +101,7 @@ export function stillQualifiesForHide(
   threshold: number | null | undefined,
 ): boolean {
   if (!data || data.status !== 'active') return false;
+  if (data.reportHideSuppressed === true) return false;
   if (typeof threshold !== 'number' || threshold <= 0) return false;
   return (data.reportCount ?? 0) >= threshold;
 }
@@ -245,7 +248,7 @@ export async function applyThresholdHide(
   deps: AutoHideDeps = {},
 ): Promise<boolean> {
   try {
-    if (!after || after.status !== 'active') return false; // active-only (F2) + loop guard
+    if (!after || after.status !== 'active' || after.reportHideSuppressed === true) return false; // active-only + restore suppression + loop guard
     const beforeCount = before?.reportCount ?? 0;
     const afterCount = after.reportCount ?? 0;
     if (afterCount <= beforeCount) return false; // reportCount did not rise — no crossing possible; skip the read

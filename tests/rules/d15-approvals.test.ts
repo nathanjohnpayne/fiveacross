@@ -218,11 +218,11 @@ describe('d15-approvals — update: approval is the approvePrompts callable; onl
     );
   });
 
-  it("a non-admin's ONLY permitted update on their own pending item is the reportCount increment path", async () => {
+  it("a non-admin cannot increment a pending item without an incarnation receipt (#1405)", async () => {
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       await setDoc(doc(ctx.firestore(), at('items/p1')), pendingPayload(ALICE));
     });
-    // The existing report path still works — unrelated to the approval gate.
-    await assertSucceeds(updateDoc(doc(db(BOB), at('items/p1')), { reportCount: 1 }));
+    // Reporting now requires its paired receipt/rate writes (#1405).
+    await assertFails(updateDoc(doc(db(BOB), at('items/p1')), { reportCount: 1 }));
   });
 });

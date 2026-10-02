@@ -198,7 +198,7 @@ describe('firestore.rules — honor-system invariants', () => {
   it('ADR 0004: items are report-only increments; reportHideThreshold validated', async () => {
     const item = doc(db(ALICE), at('items/item1'));
     await assertFails(updateDoc(item, { reportCount: 1, text: 'changed' })); // any other field
-    await assertSucceeds(updateDoc(item, { reportCount: 1 })); // +1 only
+    await assertFails(updateDoc(item, { reportCount: 1 })); // a bare +1 cannot bypass the receipt/rate boundary
     const event = doc(db(ADMIN), `events/${EVENT}`);
     await assertSucceeds(updateDoc(event, { 'settings.reportHideThreshold': 5 })); // numeric
     await assertFails(updateDoc(event, { 'settings.reportHideThreshold': 'high' })); // non-numeric

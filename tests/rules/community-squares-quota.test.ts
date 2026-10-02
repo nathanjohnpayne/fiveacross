@@ -201,13 +201,13 @@ describe("Community Prompt pool/spicy resulting-state invariant (#558)", () => {
     );
   });
 
-  it("keeps the report-only arm unchanged for a legacy item with no pool", async () => {
+  it("denies unpaired reporting even for a legacy item with no pool (#1405)", async () => {
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       const { pool: _pool, ...legacy } = activePayload("main", false);
       await setDoc(doc(ctx.firestore(), itemPath("legacy-no-pool")), legacy);
     });
 
-    await assertSucceeds(
+    await assertFails(
       updateDoc(doc(db(PLAYER), itemPath("legacy-no-pool")), {
         reportCount: 1,
       }),

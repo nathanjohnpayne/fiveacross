@@ -185,6 +185,51 @@ service cloud.firestore {
     function eventOpenForPlay(eventId) {
       return !eventClosedToPlay(eventId);
     }
+
+    // #1405: every player counter rise consumes one fresh incarnation receipt
+    // AND one reporter rate fence, atomically. No receipt/rate can vouch for a
+    // second target in the same batch; all identities come from the paths.
+    function mayReport(eventId) {
+      return admitted(eventId) && eventOpenForPlay(eventId)
+        && !(request.auth.uid in eventData(eventId).get('bannedUids', []));
+    }
+    function reportTarget(eventId, kind, targetId) {
+      return /databases/$(database)/documents/events/$(eventId)/$(kind)/$(targetId);
+    }
+    function reportReceipt(eventId, kind, targetId, uid) {
+      return /databases/$(database)/documents/events/$(eventId)/$(kind)/$(targetId)/reports/$(uid);
+    }
+    function reportRate(eventId, uid) {
+      return /databases/$(database)/documents/events/$(eventId)/reportRateLimits/$(uid);
+    }
+    function freshReportReceipt(eventId, kind, targetId) {
+      let target = get(reportTarget(eventId, kind, targetId)).data;
+      let path = reportReceipt(eventId, kind, targetId, request.auth.uid);
+      let receipt = getAfter(path).data;
+      return receipt.keys().hasOnly(['uid', 'targetCreatedAt', 'submittedAt'])
+        && receipt.uid == request.auth.uid
+        && receipt.targetCreatedAt is number
+        && receipt.targetCreatedAt == target.createdAt
+        && receipt.submittedAt == request.time
+        && (!exists(path) || get(path).data.targetCreatedAt != target.createdAt);
+    }
+    function freshReportRate(eventId, kind, targetId) {
+      let path = reportRate(eventId, request.auth.uid);
+      let rate = getAfter(path).data;
+      return rate.keys().hasOnly(['kind', 'targetId', 'submittedAt'])
+        && rate.kind == kind && rate.targetId == targetId
+        && rate.submittedAt == request.time
+        && (!exists(path) || request.time >= get(path).data.submittedAt + duration.value(3, 's'));
+    }
+    function reportCounterPaired(eventId, kind, targetId) {
+      let path = reportTarget(eventId, kind, targetId);
+      let before = get(path).data;
+      let after = getAfter(path).data;
+      return after.diff(before).affectedKeys().hasOnly(['reportCount'])
+        && after.reportCount == before.reportCount + 1
+        && freshReportReceipt(eventId, kind, targetId)
+        && freshReportRate(eventId, kind, targetId);
+    }
     // The QUIESCE ALONE — shut, but not yet frozen (#134, Codex P2 on PR #1139).
     // `eventClosedToPlay` above is true for BOTH halves of the freeze, and the
     // two halves want OPPOSITE answers about the deletes below.
@@ -686,18 +731,8 @@ service cloud.firestore {
         || (from == 'pending' && to == 'rejected')
         || (from in ['active', 'hidden'] && to in ['active', 'hidden']);
     }
-    // `retainedAt` is an APPROVAL-time fact, so a submitter may not arrive with
-    // one. Unlike a forged `approvedAt` — which the approval write overwrites,
-    // making it harmless — a forged `retainedAt` survives a normal approval,
-    // leaving a Prompt that is active and DEALT while its durable state claims it
-    // was retained and dealt nowhere (Phase 4b P1, PR #812). The `approvePrompts`
-    // callable also clears the field whenever it places a Prompt, so the two
-    // ends agree: only a retention stamps it, and anything else unstamps it.
-    //
-    // `spicyRevision` is likewise Admin-authored. The Approvals queue treats it
-    // as a monotonic acknowledgement fence for transactional spicy corrections;
-    // letting a submitter pre-seed an arbitrary or exhausted value could make the
-    // first legitimate correction acknowledge against attacker-chosen ordering.
+    // Player pending submissions use server-owned callable admission (#1311).
+    // Client creates are reserved for curated active Admin content.
     function adminActiveItemCreate(eventId) {
       return isAdmin(eventId)
         && request.resource.data.status == 'active'
@@ -1616,6 +1651,22 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    match /events/{eventId}/{kind}/{targetId}/reports/{uid} {
+      allow read: if kind in ['items', 'proofs'] && admitted(eventId)
+        && (isOwner(uid) || isAdmin(eventId));
+      allow create, update: if kind in ['items', 'proofs'] && isOwner(uid)
+        && mayReport(eventId) && reportCounterPaired(eventId, kind, targetId);
+      allow delete: if false;
+    }
+    match /events/{eventId}/reportRateLimits/{uid} {
+      allow read: if admitted(eventId) && (isOwner(uid) || isAdmin(eventId));
+      allow create, update: if isOwner(uid) && mayReport(eventId)
+        && request.resource.data.kind in ['items', 'proofs']
+        && request.resource.data.targetId is string
+        && reportCounterPaired(eventId, request.resource.data.kind, request.resource.data.targetId);
+      allow delete: if false;
+    }
+
     match /events/{eventId} {
       // In this Event subtree, historical comments that call a surface
       // "public" mean visible to the Event audience. #804 makes that audience
@@ -2168,9 +2219,7 @@ service cloud.firestore {
                 && itemPoolSpicyUnchangedOrValid())
               // #134: reporting is a player write, so it stops at the freeze.
               // The admin arm above does NOT — moderation outlives the Event.
-              || (eventOpenForPlay(eventId)
-                  && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reportCount'])
-                  && request.resource.data.reportCount == resource.data.reportCount + 1));
+              || (mayReport(eventId) && reportCounterPaired(eventId, 'items', itemId)));
         allow delete: if isAdmittedAdmin(eventId);
       }
 
@@ -2590,9 +2639,7 @@ service cloud.firestore {
         allow update: if admitted(eventId)
           && (isAdmin(eventId)
               // #134: the report path is a player write and stops at the freeze.
-              || (eventOpenForPlay(eventId)
-                  && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reportCount'])
-                  && request.resource.data.reportCount == resource.data.reportCount + 1));
+              || (mayReport(eventId) && reportCounterPaired(eventId, 'proofs', proofId)));
         // #134: an owner can no longer delete their own Proof out of a frozen
         // record — the Feed an archive preserves would otherwise keep changing
         // shape. Admin delete is untouched, so a genuine takedown request still

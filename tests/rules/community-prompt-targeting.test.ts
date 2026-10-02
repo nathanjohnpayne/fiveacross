@@ -170,6 +170,10 @@ describe('create — targetDayIndex shape', () => {
       setDoc(doc(db(ALICE), at('items/p11')), pendingPayload(ALICE, { retainedAt: NOW() })),
     );
   });
+  it('DENIES a submitter forging admin report-hide suppression (#1405)', async () => {
+    await assertFails(setDoc(doc(db(ALICE), at('items/forged-suppression')),
+      pendingPayload(ALICE, { reportHideSuppressed: true })));
+  });
 });
 
 describe('update — only an admin re-targets; nobody approves from a client', () => {
@@ -294,8 +298,8 @@ describe('update — only an admin re-targets; nobody approves from a client', (
     );
   });
 
-  it('still ALLOWS the one non-admin update there has ever been: the report increment', async () => {
-    await assertSucceeds(updateDoc(doc(db(BOB), at('items/p1')), { reportCount: 1 }));
+  it('denies bare report increments without an incarnation receipt (#1405)', async () => {
+    await assertFails(updateDoc(doc(db(BOB), at('items/p1')), { reportCount: 1 }));
   });
 });
 
