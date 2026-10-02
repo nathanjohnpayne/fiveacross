@@ -1005,6 +1005,9 @@ export default function Board() {
   // the board, and any echo win it enqueued drains through the standard
   // cells-effect drain — nothing posts directly from here.
   const reconciledBoardsRef = useRef<Set<string>>(new Set());
+  // #1360: bumps on EVERY flip of settings.echoMarks, so a flip back to an
+  // earlier value still keys a fresh reconcile visit (CodeRabbit on #1363).
+  const echoGenerationRef = useRef<{ on: boolean; generation: number } | null>(null);
   // #492: the board VISIT whose last reconcile pass came back INCOMPLETE (or
   // failed). `board` is a NEW object on every snapshot, so deleting the
   // once-per-board key alone made every subsequent snapshot re-run the whole
@@ -1165,8 +1168,14 @@ export default function Board() {
     }
     // The Echo switch is part of the visit identity (#1360, Codex P2 on #1363):
     // flipping `settings.echoMarks` while this card stays open must run a fresh
-    // reconcile under the new value, not hit the already-reconciled guard.
-    const key = `${eventId}:${user.uid}:${board.dayIndex}:${board.seed}:${echoMarksEnabled(event?.settings) ? 'echo' : 'no-echo'}`;
+    // reconcile under the new value, not hit the already-reconciled guard. A
+    // generation (not the bare value) so off→on→off→on re-arms every time.
+    const echoOn = echoMarksEnabled(event?.settings);
+    const prevEcho = echoGenerationRef.current;
+    if (!prevEcho || prevEcho.on !== echoOn) {
+      echoGenerationRef.current = { on: echoOn, generation: prevEcho ? prevEcho.generation + 1 : 0 };
+    }
+    const key = `${eventId}:${user.uid}:${board.dayIndex}:${board.seed}:echo-${echoGenerationRef.current!.generation}`;
     if (reconcileVisitRef.current.key !== key) {
       reconcileVisitRef.current = { key, generation: reconcileVisitRef.current.generation + 1 };
       // Any pin belongs to an ended visit now — inert by generation, dropped

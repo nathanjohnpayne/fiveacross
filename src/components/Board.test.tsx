@@ -672,11 +672,14 @@ describe('open-time reconcile churn gate (#492)', () => {
     expect(mocked.mock.calls[0][0]).toMatchObject({ echoMarks: false });
 
     // Same card, same seed: a completed visit would normally block a re-run.
-    H.event = { ...(H.event as object), settings: { echoMarks: true } } as unknown as EventDoc;
-    view.rerender(<Board />);
-    await act(async () => {});
-    expect(mocked).toHaveBeenCalledTimes(2);
-    expect(mocked.mock.calls[1][0]).toMatchObject({ echoMarks: true });
+    // Flip on, off, and on again — a flip BACK to an earlier value must re-arm too.
+    for (const [i, echoMarks] of [true, false, true].entries()) {
+      H.event = { ...(H.event as object), settings: { echoMarks } } as unknown as EventDoc;
+      view.rerender(<Board />);
+      await act(async () => {});
+      expect(mocked).toHaveBeenCalledTimes(i + 2);
+      expect(mocked.mock.calls[i + 1][0]).toMatchObject({ echoMarks });
+    }
   });
 
   it('a STALE incomplete completion (landing after navigation) does not re-block its board (#498)', async () => {
