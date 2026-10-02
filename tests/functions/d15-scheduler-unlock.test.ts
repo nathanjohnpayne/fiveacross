@@ -1644,6 +1644,20 @@ describe('finale defensive payload budget', () => {
     expect(boundedFinaleContent({ text: '😀'.repeat(FINALE_CONTENT_MAX_BYTES / 3) })).toBeUndefined();
   });
 
+  it('keeps a complete near-budget roster rather than silently applying a player-count cap', async () => {
+    const db = makeDb({ eventId: 'e', event: { days: mainDays() },
+      players: Array.from({ length: 900 }, (_, i) => ({ uid: `u${i}`, displayName: '😀'.repeat(50),
+        bingoCount: 1, squaresMarked: 5, firstBingoAt: i + 1 })),
+    });
+    await runFinaleBeats(db, 'e', { now: () => D9_UNLOCK + 13 * 60 * 60 * 1000 });
+    const beat = db.moments().find((m) => m.kind === 'last_call')!;
+    expect(beat.lastCall).toMatchObject({ players: expect.arrayContaining([{ uid: 'u899',
+      displayName: '😀'.repeat(50), bingoCount: 1, squaresMarked: 5 }]) });
+    expect((beat.lastCall as { players: unknown[] }).players).toHaveLength(900);
+    expect(Buffer.byteLength(JSON.stringify(beat))).toBeGreaterThan(FINALE_CONTENT_MAX_BYTES * 0.9);
+    expect(Buffer.byteLength(JSON.stringify(beat))).toBeLessThan(FINALE_CONTENT_MAX_BYTES);
+  });
+
   it('posts a generic last-call for a roster beyond the document budget, including on retries', async () => {
     const db = makeDb({ eventId: 'e', event: { days: mainDays() },
       players: Array.from({ length: 3_000 }, (_, i) => ({ uid: `u${i}`, displayName: '😀'.repeat(100),
