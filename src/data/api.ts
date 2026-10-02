@@ -776,10 +776,15 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
   // Resolve the frozen snapshot ids to their Prompt text/spicy by reading those
   // specific item docs — NOT a live `status: 'active'` collection query. Pool
   // MEMBERSHIP is the snapshot alone; this only hydrates the text/spicy the deal
-  // needs. A snapshot id whose doc is missing or is the free space is dropped.
+  // needs. An unreadable or missing member rejects the whole attempt: silently
+  // dropping it would change the frozen pool for later Players (#1406). The
+  // existing Retry surface handles this without granting hidden-content reads.
   const itemSnaps = await Promise.all(
     snapshotIds.map((id) => getDoc(rawItem(id, eventId)).catch(() => null)),
   );
+  if (itemSnaps.some((snap) => !snap || !snap.exists())) {
+    throw new Error("This Day's frozen prompts are unavailable. Try again once they are available.");
+  }
   // The Day Snapshot freezes membership, but it must not bypass the same
   // approval→hostname-stamp race guard as the legacy deal. Capture the posture
   // once: false→true while these reads run may withhold extra Prompts for this

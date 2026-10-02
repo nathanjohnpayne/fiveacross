@@ -352,6 +352,47 @@ describe('dealDayCard — snapshot-gated lazy dealing', () => {
     for (const id of nonFree) expect(ids).toContain(id);
   });
 
+  it('refuses an incomplete frozen snapshot even when enough readable Prompts remain', async () => {
+    const ids = seedPool(30);
+    H.event = { days: daysWith(mkDay({ snapshotItemIds: ids })), settings: {} };
+    H.itemsById.delete(ids[0]);
+
+    await expect(dealDayCard(U, 2)).rejects.toThrow('frozen');
+    expect(writtenBoard()).toBeNull();
+    expect(H.txSet).not.toHaveBeenCalled();
+    expect(H.trackSpy).not.toHaveBeenCalled();
+  });
+
+  it('refuses a hidden snapshot member denied by rules instead of dealing from the remainder', async () => {
+    const ids = seedPool(30);
+    H.event = { days: daysWith(mkDay({ snapshotItemIds: ids })), settings: {} };
+    H.getDoc.mockImplementation(async (ref: { args?: unknown[] }) => {
+      const path = (ref.args ?? []).filter((part): part is string => typeof part === 'string');
+      if (path[2] === 'items' && path[3] === ids[0]) {
+        throw Object.assign(new Error('hidden'), { code: 'permission-denied' });
+      }
+      return route(ref);
+    });
+
+    await expect(dealDayCard(U, 2)).rejects.toThrow('frozen');
+    expect(H.txSet).not.toHaveBeenCalled();
+    expect(H.getDocs).not.toHaveBeenCalled();
+
+    // The same frozen ids can be dealt on Retry after the member is readable;
+    // no fallback pool or replacement snapshot was written by the failed attempt.
+    H.getDoc.mockImplementation(async (ref: { args?: unknown[] }) => route(ref));
+    await expect(dealDayCard(U, 2)).resolves.toBe(true);
+    expect(writtenBoard()!.data.cells).toHaveLength(25);
+  });
+
+  it('rejects a complete snapshot below the minimum without writing a partial card', async () => {
+    const ids = seedPool(23);
+    H.event = { days: daysWith(mkDay({ snapshotItemIds: ids })), settings: {} };
+
+    await expect(dealDayCard(U, 2)).rejects.toThrow('at least 24');
+    expect(H.txSet).not.toHaveBeenCalled();
+  });
+
   // #559, Codex P2, PR #845 round 6: catalog-membership tests alone don't
   // prove this call site actually FIRES `community_prompt_dealt` after a
   // genuinely new deal, with the right aggregate count and no Prompt text.

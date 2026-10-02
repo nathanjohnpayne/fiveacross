@@ -1,13 +1,35 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, it, expect, vi } from 'vitest';
 import {
   assertFails,
   assertSucceeds,
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { doc, setDoc } from 'firebase/firestore';
+import { doc, setDoc, getDoc, updateDoc, type Firestore, type Transaction, type DocumentReference } from 'firebase/firestore';
+import type { User } from 'firebase/auth';
+
+const dealSeam = vi.hoisted(() => ({ database: null as Firestore | null, eventRead: vi.fn<() => Promise<void>>() }));
+vi.mock('../../src/firebase', () => ({ get db() { return dealSeam.database; }, EVENT_ID: 'cruise' }));
+vi.mock('../../src/analytics', () => ({ track: vi.fn() }));
+vi.mock('firebase/firestore', async (importOriginal) => {
+  const sdk = await importOriginal<typeof import('firebase/firestore')>();
+  return { ...sdk, runTransaction: (database: Firestore, callback: (tx: Transaction) => Promise<unknown>) =>
+    sdk.runTransaction(database, (tx) => callback(new Proxy(tx, {
+      get(target, key) {
+        if (key === 'get') return async (ref: DocumentReference) => {
+          const snapshot = await target.get(ref);
+          if (ref.path === 'events/cruise') await dealSeam.eventRead();
+          return snapshot;
+        };
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }))),
+  };
+});
+import { dealDayCard } from '../../src/data/api';
 
 // A minimal CANONICAL cells map (#458: the board rule requires exactly the 25
 // decimal keys) — these suites test gates other than cell mechanics, so the
@@ -77,6 +99,8 @@ afterAll(async () => {
 // the day-scoped Board write gate reads `unlockAt` from.
 beforeEach(async () => {
   await testEnv.clearFirestore();
+  dealSeam.database = db(ALICE) as unknown as Firestore;
+  dealSeam.eventRead.mockReset();
   await testEnv.withSecurityRulesDisabled(async (ctx) => {
     await setDoc(doc(ctx.firestore(), `events/${EVENT}`), {
       name: 'Cruise',
@@ -99,5 +123,53 @@ describe('d15-dealing — the deal write is gated by the Day unlock', () => {
 
   it('ALLOWS dealing a Day Card at/after unlockAt when the board doc is absent (unlocked Day 0)', async () => {
     await assertSucceeds(setDoc(doc(db(ALICE), at(`days/0/boards/${ALICE}`)), dayCard(ALICE, 0)));
+  });
+});
+
+
+describe('frozen snapshot hydration through the real deal path (#1406)', () => {
+  async function seedSnapshot(hidden = false) {
+    const ids = Array.from({ length: 30 }, (_, i) => `prompt-${i}`);
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const trusted = ctx.firestore();
+      await setDoc(doc(trusted, `events/${EVENT}`), {
+        status: 'active', admins: [], settings: {},
+        days: [{ index: 0, unlockAt: PAST(), pool: 'main', snapshotItemIds: ids }],
+      });
+      await setDoc(doc(trusted, at(`players/${ALICE}`)), { uid: ALICE, displayName: 'Alice', joinedAt: PAST() });
+      await Promise.all(ids.map((id, i) => setDoc(doc(trusted, at(`items/${id}`)), {
+        text: `Prompt ${i}`, status: hidden && i === 0 ? 'hidden' : 'active',
+        spicy: false, isFreeSpace: false, pool: 'main', reportCount: 0,
+      })));
+    });
+    return ids;
+  }
+
+  it('denies hidden Prompt reads and never commits a card from the remaining snapshot', async () => {
+    const ids = await seedSnapshot(true);
+    await assertFails(getDoc(doc(db(ALICE), at(`items/${ids[0]}`))));
+    await expect(dealDayCard({ uid: ALICE } as User, 0)).rejects.toThrow('frozen');
+    expect((await getDoc(doc(db(ALICE), at(`days/0/boards/${ALICE}`)))).exists()).toBe(false);
+  });
+
+  it('retries the real transaction when re-snapshot changes Event after the deal read', async () => {
+    const ids = await seedSnapshot();
+    let signalRead!: () => void;
+    let releaseRead!: () => void;
+    const read = new Promise<void>((resolve) => { signalRead = resolve; });
+    const release = new Promise<void>((resolve) => { releaseRead = resolve; });
+    dealSeam.eventRead.mockImplementationOnce(async () => { signalRead(); await release; });
+    const dealing = dealDayCard({ uid: ALICE } as User, 0);
+    await read;
+    try {
+      await testEnv.withSecurityRulesDisabled(async (ctx) => {
+        const ref = doc(ctx.firestore(), `events/${EVENT}`);
+        const event = (await getDoc(ref)).data()!;
+        await updateDoc(ref, { days: [{ ...event.days[0], snapshotItemIds: ids.slice(1) }] });
+      });
+    } finally { releaseRead(); }
+    await expect(dealing).resolves.toBe(false);
+    expect(dealSeam.eventRead.mock.calls.length).toBeGreaterThan(1);
+    expect((await getDoc(doc(db(ALICE), at(`days/0/boards/${ALICE}`)))).exists()).toBe(false);
   });
 });
