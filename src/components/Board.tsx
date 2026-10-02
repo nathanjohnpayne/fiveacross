@@ -1163,7 +1163,10 @@ export default function Board() {
       reconcileVisitRef.current = { key: null, generation: reconcileVisitRef.current.generation };
       return;
     }
-    const key = `${eventId}:${user.uid}:${board.dayIndex}:${board.seed}`;
+    // The Echo switch is part of the visit identity (#1360, Codex P2 on #1363):
+    // flipping `settings.echoMarks` while this card stays open must run a fresh
+    // reconcile under the new value, not hit the already-reconciled guard.
+    const key = `${eventId}:${user.uid}:${board.dayIndex}:${board.seed}:${echoMarksEnabled(event?.settings) ? 'echo' : 'no-echo'}`;
     if (reconcileVisitRef.current.key !== key) {
       reconcileVisitRef.current = { key, generation: reconcileVisitRef.current.generation + 1 };
       // Any pin belongs to an ended visit now — inert by generation, dropped

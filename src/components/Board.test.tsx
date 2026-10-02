@@ -657,6 +657,28 @@ describe('open-time reconcile churn gate (#492)', () => {
     }
   });
 
+  it('#1360: flipping settings.echoMarks while the card stays open re-runs the reconcile under the new value', async () => {
+    const { reconcileEchoes } = await import('../data/api');
+    const mocked = vi.mocked(reconcileEchoes);
+    mocked.mockImplementation(() =>
+      Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
+    );
+    const now = Date.now();
+    H.event = { claimMode: 'honor', timezone: 'UTC', days: reconcileDays(now), settings: { echoMarks: false } } as unknown as EventDoc;
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+    const view = render(<Board />);
+    await act(async () => {});
+    expect(mocked).toHaveBeenCalledTimes(1);
+    expect(mocked.mock.calls[0][0]).toMatchObject({ echoMarks: false });
+
+    // Same card, same seed: a completed visit would normally block a re-run.
+    H.event = { ...(H.event as object), settings: { echoMarks: true } } as unknown as EventDoc;
+    view.rerender(<Board />);
+    await act(async () => {});
+    expect(mocked).toHaveBeenCalledTimes(2);
+    expect(mocked.mock.calls[1][0]).toMatchObject({ echoMarks: true });
+  });
+
   it('a STALE incomplete completion (landing after navigation) does not re-block its board (#498)', async () => {
     const { reconcileEchoes } = await import('../data/api');
     const mocked = vi.mocked(reconcileEchoes);
