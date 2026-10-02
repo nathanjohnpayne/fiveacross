@@ -273,11 +273,51 @@ describe('idempotent bug-report intake orchestration', () => {
     expect(memory.docs.get(`bugReportEscalations/${reportId}`)).toEqual({ state: 'unexpected' });
   });
 
-  it('validates before touching a reservation or rolling rate state', async () => {
+  it('charges request work before validation without touching a reservation or creation quota', async () => {
     const memory = new MemoryIntake();
     const deps = dependencies(memory);
     await expect(handleSubmitBugReport({ auth: { uid: 'user-123' }, data: { schemaVersion: 1 } } as never, false, deps))
       .rejects.toMatchObject({ code: 'invalid-argument' });
+    expect([...memory.docs.keys()]).toEqual(['bugReportRequestLimits/fcdec6df4d44dbc637c7']);
+  });
+
+  it('bounds invalid payload floods before inspecting or decoding another payload', async () => {
+    const memory = new MemoryIntake();
+    const deps = dependencies(memory);
+    for (let i = 0; i < 30; i++) {
+      await expect(handleSubmitBugReport({ auth: { uid: 'user-123' }, data: {} } as never, false, deps))
+        .rejects.toMatchObject({ code: 'invalid-argument' });
+    }
+    const description = vi.fn(() => { throw new Error('payload must not be inspected'); });
+    await expect(handleSubmitBugReport({ auth: { uid: 'user-123' }, data: { get description() { return description(); } } } as never, false, deps))
+      .rejects.toMatchObject({ code: 'resource-exhausted' });
+    expect(description).not.toHaveBeenCalled();
+    expect(memory.docs.has('bugReportRateLimits/fcdec6df4d44dbc637c7')).toBe(false);
+    expect(memory.saves).toEqual([]);
+  });
+
+  it('bounds completed callable replays while preserving the stored receipt and single creation charge', async () => {
+    const memory = new MemoryIntake();
+    let nowMs = 1_000;
+    const deps = dependencies(memory, { nowMs: () => nowMs });
+    const request = { auth: { uid: 'user-123' }, data: { ...base(), screenshotDataUrl: null } } as never;
+    const receipt = await handleSubmitBugReport(request, false, deps);
+    const retries = await Promise.all(Array.from({ length: 29 }, () => handleSubmitBugReport(request, false, deps)));
+    expect(retries.every((value) => JSON.stringify(value) === JSON.stringify(receipt))).toBe(true);
+    await expect(handleSubmitBugReport(request, false, deps)).rejects.toMatchObject({ code: 'resource-exhausted' });
+    expect(memory.docs.get('bugReportRateLimits/fcdec6df4d44dbc637c7')?.submissionMs).toEqual([1_000]);
+    expect(deps.resolveEscalation).toHaveBeenCalledTimes(1);
+    nowMs += 60_000;
+    expect(await handleSubmitBugReport(request, false, deps)).toEqual(receipt);
+    expect(memory.docs.get('bugReportRateLimits/fcdec6df4d44dbc637c7')?.submissionMs).toEqual([1_000]);
+  });
+
+  it('does not charge unauthenticated or rejected App Check calls', async () => {
+    const memory = new MemoryIntake();
+    const deps = dependencies(memory);
+    await expect(handleSubmitBugReport({ data: {} } as never, false, deps)).rejects.toMatchObject({ code: 'unauthenticated' });
+    await expect(handleSubmitBugReport({ auth: { uid: 'user-123' }, data: {} } as never, true, deps))
+      .rejects.toMatchObject({ code: 'failed-precondition' });
     expect(memory.docs.size).toBe(0);
   });
 
@@ -568,8 +608,8 @@ describe('idempotent bug-report intake orchestration', () => {
       sleep,
     });
     await expect(submitValidatedBugReport('user-123', report, deps)).rejects.toMatchObject({ code: 'unavailable' });
-    expect(sleep).toHaveBeenCalledTimes(200);
-    expect(sleep.mock.calls.every(([ms]) => ms === 100)).toBe(true);
+    expect(sleep).toHaveBeenCalledTimes(20);
+    expect(sleep.mock.calls.every(([ms]) => ms === 1_000)).toBe(true);
     expect(nowMs).toBe(21_000);
     expect(deps.resolveEscalation).not.toHaveBeenCalled();
     expect(memory.saves).toEqual([]);
@@ -600,16 +640,36 @@ describe('idempotent bug-report intake orchestration', () => {
         sleepDurations.push(ms);
         nowMs += ms;
         if (sleepDurations.length === 1) {
-          memory.docs.set(reportPath, { ...memory.docs.get(reportPath)!, leaseExpiresAt: 1_250 });
+          memory.docs.set(reportPath, { ...memory.docs.get(reportPath)!, leaseExpiresAt: 2_250 });
         }
       },
     });
 
     await expect(submitValidatedBugReport('user-123', report, deps)).rejects.toMatchObject({ code: 'unavailable' });
-    expect(sleepDurations).toEqual([100, 100, 50]);
-    expect(nowMs).toBe(1_250);
+    expect(sleepDurations).toEqual([1_000, 250]);
+    expect(nowMs).toBe(2_250);
     expect(deps.resolveEscalation).not.toHaveBeenCalled();
     expect(memory.docs.has('bugReportRateLimits/fcdec6df4d44dbc637c7')).toBe(false);
+  });
+
+  it('bounds follower reads even when the injected clock does not advance', async () => {
+    const memory = new MemoryIntake();
+    const report = base();
+    const hash = deriveBugReportRequestHash(report);
+    memory.docs.set(`bugReports/${deriveBugReportId('user-123', report.submissionId!)}`, {
+      submissionId: report.submissionId,
+      reporterHash: deriveReporterHash('user-123'),
+      requestHashVersion: hash.version,
+      requestHash: hash.value,
+      intakeState: 'pending',
+      leaseId: 'other-owner',
+      leaseExpiresAt: 61_000,
+    });
+    const sleep = vi.fn(async () => undefined);
+    const deps = dependencies(memory, { sleep });
+    await expect(submitValidatedBugReport('user-123', report, deps)).rejects.toMatchObject({ code: 'unavailable' });
+    expect(sleep).toHaveBeenCalledTimes(21);
+    expect(deps.resolveEscalation).not.toHaveBeenCalled();
   });
 
   it('preserves legacy absent-token creation and per-invocation rate charging', async () => {
