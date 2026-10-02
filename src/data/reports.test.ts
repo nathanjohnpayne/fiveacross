@@ -46,7 +46,18 @@ describe('rules-paired report submission', () => {
   it('acknowledges an accepted retry after auto-hide removes target read access', async () => {
     state.rows.set('events/event/items/target/reports/alice', { targetCreatedAt: 100 });
     state.targetError = { code: 'permission-denied' };
-    await expect(reportContent('items', 'target', 'event')).resolves.toBeUndefined();
+    await expect(reportContent('items', 'target', 'event', 100)).resolves.toBeUndefined();
+    expect(state.writes).toEqual([]);
+  });
+  it('refuses stale or unbound receipts after a recreated target becomes unreadable', async () => {
+    state.rows.set('events/event/items/target/reports/alice', { targetCreatedAt: 99 });
+    state.targetError = { code: 'permission-denied' };
+    await expect(reportContent('items', 'target', 'event', 100)).rejects.toEqual(state.targetError);
+    await expect(reportContent('items', 'target', 'event')).rejects.toEqual(state.targetError);
+    expect(state.writes).toEqual([]);
+  });
+  it('does not report content recreated after the displayed incarnation', async () => {
+    await expect(reportContent('items', 'target', 'event', 99)).rejects.toThrow('has changed');
     expect(state.writes).toEqual([]);
   });
   it('permits a new report for a recreated target, not its old receipt', async () => {

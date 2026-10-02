@@ -997,8 +997,8 @@ export function useProofFeed(max: number | null = 60, moderation?: ProofFeedMode
   // 'active' proofs are readable by non-admins (firestore.rules), so a status
   // flip to 'hidden' removes it server-side — the Phase-0 override. (2) The ADR
   // 0004 Phase 0 community auto-hide, added here: a Proof whose `reportCount` has
-  // reached the event's `reportHideThreshold` self-hides on EVERY client the
-  // moment the counter crosses — a presentational emergency hide that works with
+  // reached the event's `reportHideThreshold` self-hides while automatic report
+  // hiding is unsuppressed; Admin Restore/Clear reports suppresses that hide — a presentational emergency hide that works with
   // no Admin awake and is bypassable by design (tamper-proof server enforcement
   // is #43). The doc is untouched; `useReportedProofs` stays UNfiltered so an
   // Admin can still reach a threshold-hidden Proof to restore or delete it. This

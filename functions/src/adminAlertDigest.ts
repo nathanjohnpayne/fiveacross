@@ -66,6 +66,7 @@ export interface AdminAlertRecord {
   status: string;
   visionFlag: string | null;
   reportCount: number;
+  reportHideSuppressed?: boolean;
   createdAt: number;
 }
 
@@ -177,12 +178,12 @@ export function reviewDetail(alert: AdminAlertRecord, threshold: number | null):
   const reports = plural(alert.reportCount, 'report', 'reports');
   if (alert.kind === 'moderation') {
     const reason = deriveReason(
-      { status: alert.status, visionFlag: alert.visionFlag, reportCount: alert.reportCount },
+      { status: alert.status, visionFlag: alert.visionFlag, reportCount: alert.reportCount, reportHideSuppressed: alert.reportHideSuppressed },
       threshold,
     );
     return `${alert.status}${reason ? ` (${reason})` : ''} · ${reports}`;
   }
-  if (typeof threshold === 'number' && threshold > 0 && alert.reportCount < threshold) {
+  if (alert.reportHideSuppressed !== true && typeof threshold === 'number' && threshold > 0 && alert.reportCount < threshold) {
     const remaining = threshold - alert.reportCount;
     return `reported · ${reports} · ${plural(remaining, 'more', 'more')} to auto-hide`;
   }

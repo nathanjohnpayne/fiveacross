@@ -5,7 +5,7 @@ import { auth, db } from '../firebase';
 export const REPORT_RATE_LIMIT_MS = 3_000;
 
 /** Atomically bind one report to this target's live incarnation and reporter. */
-export async function reportContent(kind: 'items' | 'proofs', id: string, eventId: string): Promise<void> {
+export async function reportContent(kind: 'items' | 'proofs', id: string, eventId: string, expectedCreatedAt?: number): Promise<void> {
   const uid = auth.currentUser?.uid;
   if (!uid) throw new Error('Sign in to report content.');
   const target = doc(db, 'events', eventId, kind, id);
@@ -17,12 +17,16 @@ export async function reportContent(kind: 'items' | 'proofs', id: string, eventI
       const receiptSnap = await tx.get(receipt);
       acceptedTargetReadDenied = false;
       const targetSnap = await tx.get(target).catch((error: unknown) => {
-        acceptedTargetReadDenied = receiptSnap.exists() &&
+        acceptedTargetReadDenied = typeof expectedCreatedAt === 'number' && Number.isFinite(expectedCreatedAt)
+          && receiptSnap.exists() && receiptSnap.data().targetCreatedAt === expectedCreatedAt &&
           (error as { code?: unknown } | null)?.code === 'permission-denied';
         throw error;
       });
       if (!targetSnap.exists()) throw new Error('This content is no longer available.');
       const data = targetSnap.data();
+      if (expectedCreatedAt !== undefined && data.createdAt !== expectedCreatedAt) {
+        throw new Error('This content has changed. Refresh before reporting.');
+      }
       if (typeof data.createdAt !== 'number' || !Number.isFinite(data.createdAt) ||
           typeof data.reportCount !== 'number' || !Number.isSafeInteger(data.reportCount) || data.reportCount < 0) {
         throw new Error('This content cannot be reported.');
@@ -36,8 +40,8 @@ export async function reportContent(kind: 'items' | 'proofs', id: string, eventI
     });
   } catch (error) {
     // An accepted report can auto-hide its target before this retry reads it.
-    // The caller's private receipt is enough to acknowledge that harmless
-    // retry; service failures and first submissions still fail normally.
+    // A receipt for the caller's observed incarnation acknowledges that retry;
+    // a stale surviving receipt never acknowledges a recreated hidden target.
     if (acceptedTargetReadDenied) return;
     throw error;
   }
