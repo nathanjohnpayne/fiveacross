@@ -4,7 +4,7 @@ import { getDoc } from 'firebase/firestore';
 import { EVENT_ID } from '../firebase';
 import { useAuth } from '../auth/AuthContext';
 import { useBoard, useDayBoard, useDayMeta, useMyPlayer, useEventDoc, useItems, useTally, useLeaderboard, useDoubts, useMyProofs, useProofsForItemText, useDayMetasStatus, isBanned } from '../hooks/useData';
-import { setMark, dealDayCard, reconcileEchoes, resolveDisplayName, RESHUFFLE_ALLOWANCE } from '../data/api';
+import { setMark, dealDayCard, reconcileEchoes, retryPendingMarkerRepoints, resolveDisplayName, RESHUFFLE_ALLOWANCE } from '../data/api';
 import { requestOpenSuggestPanel } from '../hooks/useOpenSuggestPanel';
 import { useNextUnlockClock } from '../hooks/useNextUnlockClock';
 import TomorrowsCardInvite from './TomorrowsCardInvite';
@@ -1181,6 +1181,14 @@ export default function Board() {
       // Any pin belongs to an ended visit now — inert by generation, dropped
       // for hygiene.
       incompleteReconcileVisitRef.current = null;
+      // #1370: every card VISIT retries pending Tally marker passes (#1367),
+      // independently of the once-per-board reconcile guard below — a pass that
+      // failed after this card already reconciled must not wait for a reload.
+      // Once per visit (not per snapshot), de-duplicated per Player inside, and
+      // a no-op when nothing is pending.
+      void retryPendingMarkerRepoints({ uid: user.uid, dayIndexes: schedule.map((d) => d.index) }).catch(
+        () => undefined,
+      );
     }
     const visitGeneration = reconcileVisitRef.current.generation;
     // The SERVE half of the episode (#506): the owed heal is ROW-scoped and

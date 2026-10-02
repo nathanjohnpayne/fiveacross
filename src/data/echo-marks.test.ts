@@ -167,6 +167,7 @@ const isMarkerWrite = (call: unknown[]) => segs(call)[2] === 'tally';
 
 import {
   __resetPendingMarkerRepairsForTests,
+  retryPendingMarkerRepoints,
   computeMark,
   dealDayCard,
   joinAndDeal,
@@ -1199,7 +1200,8 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       let drain: (() => void) | undefined;
       H.waitForPendingWrites.mockImplementationOnce(() => new Promise<void>((r) => { drain = r; }));
 
-      await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [0, 1, 2, 3], echoMarks: false });
+      // The retry blocks on the held drain, so it is not awaited here.
+      void retryPendingMarkerRepoints({ uid: 'u1', dayIndexes: [0, 1, 2, 3] });
       await settle();
       // Nothing runs until this device's queued writes have drained.
       expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(false);
@@ -1300,7 +1302,7 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       expect(repointKeys(values)).toHaveLength(1);
       // Next open: the rolled-back Day 2 Mark is still the server's state, so the
       // pass keeps a marker (latest carrier wins) rather than deleting it.
-      await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [0, 1, 2, 3], echoMarks: false });
+      await retryPendingMarkerRepoints({ uid: 'u1', dayIndexes: [0, 1, 2, 3] });
       await settle();
       expect(markerTxWrite()?.[1]).toMatchObject({ dayIndex: 3 });
       expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(false);
@@ -1318,7 +1320,8 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       values.set('gcb:echo-marker-repoint:test-event:u1:other:old.1.x', '1');
       let drain: (() => void) | undefined;
       H.waitForPendingWrites.mockImplementationOnce(() => new Promise<void>((r) => { drain = r; }));
-      await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [0, 1, 2, 3], echoMarks: false });
+      // The retry blocks on the held drain, so it is not awaited here.
+      void retryPendingMarkerRepoints({ uid: 'u1', dayIndexes: [0, 1, 2, 3] });
       await settle();
       // A new unmark records `shared` while the retry is still waiting.
       H.batchCommit.mockImplementationOnce(() => new Promise<void>(() => {}));
@@ -1329,6 +1332,21 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
       await settle();
       await settle();
       expect(repointKeys(values)).toEqual(fresh);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('#1370: reconcileEchoes no longer triggers the marker retry (Board owns it, once per visit)', async () => {
+    const values = stubStorage();
+    try {
+      seedRepeats();
+      H.markerServer.set('shared', serverMarker());
+      values.set(`${REPOINT_PREFIX}old.1.x`, '1');
+      await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [0, 1, 2, 3], echoMarks: false });
+      await settle();
+      expect(H.waitForPendingWrites).not.toHaveBeenCalled();
+      expect(repointKeys(values)).toHaveLength(1);
     } finally {
       vi.unstubAllGlobals();
     }

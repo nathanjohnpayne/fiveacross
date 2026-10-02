@@ -81,6 +81,9 @@ vi.mock('../data/api', () => ({
   // Daily mode's open-time echo reconcile (#446): inert here — these tests
   // never exercise Echo Marks — but Board unconditionally calls it once
   // `hasDays` is true, so the mock needs the export to exist at all.
+  // #1370: Board retries pending Tally marker passes once per card visit; a
+  // no-op stub (the retry itself is proven in src/data/echo-marks.test.ts).
+  retryPendingMarkerRepoints: vi.fn(() => Promise.resolve()),
   reconcileEchoes: vi.fn(() =>
     Promise.resolve({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true }),
   ),
