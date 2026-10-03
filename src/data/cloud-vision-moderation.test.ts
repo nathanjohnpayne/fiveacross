@@ -347,7 +347,7 @@ describe('confirmClaim — a Vision safety hide survives the claim confirm (spec
     expect(setPayload('/claims/')).toMatchObject({ status: 'confirmed' });
   });
 
-  it('leaves a plain hidden Proof carrying NO marker as it stands — its lift is Restore (plus Clear reports for a threshold hide)', async () => {
+  it('leaves a plain hidden Proof carrying NO marker as it stands — its lift is Restore, not a confirm', async () => {
     // An extreme verdict alone is not a safety hide, but a confirm publishes only
     // a still-`pending` Proof (specs/sec-rules-shape-hardening.md): a doc hidden
     // by the #43 threshold or an admin's own Hide keeps its own console lift.

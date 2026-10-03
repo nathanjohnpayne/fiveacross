@@ -216,8 +216,8 @@ export interface SafetyHideState {
  * `confirmClaim` publishes only the claimant's own still-`'pending'` Proof; it
  * returns to the Feed only through the console's Restore (directly, or back to
  * `'pending'` for an owner claim still undecided, which a Confirm then
- * publishes), together with Clear reports where a report-threshold count would
- * otherwise keep it hidden. This predicate closes the SAFETY hole ADR 0004
+ * publishes); Restore also sets `reportHideSuppressed`, so a report-threshold
+ * hide needs no Clear reports. This predicate closes the SAFETY hole ADR 0004
  * exists for, and nothing else.
  */
 export function safetyHideStands(proof: SafetyHideState | undefined): boolean {

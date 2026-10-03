@@ -680,7 +680,8 @@ describe('applyPendingVisionScan — the parked verdict lands when the Proof app
     expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(true);
     expect(store[PROOF]).toMatchObject({ status: 'flagged', visionFlag: 'racy' });
     // …and marker-less, because raciness never earns the marker or an automatic
-    // hide (ADR 0004); the 'flagged' status still holds it at confirm until review.
+    // hide (ADR 0004); a current Confirm leaves it unpublished only because it is
+    // not 'pending'.
     expect(store[PROOF]).not.toHaveProperty(SAFETY_HIDE_MARKER);
     expect(visionHideAction(store[PROOF] as VisionFlaggedDoc)).toBe(null);
   });

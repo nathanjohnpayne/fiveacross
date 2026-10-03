@@ -414,8 +414,9 @@ describe('Pending claims — a Vision-held photo is named on the row (specs/clou
   it('leaves an ACTIVE merely-racy Proof unannotated — raciness alone never earns the marker', () => {
     // ADR 0004 again, on the claim side: raciness never earns the marker, so an
     // already-active racy Proof is not withheld and the row says nothing. (A racy
-    // Proof still 'flagged' IS held, by safetyHideStands' flagged arm, until it is
-    // reviewed.)
+    // Proof still 'flagged' is not published by a Confirm either, because Confirm
+    // publishes only a still-'pending' Proof; safetyHideStands' flagged arm drives
+    // the row annotation and the marker an admin Hide carries forward.)
     adminConfirmedEvent();
     H.flagged = [proof('P', 0, { displayName: 'Racy Photo', status: 'active', visionFlag: 'racy' })];
     H.claims = [claim()];

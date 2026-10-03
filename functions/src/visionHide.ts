@@ -292,7 +292,10 @@ export function qualifiesForVisionHide(doc: VisionFlaggedDoc | undefined): boole
  *     Left unstamped, the Proof reads as a PLAIN hide: a current `confirmClaim`
  *     publishes only a still-`'pending'` Proof, so it no longer publishes this
  *     one directly, but a CACHED pre-gate bundle would, and without the marker
- *     the `'rehide'` arm could not take it back down — the hole this arm closes.
+ *     the `'rehide'` arm could not take it back down — the hole this arm closes
+ *     once the marker has landed. Residual: a cached pre-gate publish that wins
+ *     before the backfill commits (or reaches a legacy marker-less hidden Proof
+ *     before any later write fires the trigger) matches no arm (#1514).
  *   - `'rehide'` — an `'active'` Proof whose marker still says `true`. That
  *     combination is not reachable from any current client: every legitimate lift
  *     writes `safetyHide: false` in the SAME update as the status (`restoreProof`,
