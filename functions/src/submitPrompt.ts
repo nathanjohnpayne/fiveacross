@@ -26,16 +26,17 @@ export interface SubmitPromptDeps {
   logger?: { error(message: string, context: Readonly<Record<string, unknown>>): void };
 }
 
-/** Fixed-shape public input; caller stamps, ownership and targets are ignored. */
+/** Fixed-shape input; captured UID is a required intent guard, never ownership.
+ * Caller creation stamps, ownership and targets remain ignored. */
 export function parseSubmitPromptRequest(raw: unknown): SubmitPromptRequest {
   const value = raw as Partial<SubmitPromptRequest> | null;
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
-      !isFirestoreDocumentId(value.eventId) || !isFirestoreDocumentId(value.itemId) ||
+      !isFirestoreDocumentId(value.expectedUid) || !isFirestoreDocumentId(value.eventId) || !isFirestoreDocumentId(value.itemId) ||
       typeof value.text !== 'string' || !value.text.trim() || value.text.trim().length > 80 ||
       typeof value.spicy !== 'boolean') {
     throw new HttpsError('invalid-argument', 'Enter a Prompt of 1–80 characters.');
   }
-  return { eventId: value.eventId, itemId: value.itemId, text: value.text.trim(), spicy: value.spicy };
+  return { expectedUid: value.expectedUid, eventId: value.eventId, itemId: value.itemId, text: value.text.trim(), spicy: value.spicy };
 }
 
 export async function submitPromptCore(
@@ -45,6 +46,9 @@ export async function submitPromptCore(
   // before constructing Admin paths, preserving the canonical segment bound.
   input = parseSubmitPromptRequest(input);
   if (!isFirestoreDocumentId(uid)) throw new HttpsError('unauthenticated', 'Sign in before adding a Prompt.');
+  // Bind the captured submitting account to the eventual Functions auth header.
+  // A client precheck alone cannot fence SDK header resolution after a switch.
+  if (input.expectedUid !== uid) throw new HttpsError('unauthenticated', 'Sign in with the account that started this Prompt.');
   const base = `events/${input.eventId}`;
   const eventRef = deps.db.doc(base);
   const itemRef = deps.db.doc(`${base}/items/${input.itemId}`);

@@ -4,7 +4,7 @@ import type { CallableRequest } from 'firebase-functions/v2/https';
 import { parseSubmitPromptRequest, submitPromptCallable, MAX_PENDING_PROMPTS, MAX_PROMPT_TARGET_DAYS } from '../../functions/src/submitPrompt';
 import { MAX_DAYS } from '../../src/data/eventLimits';
 
-const good = { eventId: 'event', itemId: 'item', text: '  Dance  ', spicy: false };
+const good = { expectedUid: 'player', eventId: 'event', itemId: 'item', text: '  Dance  ', spicy: false };
 const request = (data: unknown = good, uid?: string, app?: object) => ({ data, ...(uid ? { auth: { uid } } : {}), ...(app ? { app } : {}) }) as CallableRequest<unknown>;
 
 // specs/community-prompt-admission.md: reject before any Admin SDK path/query.
@@ -21,10 +21,15 @@ describe('submitPrompt callable boundary', () => {
     expect(parseSubmitPromptRequest({ ...good, createdAt: 0, createdBy: 'other', targetDayIndex: 99, status: 'active' }))
       .toEqual({ ...good, text: 'Dance' });
   });
-  it.each([null, [], { ...good, text: '' }, { ...good, text: 'x'.repeat(81) }, { ...good, spicy: 'yes' },
-    ...['', '/', '.', '..', '__reserved__', 'é'.repeat(751)].flatMap(id => [{ ...good, eventId: id }, { ...good, itemId: id }])])('rejects malformed payload before SDK use: %j', async (data) => {
+  it.each([null, [], { ...good, expectedUid: undefined }, { ...good, text: '' }, { ...good, text: 'x'.repeat(81) }, { ...good, spicy: 'yes' },
+    ...['', '/', '.', '..', '__reserved__', 'é'.repeat(751)].flatMap(id => [{ ...good, eventId: id }, { ...good, itemId: id }, { ...good, expectedUid: id }])])('rejects malformed payload before SDK use: %j', async (data) => {
     const deps = failDb();
     await expect(submitPromptCallable(request(data, 'player'), false, deps)).rejects.toMatchObject({ code: 'invalid-argument' });
+    expect(deps.doc).not.toHaveBeenCalled();
+  });
+  it('refuses a changed authenticated account before any Admin path or transaction', async () => {
+    const deps = failDb();
+    await expect(submitPromptCallable(request(good, 'other'), false, deps)).rejects.toMatchObject({ code: 'unauthenticated' });
     expect(deps.doc).not.toHaveBeenCalled();
   });
   it('requires auth before any Firestore access', async () => {

@@ -3,7 +3,8 @@ import { initializeApp, deleteApp, type App } from 'firebase-admin/app';
 import { getFirestore, type Firestore } from 'firebase-admin/firestore';
 import { initializeTestEnvironment, type RulesTestEnvironment } from '@firebase/rules-unit-testing';
 import { beforeAll, afterAll, beforeEach, describe, expect, it } from 'vitest';
-import { submitPromptCore } from '../../functions/src/submitPrompt';
+import { submitPromptCore, submitPromptCallable } from '../../functions/src/submitPrompt';
+import type { CallableRequest } from 'firebase-functions/v2/https';
 
 // Actual Admin SDK transactions: cap and fence are source behavior; this dark
 // PR deliberately retains the current client pending-create Rules until cutover.
@@ -11,7 +12,7 @@ const projectId = 'demo-fiveacross-prompt-admission';
 const EVENT = 'event'; const UID = 'player'; const NOW = 1_770_000_000_000;
 let env: RulesTestEnvironment; let app: App; let db: Firestore;
 const base = `events/${EVENT}`;
-const submit = (id: string, uid = UID) => submitPromptCore({ db, now: () => NOW }, uid, { eventId: EVENT, itemId: id, text: 'Dance', spicy: false });
+const submit = (id: string, uid = UID) => submitPromptCore({ db, now: () => NOW }, uid, { expectedUid: uid, eventId: EVENT, itemId: id, text: 'Dance', spicy: false });
 async function seedPending(count: number, uid = UID) {
   const batch = db.batch();
   for (let n = 0; n < count; n++) batch.set(db.doc(`${base}/items/${uid}-${n}`), { createdBy: uid, status: 'pending', text: 'Existing', pool: 'main', createdAt: NOW - 1000 });
@@ -31,6 +32,19 @@ beforeEach(async () => {
 });
 
 describe('server Community Prompt intake', () => {
+  it('refuses an auth-header account change after the payload is captured without rows or fences', async () => {
+    const payload = { expectedUid: UID, eventId: EVENT, itemId: 'delayed-auth', text: 'Dance', spicy: false };
+    let authUid = UID;
+    let release!: () => void;
+    const headersReady = new Promise<void>(resolve => { release = resolve; });
+    const response = headersReady.then(() => submitPromptCallable({ data: payload, auth: { uid: authUid } } as CallableRequest<unknown>, false, { db, now: () => NOW }));
+    // Functions resolves its header later than ItemPool captures the request.
+    authUid = 'other'; release();
+    await expect(response).rejects.toMatchObject({ code: 'unauthenticated' });
+    expect((await db.doc(`${base}/items/delayed-auth`).get()).exists).toBe(false);
+    expect((await db.doc(`${base}/promptQuota/${UID}`).get()).exists).toBe(false);
+    expect((await db.doc(`${base}/promptQuota/other`).get()).exists).toBe(false);
+  });
   it('server-stamps new pending content/default target and increments only the per-player fence', async () => {
     expect(await submit('new')).toEqual({ id: 'new', targetDayIndex: 2 });
     expect((await db.doc(`${base}/items/new`).get()).data()).toEqual({ text: 'Dance', createdBy: UID, createdAt: NOW, isFreeSpace: false, status: 'pending', reportCount: 0, spicy: false, pool: 'main', targetDayIndex: 2 });
@@ -124,7 +138,7 @@ describe('server Community Prompt intake', () => {
     await expect(submit('new')).rejects.toMatchObject({ code: 'failed-precondition' });
     expect((await db.doc(`${base}/items/new`).get()).exists).toBe(false);
     await db.doc(`${base}/promptQuota/${UID}`).delete();
-    await expect(submitPromptCore({ db, now: () => NaN }, UID, { eventId: EVENT, itemId: 'new', text: 'Dance', spicy: false })).rejects.toMatchObject({ code: 'internal' });
+    await expect(submitPromptCore({ db, now: () => NaN }, UID, { expectedUid: UID, eventId: EVENT, itemId: 'new', text: 'Dance', spicy: false })).rejects.toMatchObject({ code: 'internal' });
     expect((await db.doc(`${base}/items/new`).get()).exists).toBe(false);
   });
 });

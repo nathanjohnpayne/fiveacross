@@ -1987,6 +1987,8 @@ export interface AdmissionDecision {
 
 /** Server-authoritative Community Prompt intake (#1311, ADR 0017). */
 export interface SubmitPromptRequest {
+  /** Captured submitting account; equality guard, never ownership authority. */
+  expectedUid: string;
   eventId: string;
   itemId: string;
   text: string;
