@@ -1743,10 +1743,11 @@ export type StatWrite = { bingoCount: number; squaresMarked: number; firstBingoA
  * the summed root `bingoCount`/`squaresMarked` and the cruise-wide `firstBingoAt`.
  *
  * `firstBingoAt` is OMITTED — from BOTH the Day bucket and the root — exactly
- * when `computeMark` omitted it AND this Day has no prior stamp: the unknown-
- * local-state case (#75, a cache-miss Mark while a bingo already stood), so the
- * merge preserves whatever earlier stamp the server holds rather than writing a
- * value derived from unknown state. Every other case writes a concrete stamp.
+ * when `computeMark` omitted it AND this Day has no prior stamp: an UNKNOWN
+ * Player timestamp while a bingo stands, including a local first-line
+ * transition. The merge preserves any unseen earlier server stamp; the daily
+ * post-ACK/open-time transaction fills a genuinely absent stamp from live cells.
+ * Otherwise the fold writes the supplied stamp or this Day's known prior stamp.
  */
 export function foldDayStat(params: {
   priorDayStats: DayStats | undefined;
@@ -1771,7 +1772,7 @@ export function foldDayStat(params: {
   const omitFirst = !('firstBingoAt' in bucket);
   // Preserve only when the fold gave no value AND this Day holds no prior stamp
   // — otherwise there is a concrete value to write (the fold's, or the Day's own
-  // earlier stamp on an unknown-while-standing further mark).
+  // earlier stamp while the Player timestamp is unknown and a bingo stands).
   const preserve = omitFirst && priorBucket?.firstBingoAt == null;
   const dayFirst = omitFirst ? (priorBucket?.firstBingoAt ?? null) : (bucket.firstBingoAt ?? null);
 
