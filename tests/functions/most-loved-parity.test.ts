@@ -203,7 +203,7 @@ describe('client/functions parity — Most-Loved Photo eligibility (#560)', () =
     expect(both([], [H('a', 'p1', 1_000)])).toEqual(NO_AWARD);
   });
 
-  it('Hearts after the freeze cutoff are excluded by their server creation time; AT the cutoff counts', () => {
+  it('Hearts after the freeze cutoff are excluded by their server binding time; AT the cutoff counts', () => {
     const award = both(
       [P('p1'), P('p2', { createdAt: 2_000 })],
       [

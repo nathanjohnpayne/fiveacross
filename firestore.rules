@@ -3172,10 +3172,10 @@ service cloud.firestore {
           // Old queued clients can remain fieldless. Once stamped, a binding
           // keeps its native time on retries and a real rebinding must reset it.
           && (!('bindingCommittedAt' in request.resource.data)
-              ? (!exists(/databases/$(database)/documents/events/$(eventId)/hearts/$(heartId))
+              ? (resource == null
                   || !('bindingCommittedAt' in resource.data))
               : (request.resource.data.bindingCommittedAt is timestamp
-                  && ((!exists(/databases/$(database)/documents/events/$(eventId)/hearts/$(heartId))
+                  && ((resource == null
                         || !('bindingCommittedAt' in resource.data)
                         || request.resource.data.targetCreatedAt != resource.data.targetCreatedAt)
                     ? request.resource.data.bindingCommittedAt == request.time
