@@ -5,10 +5,12 @@ import { renderHook, act } from '@testing-library/react';
 // Doubt-satisfaction inputs — useMyProofs (the viewer-scoped Square badge) and
 // useProofsForItemText (the Tally sheet's per-Prompt status) — must honor the
 // SAME ADR 0004 community auto-hide as useProofFeed (#107): a Proof whose
-// reportCount has reached event.settings.reportHideThreshold is invisible in the
+// reportCount has reached event.settings.reportHideThreshold without incarnation
+// suppression is invisible in the
 // public Feed, so it must not satisfy a Doubt either — the sheet would otherwise
 // read "Proof shown ✓" (and the badge clear) on evidence the group can no longer
-// see. If the group cannot see the proof, it cannot answer the accusation. The
+// see. Restored/cleared incarnations retain their report-hide override. If the
+// group cannot see the proof, it cannot answer the accusation. The
 // filter fails OPEN exactly like #107: a missing/non-positive threshold filters
 // nothing. Harness mirrors src/hooks/w2-admin-console.test.tsx — the REAL hooks
 // with Firestore's onSnapshot stubbed, the event doc (threshold source) and the

@@ -314,7 +314,7 @@ export default function GameSettings({
         <div className="row">
           <div className="grow">
             <div className="name">Auto-hide after reports</div>
-            <div className="sub">Reports needed before a Prompt or Proof self-hides from players.</div>
+            <div className="sub">Reports needed for automatic hiding. Admin overrides stay in effect.</div>
           </div>
           <ReportThresholdStepper value={threshold} onChange={setReportHideThreshold} />
         </div>

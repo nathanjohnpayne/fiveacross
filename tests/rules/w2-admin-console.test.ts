@@ -12,7 +12,7 @@ import { deleteDoc, doc, setDoc, updateDoc } from 'firebase/firestore';
 // specs/w2-admin-console.md — paired report admission and Admin moderation.
 // #1405 requires a private distinct-reporter receipt and server-clock cadence
 // fence atomically paired with each counter increment. This focused suite pins
-// bare-increment denial; report-hide-server.test.ts exercises accepted receipts,
+// bare-increment denial; report-admission.test.ts exercises accepted receipts,
 // duplicate idempotency, reporter bans, rate admission and restore suppression.
 //   1. A bare non-admin counter update is denied, including exactly +1, jumps,
 //      decrements, bundled field changes and status flips. Report admission is

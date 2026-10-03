@@ -400,8 +400,9 @@ export function useItems(enabled = true) {
   );
   // Two further presentational hides drop a Prompt from the live pool on top of the
   // now server-authoritative `status` gate (#43): the ADR 0004 community auto-hide
-  // once `reportCount` reaches `reportHideThreshold` (the Phase-0 fallback that runs
-  // before the Cloud Function catches up), and the Admin ban (#108) — a Prompt
+  // once `reportCount` reaches `reportHideThreshold` without a restore/clear
+  // suppression marker (the fallback before the Cloud Function catches up),
+  // and the Admin ban (#108) — a Prompt
   // authored by a banned uid (`createdBy` on `bannedUids`) is hidden by its OWNER,
   // mirroring `isReportHidden`. `useAllItems` (Admin) applies NEITHER, so an Admin
   // can still reach and restore/unban a threshold-hidden or banned Prompt. The
@@ -1534,8 +1535,9 @@ export function useMyPendingItems(uid: string | null | undefined) {
  *
  * Deliberately its OWN unfiltered query rather than a client-side filter of
  * `useItems()`'s public pool: `useItems` additionally drops a Prompt that has
- * crossed the community auto-hide report threshold, is withheld by the
- * adult-content posture, or was authored by a since-banned uid — all three
+ * crossed the community auto-hide report threshold without report suppression,
+ * is withheld by the adult-content posture, or was authored by a since-banned
+ * uid — all three
  * are PRESENTATIONAL hides for the public pool, not a change to the
  * document's own `status`. A submitter whose approved Prompt got reported
  * into auto-hide is still genuinely `active` and should see `'approved'` (or
@@ -1630,8 +1632,9 @@ export function useAllItems() {
  * the flag itself keeps every AI-screened Proof reachable for as long as the verdict
  * stands, so the override is visible and reversible.
  * Like `useAllItems` it is UNfiltered by the ADR 0004 Phase 0 threshold — a Proof
- * whose `reportCount` has crossed `reportHideThreshold` (and so self-hid on every
- * Player's Feed via `useProofFeed`) still surfaces here so an Admin can reach it
+ * whose `reportCount` has crossed `reportHideThreshold` still surfaces here,
+ * whether the Player Feed filtered it or an Admin restore/clear suppression keeps
+ * it visible. The Admin can reach either posture for further review
  * (any count at/over a POSITIVE threshold is > 0, so the reported arm is a strict
  * superset of the auto-hidden set). The subscription is the one broad admin read
  * of the whole collection (no `where()`), so the OR is a pure client-side filter —
@@ -1755,8 +1758,9 @@ export function useDoubts(itemId: string | null | undefined, viewerUid?: string 
  * no subscription.
  *
  * Applies the SAME ADR 0004 community auto-hide as `useProofFeed` (`isReportHidden`
- * against `useReportHideThreshold` — Codex P2, PR #106 round 4): a Proof the group
- * can no longer see in the public Feed must not satisfy a Doubt either, or the
+ * with the Event threshold and incarnation suppression — Codex P2, PR #106
+ * round 4): a Proof the group can no longer see in the public Feed must not
+ * satisfy a Doubt either, or the
  * badge would clear ("answered") on evidence nobody can inspect — if the group
  * cannot see the proof, it cannot answer the accusation. Fail-open like #107: a
  * missing/non-positive threshold filters nothing.
@@ -1788,8 +1792,9 @@ export function useMyProofs(uid: string | null | undefined) {
  * no subscription.
  *
  * Applies the SAME ADR 0004 community auto-hide as `useProofFeed` (`isReportHidden`
- * against `useReportHideThreshold` — Codex P2, PR #106 round 4): the sheet must not
- * render "Proof shown ✓" for a Proof the public Feed has community-hidden — if the
+ * with the Event threshold and incarnation suppression — Codex P2, PR #106
+ * round 4): the sheet must not render "Proof shown ✓" for a Proof the public Feed
+ * has community-hidden — if the
  * group cannot see the proof, it cannot answer the accusation. Fail-open like
  * #107: a missing/non-positive threshold filters nothing.
  */
