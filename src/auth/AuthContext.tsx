@@ -816,6 +816,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // not yet seen fail — the handle the bfcache recovery below needs to retire
   // that attempt's records without touching any other tab's (#1123).
   const redirectAttemptTokenRef = useRef<string | null>(null);
+  const redirectAbandonmentRef = useRef<{ token: string; owner: symbol; restoreLogout: () => void } | null>(null);
   const redirectResultHandledRef = useRef(false);
   // Whether onAuthStateChanged has ever fired for this mount — see its own
   // check-and-clear site (Phase 4b P1 on #836) for why signal (b) is scoped
@@ -2472,14 +2473,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // on "Signing in…" until a reload — where cancelling the retired popup used to
   // allow a retry. A persisted `pageshow` IS that abandonment: nothing signed
   // in (a completed return is a fresh navigation, never a bfcache restore), so
-  // release the guard and retire exactly this attempt's records, the same
-  // terminal cleanup a failed start performs. Token-addressed removal keeps a
-  // different tab's live attempt untouched.
+  // restore prior logout intent, release the guard and retire exactly this
+  // still-owned attempt's records, the same terminal cleanup a failed start
+  // performs. Token/owner checks preserve a newer local attempt; token-addressed
+  // removal keeps a different tab's live attempt untouched.
   useEffect(() => {
     const onPageShow = (event: Event) => {
       if ((event as PageTransitionEvent).persisted !== true) return;
       const token = redirectAttemptTokenRef.current;
       if (token === null) return;
+      const abandoned = redirectAbandonmentRef.current;
+      if (!abandoned || abandoned.token !== token || signInAttemptOwnerRef.current !== abandoned.owner) return;
+      abandoned.restoreLogout();
+      redirectAbandonmentRef.current = null;
       redirectAttemptTokenRef.current = null;
       signInAttemptRef.current = null;
       signInAttemptOwnerRef.current = null;
@@ -2494,6 +2500,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signIn = useCallback((acknowledgedAdultContent: boolean): Promise<void> => {
     if (signInAttemptRef.current) return signInAttemptRef.current;
+    let priorLogoutIntent = explicitLogoutRef.current === true;
+    if (explicitLogoutRef.current === null) {
+      try { priorLogoutIntent = localStorage.getItem(EXPLICIT_LOGOUT_KEY) === '1'; }
+      catch { priorLogoutIntent = true; }
+    }
     explicitLogoutRef.current = false;
     let logoutIntentCleanupFailed = false;
     try {
@@ -2512,6 +2523,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const acknowledged = acknowledgedAdultContent === true;
     const owner = Symbol('sign-in attempt');
     signInAttemptOwnerRef.current = owner;
+    const restorePriorLogoutIntent = () => {
+      if (!priorLogoutIntent || signInAttemptOwnerRef.current !== owner) return;
+      explicitLogoutRef.current = true;
+      try { localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1'); }
+      catch { /* This mount still honors intent when persistence refuses it. */ }
+      // The SDK may publish its User before rejecting the credential promise.
+      // Retire that provisional session even when best-effort SDK cleanup fails.
+      authUidRef.current = null;
+      profileAttemptRef.current += 1;
+      dealAttemptRef.current += 1;
+      setUser(null);
+      setLoading(false);
+      if (auth.currentUser) void signOut(auth).catch(() => {});
+    };
 
     const attempt = (async () => {
       if (onFallbackAuthOrigin) {
@@ -2548,12 +2573,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // Google, and Google returns the Player to the page they started from
         // with the session restored — no second window ever opens. There is no
         // device or display-mode heuristic here on purpose: the same-origin
-        // handler is the only condition, because it is what keeps the helper's
+        // handler is the origin condition, because it keeps the helper's
         // sessionStorage on one origin across the round trip (#161), and the
         // durable redirect-return records below carry the surfaces that lose
         // even that (#346, #836). Every production host pins its own hostname
-        // as authDomain (src/auth-domain.ts), so this IS the production flow;
-        // the popup below is the cross-origin-handler fallback only.
+        // as authDomain (src/auth-domain.ts), so this is the normal production
+        // flow; the state-preserving exceptions above also use the popup.
         // One random id for this attempt (Phase 4b P1 round 3 on #836),
         // threaded through the session marker and token-addressed durable
         // records below. A failed or abandoned prior attempt lives under a
@@ -2562,6 +2587,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         pruneExpiredRedirectAttemptRecords();
         const attemptToken = generateAttemptToken();
         redirectAttemptTokenRef.current = attemptToken;
+        redirectAbandonmentRef.current = { token: attemptToken, owner, restoreLogout: restorePriorLogoutIntent };
         markPendingRedirectAttestation(attemptToken);
         // The durable #346 signal (b) companion to the marker above — written
         // alongside it, in the same store as the acknowledgement record, for
@@ -2589,6 +2615,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (redirectAttemptTokenRef.current === attemptToken) {
             redirectAttemptTokenRef.current = null;
           }
+          if (redirectAbandonmentRef.current?.token === attemptToken) redirectAbandonmentRef.current = null;
+          if (signInAttemptOwnerRef.current !== owner) return;
+          restorePriorLogoutIntent();
           trackSignInFailure(err);
           throw err;
         }
@@ -2608,6 +2637,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         popupUser = credential.user;
       } catch (err) {
         if (signInAttemptOwnerRef.current !== owner) return;
+        restorePriorLogoutIntent();
         // Sign-in failures were invisible in analytics (#163): track('login') only
         // fires on success, and the storage-partition handler error (#161) renders
         // on the OAuth handler's own origin, which PostHog never loads. Emit an
