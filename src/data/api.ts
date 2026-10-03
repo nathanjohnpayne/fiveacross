@@ -117,9 +117,9 @@ export function resolveDisplayName(
  * runs for ANOTHER player's uid, never the viewer's own), so a player row
  * with no saved name — or missing/unreadable entirely — reads as 'Anonymous',
  * the same unresolved-submission sentinel `markerDisplayName` uses elsewhere.
- * Never throws: a failed read is presentational-only here, unlike `addItem`'s
- * fail-closed read (losing an attribution costs nothing the way losing a
- * Day-target would).
+ * Never throws: this failed attribution read is presentational-only. Prompt
+ * admission separately requires a valid server acknowledgment; it never turns
+ * a signal failure into an untargeted queued submission.
  */
 export async function fetchDisplayName(uid: string): Promise<string> {
   try {

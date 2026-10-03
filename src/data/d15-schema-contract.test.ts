@@ -20,13 +20,9 @@ vi.mock('firebase/firestore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('firebase/firestore')>();
   return {
     ...actual,
-    // The stub db ({}) is not a real Firestore, so short-circuit the ref
-    // builders addItem calls before the write — we only assert the payload.
+    // Inert references for module initialization and the unrelated converter
+    // fixtures. Callable intake reads no client schedule and writes no addDoc.
     collection: () => ({ __ref: 'items' }),
-    // `addItem` resolves a default target Day from the Event's schedule (#557),
-    // and a read failure now propagates instead of quietly writing an untargeted
-    // row — so the ref builder and the read both need an answer here. Reporting
-    // no Event doc is the schedule-less case this payload test already assumes.
     doc: () => ({ __ref: 'event', withConverter: () => ({ __ref: 'event' }) }),
     getDoc: () => Promise.resolve({ exists: () => false, data: () => undefined }),
     addDoc: addDocMock,

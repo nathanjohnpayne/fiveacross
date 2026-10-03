@@ -21,7 +21,7 @@ const { addItemMock, reportItemMock } = vi.hoisted(() => ({
   reportItemMock: vi.fn(async () => undefined),
 }));
 
-// api.ts's addItem/reportItem write to Firestore; stub only those two and
+// Stub addItem's callable admission and reportItem's transport, and
 // keep everything else (including the real checkItemRateLimit + its shared
 // module-scope timestamp map) so the throttle logic under test is real.
 vi.mock('../data/api', async (importOriginal) => {

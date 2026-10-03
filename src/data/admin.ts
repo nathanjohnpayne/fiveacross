@@ -44,7 +44,7 @@ export const deleteItem = (id: string) => deleteDoc(item(id));
 
 // Phase 1.5 approval flow (#210, daily-cards-spec § "Item pools and the approval
 // flow"): the Admin Approvals-queue write path. A main-pool submission lands
-// `pending` (src/data/api.ts addItem); only an admin's decision can move it out
+// `pending` through submitPrompt (addItem's callable); only an admin's decision can move it out
 // of that state. Since #1275 (ADR 0015) APPROVAL is the `approvePrompts`
 // callable: `approveItems` below is a thin wrapper that sends the queue rows to
 // the server, which routes each Prompt to its Day on the SERVER clock, stamps
