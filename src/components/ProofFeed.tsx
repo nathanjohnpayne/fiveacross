@@ -320,7 +320,8 @@ function ProofCard({
           onAction={async () => {
             const eventId = EVENT_ID;
             const reportingUid = viewerUid;
-            await reportProof(proof.id, proof.createdAt);
+            if (!reportingUid) throw new Error('Sign in to report content.');
+            await reportProof(proof.id, proof.createdAt, reportingUid);
             if (viewerUidRef.current === reportingUid) trackIfCurrentEvent(eventId, 'report_item');
           }}
         >

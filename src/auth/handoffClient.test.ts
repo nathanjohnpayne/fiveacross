@@ -352,7 +352,7 @@ describe('startAuthHandoff', () => {
 
   // Everything that can fail happens BEFORE the navigation. Discovering
   // unavailable storage afterwards means discovering it once a code has been
-  // minted and spent, which is unrecoverable.
+  // minted without a usable verifier; the client must start a fresh handoff.
   it('refuses to navigate when the verifier cannot be stored', async () => {
     const deny = () => {
       throw new Error('denied');
