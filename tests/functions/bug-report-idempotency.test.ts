@@ -652,7 +652,7 @@ describe('idempotent bug-report intake orchestration', () => {
     expect(memory.docs.has('bugReportRateLimits/fcdec6df4d44dbc637c7')).toBe(false);
   });
 
-  it('bounds follower reads even when the injected clock does not advance', async () => {
+  it('bounds follower sleeps even when the injected clock does not advance', async () => {
     const memory = new MemoryIntake();
     const report = base();
     const hash = deriveBugReportRequestHash(report);
@@ -665,10 +665,11 @@ describe('idempotent bug-report intake orchestration', () => {
       leaseId: 'other-owner',
       leaseExpiresAt: 61_000,
     });
-    const sleep = vi.fn(async () => undefined);
+    const sleep = vi.fn(async (_ms: number) => undefined);
     const deps = dependencies(memory, { sleep });
     await expect(submitValidatedBugReport('user-123', report, deps)).rejects.toMatchObject({ code: 'unavailable' });
-    expect(sleep).toHaveBeenCalledTimes(21);
+    expect(sleep).toHaveBeenCalledTimes(20);
+    expect(sleep.mock.calls.every(([ms]) => ms === 1_000)).toBe(true);
     expect(deps.resolveEscalation).not.toHaveBeenCalled();
   });
 

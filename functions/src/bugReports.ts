@@ -310,7 +310,7 @@ async function followSubmission(
       throw new HttpsError('failed-precondition', 'Stored submission has an invalid intake state.');
     }
     const remainingMs = Math.min(deadlineMs, leaseExpiresAt) - deps.nowMs();
-    if (remainingMs <= 0) {
+    if (remainingMs <= 0 || reads === FOLLOWER_MAX_READS - 1) {
       throw new HttpsError('unavailable', 'Submission is still being processed. Try again.');
     }
     await deps.sleep(Math.min(FOLLOWER_POLL_MS, remainingMs));
