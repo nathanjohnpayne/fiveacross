@@ -410,7 +410,7 @@ function TallySheet({
  * `undefined` — so setMark omits the preserve-vs-stamp write instead of
  * treating a phantom `null` as a real "no first bingo yet" and re-stamping
  * over the server's earlier value (Codex P2, PR #75 rounds 2 + 4). A CACHED
- * row is real knowledge either way; a loaded `null` is a known none.
+ * row is real knowledge either way; server-confirmed absence is a known none.
  * Exported for the unit test in `src/data/w1-board-mark-win.test.ts`.
  */
 export function knownFirstBingoAt(
@@ -737,8 +737,8 @@ export default function Board() {
   // window (Codex P2, PR #87). So doMark passes `displayName` only when the row
   // is known, and `undefined` otherwise — markerDisplayName then falls back to
   // the CACHED player row (the saved name), then 'Anonymous', deliberately never
-  // the possibly-stale auth value. A loaded-null row IS known (a real "no saved
-  // row"), so the auth fallback is then legitimate. ProofSheet keeps the resolved
+  // the possibly-stale auth value. A server-confirmed absent row IS known (a real
+  // "no saved row"), so the auth fallback is then legitimate. ProofSheet keeps the resolved
   // string either way: its sheet only opens after a render with the row loaded in
   // practice, and #78 pins auth as its explicit pre-load fallback.
   const identityKnown = !playerLoading && (player !== null || playerConfirmed);
@@ -1102,7 +1102,7 @@ export default function Board() {
     // The BOOKKEEPING half (uid scoping, the consistent-row reset, the
     // new-episode latch) runs on every pass whose ROW signal is attributable
     // — user signed in, schedule known, row subscription settled
-    // (identityKnown), and the subscribed row either loaded-null or
+    // (identityKnown), and the subscribed row either server-confirmed absent or
     // belonging to the signed-in account — INDEPENDENT of whether an
     // attributable board is on screen (#508, the #507 round-3 P2): a row
     // that flips lagged→consistent→lagged entirely inside a locked/loading-
