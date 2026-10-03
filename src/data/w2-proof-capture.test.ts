@@ -24,6 +24,7 @@ type Snap = { data: () => unknown };
 
 const {
   activeEvent,
+  reportContentSpy,
   txGet,
   txSet,
   txDelete,
@@ -42,6 +43,7 @@ const {
   deleteDocSpy,
 } = vi.hoisted(() => ({
   activeEvent: { id: 'med-2026' },
+  reportContentSpy: vi.fn(async () => undefined),
   txGet: vi.fn(),
   txSet: vi.fn(),
   txDelete: vi.fn(),
@@ -73,6 +75,7 @@ vi.mock('./storage', () => ({
 // `caches` bucket (the purge helper itself is unit-tested for real against a
 // stubbed `caches` global in proofMediaCache.test.ts).
 vi.mock('./proofMediaCache', () => ({ purgeProofMediaFromCaches: purgeCacheSpy }));
+vi.mock('./reports', () => ({ reportContent: reportContentSpy }));
 
 let autoSeq = 0;
 vi.mock('firebase/firestore', () => {
@@ -114,6 +117,7 @@ import {
   proofMediaOwnerUid,
   ProofBacksMarkWhileClosingError,
 } from './proofs';
+import { reportProof } from './proofs';
 
 // A dealt board: every non-free Square unmarked, the free center (12) "on".
 function dealt(): Cell[] {
@@ -1631,5 +1635,13 @@ describe('deleteProof — purges the deleting device’s own cached copy after c
     await deleteProof('P');
 
     expect(purgeCacheSpy).toHaveBeenCalledWith(undefined);
+  });
+});
+
+describe('reportProof captured identity wire', () => {
+  it('forwards the displayed reporter and incarnation to paired reporting', async () => {
+    await reportProof('proof-id', 123, 'captured-reporter');
+    expect(reportContentSpy).toHaveBeenCalledWith('proofs', 'proof-id', EVENT_ID, 123, 'captured-reporter');
+    expect(runTx).not.toHaveBeenCalled();
   });
 });
