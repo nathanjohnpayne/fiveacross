@@ -10,6 +10,7 @@ import {
 import {
   collectionGroup,
   doc,
+  deleteDoc,
   FieldPath,
   getDoc,
   getDocs,
@@ -748,6 +749,40 @@ describe('#1079/#804 membership enforcement — Mark/Echo rule budget', () => {
         const chunk = makeRepairBatch(fieldless, indexes);
         expect(chunk.writes).toBe(indexes.length + 1);
         await assertSucceeds(chunk.batch.commit());
+      }
+    }
+  });
+
+  it('admits 16+8 repair chunks when every frozen pool target was deleted, with legacy Event compatibility', async () => {
+    const indexes = Array.from({ length: 25 }, (_, i) => i).filter(i => i !== 12);
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      const database = ctx.firestore();
+      await setDoc(doc(database, COMPATIBILITY_PATH), {
+        schemaVersion: 1, projectId: 'demo-fa-membership-mark-budget', acceptLegacyUntil: NOW() + 60_000,
+      });
+      for (const index of indexes) await deleteDoc(doc(database, `${eventPath(EVENT)}/items/${cell(0, index).itemId}`));
+    });
+    const database = db(ALICE);
+    // The old queued ordinary Mark has no new slot field; it still commits its
+    // Board patch and marker atomically after the pool target disappears.
+    const oldMark = writeBatch(database);
+    const oldIndex = 24;
+    setBoardCell(oldMark, database, EVENT, 0, ALICE, oldIndex, { marked: true, markedAt: NOW() - 7 * 86400000, status: 'confirmed' });
+    oldMark.set(doc(database, markerPath(EVENT, cell(0, oldIndex).itemId as string, ALICE)), {
+      ...legacyMarker(ALICE, cell(0, oldIndex).text as string, 0), markedAt: NOW() - 7 * 86400000,
+    });
+    await assertSucceeds(oldMark.commit());
+    for (const fieldless of [false, true]) {
+      for (const chunk of [indexes.slice(0, 16), indexes.slice(16)]) {
+        const batch = writeBatch(database);
+        for (const index of chunk) {
+          const target = cell(0, index);
+          setBoardCell(batch, database, EVENT, 0, ALICE, index, { marked: true, markedAt: NOW(), status: 'confirmed', echo: true });
+          batch.set(doc(database, markerPath(EVENT, target.itemId as string, ALICE)), {
+            ...(fieldless ? legacyMarker(ALICE, target.text as string, 0) : marker(EVENT, ALICE, target.text as string, 0)), cellIndex: index,
+          });
+        }
+        await assertSucceeds(batch.commit());
       }
     }
   });

@@ -2039,7 +2039,7 @@ async function repointMarkerFromServer(params: {
   await runTransaction(database, async (tx) => {
     const marker = await tx.get(markerRef);
     if (!marker.exists()) return;
-    let best: { dayIndex: number; markedAt: number; text: string } | null = null;
+    let best: { dayIndex: number; cellIndex: number; markedAt: number; text: string } | null = null;
     for (const dayIndex of dayIndexes) {
       const board = await tx.get(doc(database, 'events', eventId, 'days', String(dayIndex), 'boards', uid));
       if (!board.exists()) continue;
@@ -2051,7 +2051,7 @@ async function repointMarkerFromServer(params: {
       if (!carrier) continue;
       const markedAt = typeof carrier.markedAt === 'number' ? carrier.markedAt : 0;
       if (!best || markedAt > best.markedAt || (markedAt === best.markedAt && dayIndex > best.dayIndex)) {
-        best = { dayIndex, markedAt, text: carrier.text };
+        best = { dayIndex, cellIndex: carrier.index, markedAt, text: carrier.text };
       }
     }
     if (!best) {
@@ -2059,8 +2059,15 @@ async function repointMarkerFromServer(params: {
       return;
     }
     const current = marker.data() as Record<string, unknown>;
-    if (current.dayIndex === best.dayIndex && current.markedAt === best.markedAt) return;
-    tx.set(markerRef, { ...current, dayIndex: best.dayIndex, markedAt: best.markedAt, itemText: best.text });
+    const normalized = {
+      uid, eventId, displayName: markerDisplayName(undefined, current.displayName),
+      dayIndex: best.dayIndex, cellIndex: best.cellIndex,
+      markedAt: Number.isSafeInteger(best.markedAt) && best.markedAt > 0 && best.markedAt <= Date.now() + 60_000 ? best.markedAt : Date.now(),
+      itemText: best.text,
+    };
+    if (Object.keys(current).length === Object.keys(normalized).length
+        && Object.entries(normalized).every(([key, value]) => current[key] === value)) return;
+    tx.set(markerRef, normalized);
   });
 }
 
@@ -2408,7 +2415,7 @@ async function runSetMark(
       // TEXT onto the marker so the Feed can group markers of the SAME
       // `(itemId, dayIndex)` into one live card. The reader resolves the label
       // from a visible trusted Prompt; Rules bound these additive fields and
-      // require that the Prompt exists. The marker path stays the per-Prompt
+      // require an existing Prompt or the owner’s frozen dealt Square. The marker path stays the per-Prompt
       // `tally/{itemId}/markers/{uid}`, so the Square badge (`useTally`) and the
       // Doubt `exists()` gate are untouched. The Feed re-sort time is DERIVED
       // (`max(marker.markedAt)`), never a client write to the admin-only parent
@@ -2420,6 +2427,7 @@ async function runSetMark(
         displayName: markerDisplayName(params.displayName, cachedPlayerName),
         markedAt: now,
         itemText: toggled!.text,
+        cellIndex: toggled!.index,
         ...(typeof params.dayIndex === 'number' ? { dayIndex: params.dayIndex } : {}),
       });
       // A normal mark recreates the marker ITSELF, superseding any persisted
@@ -3086,6 +3094,7 @@ async function runReconcileEchoes(
       displayName: markerDisplayName(undefined, cachedPlayerData?.displayName),
       markedAt: cell.markedAt ?? now,
       itemText: cell.text,
+      cellIndex: cell.index,
       dayIndex,
     });
   };

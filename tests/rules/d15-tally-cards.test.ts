@@ -96,11 +96,26 @@ describe('firestore.rules — day-scoped Tally Card markers (specs/d15-tally-car
     { dayIndex: -1 }, { dayIndex: 0.5 }, { dayIndex: 3 }, { dayIndex: 20 },
     { markedAt: 0 }, { markedAt: -1 }, { markedAt: 1.5 },
     { extra: 'unvalidated' },
+    { cellIndex: -1 }, { cellIndex: 25 }, { cellIndex: 0.5 }, { cellIndex: '2' },
   ])('rejects invalid persisted shape on create and update: %j', async (over) => {
     const mine = doc(db(ALICE), markerPath(ITEM, ALICE));
     await assertFails(setDoc(mine, marker(ALICE, over)));
     await assertSucceeds(setDoc(mine, marker(ALICE)));
     await assertFails(setDoc(mine, marker(ALICE, over)));
+  });
+
+  it.each([false, true])('preserves a queued Mark for a deleted frozen Prompt (slot identity supplied: %s)', async (slot) => {
+    const deletedId = 'deleted-pool-prompt';
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), at(`days/2/boards/${ALICE}`)), {
+        uid: ALICE, cells: { '24': { itemId: deletedId, text: 'Frozen label', marked: false } },
+      });
+    });
+    const payload = marker(ALICE, { markedAt: NOW() - 7 * 86400000, itemText: 'Forged mutable label', ...(slot ? { cellIndex: 24 } : {}) });
+    await assertSucceeds(setDoc(doc(db(ALICE), markerPath(deletedId, ALICE)), payload));
+    await assertFails(setDoc(doc(db(ALICE), markerPath('not-on-card', ALICE)), payload));
+    await assertFails(setDoc(doc(db(ALICE), markerPath(deletedId, ALICE)), { ...payload, cellIndex: 0 }));
+    await assertFails(setDoc(doc(db(BOB), markerPath(deletedId, BOB)), marker(BOB, { cellIndex: 24 })));
   });
 
   it('keeps long-offline queued marks and legacy square-only markers admissible', async () => {

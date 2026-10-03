@@ -1050,6 +1050,17 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(true);
   });
 
+  it('#1414: re-pointing replaces legacy extra fields with the bounded canonical marker', async () => {
+    seedRepeats();
+    H.markerServer.set('shared', { ...serverMarker(), legacyExtra: 'x'.repeat(2000), displayName: 'N'.repeat(200) });
+    await markShared({ nextMarked: false, echoMarks: false });
+    commitDay2Unmark();
+    await settle();
+    const write = markerTxWrite()!;
+    expect(write[1]).toEqual({ uid: 'u1', eventId: 'test-event', displayName: 'N'.repeat(100), dayIndex: 3, cellIndex: 8, markedAt: 30, itemText: 'Prompt 8' });
+    expect(write[2]).toBeUndefined(); // complete replacement removes unknown fields
+  });
+
   it('#1360: the server pass ignores a board whose stored owner does not match its path', async () => {
     seedRepeats();
     // Day 3 carries the latest Mark but its stored uid is someone else's.
