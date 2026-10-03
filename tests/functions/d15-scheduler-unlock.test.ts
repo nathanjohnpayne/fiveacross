@@ -16,6 +16,8 @@ import {
   type DayLike,
   type EventLike,
   runFinaleBeats,
+  boundedFinaleContent,
+  FINALE_CONTENT_MAX_BYTES,
 } from '../../functions/src/unlockDay';
 import { MAX_ARCHIVE_NUMBER } from '../../functions/src/finaleContent';
 
@@ -1631,5 +1633,62 @@ describe('runFinaleBeats — the finale-complete marker (#1151)', () => {
     const db = makeDb({ eventId: 'e', event: { days: mainDays() } });
     await runFinaleBeats(db, 'e', { now: () => D9_UNLOCK + 13 * 60 * 60 * 1000 });
     expect(db.readEvent().finaleCompletedAt).toBeUndefined();
+  });
+});
+
+// #1413: content size must never prevent the beat from being posted.
+describe('finale defensive payload budget', () => {
+  it('measures UTF-8 bytes, keeps near-budget content, and drops excessive content as a whole', () => {
+    const near = { text: 'x'.repeat(FINALE_CONTENT_MAX_BYTES - 11) };
+    expect(Buffer.byteLength(JSON.stringify(near))).toBe(FINALE_CONTENT_MAX_BYTES);
+    expect(boundedFinaleContent(near)).toBe(near);
+    expect(boundedFinaleContent(near, { kind: 'last_call', uid: 'system', createdAt: 1 })).toBeUndefined();
+    const metadata = { kind: 'last_call', uid: 'system', createdAt: 1 };
+    const overhead = Buffer.byteLength(JSON.stringify({ ...metadata, text: '' }));
+    const complete = { text: 'x'.repeat(FINALE_CONTENT_MAX_BYTES - overhead) };
+    expect(Buffer.byteLength(JSON.stringify({ ...metadata, ...complete }))).toBe(FINALE_CONTENT_MAX_BYTES);
+    expect(boundedFinaleContent(complete, metadata)).toBe(complete);
+    expect(boundedFinaleContent({ text: complete.text + 'x' }, metadata)).toBeUndefined();
+    expect(boundedFinaleContent({ text: near.text + 'x' })).toBeUndefined();
+    expect(boundedFinaleContent({ text: '😀'.repeat(FINALE_CONTENT_MAX_BYTES / 3) })).toBeUndefined();
+  });
+
+  it('keeps a complete near-budget roster rather than silently applying a player-count cap', async () => {
+    const db = makeDb({ eventId: 'e', event: { days: mainDays() },
+      players: Array.from({ length: 900 }, (_, i) => ({ uid: `u${i}`, displayName: '😀'.repeat(50),
+        bingoCount: 1, squaresMarked: 5, firstBingoAt: i + 1 })),
+    });
+    await runFinaleBeats(db, 'e', { now: () => D9_UNLOCK + 13 * 60 * 60 * 1000 });
+    const beat = db.moments().find((m) => m.kind === 'last_call')!;
+    expect(beat.lastCall).toMatchObject({ players: expect.arrayContaining([{ uid: 'u899',
+      displayName: '😀'.repeat(50), bingoCount: 1, squaresMarked: 5 }]) });
+    expect((beat.lastCall as { players: unknown[] }).players).toHaveLength(900);
+    expect(Buffer.byteLength(JSON.stringify(beat))).toBeGreaterThan(FINALE_CONTENT_MAX_BYTES * 0.9);
+    expect(Buffer.byteLength(JSON.stringify(beat))).toBeLessThan(FINALE_CONTENT_MAX_BYTES);
+  });
+
+  it('posts a generic last-call for a roster beyond the document budget, including on retries', async () => {
+    const db = makeDb({ eventId: 'e', event: { days: mainDays() },
+      players: Array.from({ length: 3_000 }, (_, i) => ({ uid: `u${i}`, displayName: '😀'.repeat(100),
+        bingoCount: 1, squaresMarked: 5, firstBingoAt: i + 1 })),
+    });
+    const now = () => D9_UNLOCK + 13 * 60 * 60 * 1000;
+    await runFinaleBeats(db, 'e', { now });
+    await runFinaleBeats(db, 'e', { now });
+    const beats = db.moments().filter((m) => m.kind === 'last_call');
+    expect(beats).toHaveLength(1);
+    expect(beats[0]).not.toHaveProperty('lastCall');
+    expect(beats[0]).not.toHaveProperty('line');
+    expect(Buffer.byteLength(JSON.stringify(beats[0]))).toBeLessThan(FINALE_CONTENT_MAX_BYTES);
+  });
+
+  it('bounds legacy roster names before both last-call and podium content', async () => {
+    const db = makeDb({ eventId: 'e', event: { days: mainDays() },
+      players: [{ uid: 'u', displayName: 'x'.repeat(99) + '😀' + 'x'.repeat(1_000_000), bingoCount: 3, squaresMarked: 9, firstBingoAt: 10 }],
+    });
+    await runFinaleBeats(db, 'e', { now: () => D9_UNLOCK + 13 * 60 * 60 * 1000 });
+    expect(db.moments().find((m) => m.kind === 'last_call')?.lastCall).toMatchObject({ players: [{ displayName: 'x'.repeat(99) }] });
+    await runFinaleBeats(db, 'e', { now: () => D10_UNLOCK + 1000 });
+    expect(db.moments().find((m) => m.kind === 'podium')?.podium).toMatchObject({ champion: { displayName: 'x'.repeat(99) } });
   });
 });

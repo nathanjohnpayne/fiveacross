@@ -817,6 +817,18 @@ async function hasMoment(db: AdminFirestore, eventId: string, kind: FinaleMoment
   return snap.docs.length > 0;
 }
 
+/** Conservative content budget below Firestore's 1 MiB document ceiling. */
+export const FINALE_CONTENT_MAX_BYTES = 256 * 1024;
+
+/** Oversized content yields a generic beat, never a partial roster or podium. */
+export function boundedFinaleContent(
+  extra?: Record<string, unknown>,
+  metadata: Record<string, unknown> = {},
+): Record<string, unknown> | undefined {
+  if (!extra) return undefined;
+  return Buffer.byteLength(JSON.stringify({ ...metadata, ...extra }), 'utf8') <= FINALE_CONTENT_MAX_BYTES ? extra : undefined;
+}
+
 async function postFinaleMoment(
   db: AdminFirestore,
   eventId: string,
@@ -857,20 +869,26 @@ async function postFinaleMoment(
     if (eventClosedToPlay(event)) return;
     // No human author — a `system` uid keeps the MomentDoc shape intact without
     // impersonating a Player.
-    tx.set(momentRef, {
+    const metadata = {
       kind,
       uid: 'system',
       displayName: '',
       photoURL: null,
       createdAt: now,
       dayIndex,
-      ...(extra ?? {}),
-    });
+    };
+    tx.set(momentRef, { ...metadata, ...(boundedFinaleContent(extra, metadata) ?? {}) });
   });
 }
 
 function finiteNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function boundedFinaleName(value: unknown): string {
+  if (typeof value !== 'string' || !value) return 'Anonymous';
+  const name = value.slice(0, 100);
+  return /[\uD800-\uDBFF]$/.test(name) ? name.slice(0, -1) : name;
 }
 
 /** The canonical roster as `FinalePlayer[]` (#266) — the same shape the content
@@ -909,7 +927,7 @@ export async function readFinaleRoster(
       const uid = d.id || (typeof data.uid === 'string' && data.uid ? data.uid : '');
       return {
         uid,
-        displayName: typeof data.displayName === 'string' && data.displayName ? data.displayName : 'Anonymous',
+        displayName: boundedFinaleName(data.displayName),
         bingoCount: finiteNumber(data.bingoCount, 0),
         squaresMarked: finiteNumber(data.squaresMarked, 0),
         firstBingoAt: typeof data.firstBingoAt === 'number' && Number.isFinite(data.firstBingoAt) ? data.firstBingoAt : null,
