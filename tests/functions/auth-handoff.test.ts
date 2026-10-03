@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   HANDOFF_FRAGMENT_KEY,
+  EXCHANGE_BURST_CAPACITY,
+  EXCHANGE_REFILL_MS,
+  createExchangeAdmission,
   HANDOFF_TTL_MS,
   buildHandoffRecord,
   exchangeHandoff,
@@ -149,6 +152,7 @@ const mintDeps = (fake: FakeDb, overrides: Partial<MintDeps> = {}): MintDeps => 
 });
 
 const exchangeDeps = (fake: FakeDb, overrides: Partial<ExchangeDeps> = {}): ExchangeDeps => ({
+  admitRequest: () => true,
   db: fake.db,
   now: () => T0 + 1_000,
   timestamp: fakeTimestamp,
@@ -743,5 +747,85 @@ describe('exchangeHandoff', () => {
       ok: false,
       reason: 'replayed',
     });
+  });
+});
+
+describe('exchange admission before Firestore (#1417)', () => {
+  const payload = { code: CODE, transactionVerifier: VERIFIER, origin: ORIGIN };
+
+  it('bounds concurrent well-formed unknown-code misses without caller-keyed storage', async () => {
+    const fake = makeDb();
+    const admitRequest = createExchangeAdmission(() => 0);
+    const results = await Promise.all(Array.from({ length: 1_000 }, (_, i) =>
+      exchangeHandoff({ ...payload, code: token(`unknown-${i}-`) }, exchangeDeps(fake, { admitRequest })),
+    ));
+    expect(fake.reads.count).toBe(EXCHANGE_BURST_CAPACITY);
+    expect(results.filter(r => !r.ok && r.reason === 'unknown-code')).toHaveLength(EXCHANGE_BURST_CAPACITY);
+    expect(results.filter(r => !r.ok && r.reason === 'request-limit')).toHaveLength(1_000 - EXCHANGE_BURST_CAPACITY);
+    expect(fake.docs.size).toBe(0);
+  });
+
+  it('rejects an exhausted request before even constructing a document reference', async () => {
+    const fake = makeDb();
+    fake.db.doc = () => { throw new Error('must not touch Firestore'); };
+    expect(await exchangeHandoff(payload, exchangeDeps(fake, { admitRequest: () => false })))
+      .toEqual({ ok: false, reason: 'request-limit' });
+  });
+
+  it('preserves valid unattested exchange and recovers one request after refill', async () => {
+    const fake = makeDb(seedHandoff());
+    let now = 0;
+    const admitRequest = createExchangeAdmission(() => now);
+    const deps = exchangeDeps(fake, { admitRequest, requireAppCheck: false });
+    for (let i = 0; i < EXCHANGE_BURST_CAPACITY; i++) {
+      await exchangeHandoff({ ...payload, code: token(`miss-${i}`) }, deps);
+    }
+    expect(await exchangeHandoff(payload, deps)).toEqual({ ok: false, reason: 'request-limit' });
+    expect(fake.docs.get(handoffPath(CODE))?.data.consumedAt).toBeNull();
+    now += EXCHANGE_REFILL_MS;
+    expect(await exchangeHandoff(payload, deps)).toMatchObject({ ok: true, uid: UID });
+    expect(await exchangeHandoff(payload, deps)).toEqual({ ok: false, reason: 'request-limit' });
+  });
+
+  it('does not charge malformed, wrong-origin, or App Check rejected input', async () => {
+    const fake = makeDb(seedHandoff());
+    const admitRequest = createExchangeAdmission(() => 0);
+    const deps = exchangeDeps(fake, { admitRequest });
+    for (let i = 0; i < 100; i++) {
+      await exchangeHandoff({ ...payload, code: 'bad' }, deps);
+      await exchangeHandoff({ ...payload, transactionVerifier: '!' }, deps);
+      await exchangeHandoff({ ...payload, origin: 'nonsense' }, deps);
+      await exchangeHandoff({ ...payload, headerOrigin: OTHER_ORIGIN }, deps);
+      await exchangeHandoff(payload, { ...deps, requireAppCheck: true });
+    }
+    expect(fake.reads.count).toBe(0);
+    expect(await exchangeHandoff(payload, deps)).toMatchObject({ ok: true });
+    for (let i = 1; i < EXCHANGE_BURST_CAPACITY; i++) expect(admitRequest()).toBe(true);
+    expect(admitRequest()).toBe(false);
+  });
+
+  it('caps replenishment after idle time and grants no credit for clock rollback', () => {
+    let now = 1_000;
+    const admit = createExchangeAdmission(() => now);
+    for (let i = 0; i < EXCHANGE_BURST_CAPACITY; i++) expect(admit()).toBe(true);
+    now = 0;
+    expect(admit()).toBe(false);
+    now = 1_000;
+    expect(admit()).toBe(false);
+    now = 1_000_000;
+    for (let i = 0; i < EXCHANGE_BURST_CAPACITY; i++) expect(admit()).toBe(true);
+    expect(admit()).toBe(false);
+  });
+
+  it.each([NaN, Infinity, -Infinity, -1])('fails closed on an invalid clock without resetting credit (%s)', (bad) => {
+    let now = 0;
+    const admit = createExchangeAdmission(() => now);
+    for (let i = 0; i < EXCHANGE_BURST_CAPACITY; i++) admit();
+    now = bad;
+    expect(admit()).toBe(false);
+    now = 0;
+    expect(admit()).toBe(false);
+    now = EXCHANGE_REFILL_MS;
+    expect(admit()).toBe(true);
   });
 });

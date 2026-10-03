@@ -39,7 +39,7 @@ const rawMoment = (eventId: string, id: string) => doc(db, 'events', eventId, 'm
  *
  * Not to be confused with Firestore's own cached-deletion tombstone (a
  * `getDocFromCache` snapshot with `exists() === false`), which is a local SDK
- * artifact; this is a real, server-side, publicly readable doc.
+ * artifact; this is a real server-side doc whose reads require Event admission.
  */
 const rawMomentRetraction = (eventId: string, id: string) =>
   doc(db, 'events', eventId, 'momentRetractions', id);

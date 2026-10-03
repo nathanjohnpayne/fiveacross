@@ -22,6 +22,9 @@ import {
 } from 'firebase/firestore';
 import {
   HANDOFF_TTL_MS,
+  EXCHANGE_BURST_CAPACITY,
+  EXCHANGE_REFILL_MS,
+  createExchangeAdmission,
   buildHandoffRecord,
   exchangeHandoff,
   handoffPath,
@@ -212,11 +215,28 @@ const deps = (db: HandoffFirestore, over: Partial<ExchangeDeps> = {}): ExchangeD
   db,
   now: () => T0 + 1_000,
   timestamp: (ms) => Timestamp.fromMillis(ms),
+  admitRequest: () => true,
   createCustomToken: async (uid: string) => `custom-token-for:${uid}`,
   ...over,
 });
 
 describe('handoff consumption against a real Firestore', () => {
+  it('does not consume a valid unattested code while admission is exhausted, then redeems after refill', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const raw = ctx.firestore();
+      let clock = 0;
+      const admitRequest = createExchangeAdmission(() => clock);
+      for (let i = 0; i < EXCHANGE_BURST_CAPACITY; i++) admitRequest();
+      const payload = { code: CODE, transactionVerifier: VERIFIER, origin: ORIGIN };
+      const runtime = deps(adapt(raw), { admitRequest, requireAppCheck: false });
+      expect(await exchangeHandoff(payload, runtime)).toEqual({ ok: false, reason: 'request-limit' });
+      expect((await getDoc(doc(raw, HANDOFF_PATH))).data()?.consumedAt).toBeNull();
+      clock += EXCHANGE_REFILL_MS;
+      expect(await exchangeHandoff(payload, runtime)).toMatchObject({ ok: true, uid: ALICE });
+      expect((await getDoc(doc(raw, HANDOFF_PATH))).data()?.consumedAt).not.toBeNull();
+    });
+  });
+
   it('mints and redeems once, then refuses every replay', async () => {
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       const db = adapt(ctx.firestore());
