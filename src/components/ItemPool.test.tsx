@@ -760,8 +760,8 @@ describe('server-authoritative Prompt submission retries (#1311)', () => {
     expect(track).not.toHaveBeenCalledWith('add_item');
     expect(track).not.toHaveBeenCalledWith('prompt_suggestion_submitted', expect.anything());
   });
-  it('asks the host to check admission preconditions and preserves the draft and retry ID without raw errors', async () => {
-    H.addItem.mockRejectedValueOnce(Object.assign(new Error('private provider details'), { code: 'functions/failed-precondition' }))
+  it.each(['functions/failed-precondition', 'functions/permission-denied'])('asks the host to check admission %s and preserves the draft and retry ID without raw errors', async code => {
+    H.addItem.mockRejectedValueOnce(Object.assign(new Error('private provider details'), { code }))
       .mockImplementationOnce(async (...args: unknown[]) => ({ id: args[5], targetDayIndex: 19 }));
     render(<ItemPool />);
     const input = screen.getByPlaceholderText(/add a prompt/i);
