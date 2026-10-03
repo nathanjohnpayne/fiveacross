@@ -216,7 +216,7 @@ function freshPlayer(uid: string): PlayerDoc {
 }
 
 beforeAll(async () => {
-  await seedEventDoc(PROJECT_ID, EVENT_ID);
+  await seedEventDoc(PROJECT_ID, EVENT_ID, 1, Array.from({ length: 25 }, (_, index) => `item-${index}`));
 });
 
 afterAll(async () => {
@@ -388,7 +388,7 @@ describe('w1 offline Mark via setMark (ADR 0006 + ADR 0002)', () => {
   // the pre-fix code).
   it('two Marks fired back-to-back off the same stale snapshot both survive (no clobber)', async () => {
     const raceProject = `${PROJECT_ID}-race`;
-    await seedEventDoc(raceProject, EVENT_ID);
+    await seedEventDoc(raceProject, EVENT_ID, 1, Array.from({ length: 25 }, (_, index) => `item-${index}`));
     const tab = await makeClient(RACE_TAB_APP_NAME, raceProject);
     const boardPath = `events/${EVENT_ID}/days/0/boards/${tab.uid}`;
     const playerPath = `events/${EVENT_ID}/players/${tab.uid}`;
@@ -449,7 +449,7 @@ describe('w1 offline Mark via setMark (ADR 0006 + ADR 0002)', () => {
   // earlier Mark even WITH the cache fold in place.
   it('two OVERLAPPING unawaited Marks both survive (per-board serialization)', async () => {
     const overlapProject = `${PROJECT_ID}-overlap`;
-    await seedEventDoc(overlapProject, EVENT_ID);
+    await seedEventDoc(overlapProject, EVENT_ID, 1, Array.from({ length: 25 }, (_, index) => `item-${index}`));
     const tab = await makeClient('gcb-mark-overlap-tab', overlapProject);
     const boardPath = `events/${EVENT_ID}/days/0/boards/${tab.uid}`;
     const playerPath = `events/${EVENT_ID}/players/${tab.uid}`;
