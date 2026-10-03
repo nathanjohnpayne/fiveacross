@@ -637,7 +637,7 @@ export default function ItemPool() {
                 </div>
               </div>
               <AsyncButton
-                key={`${scopeKey}:${it.id}`}
+                key={`${scopeKey}:${it.id}:${it.createdAt}`}
                 className="iconbtn"
                 title="Report"
                 disabled={reportThrottled}
