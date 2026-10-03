@@ -167,10 +167,12 @@ describe('tallyCardAction — per-viewer button gate (specs/d15-tally-cards.md)'
 // presentational component — is under test.
 const emptyColSnap = { docs: [], metadata: { fromCache: false } };
 const emptyDocSnap = { exists: () => false, data: () => undefined, metadata: { fromCache: false } };
+const tallyEventSnap = { exists: () => true, data: () => ({ days: [{ index: 0 }], bannedUids: [] }), metadata: { fromCache: false } };
 
 function markerDoc(itemId: string, entry: TallyEntry) {
   return {
-    data: () => entry,
+    id: entry.uid,
+    data: () => ({ ...entry, eventId: EVENT_ID }),
     // The full ancestor chain useTallyCards guards on:
     // events/{EVENT_ID}/tally/{itemId}/markers/{uid} — including the event id
     // (a sibling event's markers are filtered out, never merged into a card).
@@ -193,7 +195,8 @@ function captureOnNext(): {
   fire: (tally: unknown, proofs?: unknown, moments?: unknown, event?: unknown, player?: unknown, doubts?: unknown, notices?: unknown) => void;
   fireBoard: (dayIndex: number, board: BoardDoc | null) => void;
 } {
-  const captured: { proofs: ((s: unknown) => void) | null; moments: ((s: unknown) => void) | null; events: ((s: unknown) => void)[]; tally: ((s: unknown) => void) | null; doubtsAll: ((s: unknown) => void) | null; heartsAll: ((s: unknown) => void) | null; notices: ((s: unknown) => void) | null; player: ((s: unknown) => void) | null; boards: Record<number, (s: unknown) => void> } = {
+  const captured: { prompts: ((s: unknown) => void) | null; proofs: ((s: unknown) => void) | null; moments: ((s: unknown) => void) | null; events: ((s: unknown) => void)[]; tally: ((s: unknown) => void) | null; doubtsAll: ((s: unknown) => void) | null; heartsAll: ((s: unknown) => void) | null; notices: ((s: unknown) => void) | null; player: ((s: unknown) => void) | null; boards: Record<number, (s: unknown) => void> } = {
+    prompts: null,
     proofs: null,
     moments: null,
     heartsAll: null,
@@ -220,6 +223,7 @@ function captureOnNext(): {
     if (kind === 'query' && querySource?.kind === 'collectionGroup' && querySource.args?.[1] === 'markers') {
       captured.tally = onNext;
     }
+    else if (kind === 'query' && querySource?.kind === 'collection' && querySource.args?.includes('items')) captured.prompts = onNext;
     else if (kind === 'query') captured.proofs = onNext;
     else if (kind === 'doc' && args[3] === 'days') captured.boards[Number(args[4])] = onNext;
     // #392: the viewer's own player row — events/{eid}/players/{uid} — routed by
@@ -240,11 +244,16 @@ function captureOnNext(): {
     return () => {};
   });
   return {
-    fire: (tally, proofs = emptyColSnap, moments = emptyColSnap, event = emptyDocSnap, player = viewerPlayerSnap, doubts = emptyColSnap, notices = emptyColSnap) => {
+    fire: (tally, proofs = emptyColSnap, moments = emptyColSnap, event = tallyEventSnap, player = viewerPlayerSnap, doubts = emptyColSnap, notices = emptyColSnap) => {
+      // Event context can rebind the Tally's Day/moderation listeners. Feed
+      // their current callbacks only after that render has completed.
+      act(() => captured.events.forEach((fn) => fn(event)));
       act(() => {
+        const markerDocs = (tally as { docs?: ReturnType<typeof markerDoc>[] }).docs ?? [];
+        const promptDocs = new Map(markerDocs.map((marker) => [marker.ref.parent.parent.id, marker.data().itemText]));
+        captured.prompts?.({ docs: [...promptDocs].map(([id, text]) => ({ id, data: () => ({ text, status: 'active' }) })), metadata: { fromCache: false } });
         captured.proofs?.(proofs);
         captured.moments?.(moments);
-        captured.events.forEach((fn) => fn(event));
         captured.player?.(player);
         captured.tally?.(tally);
         captured.doubtsAll?.(doubts);
@@ -368,7 +377,7 @@ describe('ProofFeed (default export) — Feed-level who-list sheet (#216 accepta
     };
     sub.fire(
       { docs: [markerDoc('p1', alice)], metadata: { fromCache: false } },
-      emptyColSnap, emptyColSnap, emptyDocSnap, viewerPlayerSnap,
+      emptyColSnap, emptyColSnap, tallyEventSnap, viewerPlayerSnap,
       { docs: [{ data: () => myDoubt }], metadata: { fromCache: false, hasPendingWrites: false } },
     );
     fireEvent.click(document.querySelector('.tally-card .tally-card-body')!);
@@ -391,7 +400,7 @@ describe('ProofFeed (default export) — Feed-level who-list sheet (#216 accepta
     const unconfirmed = { exists: () => false, data: () => undefined, metadata: { fromCache: true } };
     sub.fire(
       { docs: [markerDoc('p1', alice)], metadata: { fromCache: false } },
-      emptyColSnap, emptyColSnap, emptyDocSnap, unconfirmed,
+      emptyColSnap, emptyColSnap, tallyEventSnap, unconfirmed,
     );
     fireEvent.click(document.querySelector('.tally-card .tally-card-body')!);
 
@@ -413,7 +422,7 @@ describe('ProofFeed (default export) — Feed-level who-list sheet (#216 accepta
     const staleRow = { exists: () => true, data: () => ({ uid: 'olduser', displayName: 'Old Account' }), metadata: { fromCache: false } };
     sub.fire(
       { docs: [markerDoc('p1', alice)], metadata: { fromCache: false } },
-      emptyColSnap, emptyColSnap, emptyDocSnap, staleRow,
+      emptyColSnap, emptyColSnap, tallyEventSnap, staleRow,
     );
     fireEvent.click(document.querySelector('.tally-card .tally-card-body')!);
 
@@ -776,7 +785,7 @@ describe('ProofFeed — the Hearts cue (#534/#561)', () => {
     render(<ProofFeed />);
     const unfrozenEvent = {
       exists: () => true,
-      data: () => ({ days: [] }),
+      data: () => ({ days: [{ index: 0 }] }),
       metadata: { fromCache: false },
     };
     sub.fire(tallySnap, emptyColSnap, emptyColSnap, unfrozenEvent);
@@ -792,9 +801,9 @@ describe('ProofFeed — the Hearts cue (#534/#561)', () => {
     const sub = captureOnNext();
     render(<ProofFeed />);
 
-    sub.fire(tallySnap);
+    sub.fire(tallySnap, emptyColSnap, emptyColSnap, emptyDocSnap);
 
-    expect(document.querySelector('.tally-card')).toBeTruthy();
+    expect(document.querySelector('.tally-card')).toBeNull();
     expect(document.querySelector('.feed-heart-cue')).toBeNull();
   });
 
@@ -804,7 +813,7 @@ describe('ProofFeed — the Hearts cue (#534/#561)', () => {
     render(<ProofFeed />);
     const frozenEvent = {
       exists: () => true,
-      data: () => ({ frozenAt: 123 }),
+      data: () => ({ frozenAt: 123, days: [{ index: 0 }] }),
       metadata: { fromCache: false },
     };
     sub.fire(tallySnap, emptyColSnap, emptyColSnap, frozenEvent);

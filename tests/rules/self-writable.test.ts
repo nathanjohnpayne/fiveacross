@@ -71,6 +71,7 @@ beforeEach(async () => {
   await testEnv.withSecurityRulesDisabled(async (ctx) => {
     const s = ctx.firestore();
     await setDoc(doc(s, `events/${EVENT}`), { name: 'Cruise', status: 'active', defaultTheme: 'neon-playground', claimMode: 'honor', admins: [ADMIN], settings: { reportHideThreshold: 3 }, days: [{ index: 0, unlockAt: PAST() }] });
+    await setDoc(doc(s, at('items/item1')), { text: 'Existing prompt', status: 'active' });
     await setDoc(doc(s, at(`tally/item1/markers/${CAROL}`)), { uid: CAROL, displayName: 'Carol', markedAt: NOW() });
   });
 });
