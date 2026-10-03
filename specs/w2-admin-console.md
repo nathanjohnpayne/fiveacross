@@ -85,11 +85,11 @@ Basename-aligned to this spec (the checker matches `specs/w2-admin-console.md` �
 
 Runner: `npm test` (Vitest, jsdom). Test: `src/hooks/w2-admin-console.test.tsx`.
 
-- `isReportHidden` hides **at** and **over** the threshold, shows **below** it, and fails **open** (returns `false`) on an `undefined` threshold.
+- `isReportHidden` hides unsuppressed content **at** and **over** the threshold, shows **below** it, and fails **open** (returns `false`) on an `undefined` threshold.
 - `isReportHidden` also fails **open** on a **non-positive** threshold—`0`, `-1`, and `NaN` all return `false` (fail-open-unless-positive, finding 2), so an admin `0` typo does not blank everything.
-- `useProofFeed` drops a Proof whose `reportCount` is at/over `reportHideThreshold` and keeps below-threshold Proofs; with the threshold unset it filters nothing (a `reportCount: 99` Proof still renders); with the threshold `0` it also filters nothing (the Feed is not blanked).
-- `useFeed` (the merged Feed) excludes an at/over-threshold Proof from its proof side while leaving Moments untouched—proving the single `useProofFeed` chokepoint covers the merged stream.
-- `useItems` drops a Prompt at/over the threshold and keeps below-threshold Prompts.
+- `useProofFeed` drops an unsuppressed Proof whose `reportCount` is at/over `reportHideThreshold` and keeps below-threshold Proofs; with the threshold unset it filters nothing (a `reportCount: 99` Proof still renders); with the threshold `0` it also filters nothing (the Feed is not blanked).
+- `useFeed` (the merged Feed) excludes an unsuppressed at/over-threshold Proof from its proof side while leaving Moments untouched—proving the single `useProofFeed` chokepoint covers the merged stream.
+- `useItems` drops an unsuppressed Prompt at/over the threshold and keeps below-threshold Prompts.
 - `useAllItems` and `useReportedProofs` **include** at/over-threshold content, so the Admin can reach it (the reachability invariant).
 - `useReportedProofs` includes a **hard-hidden, zero-count** Proof (`status: 'hidden'`, `reportCount: 0`) and a `flagged` one, and still omits an active unreported one—the queue-membership rule (reported OR flagged OR hidden), so the clear-then-restore ordering can never orphan a hidden Proof (round 2).
 
@@ -97,7 +97,7 @@ Runner: `npm test` (Vitest, jsdom). Test: `src/hooks/w2-admin-console.test.tsx`.
 
 Runner: `npm test` (Vitest, jsdom). Test: `src/components/w1-board-deal-join.test.tsx` (the `joinAndDeal` harness, where the getDoc/getDocs/writeBatch mocks already live; reused rather than duplicated). The event doc is the 3rd `getDoc` call (board, profile, event).
 
-- `joinAndDeal` **excludes** at/over-threshold Prompts from the deal so a frozen card never holds community-hidden content.
+- `joinAndDeal` **excludes** unsuppressed at/over-threshold Prompts from the deal so a frozen card never holds community-hidden content.
 - The `MIN_POOL` guard counts the community-**visible** pool: 23 clean + 5 reported Prompts still throws `< MIN_POOL` (the reported rows do not pad the floor) and never persists a card.
 - A **non-positive** threshold (`0`) deals the full pool—the deal path shares the fail-open-unless-positive rule (finding 2).
 - An **unreadable** event doc falls open—the deal proceeds unfiltered rather than blocking.
@@ -108,10 +108,10 @@ Runner: `npm test` (Vitest, jsdom). Test: `src/components/w2-admin-console.test.
 
 - A non-admin sees "Admins only." and no queue renders.
 - The report queue lists a reported Proof with its `reportCount ⚑`.
-- A threshold-hidden row is tagged **"auto-hidden"** and a below-threshold row is not—the REAL predicate at the `reportCount == threshold` boundary.
+- An unsuppressed threshold-hidden row is tagged **"auto-hidden"**; below-threshold or suppressed/restored rows are not—the REAL predicate at the `reportCount == threshold` boundary.
 - **Restore reaches a threshold-hidden Proof**: a Proof both `status: 'hidden'` and over the threshold is reachable in the queue and its Restore control invokes `restoreProof(id)`; deletion invokes `deleteProof(id, storagePath)`.
 - Reported Prompts surface in the queue; an unreported, active Prompt does not.
-- **Clear reports lifts the community auto-hide** (finding 3): an auto-hidden-but-active Proof's Clear reports invokes `clearProofReports(id)`, and a Prompt's invokes `clearItemReports(id)`; a below-threshold reported row shows no Clear reports control (nothing to lift).
+- **Clear reports lifts the community auto-hide** (finding 3): an auto-hidden-but-active Proof's Clear reports invokes `clearProofReports(id)`, and a Prompt's invokes `clearItemReports(id)`; an ordinary unsuppressed below-threshold reported row shows no Clear reports control. Suppressed/restored rows with new reports keep Clear reports available even below threshold, so an Admin can dismiss those new reports without hiding restored content (test: "offers Clear reports for new reports on a suppressed restored %s").
 - **A hard-hidden zero-count Proof stays reachable** (round 2): the post-clear state (`status: 'hidden'`, `reportCount: 0`) renders in the queue with working Restore + Delete and shows neither the auto-hidden pill nor Clear reports (no community hide left to mark or lift).
 - **The mixed queue orders by `reportCount` desc across kinds** (finding 4): a count-9 Prompt sorts above a count-5 Proof, and the count-5 rows tie-break by `createdAt` ascending—a heavily-reported Prompt never buries below a lightly-reported Proof.
 - **The Ban author control renders** on a queue row (flipped from the old deferred-skip pin when #108 landed the ban console; its behaviour is pinned in depth by `src/components/w2-ban-console.test.tsx`).

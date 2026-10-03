@@ -158,12 +158,12 @@ Deletion is the one thing that ends it, and the delay can be long: a digest with
 
 ### The detail line
 
-`reviewDetail` is the one place this family makes a causal claim, and it makes only claims the stored facts support. It reuses `notify.ts`'s `deriveReason` rather than re-deriving the same three-way decision: a Vision flag names itself, a hide is `reports >= threshold` only when the count and the Event threshold are both known and the count is at/over it, `by an admin` when both are known and it is under, and nothing at all when either is unknown—so a manual hide of an unreported Prompt is never mislabelled ([#101](https://github.com/nathanjohnpayne/fiveacross/issues/101) Codex R2 F1).
+`reviewDetail` is the one place this family makes a causal claim, and it makes only claims the stored facts support. It reuses `notify.ts`'s `deriveReason` rather than re-deriving the same three-way decision: a Vision flag names itself, a hide is `reports >= threshold` only when the count and the Event threshold are both known and the count is at/over it and report hiding is unsuppressed, `by an admin` when both are known and it is under or suppressed, and nothing at all when either is unknown—so a manual hide of an unreported Prompt is never mislabelled ([#101](https://github.com/nathanjohnpayne/fiveacross/issues/101) Codex R2 F1).
 
-A still-active report additionally shows the distance to the auto-hide bar, which is the number an admin actually acts on.
+An unsuppressed active report below a positive threshold shows the distance to auto-hide. A suppressed/restored incarnation retains its new report count without an auto-hide promise.
 
-- **Given** a Vision flag **then** the flag names itself; **given** a hide at/over the threshold **then** `reports >= threshold`; **given** a hide under it **then** `by an admin`; **given** an unknown threshold **then** no causal claim. (Tests under "reviewDetail".)
-- **Given** an active report under the threshold **then** the row states how many more reports auto-hide it. (Test: "states the distance to the auto-hide bar".)
+- **Given** a Vision flag **then** the flag names itself; **given** an unsuppressed hide at/over the threshold **then** `reports >= threshold`; **given** a hide under it or a report-suppressed hide **then** `by an admin`; **given** an unknown threshold **then** no causal claim. (Tests under "reviewDetail".)
+- **Given** an unsuppressed active report under the threshold **then** the row states how many more reports auto-hide it. (Tests: "states the distance to the auto-hide bar" and "keeps new suppressed reports visible without promising automatic hiding".)
 
 ## Deep links
 
