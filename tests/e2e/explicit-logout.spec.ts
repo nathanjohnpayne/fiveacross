@@ -12,6 +12,14 @@ const ALIAS = 'https://gaycruisebingo.web.app';
 const CANONICAL = 'https://gaycruisebingo.firebaseapp.com';
 
 async function harnessBundle(): Promise<string> {
+  // The local emulator accepts unsigned JWTs; keep the fixture in the SDK's
+  // real custom-token shape instead of depending on its raw-JSON shortcut.
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const seedToken = [
+    { alg: 'none', typ: 'JWT' },
+    { uid: 'dual-origin-logout', iat: issuedAt, exp: issuedAt + 3600,
+      aud: 'https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit' },
+  ].map(part => Buffer.from(JSON.stringify(part)).toString('base64url')).join('.') + '.';
   const source = `
     import React from 'react';
     import { createRoot } from 'react-dom/client';
@@ -26,7 +34,7 @@ async function harnessBundle(): Promise<string> {
     window.fixture = {
       ready: auth.authStateReady(),
       uid: () => auth.currentUser?.uid ?? null,
-      seed: () => signInWithCustomToken(auth, JSON.stringify({uid: 'dual-origin-logout'})),
+      seed: () => signInWithCustomToken(auth, ${JSON.stringify(seedToken)}),
       mount: () => createRoot(document.getElementById('root')).render(<AuthProvider><Harness /></AuthProvider>)
     };
   `;

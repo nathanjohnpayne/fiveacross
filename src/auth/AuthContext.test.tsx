@@ -2315,6 +2315,35 @@ describe('AuthContext deal-error hardening', () => {
     remove.mockRestore();
   });
 
+  it('keeps a same-origin deliberate sign-in in this mount when logout persistence cannot be cleared', async () => {
+    mocks.joinAndDeal.mockResolvedValue(true);
+    localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
+    const authMock = mockedAuth as { config?: { authDomain: string }; currentUser?: typeof FAKE_USER };
+    authMock.config = { authDomain: window.location.hostname };
+    const remove = vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {
+      throw new Error('storage is write-denied');
+    });
+    try {
+      mocks.signInWithPopup.mockImplementationOnce(async () => {
+        authMock.currentUser = FAKE_USER;
+        await emitAuth(FAKE_USER);
+        return { user: FAKE_USER };
+      });
+      mount();
+      await act(async () => { await emitAuth(null); });
+      await userEvent.click(screen.getByText('signin'));
+      expect(mocks.signInWithPopup).toHaveBeenCalledOnce();
+      expect(mocks.signInWithRedirect).not.toHaveBeenCalled();
+      expect(screen.getByTestId('auth-user')).toHaveTextContent(FAKE_USER.uid);
+      expect(mocks.signOut).not.toHaveBeenCalled();
+      expect(localStorage.getItem(EXPLICIT_LOGOUT_KEY)).toBe('1');
+    } finally {
+      remove.mockRestore();
+      delete authMock.config;
+      delete authMock.currentUser;
+    }
+  });
+
   it('honors a later same-origin tab logout after a deliberate local sign-in', async () => {
     mocks.joinAndDeal.mockResolvedValue(true);
     mount();

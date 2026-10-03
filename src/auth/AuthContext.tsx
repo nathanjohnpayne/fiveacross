@@ -2495,11 +2495,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signIn = useCallback((acknowledgedAdultContent: boolean): Promise<void> => {
     if (signInAttemptRef.current) return signInAttemptRef.current;
     explicitLogoutRef.current = false;
+    let logoutIntentCleanupFailed = false;
     try {
       localStorage.removeItem(EXPLICIT_LOGOUT_KEY);
     } catch {
       // A deliberate sign-in bypasses automatic-hop suppression even if storage
-      // is unavailable. The guard on future automatic visits stays conservative.
+      // is unavailable. Keep this attempt in the current mount: a redirect's
+      // fresh mount would read the stale logout marker and reject its new User.
+      logoutIntentCleanupFailed = true;
     }
 
     // Captured from SignIn's actual checkbox state BEFORE any auth transaction
@@ -2538,9 +2541,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const invitationHeldInMemoryOnly =
         readPendingEventInvitation({ origin: window.location.origin, now: Date.now() })?.durable ===
         false;
-      if (sameOriginHandler && !invitationHeldInMemoryOnly) {
-        // One top-level redirect on EVERY surface whose OAuth handler is
-        // same-origin (#765): the tap navigates this tab or app window to
+      if (sameOriginHandler && !invitationHeldInMemoryOnly && !logoutIntentCleanupFailed) {
+        // One top-level redirect on a same-origin-handler surface whose
+        // state survives navigation (the memory-only exceptions above stay
+        // in a popup; #765): the tap navigates this tab or app window to
         // Google, and Google returns the Player to the page they started from
         // with the session restored — no second window ever opens. There is no
         // device or display-mode heuristic here on purpose: the same-origin
@@ -2593,7 +2597,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       // Cross-origin handler — local development and the Auth Emulator (#765)
       // — or a same-origin surface whose pending Invitation lives in memory
-      // only (above). A redirect against a foreign authDomain is exactly the
+      // only or whose logout marker cannot be cleared (above). Keep that local
+      // deliberate authority alive instead of losing it across a redirect.
+      // A redirect against a foreign authDomain is exactly the
       // storage-partition failure the same-origin pin exists to avoid (#161),
       // and the e2e harness drives the emulator's account-chooser popup.
       let popupUser: User;
