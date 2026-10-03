@@ -27,6 +27,23 @@ export MERGEPATH_REVIEW_FEEDBACK_ACCOUNTING_CMD=true
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/codex-trigger-only.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
+# The requester counts solicited blocking reviews from the Codex review ledger
+# before every new request (#1560 slice 3). This stub reports a ledger with no
+# responses for whatever head the requester expects, so the blocking-review
+# budget never stops these cases; test_codex_review_request_trigger_only.sh
+# covers the budget itself.
+LEDGER_STUB="$WORKDIR/codex-ledger-stub.sh"
+cat >"$LEDGER_STUB" <<'LEDGER_EOF'
+#!/usr/bin/env bash
+head=""
+while [ $# -gt 0 ]; do
+  case "$1" in --expect-head) head=$2; shift 2 ;; --expect-policy) fp=$2; shift 2 ;; *) shift ;; esac
+done
+jq -nc --arg h "$head" --arg fp "${fp:-}" --arg a "${CODEX_LEDGER_STUB_AUTHOR:-nathanjohnpayne}" \
+  '{head_sha: $h, author: $a, max_blocking_reviews: 10, policy_fingerprint: $fp, responses: []}'
+LEDGER_EOF
+chmod +x "$LEDGER_STUB"
+export MERGEPATH_CODEX_LEDGER_CMD="$LEDGER_STUB"
 
 PASS=0
 FAIL=0
@@ -36,11 +53,16 @@ fail() { echo "FAIL: $*" >&2; FAIL=$((FAIL + 1)); }
 make_case() {
   local name=$1
   local dir="$WORKDIR/$name"
-  mkdir -p "$dir/scripts" "$dir/scripts/lib" "$dir/.github" "$dir/bin" "$dir/state"
+  mkdir -p "$dir/scripts" "$dir/scripts/lib" "$dir/scripts/workflow" "$dir/.github" "$dir/bin" "$dir/state"
   cp "$ROOT/scripts/codex-review-request.sh" "$dir/scripts/codex-review-request.sh"
   chmod +x "$dir/scripts/codex-review-request.sh"
   cp "$ROOT/scripts/lib/gh-api-scalar.sh" "$dir/scripts/lib/gh-api-scalar.sh"   # #799, hard-sourced
   cp "$ROOT/scripts/lib/gh-api-array.sh" "$dir/scripts/lib/gh-api-array.sh"     # #1008, hard-sourced
+  cp "$ROOT/scripts/lib/codex-request-evidence.sh" "$dir/scripts/lib/codex-request-evidence.sh"
+  cp "$ROOT/scripts/lib/codex-failure-markers.sh" "$dir/scripts/lib/codex-failure-markers.sh"
+  cp "$ROOT/scripts/lib/feedback-policy-helpers.sh" "$dir/scripts/lib/feedback-policy-helpers.sh"
+  cp "$ROOT/scripts/workflow/resolve_base_policy.sh" "$dir/scripts/workflow/resolve_base_policy.sh"
+  chmod +x "$dir/scripts/workflow/resolve_base_policy.sh"
 
   cat >"$dir/.github/review-policy.yml" <<'EOF'
 author_identity: nathanjohnpayne
@@ -51,6 +73,7 @@ codex:
   ack_wait_seconds: 0
   max_ack_retries: 2
 EOF
+  cp "$dir/.github/review-policy.yml" "$dir/state/base-review-policy.yml"
 
   # gh-as-author stub: records each @codex trigger post.
   cat >"$dir/scripts/gh-as-author.sh" <<'EOF'
@@ -75,12 +98,21 @@ scenario=${CODEX_TEST_SCENARIO:?}
 author='nathanjohnpayne'
 reviewer='nathanpayne-codex'
 t='2026-06-04T00:00:00Z'
+old='2026-06-03T00:00:00Z'
 [ "${1:-}" = "api" ] || { echo "unexpected gh command: $*" >&2; exit 99; }
 shift
 [ "${1:-}" = "--paginate" ] && shift
 endpoint=${1:-}
 case "$endpoint" in
-  repos/owner/repo/pulls/999)            printf '{"head":{"sha":"head-sha"}}\n' ;;
+  repos/owner/repo/pulls/999)            printf '{"head":{"sha":"head-sha"},"base":{"ref":"main","sha":"base-sha","repo":{"default_branch":"main"}}}\n' ;;
+  'repos/owner/repo/contents/.github/review-policy.yml?ref=base-sha')
+    printf '1\n' >>"$CODEX_TEST_STATE_DIR/base-policy-read-count"
+    if [ "${CODEX_TEST_BASE_POLICY_MODE:-ok}" = fail ]; then
+      echo 'simulated governing policy read failure' >&2
+      exit 1
+    fi
+    cat "$CODEX_TEST_STATE_DIR/base-review-policy.yml"
+    ;;
   repos/owner/repo/commits/head-sha)     printf '%s\n' "$t" ;;
   repos/owner/repo/issues/999/timeline)  printf '[]\n' ;;
   repos/owner/repo/pulls/999/reviews)    printf '[]\n' ;;
@@ -88,9 +120,20 @@ case "$endpoint" in
   repos/owner/repo/issues/999/reactions) printf '[]\n' ;;
   repos/owner/repo/issues/999/comments)
     case "$scenario" in
-      dup_author)    printf '[{"id":7001,"user":{"login":"%s"},"created_at":"%s","body":"@codex review"}]\n' "$author" "$t" ;;
-      reviewer_only) printf '[{"id":7002,"user":{"login":"%s"},"created_at":"%s","body":"@codex review"}]\n' "$reviewer" "$t" ;;
-      *)             printf '[]\n' ;;
+      dup_author)       jq -cn --arg who "$author" --arg t "$t" '[{id:7001,user:{login:$who},created_at:$t,body:"@codex review"}]' ;;
+      dup_author_upper) jq -cn --arg who "$author" --arg t "$t" '[{id:7002,user:{login:$who},created_at:$t,body:"@CODEX REVIEW"}]' ;;
+      author_prose)     jq -cn --arg who "$author" --arg t "$t" '[{id:7003,user:{login:$who},created_at:$t,body:"Status: @codex review was already requested."}]' ;;
+      author_quoted)    jq -cn --arg who "$author" --arg t "$t" '[{id:7004,user:{login:$who},created_at:$t,body:"Earlier note:\n> @codex review\n\nDo not run it again."}]' ;;
+      author_padded)    jq -cn --arg who "$author" --arg t "$t" '[{id:7005,user:{login:$who},created_at:$t,body:"@codex review "}]' ;;
+      stale_author)     jq -cn --arg who "$author" --arg t "$old" '[{id:7006,user:{login:$who},created_at:$t,body:"@codex review"}]' ;;
+      reviewer_only)    jq -cn --arg who "$reviewer" --arg t "$t" '[{id:7007,user:{login:$who},created_at:$t,body:"@codex review"}]' ;;
+      cap_at_limit)     jq -cn --arg who "$author" --arg t "$old" '[range(10) | {id:(8000 + .),user:{login:$who},created_at:$t,body:"@codex review"}]' ;;
+      cap_at_limit_blocked) jq -cn --arg who "$author" --arg t "$old" '[range(10) | {id:(8050 + .),user:{login:$who},created_at:$t,body:"@codex review"}] + [{id:8060,user:{login:"chatgpt-codex-connector[bot]"},created_at:$t,body:"You have reached your Codex usage limits for code reviews."}]' ;;
+      cap_below_limit)  jq -cn --arg who "$author" --arg t "$old" '[range(9) | {id:(8100 + .),user:{login:$who},created_at:$t,body:"@codex review"}]' ;;
+      cap_three)        jq -cn --arg who "$author" --arg t "$old" '[range(3) | {id:(8150 + .),user:{login:$who},created_at:$t,body:"@codex review"}]' ;;
+      cap_duplicate_ids) jq -cn --arg who "$author" --arg t "$old" '[range(12) | {id:(8200 + (. % 9)),user:{login:$who},created_at:$t,body:"@codex review"}]' ;;
+      cap_bad_id)       jq -cn --arg who "$author" --arg t "$old" '[range(9) | {id:(8300 + .),user:{login:$who},created_at:$t,body:"@codex review"}] + [{user:{login:$who},created_at:$t,body:"@codex review"}]' ;;
+      *)                printf '[]\n' ;;
     esac
     ;;
   *) echo "unexpected gh api endpoint: $endpoint" >&2; exit 99 ;;
@@ -101,13 +144,15 @@ EOF
 }
 
 run_trigger_only() {
-  local dir=$1 scenario=$2 rc=0
+  local dir=$1 scenario=$2 phase4a_gated=${3:-false} base_policy_mode=${4:-ok} rc=0
   (
     cd "$dir"
     PATH="$dir/bin:$PATH" \
       GH_TOKEN=test-token \
       CODEX_TEST_STATE_DIR="$dir/state" \
       CODEX_TEST_SCENARIO="$scenario" \
+      CODEX_TEST_BASE_POLICY_MODE="$base_policy_mode" \
+      MERGEPATH_PHASE_4A_GATED="$phase4a_gated" \
       ./scripts/codex-review-request.sh --trigger-only 999 owner/repo \
       >"$dir/out.json" 2>"$dir/err.log"
   ) || rc=$?
@@ -116,6 +161,16 @@ run_trigger_only() {
 
 trig_count() { if [ -f "$1/state/trigger-count" ]; then cat "$1/state/trigger-count"; else printf '0\n'; fi; }
 jqf() { jq -r "$2" "$1/out.json"; }
+
+# #1276: losing the shared selector cannot turn a known trigger into a new POST.
+dir=$(make_case missing-selector)
+mv "$dir/scripts/lib/codex-request-evidence.sh" "$dir/helper-removed.sh"
+rc=$(run_trigger_only "$dir" dup_author)
+if [ "$rc" = 3 ] && [ "$(trig_count "$dir")" = 0 ] && grep -q 'request evidence helper unavailable' "$dir/err.log"; then
+  pass "#1276: missing selector fails before a duplicate trigger can be posted"
+else
+  fail "#1276: missing selector rc=$rc posts=$(trig_count "$dir")"
+fi
 
 # A: fresh HEAD → posts once, exits 0, no poll, no ack-retry (#3), JSON shape
 test_fresh_posts_once_no_poll() {
@@ -143,6 +198,45 @@ test_dup_author_skips() {
   [ "$FAIL" -ne "$before" ] || pass "B: existing author @codex trigger on HEAD → idempotent skip (no duplicate)"
 }
 
+# #1276: dedup evidence is the complete author command, case-insensitively.
+test_uppercase_author_command_skips() {
+  local dir rc before=$FAIL
+  dir=$(make_case "dup-uppercase")
+  rc=$(run_trigger_only "$dir" dup_author_upper)
+  [ "$rc" = "0" ] || fail "B1: expected exit 0, got $rc; err=$(cat "$dir/err.log")"
+  [ "$(trig_count "$dir")" = "0" ] || fail "B1: uppercase exact author command must dedup, got $(trig_count "$dir") posts"
+  [ "$(jqf "$dir" '.trigger_posted')" = "false" ] || fail "B1: trigger_posted=$(jqf "$dir" '.trigger_posted'), expected false"
+  [ "$FAIL" -ne "$before" ] || pass "B1: uppercase exact author command retains case-insensitive idempotent skip"
+}
+
+test_author_containment_posts() {
+  local scenario desc dir rc before
+  for scenario in author_prose author_quoted author_padded; do
+    before=$FAIL
+    case "$scenario" in
+      author_prose) desc="prose mention" ;;
+      author_quoted) desc="quoted command" ;;
+      author_padded) desc="space-padded command" ;;
+    esac
+    dir=$(make_case "$scenario")
+    rc=$(run_trigger_only "$dir" "$scenario")
+    [ "$rc" = "0" ] || fail "B2: $desc expected exit 0, got $rc; err=$(cat "$dir/err.log")"
+    [ "$(trig_count "$dir")" = "1" ] || fail "B2: author $desc must not suppress the exact POST, got $(trig_count "$dir") posts"
+    [ "$(jqf "$dir" '.trigger_posted')" = "true" ] || fail "B2: $desc trigger_posted=$(jqf "$dir" '.trigger_posted'), expected true"
+    [ "$FAIL" -ne "$before" ] || pass "B2: author $desc is not complete-command dedup evidence → posts once"
+  done
+}
+
+test_stale_author_command_posts() {
+  local dir rc before=$FAIL
+  dir=$(make_case "stale-author")
+  rc=$(run_trigger_only "$dir" stale_author)
+  [ "$rc" = "0" ] || fail "B3: expected exit 0, got $rc; err=$(cat "$dir/err.log")"
+  [ "$(trig_count "$dir")" = "1" ] || fail "B3: stale author command must not suppress the exact POST, got $(trig_count "$dir") posts"
+  [ "$(jqf "$dir" '.trigger_posted')" = "true" ] || fail "B3: trigger_posted=$(jqf "$dir" '.trigger_posted'), expected true"
+  [ "$FAIL" -ne "$before" ] || pass "B3: stale author command remains outside the freshness-qualified dedup set"
+}
+
 # C: only a REVIEWER-authored trigger → not a valid trigger, still posts (#1)
 test_reviewer_trigger_does_not_count() {
   local dir rc before=$FAIL
@@ -152,6 +246,370 @@ test_reviewer_trigger_does_not_count() {
   [ "$(trig_count "$dir")" = "1" ] || fail "C: reviewer-authored @codex must NOT count → expected 1 post, got $(trig_count "$dir")"
   [ "$(jqf "$dir" '.trigger_posted')" = "true" ] || fail "C: trigger_posted=$(jqf "$dir" '.trigger_posted'), expected true"
   [ "$FAIL" -ne "$before" ] || pass "C: reviewer-authored @codex is not a valid trigger (author-scoped dedupe) → still posts"
+}
+
+# #813: max_review_rounds is enforced at the one request write boundary. The
+# counter intentionally follows author-owned exact command evidence rather
+# than provider review objects: clean summaries and reaction-only clearance do
+# not reliably create a review object.
+test_request_attempt_cap() {
+  local scenario expected_rc expected_posts description dir rc before
+  for scenario in cap_at_limit cap_below_limit cap_duplicate_ids cap_bad_id; do
+    case "$scenario" in
+      cap_at_limit)
+        expected_rc=7; expected_posts=0
+        description="ten prior author requests stop additional advisory requests" ;;
+      cap_below_limit)
+        expected_rc=0; expected_posts=1
+        description="nine prior author requests permit the tenth" ;;
+      cap_duplicate_ids)
+        expected_rc=0; expected_posts=1
+        description="duplicate comment IDs do not consume additional slots" ;;
+      cap_bad_id)
+        expected_rc=3; expected_posts=0
+        description="a malformed qualifying request record fails closed" ;;
+    esac
+    before=$FAIL
+    dir=$(make_case "request-cap-$scenario")
+    rc=$(run_trigger_only "$dir" "$scenario")
+    [ "$rc" = "$expected_rc" ] \
+      || fail "#813: $description expected exit $expected_rc, got $rc; err=$(cat "$dir/err.log")"
+    [ "$(trig_count "$dir")" = "$expected_posts" ] \
+      || fail "#813: $description expected $expected_posts posts, got $(trig_count "$dir")"
+    if [ "$scenario" = cap_at_limit ]; then
+      grep -q 'request-attempt cap reached.*10/10' "$dir/err.log" \
+        || fail "#813: cap refusal did not expose consumed/limit evidence"
+      [ "$(jqf "$dir" '.cap_exhausted.request_attempts')" = 10 ] \
+        || fail "#813: cap exhaustion did not report consumed attempts"
+      [ "$(jqf "$dir" '.cap_exhausted.max_request_attempts')" = 10 ] \
+        || fail "#813: cap exhaustion did not report configured bound"
+      [ "$(jqf "$dir" '.cap_exhausted.escalation')" = null ] \
+        || fail "#813: advisory cap exhaustion invented caller routing"
+      [ "$(jqf "$dir" '.cap_exhausted.observed_provider_block')" = null ] \
+        || fail "#813: cap exhaustion fabricated provider-block diagnostics"
+    fi
+    [ "$FAIL" -ne "$before" ] || pass "#813: $description"
+  done
+}
+
+test_nondefault_request_attempt_cap() {
+  local dir rc before=$FAIL
+  dir=$(make_case "request-cap-nondefault")
+  printf '  max_review_rounds: 3\n' >> "$dir/state/base-review-policy.yml"
+  rc=$(run_trigger_only "$dir" cap_three)
+  [ "$rc" = 7 ] || fail "#813: nondefault cap expected exit 7, got $rc; err=$(cat "$dir/err.log")"
+  [ "$(trig_count "$dir")" = 0 ] || fail "#813: nondefault cap posted despite three consumed requests"
+  grep -q 'request-attempt cap reached.*3/3' "$dir/err.log" \
+    || fail "#813: nondefault cap did not report the configured bound"
+  [ "$(jqf "$dir" '.cap_exhausted.escalation')" = null ] \
+    || fail "#813: nondefault advisory cap invented caller routing"
+  [ "$FAIL" -ne "$before" ] || pass "#813: configured nondefault cap governs a new request"
+}
+
+test_candidate_cannot_raise_governing_request_attempt_cap() {
+  local dir rc before=$FAIL
+  dir=$(make_case "request-cap-governing-base")
+  printf '  max_review_rounds: 999999999\n' >> "$dir/.github/review-policy.yml"
+  printf '  max_review_rounds: 3\n' >> "$dir/state/base-review-policy.yml"
+  rc=$(run_trigger_only "$dir" cap_three)
+  [ "$rc" = 7 ] || fail "#813 governing cap: candidate-raised cap expected exit 7, got $rc; err=$(cat "$dir/err.log")"
+  [ "$(trig_count "$dir")" = 0 ] || fail "#813 governing cap: candidate-raised cap posted despite three consumed requests"
+  grep -q 'request-attempt cap reached.*3/3' "$dir/err.log" \
+    || fail "#813 governing cap: refusal did not report the base-policy bound"
+  [ "$FAIL" -ne "$before" ] || pass "#813: a PR cannot raise its governing base-policy request cap"
+}
+
+test_governing_cap_read_failure_refuses_new_write() {
+  local dir rc before=$FAIL
+  dir=$(make_case "request-cap-base-read-failure")
+  printf '  max_review_rounds: 1\n' >> "$dir/.github/review-policy.yml"
+  rc=$(run_trigger_only "$dir" fresh false fail)
+  [ "$rc" = 3 ] || fail "#813 governing cap read failure: expected infrastructure exit 3, got $rc; err=$(cat "$dir/err.log")"
+  [ "$(trig_count "$dir")" = 0 ] || fail "#813 governing cap read failure: posted despite unknown governing cap"
+  [ "$FAIL" -ne "$before" ] || pass "#813: an unreadable governing cap fails closed before a new request write"
+}
+
+test_invalid_present_governing_cap_refuses_new_write() {
+  local value dir rc before
+  for value in false null "'__absent__'"; do
+    before=$FAIL
+    dir=$(make_case "request-cap-base-$value")
+    printf '  max_review_rounds: %s\n' "$value" >> "$dir/state/base-review-policy.yml"
+    rc=$(run_trigger_only "$dir" fresh)
+    [ "$rc" = 3 ] || fail "#813 governing cap $value: expected infrastructure exit 3, got $rc; err=$(cat "$dir/err.log")"
+    [ "$(trig_count "$dir")" = 0 ] || fail "#813 governing cap $value: posted despite invalid governed value"
+    [ "$FAIL" -ne "$before" ] || pass "#813: present $value governing cap remains invalid at the write boundary"
+  done
+}
+
+test_invalid_present_governing_codex_block_refuses_new_write() {
+  local value dir rc before
+  for value in false '[]' null; do
+    before=$FAIL
+    dir=$(make_case "request-cap-base-codex-$value")
+    printf 'author_identity: nathanjohnpayne\ncodex: %s\n' "$value" > "$dir/state/base-review-policy.yml"
+    rc=$(run_trigger_only "$dir" fresh)
+    [ "$rc" = 3 ] || fail "#813 governing codex $value: expected infrastructure exit 3, got $rc; err=$(cat "$dir/err.log")"
+    [ "$(trig_count "$dir")" = 0 ] || fail "#813 governing codex $value: posted despite invalid governed block"
+    [ "$FAIL" -ne "$before" ] || pass "#813: present $value governing codex block remains invalid at the write boundary"
+  done
+}
+
+test_missing_governing_codex_block_defaults_request_cap() {
+  local dir rc before=$FAIL
+  dir=$(make_case "request-cap-base-no-codex")
+  printf 'author_identity: nathanjohnpayne\n' > "$dir/state/base-review-policy.yml"
+  rc=$(run_trigger_only "$dir" cap_at_limit)
+  [ "$rc" = 7 ] || fail "#813 missing governing codex: expected default-cap exit 7, got $rc; err=$(cat "$dir/err.log")"
+  [ "$(trig_count "$dir")" = 0 ] || fail "#813 missing governing codex: posted despite default cap exhaustion"
+  grep -q 'request-attempt cap reached.*10/10' "$dir/err.log" \
+    || fail "#813 missing governing codex: did not apply the default cap"
+  [ "$FAIL" -ne "$before" ] || pass "#813: missing governing codex block defaults the request cap to 10"
+}
+
+test_idempotent_skip_does_not_resolve_governing_cap() {
+  local dir rc before=$FAIL
+  dir=$(make_case "request-cap-idempotent-no-read")
+  printf '  max_review_rounds: 999999999\n' >> "$dir/.github/review-policy.yml"
+  rc=$(run_trigger_only "$dir" dup_author false fail)
+  [ "$rc" = 0 ] || fail "#813 idempotent cap skip: expected exit 0, got $rc; err=$(cat "$dir/err.log")"
+  [ "$(trig_count "$dir")" = 0 ] || fail "#813 idempotent cap skip: posted a duplicate trigger"
+  [ ! -f "$dir/state/base-policy-read-count" ] || fail "#813 idempotent cap skip: resolved policy despite no write"
+  [ "$FAIL" -ne "$before" ] || pass "#813: idempotent no-write path does not resolve the governing cap"
+}
+
+test_gated_cap_leaves_routing_to_caller() {
+  local dir rc before=$FAIL
+  dir=$(make_case "request-cap-gated")
+  rc=$(run_trigger_only "$dir" cap_at_limit true)
+  [ "$rc" = 7 ] || fail "#813 gated cap: expected exit 7, got $rc; err=$(cat "$dir/err.log")"
+  [ "$(trig_count "$dir")" = 0 ] || fail "#813 gated cap: posted despite exhausted request budget"
+  [ "$(jqf "$dir" '.cap_exhausted.escalation')" = null ] \
+    || fail "#813 gated cap invented caller routing"
+  [ "$FAIL" -ne "$before" ] || pass "#813: Phase 4a-gated cap leaves routing to the caller"
+}
+
+test_cap_preserves_provider_block_as_diagnostic_only() {
+  local dir rc before=$FAIL
+  dir=$(make_case "request-cap-blocked")
+  rc=$(run_trigger_only "$dir" cap_at_limit_blocked true)
+  [ "$rc" = 7 ] || fail "#813 blocked cap: expected exit 7, got $rc; err=$(cat "$dir/err.log")"
+  [ "$(trig_count "$dir")" = 0 ] || fail "#813 blocked cap: posted despite exhausted request budget"
+  [ "$(jqf "$dir" '.blocked_reason')" = null ] \
+    || fail "#813 blocked cap elevated the provider block into Phase 4b routing"
+  [ "$(jqf "$dir" '.cap_exhausted.escalation')" = null ] \
+    || fail "#813 blocked cap invented caller routing"
+  [ "$(jqf "$dir" '.cap_exhausted.observed_provider_block.reason')" = usage_limit ] \
+    || fail "#813 blocked cap did not preserve the observed provider-block reason"
+  [ "$(jqf "$dir" '.cap_exhausted.observed_provider_block.comment_id')" = 8060 ] \
+    || fail "#813 blocked cap did not preserve the observed provider-block comment id"
+  [ "$FAIL" -ne "$before" ] || pass "#813: cap preserves provider-block diagnostics without changing routing"
+}
+
+# ---------------------------------------------------------------------------
+# #1560 slice 3: the blocking-review budget. Before every new request the
+# requester counts, from the Codex review ledger, the PR's solicited responses
+# that are blocking, unknown-tier or conflicting, and refuses the request once
+# that count reaches codex.max_blocking_reviews (default 10, provisional).
+# Each case gets its own ledger stub that prints exactly the responses under
+# test; the stub records its arguments and how often it ran.
+# ---------------------------------------------------------------------------
+# make_budget_case <name> <responses-jq-expr>: the expression builds the
+# ledger's .responses array.
+make_budget_case() {
+  local name=$1 expr=$2 dir
+  dir=$(make_case "$name")
+  jq -nc "$expr" >"$dir/state/ledger-responses.json"
+  cat >"$dir/ledger-stub.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+state=${CODEX_TEST_STATE_DIR:?}
+printf '%s\n' "$*" >>"$state/ledger-calls"
+head=""
+while [ $# -gt 0 ]; do
+  case "$1" in --expect-head) head=$2; shift 2 ;; --expect-policy) fp=$2; shift 2 ;; *) shift ;; esac
+done
+[ ! -f "$state/ledger-policy" ] || fp=$(cat "$state/ledger-policy")
+[ ! -f "$state/ledger-rc" ] || exit "$(cat "$state/ledger-rc")"
+if [ -f "$state/ledger-raw" ]; then cat "$state/ledger-raw"; exit 0; fi
+[ ! -f "$state/ledger-head" ] || head=$(cat "$state/ledger-head")
+author=nathanjohnpayne
+[ ! -f "$state/ledger-author" ] || author=$(cat "$state/ledger-author")
+max=10
+[ ! -f "$state/ledger-max" ] || max=$(cat "$state/ledger-max")
+doc=$(jq -nc --arg h "$head" --arg a "$author" --argjson m "$max" --arg fp "${fp:-}" --slurpfile r "$state/ledger-responses.json" \
+  '{head_sha: $h, author: $a, max_blocking_reviews: $m, policy_fingerprint: $fp, responses: $r[0]}')
+printf '%s\n' "$doc"
+[ ! -f "$state/ledger-twice" ] || printf '%s\n' "$doc"
+EOF
+  chmod +x "$dir/ledger-stub.sh"
+  printf '%s\n' "$dir"
+}
+
+run_budget_case() { # <dir> <scenario>
+  MERGEPATH_CODEX_LEDGER_CMD="$1/ledger-stub.sh" run_trigger_only "$1" "$2"
+}
+
+ledger_calls() { if [ -f "$1/state/ledger-calls" ]; then wc -l <"$1/state/ledger-calls" | tr -d ' '; else printf '0\n'; fi; }
+
+# n solicited responses of one class.
+responses() { # <n> <class> [unsolicited] [conflicting]
+  printf '[range(%s) | {class: "%s", unsolicited: %s, conflicting: %s, first_at: "2026-06-04T00:00:00Z"}]' \
+    "$1" "$2" "${3:-false}" "${4:-false}"
+}
+
+# The explicit boundary: with a budget of 10, 9 solicited blocking reviews
+# permit a request (it may draw the 10th), and 10 or 11 refuse one.
+test_blocking_budget_boundary() {
+  local n expected_rc expected_posts dir rc before
+  for n in 9 10 11; do
+    before=$FAIL
+    case "$n" in
+      9) expected_rc=0; expected_posts=1 ;;
+      *) expected_rc=7; expected_posts=0 ;;
+    esac
+    dir=$(make_budget_case "blocking-budget-$n" "$(responses "$n" blocking)")
+    rc=$(run_budget_case "$dir" fresh)
+    [ "$rc" = "$expected_rc" ] \
+      || fail "#1560 budget $n/10: expected exit $expected_rc, got $rc; err=$(cat "$dir/err.log")"
+    [ "$(trig_count "$dir")" = "$expected_posts" ] \
+      || fail "#1560 budget $n/10: expected $expected_posts posts, got $(trig_count "$dir")"
+    [ "$(ledger_calls "$dir")" = 1 ] \
+      || fail "#1560 budget $n/10: ledger ran $(ledger_calls "$dir") times, expected once"
+    grep -qE -- '^--repo owner/repo --expect-head head-sha --expect-policy [0-9]+-[0-9]+ 999$' "$dir/state/ledger-calls" \
+      || fail "#1560 budget $n/10: ledger was not asked for this PR at the requester's head: $(cat "$dir/state/ledger-calls" 2>/dev/null)"
+    if [ "$expected_rc" = 7 ]; then
+      [ "$(jqf "$dir" '.cap_exhausted.kind')" = blocking-reviews ] \
+        || fail "#1560 budget $n/10: stop kind is $(jqf "$dir" '.cap_exhausted.kind')"
+      [ "$(jqf "$dir" '.cap_exhausted.blocking_reviews')" = "$n" ] \
+        || fail "#1560 budget $n/10: did not report the blocking count"
+      [ "$(jqf "$dir" '.cap_exhausted.max_blocking_reviews')" = 10 ] \
+        || fail "#1560 budget $n/10: did not report the default budget"
+      [ "$(jqf "$dir" '.cap_exhausted.request_attempts')" = 0 ] \
+        || fail "#1560 budget $n/10: did not report the request count"
+      grep -q "blocking-review budget spent.*$n/10" "$dir/err.log" \
+        || fail "#1560 budget $n/10: refusal did not log consumed/limit"
+    fi
+    [ "$FAIL" -ne "$before" ] || pass "#1560: $n solicited blocking reviews against a budget of 10 -> exit $expected_rc"
+  done
+}
+
+# Only solicited blocking, unknown-tier and conflicting responses count.
+test_blocking_budget_counting_rule() {
+  local name expr expected_rc dir rc before
+  while IFS='|' read -r name expected_rc expr; do
+    [ -n "$name" ] || continue
+    before=$FAIL
+    dir=$(make_budget_case "blocking-count-$name" "$expr")
+    rc=$(run_budget_case "$dir" fresh)
+    [ "$rc" = "$expected_rc" ] \
+      || fail "#1560 counting rule $name: expected exit $expected_rc, got $rc; err=$(cat "$dir/err.log")"
+    [ "$FAIL" -ne "$before" ] || pass "#1560 counting rule: $name -> exit $expected_rc"
+  done <<EOF
+unsolicited blocking is not counted|0|$(responses 9 blocking) + $(responses 5 blocking true)
+non-blocking classes are not counted|0|$(responses 9 blocking) + $(responses 3 discretionary) + $(responses 3 clean) + $(responses 3 no_findings) + $(responses 3 provider_blocked)
+unknown tier counts against the budget|7|$(responses 9 blocking) + $(responses 1 unknown_tier)
+a conflicting response counts against the budget|7|$(responses 9 blocking) + $(responses 1 discretionary false true)
+EOF
+}
+
+# Both budgets spent: the blocking budget is checked first and names the stop.
+test_blocking_budget_wins_simultaneous_exhaustion() {
+  local dir rc before=$FAIL
+  dir=$(make_budget_case "blocking-both-spent" "$(responses 10 blocking)")
+  rc=$(run_budget_case "$dir" cap_at_limit)
+  [ "$rc" = 7 ] || fail "#1560 both spent: expected exit 7, got $rc; err=$(cat "$dir/err.log")"
+  [ "$(trig_count "$dir")" = 0 ] || fail "#1560 both spent: posted a trigger"
+  [ "$(jqf "$dir" '.cap_exhausted.kind')" = blocking-reviews ] \
+    || fail "#1560 both spent: stop kind is $(jqf "$dir" '.cap_exhausted.kind'), expected blocking-reviews"
+  [ "$(jqf "$dir" '.cap_exhausted.request_attempts')/$(jqf "$dir" '.cap_exhausted.max_request_attempts')" = 10/10 ] \
+    || fail "#1560 both spent: did not also report the spent request ceiling"
+  [ "$FAIL" -ne "$before" ] || pass "#1560: with both budgets spent, the blocking budget names the stop"
+
+  before=$FAIL
+  dir=$(make_budget_case "blocking-ceiling-only" "$(responses 9 blocking)")
+  rc=$(run_budget_case "$dir" cap_at_limit)
+  [ "$rc" = 7 ] || fail "#1560 ceiling only: expected exit 7, got $rc; err=$(cat "$dir/err.log")"
+  [ "$(jqf "$dir" '.cap_exhausted.kind')" = request-ceiling ] \
+    || fail "#1560 ceiling only: stop kind is $(jqf "$dir" '.cap_exhausted.kind'), expected request-ceiling"
+  [ "$(jqf "$dir" '.cap_exhausted.blocking_reviews')/$(jqf "$dir" '.cap_exhausted.max_blocking_reviews')" = 9/10 ] \
+    || fail "#1560 ceiling only: did not report the remaining blocking budget"
+  [ "$FAIL" -ne "$before" ] || pass "#1560: a spent request ceiling with blocking budget left is a request-ceiling stop"
+}
+
+test_blocking_budget_governing_value() {
+  local dir rc before=$FAIL value
+  dir=$(make_budget_case "blocking-budget-three" "$(responses 3 blocking)")
+  printf '  max_blocking_reviews: 3\n' >> "$dir/state/base-review-policy.yml"
+  printf '3\n' >"$dir/state/ledger-max"
+  rc=$(run_budget_case "$dir" fresh)
+  [ "$rc" = 7 ] || fail "#1560 budget 3: expected exit 7, got $rc; err=$(cat "$dir/err.log")"
+  [ "$(jqf "$dir" '.cap_exhausted.max_blocking_reviews')" = 3 ] \
+    || fail "#1560 budget 3: did not apply the configured budget"
+  [ "$FAIL" -ne "$before" ] || pass "#1560: a configured blocking-review budget governs a new request"
+
+  before=$FAIL
+  dir=$(make_budget_case "blocking-budget-candidate" "$(responses 3 blocking)")
+  printf '  max_blocking_reviews: 999\n' >> "$dir/.github/review-policy.yml"
+  printf '  max_blocking_reviews: 3\n' >> "$dir/state/base-review-policy.yml"
+  printf '3\n' >"$dir/state/ledger-max"
+  rc=$(run_budget_case "$dir" fresh)
+  [ "$rc" = 7 ] || fail "#1560 candidate budget: expected exit 7, got $rc; err=$(cat "$dir/err.log")"
+  [ "$(trig_count "$dir")" = 0 ] || fail "#1560 candidate budget: candidate raised its own budget"
+  [ "$FAIL" -ne "$before" ] || pass "#1560: a PR cannot raise its governing blocking-review budget"
+
+  for value in false null -1 "'ten'" 1234567890; do
+    before=$FAIL
+    dir=$(make_budget_case "blocking-budget-invalid-$value" '[]')
+    printf '  max_blocking_reviews: %s\n' "$value" >> "$dir/state/base-review-policy.yml"
+    rc=$(run_budget_case "$dir" fresh)
+    [ "$rc" = 3 ] || fail "#1560 invalid budget $value: expected exit 3, got $rc; err=$(cat "$dir/err.log")"
+    [ "$(trig_count "$dir")" = 0 ] || fail "#1560 invalid budget $value: posted despite an invalid budget"
+    [ "$FAIL" -ne "$before" ] || pass "#1560: invalid governing blocking-review budget $value fails closed"
+  done
+}
+
+# Missing, unreadable or conflicting ledger evidence never counts as
+# available budget: each exits 3 before any request is posted.
+test_blocking_budget_fails_closed() {
+  local name dir rc before
+  for name in missing nonzero garbage not-object head-mismatch author-mismatch class-missing unsolicited-not-bool conflicting-not-bool unknown-class two-documents budget-mismatch policy-mismatch null-timestamp; do
+    before=$FAIL
+    dir=$(make_budget_case "blocking-fail-$name" '[]')
+    case "$name" in
+      missing) rm -f "$dir/ledger-stub.sh" ;;
+      nonzero) printf '3\n' >"$dir/state/ledger-rc" ;;
+      garbage) printf 'not json\n' >"$dir/state/ledger-raw" ;;
+      not-object) printf '[]\n' >"$dir/state/ledger-raw" ;;
+      head-mismatch) printf 'other-sha\n' >"$dir/state/ledger-head" ;;
+      author-mismatch) printf 'someone-else\n' >"$dir/state/ledger-author" ;;
+      # One broken field each, on an otherwise valid response that would NOT
+      # count (unsolicited), so accepting it would post: each case fails only
+      # if its own check is missing (#1560 canary, finding 6).
+      class-missing) printf '[{"unsolicited":true,"conflicting":false,"first_at":"2026-06-04T00:00:00Z"}]\n' >"$dir/state/ledger-responses.json" ;;
+      unsolicited-not-bool) printf '[{"class":"blocking","unsolicited":"no","conflicting":false,"first_at":"2026-06-04T00:00:00Z"}]\n' >"$dir/state/ledger-responses.json" ;;
+      conflicting-not-bool) printf '[{"class":"blocking","unsolicited":true,"conflicting":"no","first_at":"2026-06-04T00:00:00Z"}]\n' >"$dir/state/ledger-responses.json" ;;
+      unknown-class) printf '[{"class":"severe","unsolicited":true,"conflicting":false,"first_at":"2026-06-04T00:00:00Z"}]\n' >"$dir/state/ledger-responses.json" ;;
+      two-documents) : >"$dir/state/ledger-twice" ;;
+      budget-mismatch) printf '3\n' >"$dir/state/ledger-max" ;;
+      policy-mismatch) printf '1-1\n' >"$dir/state/ledger-policy" ;;
+      null-timestamp) printf '[{"class":"blocking","unsolicited":true,"conflicting":false,"first_at":null}]\n' >"$dir/state/ledger-responses.json" ;;
+    esac
+    rc=$(run_budget_case "$dir" fresh)
+    [ "$rc" = 3 ] || fail "#1560 fail-closed $name: expected exit 3, got $rc; err=$(cat "$dir/err.log")"
+    [ "$(trig_count "$dir")" = 0 ] || fail "#1560 fail-closed $name: posted a trigger"
+    [ "$FAIL" -ne "$before" ] || pass "#1560: ledger evidence that is $name fails closed with no trigger"
+  done
+}
+
+# An idempotent skip writes nothing, so it never runs the ledger.
+test_blocking_budget_not_read_without_a_write() {
+  local dir rc before=$FAIL
+  dir=$(make_budget_case "blocking-idempotent" "$(responses 10 blocking)")
+  rc=$(run_budget_case "$dir" dup_author)
+  [ "$rc" = 0 ] || fail "#1560 idempotent: expected exit 0, got $rc; err=$(cat "$dir/err.log")"
+  [ "$(ledger_calls "$dir")" = 0 ] || fail "#1560 idempotent: ran the ledger without a write"
+  [ "$FAIL" -ne "$before" ] || pass "#1560: an idempotent skip does not read the blocking-review budget"
 }
 
 # ---------------------------------------------------------------------------
@@ -521,6 +979,21 @@ EOF
   [ "$rc" = "6" ] || fail "O: expected feedback-unaccounted exit 6, got $rc; err=$(cat "$dir/err.log")"
   [ "$(trig_count "$dir")" = "0" ] || fail "O: accounting miss must block before @codex post"
   [ "$FAIL" -ne "$before" ] || pass "O: unaccounted feedback exits 6 before a new @codex trigger"
+  # An exhausted request never reaches the write that accounting protects.
+  rc=0
+  (
+    cd "$dir"
+    PATH="$dir/bin:$PATH" GH_TOKEN=test-token \
+      CODEX_TEST_STATE_DIR="$dir/state" CODEX_TEST_SCENARIO=cap_at_limit \
+      MERGEPATH_REVIEW_FEEDBACK_ACCOUNTING_CMD="$gate" \
+      ./scripts/codex-review-request.sh --trigger-only 999 owner/repo \
+      >"$dir/out.json" 2>"$dir/err.log"
+  ) || rc=$?
+  [ "$rc" = 7 ] || fail "O: exhausted cap with unaccounted feedback expected exit 7, got $rc"
+  [ "$(trig_count "$dir")" = 0 ] || fail "O: cap exhaustion with feedback posted a trigger"
+  [ "$(jqf "$dir" '.cap_exhausted.request_attempts')" = 10 ] \
+    || fail "O: cap exhaustion with feedback lost the request count"
+  [ "$FAIL" -ne "$before" ] || pass "O: exhaustion is reported before accounting without a new write"
 }
 
 # K: a registered approval stays in the candidate-controlled read-only lane.
@@ -608,7 +1081,26 @@ test_workflow_declares_auto_trigger_flag() {
 
 test_fresh_posts_once_no_poll
 test_dup_author_skips
+test_uppercase_author_command_skips
+test_author_containment_posts
+test_stale_author_command_posts
 test_reviewer_trigger_does_not_count
+test_request_attempt_cap
+test_nondefault_request_attempt_cap
+test_candidate_cannot_raise_governing_request_attempt_cap
+test_governing_cap_read_failure_refuses_new_write
+test_invalid_present_governing_cap_refuses_new_write
+test_invalid_present_governing_codex_block_refuses_new_write
+test_missing_governing_codex_block_defaults_request_cap
+test_idempotent_skip_does_not_resolve_governing_cap
+test_gated_cap_leaves_routing_to_caller
+test_cap_preserves_provider_block_as_diagnostic_only
+test_blocking_budget_boundary
+test_blocking_budget_counting_rule
+test_blocking_budget_wins_simultaneous_exhaustion
+test_blocking_budget_governing_value
+test_blocking_budget_fails_closed
+test_blocking_budget_not_read_without_a_write
 test_gate_skips_content_free_head
 test_gate_triggers_on_real_content_change
 test_gate_triggers_without_prior_review
