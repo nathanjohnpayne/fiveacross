@@ -88,8 +88,8 @@ export const doubtsCol = () =>
 export const doubtRef = (id: string) =>
   doc(db, 'events', EVENT_ID, 'doubts', id).withConverter(doubtConverter);
 // Hearts: events/{EVENT_ID}/hearts (specs/feed-hearts.md) — one Player's like
-// on a Feed post (Proof or Moment). Flat like doubts/moments, one live stream
-// (useAllHearts) feeding every card's count; the write path (src/data/hearts.ts)
+// on a Feed post (Proof or Moment). The collection stays flat; useAllHearts
+// queries only the currently displayed target incarnation for each card; the write path (src/data/hearts.ts)
 // uses the deterministic `${uid}_${kind}_${targetId}` slot id.
 export const heartsCol = () =>
   collection(db, 'events', EVENT_ID, 'hearts').withConverter(heartConverter);
