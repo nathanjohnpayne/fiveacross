@@ -62,8 +62,9 @@ async function seedEvents(database: Firestore): Promise<void> {
     await setDoc(doc(database, `events/${eventId}`), {
       name: eventId,
       status: 'active',
-      admins: [],
+      admins: [], days: [{ index: 0, unlockAt: 0 }],
     });
+    await setDoc(doc(database, `events/${eventId}/items/${ITEM}`), { text: 'Shared prompt', status: 'active' });
   }
 }
 
@@ -196,21 +197,38 @@ describe('marker Event identity compatibility window (#1072)', () => {
     }
   });
 
-  it('reuses one compatibility lookup across the maximum 24-marker legacy repair batch', async () => {
+  it.each(['off', 'enforced'])('bounds 24-marker repair batches below the aggregate access budget with membership %s', async (membershipEnforcement) => {
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
-      await seedCompatibility(ctx.firestore(), NOW() + 60_000);
+      const trusted = ctx.firestore();
+      await seedCompatibility(trusted, NOW() + 60_000);
+      await setDoc(doc(trusted, `events/${EVENT_A}`), {
+        status: 'active', admins: [], membershipEnforcement, days: [{ index: 0, unlockAt: 0 }],
+      });
+      await setDoc(doc(trusted, `events/${EVENT_A}/memberships/${UID}`), { status: 'active' });
+      for (let index = 0; index < 24; index++)
+        await setDoc(doc(trusted, `events/${EVENT_A}/items/legacy-item-${index}`), { text: `Prompt ${index}`, status: 'active' });
+      await setDoc(doc(trusted, `events/${EVENT_A}/days/0/boards/${UID}`), {
+        uid: UID, seed: 1, cells: Object.fromEntries(Array.from({ length: 25 }, (_, index) => [String(index),
+          { index, itemId: index === 12 ? null : `legacy-item-${index}`, text: 'Prompt', free: index === 12, marked: false }])),
+      });
     });
 
     const database = db(UID);
-    const batch = writeBatch(database);
-    for (let index = 0; index < 24; index += 1) {
-      batch.set(
-        doc(database, markerPath(EVENT_A, `legacy-item-${index}`, UID)),
-        marker(UID),
-      );
-    }
-
-    await assertSucceeds(batch.commit());
+    const makeBatch = (start: number, end: number) => {
+      const batch = writeBatch(database);
+      if (start === 0) batch.set(doc(database, `events/${EVENT_A}/days/0/boards/${UID}`),
+        { cells: { '0': { marked: true, markedAt: 1, echo: true } }, markSeed: 1 }, { merge: true });
+      for (let index = start; index < end; index++)
+        batch.set(doc(database, markerPath(EVENT_A, `legacy-item-${index}`, UID)), marker(UID));
+      return batch;
+    };
+    // Every target exists: this denial proves the aggregate-access constraint,
+    // rather than accidentally asserting a missing-Prompt denial.
+    await assertFails(makeBatch(0, 24).commit());
+    await assertSucceeds(makeBatch(0, 16).commit());
+    await assertSucceeds(makeBatch(16, 24).commit());
+    for (let index = 0; index < 24; index++)
+      expect((await getDoc(doc(database, markerPath(EVENT_A, `legacy-item-${index}`, UID)))).exists()).toBe(true);
   });
 
   it('treats a nonblank wrong-project value as trusted Admin metadata', async () => {
