@@ -61,7 +61,7 @@ vi.mock('../hooks/useData', () => ({
   useEventDoc: () => ({ data: null, loading: false }),
   useMyDayBoards: () => new Map(),
   useAllDoubts: () => ({ doubts: [], loading: false, hasServerData: true }),
-  // specs/feed-hearts.md: the Feed's flat hearts stream — empty here; the
+  // specs/feed-hearts.md: each post’s scoped Hearts query — empty here; the
   // hearts surface has its own suite (feed-hearts.test.tsx).
   useAllHearts: () => ({ hearts: [], loading: false, hasServerData: true }),
   // #392: the Feed resolves the viewer's own player row for its ask-for-proof
