@@ -228,6 +228,25 @@ beforeEach(() => {
 });
 
 describe('confirmClaim — the pending win materializes: credit + publish the Proof (specs/w3-claim-modes.md)', () => {
+  it.each(['confirmed', 'rejected'] as const)('reviews new content without rewriting established Mark credit (%s)', async outcome => {
+    const cells = boardWith(ROW0);
+    cells[4] = { ...cells[4], markedAt: 9, proofId: 'P' };
+    boardState = { cells };
+    playerState = { firstBingoAt: 3, bingoCount: 1, squaresMarked: 5 };
+    if (outcome === 'confirmed') await confirmClaim(pendingClaim(), 'admin-1');
+    else await rejectClaim(pendingClaim(), 'admin-1');
+    expect(setPayload('/players/')).toBeUndefined();
+    expect(txDelete).not.toHaveBeenCalled();
+    const board = setPayload('/boards/') as { cells: Cell[]; directAnalyticsRequest?: unknown };
+    expect(board.directAnalyticsRequest).toBeUndefined();
+    if (outcome === 'rejected') expect(board.cells[4]).toMatchObject({ marked: true, markedAt: 9, status: 'confirmed', proofId: null });
+    else {
+      expect(setPayload('/proofs/')).toMatchObject({ status: 'active' });
+      expect(board.cells).toBeUndefined(); // no Mark fields changed
+    }
+    expect(setPayload('/claims/')).toMatchObject({ status: outcome });
+  });
+
   it('flips the claim cell pending→confirmed, credits the square, and activates the pending Proof', async () => {
     // cell 4 is the pending claim square backed by proof P; nothing else marked.
     const cells = boardWith([]);

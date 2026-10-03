@@ -28,7 +28,7 @@ Every claim below maps to a real assertion. Layers and runners: `src/data/w2-pro
 - A cancelled sheet leaves the Square unmarked (no `attachProof`, no `setMark`)—`src/components/w2-proof-capture.test.tsx`.
 - Unmarking an already-marked Square stays instant even in `proof_required` (no proof gate on unmark)—`src/components/w2-proof-capture.test.tsx`.
 - In `honor` mode a claim tap opens the sheet too (issue #181), but the 🎖️ Cross My Heart pledge marks WITHOUT any Proof—a Proof never gates credit—`src/components/w4-honor-pledge.test.tsx` (see `specs/w4-honor-pledge.md`; before #181 an honor tap marked directly with no sheet).
-- `admin_confirmed` starts the Proof `pending` (admin-only readable per the rules), holds the cell `pending` so it is excluded from stats, and files a claim for the admin queue referencing the proof + cell—`src/data/w2-proof-capture.test.ts`.
+- `admin_confirmed` starts the Proof `pending` (admin-only readable per the rules), holds a fresh unconfirmed cell `pending` so it is excluded from stats, preserves established confirmed credit for content-only review, and files a Claim for the admin queue referencing the proof + cell—`src/data/w2-proof-capture.test.ts`.
 - `ProofSheet` never frames a Proof as "required for credit"—`src/components/w2-proof-capture.test.tsx`.
 
 ## Offline: the Mark queues, the Proof media does not (ADR 0006)
@@ -55,3 +55,7 @@ Every claim below maps to a real assertion. Layers and runners: `src/data/w2-pro
 - Photo, audio, and text Proofs all post to the Feed—`src/data/w2-proof-capture.test.ts` + `src/components/w2-proof-capture-feed.test.tsx`.
 - A Proof never gates credit—it is flavour, not enforcement—`src/components/w2-proof-capture.test.tsx`.
 - The proof→cell link is resolvable from the proofs doc (`uid` + `cellIndex`) and never depends solely on `cells[i].proofId` (PR #75)—`src/data/w2-proof-capture.test.ts` + `src/components/w2-proof-capture-feed.test.tsx`.
+
+## New content on a confirmed Mark (#1422)
+
+In `admin_confirmed`, every new Proof starts pending and creates a Claim for content review, including one added to an already-confirmed Echo or local Mark. The Claim carries `contentOnly: true` so the confirm listener skips ceremony; old flag-less credit Claims retain their existing listener behavior. This self-supplied flag grants no authority: resolution uses live Board/Proof state. The established Mark keeps its confirmed status and original timestamp; attaching the artifact removes Echo status so it remains anchored to this card. Confirming the new content publishes only the claimant’s still-pending, safety-eligible Proof. Rejecting it removes this Proof’s current cell link, preserving the Mark, stats and Tally. Neither resolution rewrites established credit, propagates new Echoes or emits a new Mark transition. Existing proof-id matching protects a newer submission from an older Claim. Fresh unconfirmed Marks retain the existing pending→confirm/reject scoring behavior.

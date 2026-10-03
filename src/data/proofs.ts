@@ -177,14 +177,14 @@ export interface AttachProofArgs {
  * feed one broadcast helper. `bingo`/`blackout` are the STANDING state of the
  * folded board; the transitions are the rising EDGE this attach crossed
  * (no-win → win), computed against the LIVE prior cells the transaction read.
- * In `admin_confirmed` mode the attached cell goes `pending`, and the win mask
+ * For fresh credit in `admin_confirmed` the attached cell goes `pending`, and the win mask
  * (game/logic: `marked && status !== 'pending'`) excludes it — so an
  * admin-confirmed attach structurally crosses NO transition and broadcasts no
  * Moment at attach time. That is a decision, not an accident: a pending claim
  * can be REJECTED, and a Moment is IMMUTABLE (delete-only moderation) — an
  * attach-time broadcast would leave a permanent win announcement for a claim an
  * admin then rejects. The tally-marker analogy (which does publish at attach,
- * #87) does not carry: `rejectClaim` deletes the marker on rejection, but no
+ * #87) does not carry: `rejectClaim` deletes the marker on pending-credit rejection, but no
  * automatic cleanup path exists for a Moment. The admin-confirmed win (and its
  * Moment) materialize at admin confirm — the #41 deferral. `cells` is the folded
  * post-attach board, for fire-time revalidation in the drain.
@@ -210,8 +210,9 @@ export interface AttachProofResult {
 /**
  * Mark a square and attach a playful proof (ADR 0002: the Proof IS the Feed
  * entry — a bare Mark posts nothing, an attached Proof posts here). In
- * admin_confirmed mode the square goes pending (doesn't count) and a claim is
- * created for an admin/peer to confirm. A Proof is flavour, never enforcement
+ * admin_confirmed mode fresh credit goes pending (doesn't count), while an
+ * established Mark keeps its credit/time. New content always raises a Claim
+ * for an admin to review, separately from established credit. A Proof is flavour, never enforcement
  * (ADR 0001): it enriches the Feed, it does not make the Mark more trustworthy.
  *
  * Online-only, by design AND by rule (ADR 0006) — unlike a bare honor Mark
@@ -311,16 +312,19 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
     // sheet-opening snapshot — see `AttachProofResult.markTransition`'s doc
     // comment for why the caller's own `cell` prop cannot be trusted here.
     const markTransition = existingCell?.marked !== true;
-    // A confirmed Echo has already passed the original admin confirmation. Adding
-    // proof makes it a local mark, but must not create a second pending claim.
-    const pendingClaim = pending && !(existingCell?.echo === true && existingCell.status === 'confirmed');
+    // New content still needs review in admin mode. Its Claim is distinct
+    // from the already-confirmed Mark authority (including an Echo), which
+    // keeps its original credit and timestamp while the new Proof is pending.
+    const confirmedMark = existingCell?.marked === true && existingCell.status !== 'pending';
+    const pendingClaim = pending;
+    const pendingMark = pending && !confirmedMark;
     const next: Cell[] = liveCells.map((c) => {
       if (c.index !== cellIndex) return c;
       // A proof creates a durable artifact anchored to this card. It must turn
       // an Echo into a local Mark so the reshuffle gate cannot trade the card
       // away and strand that artifact.
       const { echo: _echo, echoOptOut: _echoOptOut, ...proofed } = c;
-      return { ...proofed, marked: true, markedAt: now, proofId, status: pendingClaim ? 'pending' : 'confirmed' };
+      return { ...proofed, marked: true, markedAt: confirmedMark ? c.markedAt : now, proofId, status: pendingMark ? 'pending' : 'confirmed' };
     });
 
     const bingoCount = completedLines(next).length;
@@ -413,7 +417,7 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
     // Per-Prompt Tally (ADR 0002): a proofed Mark self-publishes the SAME attributed
     // marker a bare honor Mark does (setMark) — EVERY Mark, proofed or not, tallies.
     // The cell above is set marked:true in BOTH claim modes (proof_required →
-    // 'confirmed', admin_confirmed → 'pending'), so the marker publishes here under
+    // 'confirmed', admin_confirmed → fresh credit 'pending' or established 'confirmed'), so the marker publishes here under
     // the SAME condition as the cell becoming marked — exactly as setMark writes it
     // on `nextMarked` regardless of pending/confirmed status. The marker doc id IS
     // the marker uid so firestore.rules keeps a forged attribution out; the name is
@@ -457,6 +461,7 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
         itemText,
         proofId,
         status: 'pending',
+        ...(confirmedMark ? { contentOnly: true } : {}),
         createdAt: now,
         resolvedBy: null,
         // In daily mode the pending mark lives on the DAY-SCOPED board, so the
@@ -468,8 +473,8 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
     }
     // The verdict (see AttachProofResult): standing state from the fold, rising
     // edges against the LIVE prior cells this transaction read. In
-    // admin_confirmed the folded cell is `pending` and the win mask excludes it,
-    // so both transitions are structurally false — no Moment fires at attach.
+    // admin_confirmed fresh credit stays pending; established credit is unchanged.
+    // Neither case crosses a new win edge, so no Moment fires at attach.
     return {
       cells: next,
       bingo: bingoCount > 0,

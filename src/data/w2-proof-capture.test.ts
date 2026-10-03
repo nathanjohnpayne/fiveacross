@@ -353,6 +353,19 @@ describe('attachProof — posts an active Proof to the Feed and marks the cell (
     expect(typeof claim.proofId).toBe('string');
   });
 
+  it.each([false, true])('queues new content on a confirmed Mark without revoking its credit (Echo: %s)', async echo => {
+    const cells = baseArgs.cells.map(c => ({ ...c }));
+    cells[5] = { ...cells[5], marked: true, markedAt: 999, status: 'confirmed', ...(echo ? { echo: true } : {}) };
+    boardState = { cells };
+    await attachProof({ ...baseArgs, cells, claimMode: 'admin_confirmed', proof: { type: 'text', text: 'new content needs review' } });
+    expect(setPayload('/proofs/')).toMatchObject({ status: 'pending' });
+    expect(setPayload('/claims/')).toMatchObject({ status: 'pending', cellIndex: 5, contentOnly: true, proofId: expect.any(String) });
+    const board = setPayload('/boards/') as { cells: Cell[] };
+    expect(board.cells[5]).toMatchObject({ marked: true, markedAt: 999, status: 'confirmed' });
+    expect(board.cells[5]).not.toHaveProperty('echo');
+    expect(setPayload('/players/')).toMatchObject({ squaresMarked: 1 });
+  });
+
   it('folds onto the LIVE board inside the transaction so a concurrent mark is not clobbered', async () => {
     // Another of the owner's writes already marked index 3 on the server; the
     // caller's `cells` prop predates it. The transaction reads the live board,

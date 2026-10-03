@@ -845,6 +845,8 @@ export default function Board() {
   // never gates a Mark (ADR 0001) and does not touch the Moments machinery below.
   const { proofs: myProofs } = useMyProofs(uid);
   const claimMode: ClaimMode = event?.claimMode ?? 'honor';
+  const committedClaimMode = useRef(claimMode);
+  useEffect(() => { committedClaimMode.current = claimMode; }, [claimMode]);
 
   const [celebrate, setCelebrate] = useState<null | 'bingo' | 'blackout'>(null);
   const [freePulse, setFreePulse] = useState(0);
@@ -2997,10 +2999,12 @@ export default function Board() {
           // (ADR 0006 — a pledge is a setMark, never a transaction). A ＋-button
           // proof-add open (marked cell) omits it: the Square is already
           // claimed, so ProofSheet hides the row entirely.
+          showPledge={!proofTarget.marked}
           onPledge={
-            proofTarget.marked
+            proofTarget.marked || claimMode !== 'honor'
               ? undefined
               : () => {
+                  if (committedClaimMode.current !== 'honor') return;
                   const target = proofTarget;
                   setProofTarget(null);
                   // Write-time twin of the render-time proofSourceLive close

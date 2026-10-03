@@ -2824,8 +2824,9 @@ service cloud.firestore {
           let d = request.resource.data;
           return d.keys().hasOnly([
               'uid', 'displayName', 'cellIndex', 'itemText', 'proofId',
-              'status', 'createdAt', 'resolvedBy', 'dayIndex'
+              'status', 'createdAt', 'resolvedBy', 'dayIndex', 'contentOnly'
             ])
+            && (!('contentOnly' in d) || d.contentOnly is bool)
             && d.status == 'pending'
             && d.get('resolvedBy', null) == null
             && displayNameOk(d.displayName)

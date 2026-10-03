@@ -1846,6 +1846,10 @@ async function resolve(
     // 'pending' means either it was never pending (a legacy/malformed claim)
     // or another confirm already credited it.
     const claimCellBefore = cells.find((x) => isClaimCell(x, c));
+    // A new Proof on an established Mark queues content review, not new credit.
+    // Confirm/reject may publish/remove its artifact but cannot rewrite stats,
+    // timestamps or propagate achievements that were already confirmed.
+    const contentOnly = claimCellBefore?.marked === true && claimCellBefore.status === 'confirmed';
     const claimCellAfter = next.find((x) => isClaimCell(x, c));
     const transitionedToConfirmed =
       status === 'confirmed' && claimCellBefore?.status === 'pending' && claimCellAfter?.status === 'confirmed';
@@ -1889,7 +1893,7 @@ async function resolve(
     // (Firestore's reads-before-writes transaction contract).
     const confirmedCell = status === 'confirmed' ? next.find((x) => isClaimCell(x, c)) : undefined;
     const echoItemId =
-      echoOn && confirmedCell && !confirmedCell.free && confirmedCell.marked ? confirmedCell.itemId : null;
+      !contentOnly && echoOn && confirmedCell && !confirmedCell.free && confirmedCell.marked ? confirmedCell.itemId : null;
     const echoBuckets: EchoBucket[] = [];
     const echoWrites: Array<{ ref: ReturnType<typeof dayBoard>; set: ReturnType<typeof cellsMergeSet> }> = [];
     const echoPinDays: number[] = [];
@@ -1966,7 +1970,7 @@ async function resolve(
         },
       });
     }
-    if (daily) {
+    if (!contentOnly && daily) {
       const siblingBlackout =
         status === 'rejected' &&
         pSnap.exists() &&
@@ -2024,7 +2028,7 @@ async function resolve(
           });
         }
       }
-    } else {
+    } else if (!contentOnly) {
       tx.set(
         player(c.uid, eventId),
         { squaresMarked: squares, bingoCount, blackout, firstBingoAt },
@@ -2034,7 +2038,8 @@ async function resolve(
     // Tally symmetry (ADR 0002): wherever a write flips a cell marked→unmarked it
     // must delete that cell's per-Prompt Tally marker, and wherever it flips
     // →marked it must ensure the marker (setMark and attachProof do). Rejecting a
-    // claim unmarks the claim's cell via the transform above, so diff old→new and
+    // pending-credit claim unmarks its cell via the transform above; a content-only
+    // reject keeps established credit and its marker. Diff old→new and
     // delete the marker for exactly the cells that lost their mark — the SAME
     // conditionality as the flip itself; without this, a rejected admin_confirmed
     // claim would reverse the board + stats but leave the player in the Prompt's
@@ -2127,7 +2132,8 @@ export function confirmClaim(c: ClaimDoc, adminUid: string): Promise<void> {
     c,
     (cells) =>
       cells.map((x) =>
-        isClaimCell(x, c) ? { ...x, status: 'confirmed' as const, markedAt: creditedAt } : x,
+        isClaimCell(x, c) && !(x.marked && x.status === 'confirmed')
+          ? { ...x, status: 'confirmed' as const, markedAt: creditedAt } : x,
       ),
     adminUid,
     'confirmed',
@@ -2178,7 +2184,9 @@ export function rejectClaim(c: ClaimDoc, adminUid: string): Promise<void> {
     (cells) =>
       cells.map((x) =>
         isClaimCell(x, c)
-          ? { ...x, marked: false, status: 'confirmed' as const, proofId: null, markedAt: null }
+          ? (x.marked && x.status === 'confirmed'
+              ? { ...x, proofId: null }
+              : { ...x, marked: false, status: 'confirmed' as const, proofId: null, markedAt: null })
           : x,
       ),
     adminUid,

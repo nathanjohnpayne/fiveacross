@@ -1198,6 +1198,9 @@ export interface ClaimDoc {
   cellIndex: number;
   itemText: string;
   proofId?: string | null;
+  // New content review on already-confirmed credit; no new win transition.
+  // Absent on older credit Claims, whose existing ceremony behavior remains.
+  contentOnly?: boolean;
   status: 'pending' | 'confirmed' | 'rejected';
   createdAt: number;
   resolvedBy?: string | null;

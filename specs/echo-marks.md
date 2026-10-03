@@ -61,7 +61,7 @@ An Event can switch Echo Marks off. Echo was designed for a trip, where a Player
 
 - **Name:** "Echo Mark" (glossary in CONTEXT.md).
 - **Echo indicator UI:** yes, minimal—a subtle ⟲ glyph top-left plus a slightly dimmed ✓ on echoed Squares; it shifts below a live Doubt badge, CSS-only (`.cell.echo`, src/index.css).
-- **Echoes skip admin re-confirmation** in admin_confirmed mode: yes—born `confirmed`, no second Claim.
+- **Echoes skip admin re-confirmation** in admin_confirmed mode: yes—born `confirmed`, no second credit Claim. A subsequently attached Proof still queues content-only review without revoking that credit.
 - **Tally for echoes:** yes in the adapted single-slot form above (the ticket's literal per-day marker contradicts the deployed marker schema; see Residuals).
 - **Unmark independence:** no cascades either direction.
 

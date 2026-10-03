@@ -284,6 +284,17 @@ describe('moments/{momentId} — the avatar is pinned like every other', () => {
 });
 
 describe('claims/{claimId} — the create is the attachProof shape, naming the creator’s own Proof', () => {
+  it('admits a boolean content-only hint without widening Proof ownership or resolution authority', async () => {
+    const alice = db(ALICE);
+    const batch = writeBatch(alice);
+    batch.set(doc(alice, at('proofs/contentOnlyProof')), textProof(ALICE, 'pending'));
+    batch.set(doc(alice, at('claims/contentOnlyClaim')), { ...claim(ALICE, 'contentOnlyProof'), contentOnly: true });
+    await assertSucceeds(batch.commit());
+    await assertFails(setDoc(doc(alice, at('claims/invalidContentHint')), { ...claim(ALICE, 'contentOnlyProof'), contentOnly: 'yes' }));
+    await assertFails(setDoc(doc(db(BOB), at('claims/foreignContentHint')), { ...claim(BOB, 'contentOnlyProof'), contentOnly: true }));
+    await assertFails(updateDoc(doc(alice, at('claims/contentOnlyClaim')), { status: 'confirmed' }));
+  });
+
   it('ALLOWS the pending Proof and its Claim written together, as attachProof does', async () => {
     const alice = db(ALICE);
     const batch = writeBatch(alice);
