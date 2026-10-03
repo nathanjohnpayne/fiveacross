@@ -144,7 +144,9 @@ export function isAuthConfiguredForHost(configuredAuthDomain: string, hostname: 
  *
  *  - `gaycruisebingo.web.app` deliberately keeps the configured `.com`
  *    authDomain (see `resolveAuthDomain`), because `AuthProvider` history-
- *    replaces every signed-out web.app visit to `gaycruisebingo.firebaseapp.com`
+ *    replaces permitted signed-out web.app visits (initial empty sessions or
+ *    spontaneous loss without explicit logout intent, or deliberate sign-in)
+ *    to `gaycruisebingo.firebaseapp.com`
  *    BEFORE any auth transaction starts (specs/w1-auth-google.md,
  *    src/canonical-redirect.ts). Blocking the mount there would strand the
  *    documented ship-network fallback host on an "auth unconfigured" screen —
