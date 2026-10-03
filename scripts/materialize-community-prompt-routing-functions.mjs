@@ -4,8 +4,8 @@
 //
 // `functions/tsconfig.json` sets `rootDir: "src"`, so the Functions package
 // cannot import runtime code from the app package. The `approvePrompts`
-// callable still has to route on the same five decisions the client uses to
-// default a submission's Day and to tell a submitter "scheduled", so the
+// callable and submitPrompt intake use the same five routing decisions the
+// client retains for submitter status and pure helpers, so the
 // marked block is copied byte-for-byte into
 // `functions/src/communityPromptRouting.generated.ts`. Only the import of
 // `normalizePool` differs, and it lives outside the block: the app resolves it

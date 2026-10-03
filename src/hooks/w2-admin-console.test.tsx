@@ -3,11 +3,13 @@ import { renderHook, act } from '@testing-library/react';
 
 // specs/w2-admin-console.md, RTL-jsdom layer. Proves the ADR 0004 Phase 0
 // community auto-hide is load-bearing in the READ hooks: a Prompt or Proof whose
-// reportCount has REACHED event.settings.reportHideThreshold self-hides from the
+// reportCount has REACHED event.settings.reportHideThreshold without incarnation
+// suppression self-hides from the
 // public read paths (useProofFeed — and through it the merged useFeed — and
 // useItems) on every client, with no Admin action and the doc untouched. The
 // Admin views (useAllItems / useReportedProofs) apply NO such filter, so an Admin
-// can still reach and restore threshold-hidden content. A missing/undefined
+// can still reach and restore threshold-hidden content. Restored/cleared
+// incarnations keep their report-hide override. A missing/undefined
 // threshold means NO filtering (fail-open). The hide is presentational and
 // bypassable by design (tamper-proof server enforcement is #43); here we drive
 // the REAL hooks with Firestore's onSnapshot stubbed so we can hand-deliver the

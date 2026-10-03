@@ -11,6 +11,7 @@ import { cellsMergeSet } from './cellsMerge';
 import { directMarkAnalyticsRequest } from './markAnalytics';
 import { supportedDayIndex } from './eventLimits';
 import { isEventArchived, isEventArchiving } from './eventArchive';
+import { reportContent } from './reports';
 import type {
   Cell,
   ClaimMode,
@@ -510,8 +511,8 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
   });
 }
 
-export async function reportProof(id: string): Promise<void> {
-  await updateDoc(rawProof(id), { reportCount: increment(1) });
+export async function reportProof(id: string, expectedCreatedAt?: number): Promise<void> {
+  await reportContent('proofs', id, EVENT_ID, expectedCreatedAt);
 }
 
 /**

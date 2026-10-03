@@ -13,6 +13,7 @@ import {
 } from '../data/mySuggestions';
 import { track } from '../analytics';
 import LoadingState from './LoadingState';
+import AsyncButton from './admin/AsyncButton';
 import { editionBrand } from '../editions';
 import { useAdultContent } from '../hooks/useAdultContent';
 import { EVENT_ID } from '../firebase';
@@ -369,6 +370,20 @@ export default function ItemPool() {
   const [showExplicitIntro, setShowExplicitIntro] = useState(false);
   const [addThrottled, setAddThrottled] = useState(false);
   const [reportThrottled, setReportThrottled] = useState(false);
+  const [submission, setSubmission] = useState({ scope: scopeKey, busy: false, error: '' });
+  const retrySubmission = useRef<{ scope: string; text: string; spicy: boolean; id: string } | null>(null);
+  const pendingSubmission = useRef<{ scope: string } | null>(null);
+  const submitting = submission.scope === scopeKey && submission.busy;
+  const submissionEpoch = useRef(0);
+  useLayoutEffect(() => {
+    submissionEpoch.current += 1;
+    return () => {
+      submissionEpoch.current += 1;
+      if (pendingSubmission.current?.scope === scopeKey) pendingSubmission.current = null;
+      if (retrySubmission.current?.scope === scopeKey) retrySubmission.current = null;
+    };
+  }, [scopeKey]);
+
   const addTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reportTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Reset on the uid TRANSITION itself (#861 round 2, Codex P1): guarding
@@ -398,6 +413,7 @@ export default function ItemPool() {
     setShowExplicitIntro(false);
     setAddThrottled(false);
     setReportThrottled(false);
+    setSubmission({ scope: scopeKey, busy: false, error: '' });
   }
   // Un-throttle timers are real (not just presentational math) so the button
   // re-enables on its own once the window passes — clear them on unmount so a
@@ -412,7 +428,7 @@ export default function ItemPool() {
   );
 
   const add = async () => {
-    if (!user || !text.trim()) return;
+    if (!user || !text.trim() || pendingSubmission.current?.scope === scopeKey) return;
     // Captured now, not re-read after the `await` (#861): this closure keeps
     // whichever `user` was signed in when the submit happened, which is
     // correct for the Firestore write and the localStorage key below — both
@@ -421,6 +437,7 @@ export default function ItemPool() {
     const submittingUid = user.uid;
     const submittingEventId = eventId;
     const submittingScope = scopeKey;
+    const submittingEpoch = submissionEpoch.current;
     const now = Date.now();
     const key = `add:${submittingEventId}:${submittingUid}`;
     if (!checkItemRateLimit(key, now)) {
@@ -435,13 +452,30 @@ export default function ItemPool() {
       }, itemRateLimitRemainingMs(key, now));
       return;
     }
+    const submittedText = text.trim();
+    const submittedSpicy = adult && spicy;
+    const prior = retrySubmission.current;
+    const request = prior?.scope === submittingScope && prior.text === submittedText && prior.spicy === submittedSpicy
+      ? prior
+      : { scope: submittingScope, text: submittedText, spicy: submittedSpicy, id: globalThis.crypto.randomUUID() };
+    retrySubmission.current = request;
+    const pending = { scope: submittingScope };
+    pendingSubmission.current = pending;
+    // An account can leave and return while this request is in flight. Its
+    // server ACK still belongs to that submitter, but only this exact compose
+    // lifetime and pending token may update the visible draft or analytics.
+    const isCurrentSubmission = () => pendingSubmission.current === pending
+      && uidRef.current === submittingUid && scopeRef.current === submittingScope
+      && submissionEpoch.current === submittingEpoch;
+    setSubmission({ scope: submittingScope, busy: true, error: '' });
     try {
       const result = await addItem(
         submittingUid,
-        text,
-        adult && spicy,
+        submittedText,
+        submittedSpicy,
         undefined,
         submittingEventId,
+        request.id,
       );
       // Analytics attribution is ALSO guarded (#861 round 2, Codex P2):
       // firing unconditionally after the awaited write would attribute
@@ -452,7 +486,7 @@ export default function ItemPool() {
       // than trying to override the SDK's ambient identity for one event,
       // and losing one event for this narrow timing overlap is a much
       // smaller cost than misattributing it.
-      if (uidRef.current === submittingUid && scopeRef.current === submittingScope) {
+      if (isCurrentSubmission()) {
         track('add_item');
         // `prompt_suggestion_submitted` (#559): NO Prompt text in the
         // payload — just whether a Day could be named. Reports the target
@@ -467,7 +501,7 @@ export default function ItemPool() {
         });
       }
       if (result) {
-        const submitted = { id: result.id, text: text.trim().slice(0, 80), submittedAt: Date.now() };
+        const submitted = { id: result.id, text: submittedText.slice(0, 80), submittedAt: Date.now() };
         // Persisted under the SUBMITTING uid regardless of who is current —
         // this write is always correct, auth change or not.
         trackSuggestion(submittingEventId, submittingUid, submitted);
@@ -480,7 +514,7 @@ export default function ItemPool() {
         // NEW account's on-screen list — the exact leak #861 describes. Skip
         // the state update in that case; the persisted write above is
         // already correct and complete on its own.
-        if (uidRef.current === submittingUid && scopeRef.current === submittingScope) {
+        if (isCurrentSubmission()) {
           setTracked((prev) => [...prev.filter((s) => s.id !== submitted.id), submitted]);
         }
       }
@@ -490,16 +524,30 @@ export default function ItemPool() {
       // the switch — the same leak #861 describes, just for the compose
       // fields instead of the tracked-submissions list. Only the account
       // that actually submitted gets to clear its own form.
-      if (uidRef.current === submittingUid && scopeRef.current === submittingScope) {
-        setText('');
-        setSpicy(false);
+      if (isCurrentSubmission()) {
+        setText(current => current.trim() === submittedText ? '' : current);
+        setSpicy(current => current === submittedSpicy ? false : current);
+        if (retrySubmission.current === request) retrySubmission.current = null;
       }
-    } catch (e) {
-      console.error(e);
+    } catch (error) {
+      if (isCurrentSubmission()) {
+        const code = error && typeof error === 'object' && 'code' in error ? error.code : null;
+        setSubmission({ scope: submittingScope, busy: false,
+          error: code === 'functions/resource-exhausted'
+            ? 'You have 10 Prompts waiting for review. Try again after some are reviewed.'
+            : code === 'functions/unauthenticated'
+              ? 'Your sign-in changed. Sign in with the account that started this Prompt and try again.'
+            : code === 'functions/failed-precondition' || code === 'functions/permission-denied'
+              ? 'Prompt not submitted. Your text is still here. Ask your host to check this Event and its submission settings.'
+            : 'Prompt not submitted. Your text is still here. Try again with signal.' });
+      }
+    } finally {
+      if (isCurrentSubmission()) setSubmission(current => ({ ...current, busy: false }));
+      if (pendingSubmission.current === pending) pendingSubmission.current = null;
     }
   };
 
-  const report = (id: string) => {
+  const report = async (id: string, createdAt: number) => {
     if (!user) return;
     const now = Date.now();
     const reportingScope = scopeKey;
@@ -513,8 +561,8 @@ export default function ItemPool() {
       }, itemRateLimitRemainingMs(key, now));
       return;
     }
-    reportItem(id, eventId).catch(console.error);
-    track('report_item');
+    await reportItem(id, eventId, createdAt);
+    if (scopeRef.current === reportingScope) track('report_item');
   };
 
   return (
@@ -532,16 +580,17 @@ export default function ItemPool() {
           maxLength={80}
           placeholder="Add a prompt…"
           value={text}
+          disabled={submitting}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             // Gate Enter with the SAME `addThrottled` state the Add button's
             // `disabled` uses, so the keyboard path can never submit while
             // the UI is showing "throttled" — it now expires in lockstep
             // with the button instead of re-checking the guard on its own.
-            if (e.key === 'Enter' && !addThrottled) add();
+            if (e.key === 'Enter' && !addThrottled && !submitting) add();
           }}
         />
-        <button className="btn primary" onClick={add} disabled={!text.trim() || addThrottled}>
+        <button className="btn primary" onClick={add} disabled={!text.trim() || addThrottled || submitting} aria-busy={submitting}>
           Add
         </button>
         {adult && (
@@ -549,6 +598,7 @@ export default function ItemPool() {
             <input
               type="checkbox"
               checked={spicy}
+              disabled={submitting}
               onChange={(e) => {
                 const next = e.target.checked;
                 // The tick lands regardless — this is an explainer over the
@@ -569,6 +619,7 @@ export default function ItemPool() {
       <p className="muted" style={{ fontSize: 12 }}>
         {APPROVAL_NOTE}
       </p>
+      {submission.scope === scopeKey && submission.error && <p role="alert">{submission.error}</p>}
       {addThrottled && (
         <p className="muted" role="alert" style={{ fontSize: 12 }}>
           {ADD_THROTTLE_MESSAGE}
@@ -585,14 +636,16 @@ export default function ItemPool() {
                   {it.text}
                 </div>
               </div>
-              <button
+              <AsyncButton
+                key={`${scopeKey}:${it.id}:${it.createdAt}`}
                 className="iconbtn"
                 title="Report"
                 disabled={reportThrottled}
-                onClick={() => report(it.id)}
+                failureLabel="Report not sent. Wait a moment and try again online."
+                onAction={() => report(it.id, it.createdAt)}
               >
                 ⚑
-              </button>
+              </AsyncButton>
             </div>
           ))}
           {/* Own submissions (#210, extended #559): visible ONLY to their

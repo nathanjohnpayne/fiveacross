@@ -1,3 +1,4 @@
+import { submitReportForTest } from './reportTestHelpers';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest';
@@ -233,6 +234,7 @@ async function seedEventContent(
     );
     await setDoc(doc(database, at(`items/existing-${uid}`)), {
       text: `Existing prompt for ${uid}`,
+      createdAt: NOW,
       createdBy: uid,
       status: 'active',
       reportCount: 0,
@@ -287,7 +289,7 @@ async function seedEventContent(
   });
 }
 
-type ClientOperation = readonly [name: string, run: () => Promise<unknown>];
+type ClientOperation = readonly [name: string, run: () => Promise<unknown>, alwaysDeny?: boolean];
 
 function clientWriteInventory(
   database: Firestore,
@@ -298,7 +300,7 @@ function clientWriteInventory(
   const momentId = `${uid}-bingo-d0`;
   return [
     [
-      'item create',
+      'stale client pending create',
       () =>
         setDoc(doc(database, at(`items/pending-${uid}`)), {
           text: 'Pending membership prompt',
@@ -308,13 +310,12 @@ function clientWriteInventory(
           reportCount: 0,
           spicy: false,
         }),
+      true, // Callable-only admission is invariant across membership postures.
     ],
     [
       'item report update',
       () =>
-        updateDoc(doc(database, at(`items/existing-${uid}`)), {
-          reportCount: 1,
-        }),
+        submitReportForTest(database, eventId, uid, 'items', `existing-${uid}`),
     ],
     [
       'player update',
@@ -359,9 +360,7 @@ function clientWriteInventory(
     [
       'proof report update',
       () =>
-        updateDoc(doc(database, at(`proofs/existing-${uid}`)), {
-          reportCount: 1,
-        }),
+        submitReportForTest(database, eventId, uid, 'proofs', `existing-${uid}`),
     ],
     [
       'claim create',
@@ -506,15 +505,18 @@ async function expectClientWrites(
   uid: string,
   outcome: 'allow' | 'deny',
 ): Promise<void> {
-  for (const [name, run] of clientWriteInventory(database, eventId, uid)) {
+  for (const [name, run, alwaysDeny] of clientWriteInventory(database, eventId, uid)) {
+    const expected = alwaysDeny ? 'deny' : outcome;
     try {
-      if (outcome === 'allow') {
+      // #1311 removes this direct write for every membership posture. Keep
+      // the attempted stale-client bypass in the inventory and assert denial.
+      if (expected === 'allow') {
         await assertSucceeds(run());
       } else {
         await assertFails(run());
       }
     } catch (error) {
-      throw new Error(`${name} did not ${outcome}`, { cause: error });
+      throw new Error(`${name} did not ${expected}`, { cause: error });
     }
   }
 }

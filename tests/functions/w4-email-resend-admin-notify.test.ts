@@ -196,6 +196,9 @@ describe('sendEmail', () => {
 // wholesale). What stayed here is the pure causal labelling the digest reuses —
 // the #101 Codex R2 F1 guarantee that a hide never claims a cause it did not have.
 describe('deriveReason', () => {
+  it('does not blame reports for an Admin hide on a suppressed incarnation', () => {
+    expect(deriveReason({ status: 'hidden', reportCount: 8, reportHideSuppressed: true }, 3)).toBe('by an admin');
+  });
   it('derives the cause from doc state: threshold, manual, and Vision — never a fabricated threshold', () => {
     // At/over threshold → threshold cause.
     expect(deriveReason({ status: 'hidden', reportCount: 3 }, 3)).toBe('reports >= threshold');

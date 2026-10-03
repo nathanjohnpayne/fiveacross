@@ -889,9 +889,9 @@ fi
 # licence to swallow a later failure. GCLOUD_FAIL_AFTER lets the read-only
 # Step 1.6 describes through and fails everything after, which is what an
 # expired credential (or describe-without-update permission) looks like from
-# Step 2.5. The threshold is the COUNT OF RECONCILED SERVICES — nine, because
+# Step 2.5. The threshold is the COUNT OF RECONCILED SERVICES — ten, because
 # a full deploy selects every invoker family whatever the fixture exports
-# (#1335): submitbugreport, emailunsubscribe, the two handoff halves, the three
+# (#1335): submitbugreport, submitprompt, emailunsubscribe, the two handoff halves, the three
 # invitation callables and the two admin callables. Bump it when a family gains
 # a service, or this case silently stops testing the post-publish path and
 # starts testing the pre-publish abort instead.
@@ -909,7 +909,7 @@ PATH="$STUB_DIR:$PATH" \
 OFD_LOG="$WORKDIR/ofd-calls-11b.log" \
 NPM_LOG="$WORKDIR/npm-calls-11b.log" \
 GCLOUD_CALL_COUNTER="$WORKDIR/gcloud-counter-11b" \
-GCLOUD_FAIL_AFTER=9 \
+GCLOUD_FAIL_AFTER=10 \
   bash -c "cd '$REPO11B' && bash '$SCRIPT' --force --skip-build --skip-cf-purge" \
   >"$OUT11B" 2>"$ERR11B"
 RC11B=$?
@@ -3431,10 +3431,12 @@ FUNCTIONS_ATTEMPTED=false
 HOSTING_ATTEMPTED=true
 FIREBASE_DRY_RUN=false
 BUG_REPORT_INVOKER_SELECTED=false
+SUBMIT_PROMPT_INVOKER_SELECTED=false
 EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=false
 AUTH_HANDOFF_INVOKER_SELECTED=false
 EVENT_INVITATIONS_INVOKER_SELECTED=false
 BUG_REPORT_INVOKER_CONSERVATIVE=false
+SUBMIT_PROMPT_INVOKER_CONSERVATIVE=false
 EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
 AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
 AUTH_HANDOFF_STRICT_HALF=

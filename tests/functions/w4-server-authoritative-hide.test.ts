@@ -22,6 +22,17 @@ import {
 // Firestore seam is injected or faked — no live runtime.
 
 describe('shouldHideAtThreshold — the snapshot-level active-only "count rose to at/over" gate', () => {
+  it('preserves admin restore suppression after new distinct reports and during delayed live rechecks', async () => {
+    const restored = { status: 'active', reportCount: 6, reportHideSuppressed: true };
+    expect(shouldHideAtThreshold({ status: 'active', reportCount: 5 }, restored, 4)).toBe(false);
+    expect(stillQualifiesForHide(restored, 4)).toBe(false);
+    const { db, updates } = fakeDb({
+      'events/event': { settings: { reportHideThreshold: 4 } },
+      'events/event/items/item': restored,
+    });
+    expect(await hideIfQualifies(db, 'items', 'event', 'item')).toBe(false);
+    expect(updates).toEqual([]);
+  });
   it('hides an ACTIVE doc on the initial crossing from below the threshold to at/over it', () => {
     expect(shouldHideAtThreshold({ status: 'active', reportCount: 3 }, { status: 'active', reportCount: 4 }, 4)).toBe(true);
     expect(shouldHideAtThreshold({ status: 'active', reportCount: 3 }, { status: 'active', reportCount: 6 }, 4)).toBe(true);
