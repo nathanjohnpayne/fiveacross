@@ -210,7 +210,7 @@ describe('client/functions parity — Most-Loved Photo eligibility (#560)', () =
     expect(both([], [H('a', 'p1', 1_000)])).toEqual(NO_AWARD);
   });
 
-  it('Hearts after the freeze cutoff are excluded by their server creation time; AT the cutoff counts', () => {
+  it('Hearts after the freeze cutoff are excluded by their server binding time; AT the cutoff counts', () => {
     const award = both(
       [P('p1'), P('p2', { createdAt: 2_000 })],
       [
@@ -257,5 +257,15 @@ describe('client/functions parity — Most-Loved Photo eligibility (#560)', () =
     expect(award.winners).toHaveLength(100);
     expect(award.winners[0].proofId).toBe('p-0');
     expect(award.winners.at(-1)?.proofId).toBe('p-99');
+  });
+});
+
+
+describe('native binding/birth parity', () => {
+  it('rejects post-cutoff Proofs and pre-birth bindings with exact precision', () => {
+    const p = P('p1', { serverCreatedAt: 1001, serverCreatedTimestamp: { seconds: 1, nanoseconds: 1 } });
+    expect(both([p], [H('fan', 'p1', 1000, { serverBindingTimestamp: { seconds: 1, nanoseconds: 0 } })])).toEqual(NO_AWARD);
+    expect(both([p], [H('fan', 'p1', 1000, { serverBindingTimestamp: { seconds: 1, nanoseconds: 2 } })]).heartCount).toBe(1);
+    expect(both([P('p1', { serverCreatedAt: CUTOFF + 1 })], [H('fan', 'p1', 1000)])).toEqual(NO_AWARD);
   });
 });
