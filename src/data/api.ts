@@ -24,6 +24,7 @@ import { httpsCallable } from 'firebase/functions';
 import { db, functions, EVENT_ID } from '../firebase';
 import { honorDisplayName, markerDisplayName } from './attribution';
 import { isReportHidden, isBanned, isExplicitWithheld } from './moderation';
+import { reportContent, REPORT_RATE_LIMIT_MS } from './reports';
 import { isEventArchived, isEventArchiving } from './eventArchive';
 import { adultContentRequired } from '../adultContent';
 import { itemsCol, eventRef } from './paths';
@@ -614,7 +615,7 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
 
   // The ADR 0004 Phase 0 community auto-hide threshold, read from the event doc so
   // a frozen card is dealt from the SAME pool a Player sees live (useItems): a
-  // Prompt whose reportCount has reached a POSITIVE reportHideThreshold is hidden
+  // Unsuppressed Prompt whose reportCount reaches a POSITIVE reportHideThreshold is hidden
   // everywhere, so it must never land on a new Player's board (Codex P2, PR #107
   // finding 1). One extra event-doc read, join-path only (returning Players
   // early-return above) and fetched in the SAME Promise.all as the pool + profile,
@@ -657,7 +658,7 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
       (it) =>
         !it.isFreeSpace &&
         (it.pool ?? 'main') === 'main' &&
-        !isReportHidden(it.reportCount, threshold) &&
+        !isReportHidden(it.reportCount, threshold, it.reportHideSuppressed) &&
         !isExplicitWithheld(it.spicy, adultRequired) &&
         !isBanned(it.createdBy, bannedUids),
     )
@@ -3164,13 +3165,11 @@ async function runReconcileEchoes(
 //
 // This honest-client guard throttles double taps and fast re-submits. Another
 // tab or a raw caller can bypass it, so it grants no security guarantee.
-// Prompt pending capacity is enforced separately by submitPrompt (ADR 0017);
-// its cap does not replace this short UI cadence. Module state and Date.now()
-// are appropriate for this presentational guard, like markChains above.
-// Keyed by a caller-supplied string (`ItemPool.tsx` keys by
-// `${action}:${uid}`) rather than one global bucket, so two different
-// signed-in identities sharing a browser never share a throttle window.
-export const ITEM_RATE_LIMIT_MS = 3_000;
+// Prompt pending capacity is enforced separately by submitPrompt (ADR 0017).
+// Reports also require their server-clock cadence through Rules-paired receipts;
+// neither server admission replaces this short UI cadence. The UI bucket stays
+// keyed by `${action}:${uid}` so browser identities do not share a window.
+export const ITEM_RATE_LIMIT_MS = REPORT_RATE_LIMIT_MS;
 const lastItemActionAt = new Map<string, number>();
 
 /**
@@ -3254,12 +3253,11 @@ export async function addItem(
 }
 
 /**
- * Report a prompt (increments the report counter; auto-hide handled by
- * admin/threshold). Same rate-limit posture as `addItem` above — throttled by
- * the caller, not in here.
+ * Report one live Prompt incarnation through the rules-paired receipt/counter.
+ * Rules enforce the reporter's server-clock cadence in addition to the UI throttle.
  */
-export async function reportItem(id: string, eventId: string = EVENT_ID): Promise<void> {
-  await updateDoc(rawItem(id, eventId), { reportCount: increment(1) });
+export async function reportItem(id: string, eventId: string = EVENT_ID, expectedCreatedAt?: number): Promise<void> {
+  await reportContent('items', id, eventId, expectedCreatedAt);
 }
 
 /** Let a player set a display theme preference on their player row. */

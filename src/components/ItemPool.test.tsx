@@ -84,6 +84,36 @@ beforeEach(() => {
 });
 
 describe('ItemPool submission (specs/d15-approvals.md)', () => {
+  it.each(['accepted', 'denied'])('waits for a report acknowledgment and shows retryable failure: %s', async (outcome) => {
+    H.items = [item('reported', { createdAt: 123 })];
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    H.reportItem.mockReturnValueOnce(new Promise<void>((yes, no) => { resolve = yes; reject = no; }));
+    render(<ItemPool />);
+    const button = screen.getByTitle('Report');
+    fireEvent.click(button);
+    expect(H.reportItem).toHaveBeenCalledWith('reported', 'ev-1', 123);
+    expect(button).toBeDisabled();
+    expect(track).not.toHaveBeenCalledWith('report_item');
+    await act(async () => { if (outcome === 'accepted') resolve(); else reject(new Error('offline or rate denied')); });
+    expect(button).not.toBeDisabled();
+    if (outcome === 'accepted') expect(track).toHaveBeenCalledWith('report_item');
+    else {
+      expect(screen.getByRole('alert')).toHaveTextContent('Report not sent');
+      expect(track).not.toHaveBeenCalledWith('report_item');
+    }
+  });
+  it('resets a failed report control when the same target ID has a new incarnation', async () => {
+    H.items = [item('reported', { createdAt: 123 })];
+    H.reportItem.mockRejectedValueOnce(new Error('rejected'));
+    const { rerender } = render(<ItemPool />);
+    fireEvent.click(screen.getByTitle('Report'));
+    await act(async () => {});
+    expect(screen.getByRole('alert')).toHaveTextContent('Report not sent');
+    H.items = [item('reported', { createdAt: 124 })];
+    rerender(<ItemPool />);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
   it('calls addItem server admission (pending stamps are pinned by the server SDK tests)', () => {
     render(<ItemPool />);
     fireEvent.change(screen.getByPlaceholderText('Add a prompt…'), {

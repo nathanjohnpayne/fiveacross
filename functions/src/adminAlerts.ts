@@ -157,6 +157,7 @@ export interface AlertableDoc {
   status?: string;
   visionFlag?: string | null;
   reportCount?: number;
+  reportHideSuppressed?: boolean;
   /** A Prompt's own words — the only human-readable label an item carries. */
   text?: string;
   /** A Proof's Prompt text, denormalized onto the proof (`ProofDoc.itemText`). */
@@ -176,6 +177,7 @@ export interface AdminAlertDraft {
   status: string;
   visionFlag: string | null;
   reportCount: number;
+  reportHideSuppressed?: boolean;
 }
 
 /** The one queue-row constructor shared by every producer. Its expiry is a
@@ -276,6 +278,7 @@ export function alertsForWrite(
     status: after.status ?? 'unknown',
     visionFlag: typeof after.visionFlag === 'string' && after.visionFlag ? after.visionFlag : null,
     reportCount: typeof after.reportCount === 'number' ? after.reportCount : 0,
+    ...(after.reportHideSuppressed === true ? { reportHideSuppressed: true } : {}),
   };
   const drafts: AdminAlertDraft[] = [];
 
@@ -1427,6 +1430,7 @@ function toRecord(snap: AlertSnapshot): AdminAlertRecord | null {
     status: typeof data.status === 'string' ? data.status : 'unknown',
     visionFlag: typeof data.visionFlag === 'string' && data.visionFlag ? data.visionFlag : null,
     reportCount: typeof data.reportCount === 'number' ? data.reportCount : 0,
+    ...(data.reportHideSuppressed === true ? { reportHideSuppressed: true } : {}),
     createdAt: typeof data.createdAt === 'number' ? data.createdAt : 0,
   };
 }
@@ -1488,7 +1492,7 @@ export function currentRowFor(
   if (alert.kind === 'item-created') {
     // Approved, rejected or hidden since it was queued — the approval work is
     // done, whoever did it.
-    return status === 'pending' ? { ...alert, status, reportCount, visionFlag, label } : null;
+    return status === 'pending' ? { ...alert, status, reportCount, reportHideSuppressed: live.reportHideSuppressed === true, visionFlag, label } : null;
   }
   // A report or a moderation transition still needs eyes while the content is
   // in a moderation state OR still carries reports. A restore that also cleared
@@ -1502,6 +1506,7 @@ export function currentRowFor(
     kind: MODERATION_STATES_LIVE.includes(status) ? 'moderation' : 'content-reported',
     status,
     reportCount,
+    reportHideSuppressed: live.reportHideSuppressed === true,
     visionFlag,
     label,
   };

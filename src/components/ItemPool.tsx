@@ -13,6 +13,7 @@ import {
 } from '../data/mySuggestions';
 import { track } from '../analytics';
 import LoadingState from './LoadingState';
+import AsyncButton from './admin/AsyncButton';
 import { editionBrand } from '../editions';
 import { useAdultContent } from '../hooks/useAdultContent';
 import { EVENT_ID } from '../firebase';
@@ -546,7 +547,7 @@ export default function ItemPool() {
     }
   };
 
-  const report = (id: string) => {
+  const report = async (id: string, createdAt: number) => {
     if (!user) return;
     const now = Date.now();
     const reportingScope = scopeKey;
@@ -560,8 +561,8 @@ export default function ItemPool() {
       }, itemRateLimitRemainingMs(key, now));
       return;
     }
-    reportItem(id, eventId).catch(console.error);
-    track('report_item');
+    await reportItem(id, eventId, createdAt);
+    if (scopeRef.current === reportingScope) track('report_item');
   };
 
   return (
@@ -635,14 +636,16 @@ export default function ItemPool() {
                   {it.text}
                 </div>
               </div>
-              <button
+              <AsyncButton
+                key={`${scopeKey}:${it.id}:${it.createdAt}`}
                 className="iconbtn"
                 title="Report"
                 disabled={reportThrottled}
-                onClick={() => report(it.id)}
+                failureLabel="Report not sent. Wait a moment and try again online."
+                onAction={() => report(it.id, it.createdAt)}
               >
                 ⚑
-              </button>
+              </AsyncButton>
             </div>
           ))}
           {/* Own submissions (#210, extended #559): visible ONLY to their

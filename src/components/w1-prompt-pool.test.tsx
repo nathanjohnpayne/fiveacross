@@ -174,7 +174,7 @@ describe('client-side rate limit on Add (Phase 0, presentational only)', () => {
     expect(addItemMock).toHaveBeenCalledTimes(1);
 
     // The auto-clear timer fires once the window passes.
-    act(() => {
+    await act(async () => {
       vi.advanceTimersByTime(ITEM_RATE_LIMIT_MS);
     });
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
@@ -279,20 +279,18 @@ describe('client-side rate limit on Report (Phase 0, presentational only)', () =
     const reportButtons = () => screen.getAllByTitle('Report');
 
     // The limit is per-Player, not per-Prompt: reporting a SECOND, DIFFERENT
-    // item right after the first still hits the same throttle bucket. Unlike
-    // `add`, `report` has no `await` before its (fire-and-forget) write call,
-    // so both clicks' effects are fully synchronous — no microtask flush
-    // needed before asserting call counts.
+    // item right after the first still hits the same throttle bucket. Admission
+    // is synchronous; the accepted report stays busy until its write settles.
     fireEvent.click(reportButtons()[0]);
     fireEvent.click(reportButtons()[1]);
 
     expect(reportItemMock).toHaveBeenCalledTimes(1);
-    expect(reportItemMock).toHaveBeenCalledWith('i1', 'test-event');
+    expect(reportItemMock).toHaveBeenCalledWith('i1', 'test-event', undefined);
     expect(screen.getByRole('alert')).toHaveTextContent(/slow down/i);
     expect(reportButtons()[0]).toBeDisabled();
     expect(reportButtons()[1]).toBeDisabled();
 
-    act(() => {
+    await act(async () => {
       vi.advanceTimersByTime(ITEM_RATE_LIMIT_MS);
     });
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
@@ -300,6 +298,6 @@ describe('client-side rate limit on Report (Phase 0, presentational only)', () =
 
     fireEvent.click(reportButtons()[1]);
     expect(reportItemMock).toHaveBeenCalledTimes(2);
-    expect(reportItemMock).toHaveBeenLastCalledWith('i2', 'test-event');
+    expect(reportItemMock).toHaveBeenLastCalledWith('i2', 'test-event', undefined);
   });
 });

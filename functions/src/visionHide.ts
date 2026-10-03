@@ -245,7 +245,8 @@ export function visionVerdictWrite(visionFlag: string): Record<string, unknown> 
  *
  * Deliberately a STATE predicate, where the report-count path's snapshot gate is
  * a TRANSITION one (`shouldHideAtThreshold` needs "`reportCount` rose" to tell a
- * fresh crossing from an admin restore that left the count over the bar). Here
+ * fresh crossing from a handled report; restored incarnations also carry
+ * `reportHideSuppressed`). Here
  * the status carries that distinction on its own, and three properties fall out
  * of using one predicate at both the snapshot gate and the live write-time
  * re-confirm:
@@ -257,7 +258,8 @@ export function visionVerdictWrite(visionFlag: string): Record<string, unknown> 
  *     `safetyHide` marker and leaves `visionFlag` in place as the audit record of
  *     what the admin overrode. That doc is no longer `'flagged'`, so this path
  *     never re-hides it and the restore sticks — the same shape as the report
- *     path's restore, which survives because it leaves `reportCount` un-raised.
+ *     path's restore, which stamps `reportHideSuppressed` so new reports
+ *     remain Admin-visible without reversing that decision.
  *     The explicit `false` it writes is equally load-bearing: it is what keeps the
  *     re-hide arm off a genuinely restored Proof. A restored Proof is re-hidden
  *     only by a fresh scan (a re-upload re-flags it) or by an admin.

@@ -151,6 +151,13 @@ describe('client/functions parity — Most-Loved Photo eligibility (#560)', () =
     expect(award).toEqual(NO_AWARD);
   });
 
+  it('an admin-restored incarnation remains award-eligible after new distinct reports', () => {
+    const restored = P('restored', { reportCount: 8, reportHideSuppressed: true });
+    const award = both([restored], [H('fan', 'restored', 1_000)]);
+    expect(award.winners.map((w) => w.proofId)).toEqual(['restored']);
+    expect(award.heartCount).toBe(1);
+  });
+
   it('a Heart on a Moment never counts toward a Proof with the same id', () => {
     const award = both([P('p1')], [H('a', 'p1', 1_000, { targetKind: 'moment' })]);
     expect(award).toEqual(NO_AWARD);

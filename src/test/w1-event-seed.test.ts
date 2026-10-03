@@ -16,6 +16,7 @@ import {
   verifySeedPool,
 } from '../../scripts/seed.mjs';
 import { EVENT_SEED, ITEMS, ALL_ITEMS } from '../../scripts/seed-data/med-2026.mjs';
+import { isReportHidden } from '../data/moderation';
 
 type SeedItem = { text: string; spicy: boolean };
 type LiveDoc = {
@@ -438,6 +439,42 @@ describe('w1-event-seed: verifySeedPool drift check (#129 reopened)', () => {
     expect(verifySeedPool(withReportCount(1), ITEMS).ok).toBe(true);
     expect(verifySeedPool(withReportCount(3), ITEMS).ok).toBe(true);
     expect(verifySeedPool(withReportCount(4), ITEMS).ok).toBe(false);
+  });
+
+  it.each([4, 7])('accepts a restored seed Prompt with %s reports without hiding other drift', (reportCount) => {
+    const restored = liveFromCanonical().map((d) =>
+      d.text === 'Threesome' ? { ...d, reportCount, reportHideSuppressed: true } : d,
+    );
+    expect(verifySeedPool(restored, ITEMS).ok).toBe(true);
+    const hidden = restored.map((d) => d.text === 'Threesome' ? { ...d, status: 'hidden' } : d);
+    const report = verifySeedPool(hidden, ITEMS);
+    expect(report.ok).toBe(false);
+    expect(report.mismatched).toHaveLength(1);
+    expect(report.mismatched[0]).toMatchObject({ expectedStatus: 'active', actualStatus: 'hidden' });
+    expect(report.mismatched[0]).not.toHaveProperty('actualReportCount');
+  });
+
+  it('keeps the Node verifier visibility axis aligned with the canonical report predicate', () => {
+    const cases: Array<[number, number | undefined, boolean | undefined]> = [
+      [4, 4, undefined], [4, 4, false], [4, 4, true], [7, 4, true],
+      [3, 4, false], [7, 0, false], [7, -1, false], [7, NaN, false],
+    ];
+    for (const [reportCount, threshold, reportHideSuppressed] of cases) {
+      const live = liveFromCanonical().map((d) =>
+        d.text === 'Threesome' ? { ...d, reportCount, reportHideSuppressed } : d,
+      );
+      const report = verifySeedPool(live, ITEMS, threshold);
+      expect(report.ok).toBe(!isReportHidden(reportCount, threshold, reportHideSuppressed));
+    }
+  });
+
+  it('does not treat a truthy persisted suppression string as an Admin override', () => {
+    const live = liveFromCanonical().map((d) =>
+      d.text === 'Threesome' ? { ...d, reportCount: 4, reportHideSuppressed: 'true' } : d,
+    );
+    const report = verifySeedPool(live, ITEMS);
+    expect(report.ok).toBe(false);
+    expect(report.mismatched[0]).toMatchObject({ reportHideThreshold: 4, actualReportCount: 4 });
   });
 
   it('prints a roster-safe reconcile command for the same event and project', () => {
