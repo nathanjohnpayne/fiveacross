@@ -35,4 +35,19 @@ describe('submitPrompt callable boundary', () => {
     await expect(submitPromptCallable(request(good, 'player'), false, { ...deps, logger })).rejects.toMatchObject({ code: 'internal', message: 'Prompt submission failed; try again with signal.' });
     expect(logger.error).toHaveBeenCalledWith('submitPrompt failed', { code: 'unknown' });
   });
+  it('returns fixed signal-required retry guidance for an invalid server clock without writes', async () => {
+    const query = { where: vi.fn(), limit: vi.fn() };
+    query.where.mockReturnValue(query); query.limit.mockReturnValue(query);
+    const get = vi.fn().mockResolvedValueOnce({ exists: true, data: () => ({}) })
+      .mockResolvedValueOnce({ exists: false }).mockResolvedValueOnce({ data: () => undefined })
+      .mockResolvedValueOnce({ size: 0 });
+    const create = vi.fn(); const set = vi.fn();
+    const deps = { db: { doc: vi.fn(path => ({ path })), collection: vi.fn(() => query),
+      runTransaction: vi.fn(fn => fn({ get, create, set })) } as unknown as Firestore, now: () => Number.NaN };
+    await expect(submitPromptCallable(request(good, 'player'), false, deps)).rejects.toMatchObject({
+      code: 'internal', message: 'Prompt submission failed; try again with signal.',
+    });
+    expect(create).not.toHaveBeenCalled(); expect(set).not.toHaveBeenCalled();
+  });
+
 });

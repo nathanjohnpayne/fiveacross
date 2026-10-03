@@ -71,7 +71,7 @@ export async function submitPromptCore(
     }
     const createdAt = deps.now();
     if (!Number.isSafeInteger(createdAt) || createdAt < 0) {
-      throw new HttpsError('internal', 'Prompt submission failed; try again.');
+      throw new HttpsError('internal', 'Prompt submission failed; try again with signal.');
     }
     const target = defaultTargetDayIndex(Array.isArray(event.days) ? event.days : [], createdAt);
     tx.create(itemRef, {
