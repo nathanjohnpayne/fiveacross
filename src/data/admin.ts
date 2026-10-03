@@ -2094,8 +2094,8 @@ async function resolve(
     // steer it. Anything else is left exactly as it stands: another Player's
     // Proof (a hidden or pending one must not reach the Feed through somebody
     // else's Claim), an already-active one (publishing it would be a no-op), a
-    // report- or admin-hidden one (its lift is `Clear reports` / `Restore`, not
-    // a confirm), and a missing one (a merge `set` would CREATE a ghost Proof
+    // report- or admin-hidden one (its lift is `Restore`, plus `Clear reports`
+    // for a report-threshold hide, never a confirm), and a missing one (a merge `set` would CREATE a ghost Proof
     // carrying nothing but a status). The Claim still resolves and the Mark is
     // still confirmed in every case.
     if (claimProofRef) {

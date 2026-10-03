@@ -27,11 +27,12 @@
  *     that marker and the status have come apart (see `visionHideAction`): it
  *     backfills the marker onto an extreme/illegal Proof that reached `'hidden'`
  *     without one, and re-hides an `'active'` Proof whose marker still stands.
- *     The marker — not the status — is what holds the media through a claim
- *     confirm, so an admin who hides a flagged row before the trigger reaches it
- *     must not thereby demote a safety hide to a plain one, and no client, however
- *     stale its cached bundle, may publish a Proof whose hold the server still
- *     records.
+ *     A current claim confirm already refuses anything not still `'pending'`; the
+ *     marker is what the re-hide arm keys on, so it is what keeps a hold
+ *     enforceable against a cached pre-gate client that publishes directly. An
+ *     admin who hides a flagged row before the trigger reaches it must therefore
+ *     not demote a safety hide to a plain one, and no client, however stale its
+ *     cached bundle, may keep public a Proof whose hold the server still records.
  *
  * Extreme/illegal ONLY (ADR 0004). The app is intentionally racy, so the trigger
  * is an ALLOWLIST of the producer's extreme verdicts (`violence`, `extreme`) —
@@ -369,9 +370,11 @@ export function visionHideWrite(action: VisionHideAction): Record<string, unknow
  * path (#43 round 2 F1), so a delayed or retried trigger can never act on a stale
  * event snapshot:
  *
- *   - an admin who Restored (`'active'`) or Hid the Proof by hand since the
- *     trigger fired → no-op, so the admin's decision is not silently reverted
- *     and no marker is stamped on a hide the admin owns;
+ *   - an admin who Restored (`'active'`, marker `false`) since the trigger fired
+ *     → no-op, so the admin's decision is not silently reverted; an admin
+ *     hand-Hide is a no-op when it already carries the marker (a current
+ *     console's `hideProof` writes it) and is backfilled when it does not, unless
+ *     the marker is the explicit `false` a Restore left;
  *   - a Proof DELETED since the snapshot → no-op via `tx.update` on a missing
  *     doc, never a re-creating `set`;
  *   - a `visionFlag` no longer in the allowlist → no-op;

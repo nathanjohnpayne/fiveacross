@@ -679,7 +679,8 @@ describe('applyPendingVisionScan — the parked verdict lands when the Proof app
     const { db, store } = fakeDb({ [PROOF]: created(), [SCAN]: { visionFlag: 'racy', scannedAt: 5, storagePath: MEDIA } });
     expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(true);
     expect(store[PROOF]).toMatchObject({ status: 'flagged', visionFlag: 'racy' });
-    // …and marker-less, because nothing racy ever earns a safety hold (ADR 0004).
+    // …and marker-less, because raciness never earns the marker or an automatic
+    // hide (ADR 0004); the 'flagged' status still holds it at confirm until review.
     expect(store[PROOF]).not.toHaveProperty(SAFETY_HIDE_MARKER);
     expect(visionHideAction(store[PROOF] as VisionFlaggedDoc)).toBe(null);
   });
@@ -785,7 +786,7 @@ describe('visionVerdictWrite — the hold is stamped WITH the verdict (#1143)', 
     }
   });
 
-  it('leaves every other verdict marker-less — nothing racy ever earns a hold (ADR 0004)', () => {
+  it('leaves every other verdict marker-less — raciness never earns the marker (ADR 0004)', () => {
     for (const flag of ['racy', 'adult', 'spoof', 'medical', 'VIOLENCE', ' violence']) {
       expect(visionVerdictWrite(flag)).toEqual({ status: 'flagged', visionFlag: flag });
       expect(visionVerdictWrite(flag)).not.toHaveProperty(SAFETY_HIDE_MARKER);
@@ -839,7 +840,7 @@ describe('visionVerdictWrite — the hold is stamped WITH the verdict (#1143)', 
     expect(safetyHideStands({ safetyHide: flagged.safetyHide })).toBe(true);
   });
 
-  it('leaves a racy flag exactly as it was — flagged for admins, held by nobody, hidden by nobody', async () => {
+  it('leaves a racy flag exactly as it was — flagged for admins, no marker, hidden by nobody', async () => {
     const { db, store } = fakeDb({ [PROOF]: { uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: null } });
     await writeVisionVerdict(db, 'e', 'p1', 'racy', MEDIA, 5);
     expect(store[PROOF]).toEqual({ uid: 'u1', storagePath: MEDIA, status: 'flagged', visionFlag: 'racy' });
