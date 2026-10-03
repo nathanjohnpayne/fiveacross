@@ -907,7 +907,8 @@ export const MAX_PERSISTED_MOST_LOVED_WINNERS = 100;
 
 /** Local mirror of `src/data/moderation.ts`'s `isReportHidden` (this module
  *  stays decoupled from the app package, like `autohide.ts`/`unlockDay.ts`).
- *  True iff `reportCount` has REACHED a POSITIVE threshold; fails OPEN for a
+ *  True iff suppression is not true and `reportCount` has REACHED a POSITIVE
+ *  threshold; fails OPEN for a
  *  missing/non-positive/NaN threshold. */
 function mostLovedReportHidden(reportCount: number, threshold: number | undefined, suppressed?: boolean): boolean {
   return suppressed !== true && typeof threshold === 'number' && threshold > 0 && reportCount >= threshold;

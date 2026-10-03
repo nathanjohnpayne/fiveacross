@@ -615,7 +615,7 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
 
   // The ADR 0004 Phase 0 community auto-hide threshold, read from the event doc so
   // a frozen card is dealt from the SAME pool a Player sees live (useItems): a
-  // Prompt whose reportCount has reached a POSITIVE reportHideThreshold is hidden
+  // Unsuppressed Prompt whose reportCount reaches a POSITIVE reportHideThreshold is hidden
   // everywhere, so it must never land on a new Player's board (Codex P2, PR #107
   // finding 1). One extra event-doc read, join-path only (returning Players
   // early-return above) and fetched in the SAME Promise.all as the pool + profile,
