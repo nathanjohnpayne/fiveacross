@@ -776,6 +776,24 @@ describe('server-authoritative Prompt submission retries (#1311)', () => {
     await waitFor(() => expect(input).toHaveValue(''));
     expect(H.addItem.mock.calls[1][5]).toBe(id);
   });
+  it('asks for the submitting account after an auth mismatch and retries with the same owned ID', async () => {
+    H.addItem.mockRejectedValueOnce(Object.assign(new Error('private provider auth details'), { code: 'functions/unauthenticated' }))
+      .mockImplementationOnce(async (...args: unknown[]) => ({ id: args[5], targetDayIndex: 2 }));
+    render(<ItemPool />);
+    const input = screen.getByPlaceholderText(/add a prompt/i);
+    fireEvent.change(input, { target: { value: 'Keep my account draft' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/sign.in changed.*account that started this Prompt/i);
+    expect(screen.getByRole('alert')).not.toHaveTextContent(/private provider|ask your host|try again with signal/i);
+    expect(input).toHaveValue('Keep my account draft');
+    expect(track).not.toHaveBeenCalledWith('prompt_suggestion_submitted', expect.anything());
+    const first = H.addItem.mock.calls[0];
+    expect(first[0]).toBe('u1');
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await waitFor(() => expect(input).toHaveValue(''));
+    expect(H.addItem.mock.calls[1][0]).toBe('u1');
+    expect(H.addItem.mock.calls[1][5]).toBe(first[5]);
+  });
   it('a changed draft gets a new ID and pending calls cannot double-submit', async () => {
     let reject!: (error: Error) => void;
     H.addItem.mockReturnValueOnce(new Promise((_, r) => { reject = r; }));

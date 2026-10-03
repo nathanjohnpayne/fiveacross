@@ -314,7 +314,7 @@ describe('addItem — server-owned target acknowledgment (#1311)', () => {
     callableMock.mockResolvedValue({ data: { id: 'retry-id', targetDayIndex: 4 } });
     expect(await addItem('u1', '  Prompt  ', false, undefined, 'event-a', 'retry-id')).toEqual({ id: 'retry-id', targetDayIndex: 4 });
     expect(httpsCallableMock).toHaveBeenCalledWith(expect.anything(), 'submitPrompt');
-    expect(callableMock).toHaveBeenCalledWith({ eventId: 'event-a', itemId: 'retry-id', text: 'Prompt', spicy: false });
+    expect(callableMock).toHaveBeenCalledWith({ expectedUid: 'u1', eventId: 'event-a', itemId: 'retry-id', text: 'Prompt', spicy: false });
     expect(getDocMock).not.toHaveBeenCalled();
     expect(addDocMock).not.toHaveBeenCalled();
   });

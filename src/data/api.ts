@@ -3160,17 +3160,13 @@ async function runReconcileEchoes(
   };
 }
 
-// --- Phase 0 client-side rate limiting (add / report a Prompt, #28) ---
+// --- Presentational client cadence (add / report a Prompt, #28) ---
 //
-// No Cloud Functions exist yet (ADR 0004's Phase 0 posture), so this guard is
-// CLIENT-SIDE and PRESENTATIONAL ONLY — it throttles the honest common case
-// (a double-tap, a fast re-submit) so the pool doesn't get spammed by an
-// enthusiastic or fat-fingered Player. It is trivially bypassable by a
-// motivated caller (a second tab, a raw network call) and is NOT a security
-// boundary; server-authoritative rate limiting (a Function or rules-enforced
-// quota) is a Phase 1 concern — the same deferral ADR 0004 makes for the
-// reactive-moderation hide. Module-scope state is fine for a client-only
-// guard, same as `markChains` above — `Date.now()` is allowed in app code.
+// This honest-client guard throttles double taps and fast re-submits. Another
+// tab or a raw caller can bypass it, so it grants no security guarantee.
+// Prompt pending capacity is enforced separately by submitPrompt (ADR 0017);
+// its cap does not replace this short UI cadence. Module state and Date.now()
+// are appropriate for this presentational guard, like markChains above.
 // Keyed by a caller-supplied string (`ItemPool.tsx` keys by
 // `${action}:${uid}`) rather than one global bucket, so two different
 // signed-in identities sharing a browser never share a throttle window.
@@ -3226,11 +3222,12 @@ export interface AddItemResult {
 /** Submit with signal; callable admission, stamps and routing are authoritative.
  * No Firestore pending create is queued. ItemPool retains the same request ID
  * and typed text on a failed response so a lost ACK can be retried idempotently.
- * uid remains the caller attribution seam; the callable uses Firebase Auth.
+ * uid is the captured account intent; the server compares it with Firebase Auth
+ * before admission, and derives ownership solely from that authenticated UID.
  * The old target argument is retained only to reject stale override callers.
  */
 export async function addItem(
-  _uid: string,
+  uid: string,
   text: string,
   spicy = false,
   targetDayIndex?: number,
@@ -3243,7 +3240,7 @@ export async function addItem(
     throw new Error('addItem: targetDayIndex is server-owned; omit the override.');
   }
   const submit = httpsCallable<SubmitPromptRequest, unknown>(functions, 'submitPrompt');
-  const { data } = await submit({ eventId, itemId, text: trimmed.slice(0, 80), spicy });
+  const { data } = await submit({ expectedUid: uid, eventId, itemId, text: trimmed.slice(0, 80), spicy });
   // SDK result generics do not validate wire data. Never clear a draft or track
   // success for a malformed/mismatched response; retry keeps the owned ID.
   if (!data || typeof data !== 'object' || Array.isArray(data)) {

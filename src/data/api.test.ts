@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// specs/d15-approvals.md, data layer: addItem sends a content-only callable
+// specs/d15-approvals.md, data layer: addItem sends content and captured identity in a callable
 // payload and never queues a pending Firestore create. These mocked wire checks
-// also pin captured Event/retry identity. Actual server pending/main stamps and
+// also pin captured account/Event/retry identity. Actual server pending/main stamps and
 // admission are covered by tests/rules/community-prompt-admission.test.ts.
 
 type Ref = { __kind: 'doc' | 'collection'; id?: string; path: string };
@@ -32,10 +32,8 @@ vi.mock('firebase/firestore', async (importOriginal) => {
       };
       return { ...ref, withConverter: () => ref } as Ref;
     },
-    // `addItem` reads the Event's schedule to resolve a default target Day
-    // (#557). A read FAILURE now propagates rather than falling back to an
-    // untargeted write, so this stand-in has to answer — reporting no Event doc,
-    // which is the schedule-less case these tests already assume.
+    // Other helpers use document reads; addItem never reads a client schedule
+    // or queues a pending create because callable admission owns both.
     getDoc: () => Promise.resolve({ exists: () => false, data: () => undefined }),
     addDoc: (...args: unknown[]) => addDocMock(...args),
     getDocsFromCache: (...args: unknown[]) => getDocsFromCacheMock(...args),
@@ -59,7 +57,23 @@ beforeEach(() => {
 describe('addItem — server admission wire (#1311)', () => {
   it('submits content and request identity without client authority stamps', async () => {
     await addItem('u1', 'Wore Crocs to dinner', false, undefined, 'med-2026', 'stable-id');
-    expect(submitMock).toHaveBeenCalledWith({ eventId: 'med-2026', itemId: 'stable-id', text: 'Wore Crocs to dinner', spicy: false });
+    expect(submitMock).toHaveBeenCalledWith({ expectedUid: 'u1', eventId: 'med-2026', itemId: 'stable-id', text: 'Wore Crocs to dinner', spicy: false });
+    expect(addDocMock).not.toHaveBeenCalled();
+  });
+  it('keeps the captured UID when callable auth headers resolve after an account switch', async () => {
+    let authUid = 'u1';
+    let release!: () => void;
+    const headersReady = new Promise<void>(resolve => { release = resolve; });
+    const mismatch = Object.assign(new Error('sign-in changed'), { code: 'functions/unauthenticated' });
+    submitMock.mockImplementationOnce(async input => {
+      await headersReady;
+      if ((input as { expectedUid?: string }).expectedUid !== authUid) throw mismatch;
+      return { data: { id: input.itemId } };
+    });
+    const response = addItem('u1', 'Keep this draft', false, undefined, 'event-a', 'retry-a');
+    authUid = 'u2'; release();
+    await expect(response).rejects.toBe(mismatch);
+    expect(submitMock).toHaveBeenCalledWith(expect.objectContaining({ expectedUid: 'u1', itemId: 'retry-a' }));
     expect(addDocMock).not.toHaveBeenCalled();
   });
   it('preserves the spicy flag', async () => {

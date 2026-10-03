@@ -534,6 +534,8 @@ export default function ItemPool() {
         setSubmission({ scope: submittingScope, busy: false,
           error: code === 'functions/resource-exhausted'
             ? 'You have 10 Prompts waiting for review. Try again after some are reviewed.'
+            : code === 'functions/unauthenticated'
+              ? 'Your sign-in changed. Sign in with the account that started this Prompt and try again.'
             : code === 'functions/failed-precondition' || code === 'functions/permission-denied'
               ? 'Prompt not submitted. Your text is still here. Ask your host to check this Event and its submission settings.'
             : 'Prompt not submitted. Your text is still here. Try again with signal.' });

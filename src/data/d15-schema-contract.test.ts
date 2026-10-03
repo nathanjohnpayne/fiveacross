@@ -6,7 +6,7 @@ import type { BoardDoc, EventDoc, ItemDoc, MomentDoc } from '../types';
 import { THEMES } from '../theme/themes';
 import { hasCanonicalMomentId } from '../hooks/useData';
 
-// addItem sends content-only callable input; the server SDK suite pins its
+// addItem sends content and captured submitting identity; the server SDK suite pins its
 // pending/main stamps. Mock that transport while keeping Firestore converter
 // helpers real for the independent schema and Moment-filter assertions.
 
@@ -257,12 +257,12 @@ describe('hasCanonicalMomentId (Phase 1.5 finale beats render)', () => {
 });
 
 describe('addItem (server-owned Phase 1.5 pool stamp)', () => {
-  it('sends content only; pending/main pool authority belongs to submitPrompt', async () => {
+  it('sends content and captured identity; pending/main pool authority belongs to submitPrompt', async () => {
     const { addItem } = await import('./api');
     submitMock.mockClear();
     addDocMock.mockClear();
     await addItem('player-uid', 'Cabin karaoke incident', true, undefined, 'd15-test-event', 'stable');
-    expect(submitMock).toHaveBeenCalledWith({ eventId: 'd15-test-event', itemId: 'stable', text: 'Cabin karaoke incident', spicy: true });
+    expect(submitMock).toHaveBeenCalledWith({ expectedUid: 'player-uid', eventId: 'd15-test-event', itemId: 'stable', text: 'Cabin karaoke incident', spicy: true });
     expect(addDocMock).not.toHaveBeenCalled();
   });
 });
