@@ -801,6 +801,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (event.key === EXPLICIT_LOGOUT_KEY) {
         // A new same-origin tab logout supersedes our local sign-in choice.
         explicitLogoutRef.current = event.newValue === '1' ? true : null;
+        if (event.newValue === '1') {
+          // Remote logout retires the same continuation and coalescing slot as
+          // this tab's logout; the old finally cannot erase a fresh attempt.
+          signInAttemptRef.current = null;
+          signInAttemptOwnerRef.current = null;
+        }
       }
     };
     window.addEventListener('storage', onLogoutStorage);

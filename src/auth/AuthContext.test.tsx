@@ -2329,6 +2329,34 @@ describe('AuthContext deal-error hardening', () => {
     expect(mocks.signOut).toHaveBeenCalledOnce();
   });
 
+  it('retires a pending popup on same-origin logout and preserves a fresh attempt', async () => {
+    let signIn!: (acknowledged: boolean) => Promise<void>;
+    function Controls() {
+      ({ signIn } = useAuth());
+      return null;
+    }
+    const retiredPopup = deferred<{ user: typeof FAKE_USER }>();
+    const freshPopup = deferred<{ user: typeof FAKE_USER }>();
+    const authMock = mockedAuth as { currentUser?: typeof FAKE_USER };
+    authMock.currentUser = FAKE_USER;
+    mocks.signInWithPopup.mockReturnValueOnce(retiredPopup.promise).mockReturnValueOnce(freshPopup.promise);
+    render(<AuthProvider><Controls /></AuthProvider>);
+    let retired!: Promise<void>;
+    await act(async () => { retired = signIn(true); await Promise.resolve(); });
+    localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
+    window.dispatchEvent(new StorageEvent('storage', { key: EXPLICIT_LOGOUT_KEY, newValue: '1' }));
+    let fresh!: Promise<void>;
+    await act(async () => { fresh = signIn(false); await Promise.resolve(); });
+    expect(mocks.signInWithPopup).toHaveBeenCalledTimes(2);
+    await act(async () => { retiredPopup.settle({ user: FAKE_USER }); await retired; });
+    expect(mocks.attestAdult).not.toHaveBeenCalled();
+    expect(mocks.track.mock.calls.filter(([event]) => event === 'login')).toHaveLength(0);
+    expect(signIn(false)).toBe(fresh);
+    await act(async () => { freshPopup.settle({ user: FAKE_USER }); await fresh; });
+    expect(mocks.track.mock.calls.filter(([event]) => event === 'login')).toHaveLength(1);
+    delete authMock.currentUser;
+  });
+
   it('rejects a persisted logout session callback even when SDK cleanup fails', async () => {
     localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
     mocks.signOut.mockRejectedValueOnce(new Error('SDK cleanup failed'));
