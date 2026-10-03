@@ -248,8 +248,8 @@ function isSameOriginPath(path: string, targetOrigin: string): boolean {
  * Everything that can fail happens BEFORE the navigation: the verifier is
  * generated, hashed and confirmed readable back out of storage, and only then
  * does the browser leave. Ordering it the other way round would discover
- * unavailable storage after a code had been minted and spent, which is both
- * unrecoverable and maximally confusing.
+ * unavailable storage after a code had been minted without its usable verifier.
+ * Minting does not consume the code, but this client requires a fresh attempt.
  *
  * Returns `false` if it could not start; the caller surfaces that rather than
  * navigating.

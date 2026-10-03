@@ -41,7 +41,7 @@ import {
   type ProofStorageDeleteInput,
   type SweepLeaseOutcome,
 } from './proofStorageDeletes';
-import { exchangeHandoff, mintHandoff, type HandoffFirestore } from './authHandoff';
+import { createExchangeAdmission, exchangeHandoff, mintHandoff, type HandoffFirestore } from './authHandoff';
 import {
   manualUnlockNow,
   parseUnlockDayNowPayload,
@@ -203,6 +203,8 @@ export const mintAuthHandoff = onCall(
  * "expired" from "already used" from "no such code" would learn whether a
  * guessed code was ever real.
  */
+const admitHandoffExchange = createExchangeAdmission();
+
 export const exchangeAuthHandoff = onCall(
   { maxInstances: 20, timeoutSeconds: 30, serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
   async (request) => {
@@ -221,6 +223,7 @@ export const exchangeAuthHandoff = onCall(
         now: () => Date.now(),
         timestamp: (ms) => Timestamp.fromMillis(ms),
         requireAppCheck: AUTH_HANDOFF_APP_CHECK.value(),
+        admitRequest: admitHandoffExchange,
         createCustomToken: (uid) => getAuth().createCustomToken(uid),
         // Fails closed: `getUser` rejects for a deleted account, and a lookup
         // that errors must not be read as "the account is fine".
