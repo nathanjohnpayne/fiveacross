@@ -9,6 +9,7 @@ import { boardFirstBingoAt, completedLines, countMarked, isBlackout, foldDayStat
 import { cellsPatch, changedCells, cellsFromData } from '../game/cells';
 import { cellsMergeSet } from './cellsMerge';
 import { directMarkAnalyticsRequest } from './markAnalytics';
+import { supportedDayIndex } from './eventLimits';
 import { isEventArchived, isEventArchiving } from './eventArchive';
 import { reportContent } from './reports';
 import type {
@@ -439,22 +440,25 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
     // overwriting markedAt with `now` would reorder it by proof-attach time (Codex
     // P2, PR #87). Preserve an existing marker's original markedAt — refreshing
     // uid/displayName is fine — and stamp `now` only when no marker exists yet (a
-    // fresh mark, or a legacy pre-Tally mark that never had one). The merge also
-    // preserves an existing Day/feed stamp while this write refreshes the
-    // canonical path Event, Prompt text, and supplied Day identity (#1072).
+    // fresh mark, or a legacy pre-Tally mark that never had one). A full accepted-fields replacement
+    // removes malformed legacy extras while preserving a valid prior timestamp
+    // and Day when the caller supplies no Day; the captured path Event, current
+    // slot, Prompt text and supplied Day identity remain canonical (#1072).
     if (markerRef) {
-      const priorMarkedAt = (markerSnap?.data() as { markedAt?: unknown } | undefined)?.markedAt;
+      const priorMarker = markerSnap?.data() as { markedAt?: unknown; dayIndex?: unknown } | undefined;
+      const priorMarkedAt = priorMarker?.markedAt;
+      const markerDay = typeof dayIndex === 'number' ? dayIndex : priorMarker?.dayIndex;
       tx.set(
         markerRef,
         {
           uid,
           eventId,
           displayName: markerDisplayName(displayName, playerSnap.data()?.displayName),
-          markedAt: typeof priorMarkedAt === 'number' ? priorMarkedAt : now,
+          markedAt: typeof priorMarkedAt === 'number' && Number.isSafeInteger(priorMarkedAt) && priorMarkedAt > 0 && priorMarkedAt <= now + 60_000 ? priorMarkedAt : now,
           itemText,
-          ...(typeof dayIndex === 'number' ? { dayIndex } : {}),
+          cellIndex,
+          ...(supportedDayIndex(markerDay) ? { dayIndex: markerDay } : {}),
         },
-        { merge: true },
       );
     }
     if (pendingClaim) {

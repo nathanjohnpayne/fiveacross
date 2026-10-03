@@ -1236,11 +1236,11 @@ export interface TallyEntry {
   markedAt: number; // ms epoch
   // Day-scoped Tally Cards (#216): the Mark's own attributes, stamped so the
   // Feed can group markers of the SAME `(itemId, dayIndex)` into one live Tally
-  // Card and label it. Optional/back-compat — legacy per-Prompt markers written
+  // Card. Labels come from the current visible Prompt read boundary, never marker text. Optional/back-compat — legacy per-Prompt markers written
   // before #216 carry neither, so they contribute to the Square badge (`useTally`
   // counts every marker of the Prompt) but never form a day-scoped Feed card.
-  // `itemText` is denormalized here (the marker path carries only `itemId`) so a
-  // Tally Card can render "…got 'Balcony or porthole photo'" without a pool read.
+  // `itemText` remains bounded compatibility metadata for grouping/readability;
+  // the Feed joins the itemId to its trusted visible Prompt map before rendering.
   dayIndex?: number;
   itemText?: string;
 }

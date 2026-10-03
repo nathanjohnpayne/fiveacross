@@ -1051,6 +1051,17 @@ describe('setMark — mark-time propagation (spec § Mark-time)', () => {
     expect(H.txDelete.mock.calls.some((c) => segs(c)[2] === 'tally')).toBe(true);
   });
 
+  it('#1414: re-pointing replaces legacy extra fields with the bounded canonical marker', async () => {
+    seedRepeats();
+    H.markerServer.set('shared', { ...serverMarker(), legacyExtra: 'x'.repeat(2000), displayName: 'N'.repeat(200) });
+    await markShared({ nextMarked: false, echoMarks: false });
+    commitDay2Unmark();
+    await settle();
+    const write = markerTxWrite()!;
+    expect(write[1]).toEqual({ uid: 'u1', eventId: 'test-event', displayName: 'N'.repeat(100), dayIndex: 3, cellIndex: 8, markedAt: 30, itemText: 'Prompt 8' });
+    expect(write[2]).toBeUndefined(); // complete replacement removes unknown fields
+  });
+
   it('#1360: the server pass ignores a board whose stored owner does not match its path', async () => {
     seedRepeats();
     // Day 3 carries the latest Mark but its stored uid is someone else's.
@@ -1635,6 +1646,36 @@ describe('reshuffleBoard — the post-Reshuffle re-deal echo (spec § Reshuffle 
 });
 
 describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
+  it.each([0, 1.5, 1_700_000_060_001, NaN])('normalizes malformed carrier timestamp %s in first and delayed repair chunks', async (badStamp) => {
+    const now = 1_700_000_000_000;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    const ids = (index: number) => `malformed-repair-${index}`;
+    const cells = card(ids, Object.fromEntries(Array.from({ length: 25 }, (_, index) => [index, {
+      marked: true, markedAt: index === 0 || index === 20 ? badStamp : 1, status: 'confirmed' as const,
+    }])));
+    H.dayBoards.set(0, { uid: 'u1', seed: 71, dayIndex: 0, cells });
+    H.player = { uid: 'u1', displayName: 'Alice' };
+    const itemIds = cells.filter((cell) => !cell.free).map((cell) => cell.itemId!);
+    const witnesses = new Map(itemIds.map((id) => [`gcb:echo-marker-repair:${EVENT_ID}:u1:${id}`, '1']));
+    itemIds.forEach((id) => H.markerCache.set(id, false));
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => witnesses.get(key) ?? null,
+      setItem: (key: string, value: string) => witnesses.set(key, value),
+      removeItem: (key: string) => witnesses.delete(key),
+    });
+    try {
+      await reconcileEchoes({ uid: 'u1', dayIndex: 0, dayIndexes: [0], statsFrozen: true });
+      await vi.waitFor(() => expect(H.batchSet.mock.calls.filter(isMarkerWrite)).toHaveLength(24));
+      const writes = H.batchSet.mock.calls.filter(isMarkerWrite);
+      for (const index of [0, 20]) {
+        expect(writes.find((call) => segs(call)[3] === ids(index))![1]).toMatchObject({ markedAt: now });
+      }
+      expect(writes.find((call) => segs(call)[3] === ids(1))![1]).toMatchObject({ markedAt: 1 });
+      expect(cells[0].markedAt).toBe(badStamp); // the persisted Board/credit is untouched
+      expect(H.batchCommit).toHaveBeenCalledTimes(2);
+    } finally { clock.mockRestore(); vi.unstubAllGlobals(); }
+  });
+
   const seedReconcile = () => {
     H.dayBoards.set(1, {
       uid: 'u1',
@@ -1673,7 +1714,7 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
     expect(writeBatch).not.toHaveBeenCalled();
   });
 
-  it('emits the full supported reconcile batch once: one Board plus all 24 marker repairs', async () => {
+  it.each(['complete', 'first-rejected', 'tail-rejected'])('bounds 24 marker repairs, gates acknowledgments and retries partial work: %s', async (outcome) => {
     const dayIndexes = Array.from({ length: MAX_DAYS }, (_unused, index) => index);
     const targetDayIndex = MAX_DAYS - 1;
     const itemIdAt = (index: number) => `max-reconcile-${index}`;
@@ -1716,15 +1757,22 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
       removeItem: (key: string) => repairWitnesses.delete(key),
     });
     const { writeBatch } = await import('firebase/firestore');
+    let resolveFirst!: () => void;
+    let rejectFirst!: (error: Error) => void;
+    let resolveTail!: () => void;
+    let rejectTail!: (error: Error) => void;
+    const first = new Promise<void>((resolve, reject) => { resolveFirst = resolve; rejectFirst = reject; });
+    const tail = new Promise<void>((resolve, reject) => { resolveTail = resolve; rejectTail = reject; });
+    H.batchCommit.mockImplementationOnce(() => first).mockImplementationOnce(() => tail);
+    const flush = async () => { for (let turn = 0; turn < 40; turn++) await Promise.resolve(); };
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     try {
       const result = await reconcileEchoes({
         uid: 'u1',
         dayIndex: targetDayIndex,
         dayIndexes,
-        // Keep this write-shape test focused on the batch: post-freeze,
-        // non-ceremonial reconciliation has no stats or honor continuation.
-        statsFrozen: true,
+        statsFrozen: false,
       });
 
       expect(result).toMatchObject({ changed: true, complete: true });
@@ -1735,25 +1783,45 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
       const boardWrites = H.batchSet.mock.calls.filter((call) => isDayBoardWrite(call, targetDayIndex));
       const markerWrites = H.batchSet.mock.calls.filter(isMarkerWrite);
       expect(boardWrites).toHaveLength(1);
-      expect(markerWrites).toHaveLength(24);
-      expect(markerWrites.map((call) => segs(call)[3]).sort()).toEqual([...carrierItemIds].sort());
+      expect(markerWrites).toHaveLength(16);
+      expect(markerWrites.map((call) => segs(call)[3]).sort()).toEqual(carrierItemIds.slice(0, 16).sort());
       expect(markerWrites.every((call) => (call[1] as { dayIndex?: number }).dayIndex === targetDayIndex)).toBe(
         true,
       );
       expect(markerWrites.every((call) => (call[1] as { eventId?: string }).eventId === EVENT_ID)).toBe(true);
-      expect(H.batchSet).toHaveBeenCalledTimes(25);
+      expect(H.batchSet).toHaveBeenCalledTimes(17);
 
-      // Model Firestore's latency-compensated cache after that atomic commit.
-      // A retry must see every repair and the Echo as standing, then emit no
-      // duplicate batch — proving the 25 writes are neither truncated nor
-      // silently replayed.
-      H.dayBoards.set(targetDayIndex, {
-        uid: 'u1',
-        seed: 909,
-        dayIndex: targetDayIndex,
-        cells: openedAfter,
-      });
-      for (const itemId of carrierItemIds) H.markerCache.set(itemId, true);
+      expect([...repairWitnesses.keys()].filter((key) => key.includes(':echo-marker-repair:')).length).toBe(24);
+      expect(H.txGet).not.toHaveBeenCalled(); // no stats continuation before all acks
+      if (outcome === 'first-rejected') {
+        rejectFirst(new Error('stale Board rejected'));
+        await flush();
+        expect(H.batchCommit).toHaveBeenCalledTimes(1); // tail cannot publish
+        expect([...repairWitnesses.keys()].filter((key) => key.includes(':echo-marker-repair:')).length).toBe(24);
+        // The unused tail mock belongs to the retired attempt.
+        H.batchCommit.mockReset().mockImplementation(async () => {});
+      } else {
+        resolveFirst();
+        await flush();
+        expect(H.batchCommit).toHaveBeenCalledTimes(2);
+        expect(H.batchSet.mock.calls.filter(isMarkerWrite)).toHaveLength(24);
+        expect([...repairWitnesses.keys()].filter((key) => key.includes(':echo-marker-repair:')).length).toBe(24); // not forgotten after just first ack
+        expect(H.txGet).not.toHaveBeenCalled();
+        H.dayBoards.set(targetDayIndex, { uid: 'u1', seed: 909, dayIndex: targetDayIndex, cells: openedAfter });
+        const acknowledgedIds = outcome === 'complete' ? carrierItemIds : carrierItemIds.slice(0, 16);
+        for (const itemId of acknowledgedIds) H.markerCache.set(itemId, true);
+        if (outcome === 'complete') {
+          resolveTail();
+          await flush();
+          expect([...repairWitnesses.keys()].filter((key) => key.includes(':echo-marker-repair:')).length).toBe(0);
+          expect(H.txGet).toHaveBeenCalled();
+        } else {
+          rejectTail(new Error('tail repair rejected'));
+          await flush();
+          expect([...repairWitnesses.keys()].filter((key) => key.includes(':echo-marker-repair:')).length).toBe(24);
+          expect(H.txGet).not.toHaveBeenCalled();
+        }
+      }
       vi.clearAllMocks();
 
       const retry = await reconcileEchoes({
@@ -1763,19 +1831,83 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
         statsFrozen: true,
       });
 
-      expect(retry).toEqual({
-        changed: false,
-        bingoTransition: false,
-        blackoutTransition: false,
-        complete: true,
-      });
-      expect(writeBatch).not.toHaveBeenCalled();
-      expect(H.batchSet).not.toHaveBeenCalled();
-      expect(H.batchCommit).not.toHaveBeenCalled();
+      await flush();
+      expect(retry.complete).toBe(true);
+      const retryMarkers = H.batchSet.mock.calls.filter(isMarkerWrite);
+      expect(retryMarkers).toHaveLength(outcome === 'complete' ? 0 : outcome === 'first-rejected' ? 24 : 8);
+      if (outcome === 'complete') expect(writeBatch).not.toHaveBeenCalled();
+      else {
+        expect(H.batchCommit).toHaveBeenCalledTimes(outcome === 'first-rejected' ? 2 : 1);
+        expect([...repairWitnesses.keys()].filter((key) => key.includes(':echo-marker-repair:')).length).toBe(0);
+      }
     } finally {
+      H.batchCommit.mockReset().mockImplementation(async () => {});
+      errorLog.mockRestore();
       vi.unstubAllGlobals();
     }
   });
+
+  it.each(['unmark', 'direct-mark', 'unknown-marker', 'newer-first-witness'])(
+    'refreshes a delayed tail after an intervening %s without overwriting newer intent', async (intervention) => {
+      const ids = (index: number) => `tail-race-${index}`;
+      const overrides = Object.fromEntries(Array.from({ length: 25 }, (_, index) => [index, { marked: true, markedAt: index + 1, status: 'confirmed' as const }]));
+      const cells = card(ids, overrides);
+      H.dayBoards.set(0, { uid: 'u1', seed: 71, dayIndex: 0, cells });
+      H.player = { uid: 'u1', displayName: 'Alice' };
+      const itemIds = cells.filter((cell) => !cell.free).map((cell) => cell.itemId!);
+      const witnesses = new Map(itemIds.map((itemId) => [`gcb:echo-marker-repair:${EVENT_ID}:u1:${itemId}`, '1']));
+      itemIds.forEach((itemId) => H.markerCache.set(itemId, false));
+      vi.stubGlobal('localStorage', {
+        getItem: (key: string) => witnesses.get(key) ?? null,
+        setItem: (key: string, value: string) => witnesses.set(key, value),
+        removeItem: (key: string) => witnesses.delete(key),
+      });
+      let acknowledge!: () => void;
+      H.batchCommit.mockImplementationOnce(() => new Promise<void>((resolve) => { acknowledge = resolve; }));
+      try {
+        await reconcileEchoes({ uid: 'u1', dayIndex: 0, dayIndexes: [0], statsFrozen: true });
+        expect(H.batchSet.mock.calls.filter(isMarkerWrite)).toHaveLength(16);
+        const targetIndex = intervention === 'newer-first-witness' ? 1 : 24;
+        const tailItem = ids(targetIndex);
+        if (intervention === 'newer-first-witness') {
+          const { getDocFromCache } = await import('firebase/firestore');
+          vi.mocked(getDocFromCache).mockImplementation(async (ref) => {
+            const segments = (ref as { args?: unknown[] }).args?.filter((value) => typeof value === 'string');
+            if (segments?.[2] === 'days' && segments[3] === '1') throw new Error('sibling unknown');
+            return H.defaultGetDocFromCache(ref as { args?: unknown[] }) as never;
+          });
+        }
+        if (intervention === 'unknown-marker') H.markerCache.delete(tailItem);
+        else {
+          // This returns while the repair's first server acknowledgement is
+          // held: ordinary Mark interaction and offline enqueue stay live.
+          const latest = await setMark({ uid: 'u1', cells, index: targetIndex,
+            nextMarked: intervention === 'direct-mark', claimMode: 'honor',
+            currentFirstBingoAt: null, dayIndex: 0, daily: true,
+            boardSeed: 71, statsFrozen: true,
+            ...(intervention === 'newer-first-witness' ? { echoDayIndexes: [0, 1] } : {}) });
+          H.dayBoards.set(0, { uid: 'u1', seed: 71, dayIndex: 0, cells: latest.cells });
+          H.markerCache.set(tailItem, intervention === 'direct-mark');
+          if (intervention === 'unmark' || intervention === 'newer-first-witness') expect(H.batchDelete.mock.calls.some((call) => segs(call)[3] === tailItem)).toBe(true);
+        }
+        const beforeTail = H.batchSet.mock.calls.length;
+        acknowledge();
+        await vi.waitFor(() => expect(H.batchCommit).toHaveBeenCalledTimes(intervention === 'unknown-marker' ? 2 : 3));
+        const tailWrites = H.batchSet.mock.calls.slice(beforeTail).filter(isMarkerWrite);
+        expect(tailWrites).toHaveLength(intervention === 'newer-first-witness' ? 8 : 7);
+        expect(tailWrites.some((call) => segs(call)[3] === tailItem)).toBe(false);
+        if (intervention === 'unknown-marker' || intervention === 'newer-first-witness') {
+          await vi.waitFor(() => expect(witnesses.size).toBe(1));
+          expect(witnesses.has(`gcb:echo-marker-repair:${EVENT_ID}:u1:${tailItem}`)).toBe(true);
+        }
+      } finally {
+        const { getDocFromCache } = await import('firebase/firestore');
+        vi.mocked(getDocFromCache).mockImplementation((ref) => H.defaultGetDocFromCache(ref as { args?: unknown[] }) as never);
+        H.batchCommit.mockReset().mockImplementation(async () => {});
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 
   it('keeps an Event A reconcile pinned to A while its cache reads settle after B is selected', async () => {
     seedReconcile();
@@ -1931,6 +2063,125 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
     // The existing durable identity is consumed from the server-owned record,
     // not replayed from this cached Board snapshot.
     expectNoClientEchoTrack();
+  });
+
+  it.each([null, 2])('#1424: a count-consistent missing Day stamp heals from live cells while retaining earlier root %s', async (earlierRoot) => {
+    seedReconcile();
+    H.dayBoards.set(2, {
+      uid: 'u1', seed: 222, dayIndex: 2,
+      cells: card((i) => `d${i}`, {
+        10: { marked: true, markedAt: 3, status: 'confirmed' },
+        11: { marked: true, markedAt: 4, status: 'confirmed' },
+        13: { marked: true, markedAt: 5, status: 'confirmed' },
+        14: { marked: true, markedAt: 7, status: 'confirmed' },
+      }),
+    });
+    H.player = {
+      uid: 'u1', displayName: 'Alice', bingoCount: 1, squaresMarked: 5,
+      firstBingoAt: earlierRoot,
+      dayStats: {
+        1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
+        2: { bingoCount: 1, squaresMarked: 4, firstBingoAt: null },
+      },
+    };
+    const result = await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [2], echoMarks: false });
+    expect(result.complete).toBe(true);
+    const call = H.txSet.mock.calls.find((call) => segs(call as unknown[])[2] === 'players');
+    expect(call).toBeDefined();
+    const write = call![1] as { dayStats: Record<number, { firstBingoAt: number }>; firstBingoAt?: number };
+    expect(write.dayStats[2].firstBingoAt).toBe(7);
+    if (earlierRoot === null) expect(write.firstBingoAt).toBe(7);
+    else expect(write).not.toHaveProperty('firstBingoAt');
+    expect(H.batchCommit).not.toHaveBeenCalled();
+  });
+
+  it('#1424: an open-time echo repair retains earlier root evidence while filling a missing Day stamp', async () => {
+    seedReconcile();
+    const cells = card((i) => i === 9 ? 'shared' : `d${i}`, {
+      10: { marked: true, markedAt: 3, status: 'confirmed' },
+      11: { marked: true, markedAt: 4, status: 'confirmed' },
+      13: { marked: true, markedAt: 5, status: 'confirmed' },
+      14: { marked: true, markedAt: 7, status: 'confirmed' },
+    });
+    H.dayBoards.set(2, { uid: 'u1', seed: 222, dayIndex: 2, cells });
+    H.player = { uid: 'u1', displayName: 'Alice', bingoCount: 1, squaresMarked: 5,
+      firstBingoAt: 2, dayStats: {
+        1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
+        2: { bingoCount: 1, squaresMarked: 4, firstBingoAt: null },
+      },
+    };
+    H.transactionRunner = async (fn, tx) => {
+      H.dayBoards.set(2, { uid: 'u1', seed: 222, dayIndex: 2,
+        cells: cells.map((c) => c.index === 9 ? { ...c, marked: true, markedAt: 1, status: 'confirmed', echo: true } : c),
+      });
+      return fn(tx);
+    };
+    const result = await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [1, 2] });
+    expect(result.changed).toBe(true);
+    await vi.waitFor(() => expect(H.txSet.mock.calls.find(isPlayerWrite)).toBeDefined());
+    const write = H.txSet.mock.calls.find(isPlayerWrite)![1] as {
+      dayStats: Record<number, { firstBingoAt: number }>; firstBingoAt?: number;
+    };
+    expect(write.dayStats[2].firstBingoAt).toBe(7);
+    expect(write).not.toHaveProperty('firstBingoAt');
+  });
+
+  it.each([
+    { frozen: false, ceremonial: false, eligible: true },
+    { frozen: true, ceremonial: true, eligible: true },
+    { frozen: true, ceremonial: false, eligible: false },
+  ])('#1424: changed missing-stamp pass retains later-open retry without awaiting ACK (frozen=$frozen ceremonial=$ceremonial)', async ({ frozen, ceremonial, eligible }) => {
+    seedReconcile();
+    const cells = card((i) => i === 9 ? 'shared' : `d${i}`, {
+      10: { marked: true, markedAt: 3, status: 'confirmed' },
+      11: { marked: true, markedAt: 4, status: 'confirmed' },
+      13: { marked: true, markedAt: 5, status: 'confirmed' },
+      14: { marked: true, markedAt: 7, status: 'confirmed' },
+    });
+    H.dayBoards.set(2, { uid: 'u1', seed: 222, dayIndex: 2, cells });
+    H.player = { uid: 'u1', bingoCount: 1, squaresMarked: 5, firstBingoAt: 2,
+      dayStats: {
+        1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
+        2: { bingoCount: 1, squaresMarked: 4, firstBingoAt: null },
+      },
+    };
+    let ack!: () => void;
+    H.batchCommit.mockImplementationOnce(() => new Promise<void>((resolve) => { ack = resolve; }));
+    let repairAttempts = 0;
+    H.transactionRunner = async () => { repairAttempts += 1; throw new Error('unavailable'); };
+    const params = { uid: 'u1', dayIndex: 2, dayIndexes: [1, 2], statsFrozen: frozen,
+      ceremonialDayIndexes: ceremonial ? [2] : [],
+    };
+    // Resolve before the held queued ACK: neither this call nor the shared
+    // Mark chain may wait for the detached server transaction.
+    const result = await reconcileEchoes(params);
+    expect(result.changed).toBe(true);
+    expect(repairAttempts).toBe(0);
+    expect(result.complete).toBe(!eligible);
+    // A subsequent ordinary Mark shares this chain but queues without
+    // waiting for the repair batch's ACK or server transaction.
+    H.batchCommit.mockImplementationOnce(() => new Promise<void>(() => {}));
+    await setMark({ uid: 'u1', cells: cellsFromData(H.dayBoards.get(1)!.cells),
+      index: 0, nextMarked: true, claimMode: 'honor', currentFirstBingoAt: null,
+      dayIndex: 1, daily: true, boardSeed: 111, echoDayIndexes: [1, 2], echoMarks: false,
+    });
+    expect(H.batchCommit).toHaveBeenCalledTimes(2);
+    expect(repairAttempts).toBe(0);
+    H.dayBoards.set(2, { uid: 'u1', seed: 222, dayIndex: 2,
+      cells: cells.map((c) => c.index === 9 ? { ...c, marked: true, markedAt: 1, status: 'confirmed', echo: true } : c),
+    });
+    ack();
+    if (eligible) await vi.waitFor(() => expect(repairAttempts).toBe(1));
+    else await Promise.resolve();
+    // Failed post-ACK stats repair leaves the same missing timestamp. A
+    // later open with unchanged cells must take the existing awaited heal.
+    H.transactionRunner = null;
+    const retry = await reconcileEchoes(params);
+    expect(retry.changed).toBe(false);
+    expect(retry.complete).toBe(true);
+    const write = H.txSet.mock.calls.find(isPlayerWrite)?.[1] as { dayStats?: Record<number, { firstBingoAt: number }> } | undefined;
+    if (eligible) expect(write?.dayStats?.[2]?.firstBingoAt).toBe(7);
+    else expect(write).toBeUndefined(); // frozen scoring Days cannot converge
   });
 
   it('#491: a FAILED stats-lag heal reports the pass incomplete so a later open retries (Codex P2 #495)', async () => {

@@ -867,6 +867,7 @@ describe('per-Prompt Tally marker — every proofed Mark publishes too (ADR 0002
       displayName: 'Deck Daddy',
       markedAt: 1000,
       itemText: 'Saw a sailor in Speedos',
+      cellIndex: 5,
       dayIndex: 2,
     });
     // A Firestore transaction requires ALL reads before ANY write, and the marker
@@ -898,6 +899,7 @@ describe('per-Prompt Tally marker — every proofed Mark publishes too (ADR 0002
       displayName: 'Deck Daddy',
       markedAt: 1000,
       itemText: 'Saw a sailor in Speedos',
+      cellIndex: 5,
     });
   });
 
@@ -910,8 +912,10 @@ describe('per-Prompt Tally marker — every proofed Mark publishes too (ADR 0002
       uid: 'u1',
       eventId: EVENT_ID,
       displayName: 'Old Salt',
+      legacyOversizedExtra: 'x'.repeat(2000),
       markedAt: 111,
       itemText: 'Saw a sailor in Speedos',
+      cellIndex: 5,
       dayIndex: 2,
     };
     const board = dealt();
@@ -932,9 +936,10 @@ describe('per-Prompt Tally marker — every proofed Mark publishes too (ADR 0002
       displayName: 'Deck Daddy',
       markedAt: 111,
       itemText: 'Saw a sailor in Speedos',
+      cellIndex: 5,
       dayIndex: 2,
     });
-    expect(call![2]).toEqual({ merge: true });
+    expect(call![2]).toBeUndefined(); // full accepted-fields replacement sanitizes legacy extras
     // The preserve requires reading the marker — and that read still precedes
     // every write, per the transaction contract.
     expect(Math.max(...txGet.mock.invocationCallOrder)).toBeLessThan(
