@@ -511,8 +511,8 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
   });
 }
 
-export async function reportProof(id: string, expectedCreatedAt?: number): Promise<void> {
-  await reportContent('proofs', id, EVENT_ID, expectedCreatedAt);
+export async function reportProof(id: string, expectedCreatedAt: number | undefined, expectedUid: string): Promise<void> {
+  await reportContent('proofs', id, EVENT_ID, expectedCreatedAt, expectedUid);
 }
 
 /**

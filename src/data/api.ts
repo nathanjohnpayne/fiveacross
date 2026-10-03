@@ -3392,11 +3392,11 @@ export async function addItem(
 }
 
 /**
- * Report one live Prompt incarnation through the rules-paired receipt/counter.
+ * Report the displayed account's live Prompt incarnation through the paired receipt/counter.
  * Rules enforce the reporter's server-clock cadence in addition to the UI throttle.
  */
-export async function reportItem(id: string, eventId: string = EVENT_ID, expectedCreatedAt?: number): Promise<void> {
-  await reportContent('items', id, eventId, expectedCreatedAt);
+export async function reportItem(id: string, eventId: string, expectedCreatedAt: number | undefined, expectedUid: string): Promise<void> {
+  await reportContent('items', id, eventId, expectedCreatedAt, expectedUid);
 }
 
 /** Let a player set a display theme preference on their player row. */
