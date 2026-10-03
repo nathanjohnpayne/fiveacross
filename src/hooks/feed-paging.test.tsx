@@ -57,10 +57,11 @@ type SnapCb = (snap: unknown) => void;
 function capture() {
   const cbs: {
     docs: SnapCb[];
+    prompts: SnapCb | null;
     query: SnapCb | null;
     cols: Record<string, SnapCb>;
     group: SnapCb | null;
-  } = { docs: [], query: null, cols: {}, group: null };
+  } = { docs: [], prompts: null, query: null, cols: {}, group: null };
   H.onSnapshot.mockImplementation((target: unknown, _o: unknown, onNext: SnapCb) => {
     if (target && typeof target === 'object') {
       const ref = target as { kind?: string; args?: unknown[] };
@@ -70,6 +71,7 @@ function capture() {
       if (ref.kind === 'query' && querySource?.kind === 'collectionGroup' && querySource.args?.[1] === 'markers') {
         cbs.group = onNext;
       }
+      else if (ref.kind === 'query' && querySource?.args?.includes('items')) cbs.prompts = onNext;
       else if (ref.kind === 'query') cbs.query = onNext;
       else if (ref.kind === 'doc') cbs.docs.push(onNext);
       else cbs.cols[String(ref.args?.[ref.args.length - 1])] = onNext;
@@ -81,11 +83,15 @@ function capture() {
     fireProofs: (s: unknown) => act(() => cbs.query?.(s)),
     fireMoments: (s: unknown) => act(() => cbs.cols.moments?.(s)),
     fireNotices: (s: unknown) => act(() => cbs.cols.notices?.(s)),
-    fireTally: (s: unknown) => act(() => cbs.group?.(s)),
+    fireTally: (s: unknown) => act(() => {
+      const rows = (s as { docs: ReturnType<typeof marker>[] }).docs;
+      cbs.prompts?.({ docs: rows.map((row) => ({ id: row.ref.parent.parent.id, data: () => ({ status: 'active', text: row.data().itemText }) })) });
+      cbs.group?.(s);
+    }),
   };
 }
 
-const eventSnap = { exists: () => true, data: () => ({ admins: [] }), metadata: { fromCache: false } };
+const eventSnap = { exists: () => true, data: () => ({ admins: [], days: [{ index: 0 }] }), metadata: { fromCache: false } };
 const colSnap = (docs: object[]) => ({
   docs: docs.map((d) => ({ data: () => d })),
   metadata: { fromCache: false },
@@ -101,6 +107,7 @@ const groupSnap = groupSnapOf([]);
  * what `useTallyCards` reads the itemId and the owning Event from
  * (events/{EVENT_ID}/tally/{itemId}/markers/{uid}). */
 const marker = (itemId: string, uid: string, markedAt: number) => ({
+  id: uid,
   data: () => ({ uid, eventId: 'test-event', displayName: uid, markedAt, dayIndex: 0, itemText: `prompt ${itemId}` }),
   ref: { parent: { parent: { id: itemId, parent: { id: 'tally', parent: { id: 'test-event' } } } } },
 });

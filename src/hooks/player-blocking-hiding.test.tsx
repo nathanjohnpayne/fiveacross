@@ -57,25 +57,34 @@ type SnapCb = (snap: unknown) => void;
 // Each test mounts ONE hook, so its data stream is the only query, collection or
 // collectionGroup open; the Event doc feeds the (empty) ban roster.
 function capture() {
-  const cbs: { docs: SnapCb[]; data: SnapCb | null } = { docs: [], data: null };
+  const cbs: { docs: SnapCb[]; data: SnapCb | null; prompts: SnapCb | null } = { docs: [], data: null, prompts: null };
   H.onSnapshot.mockImplementation((target: unknown, optionsOrNext: unknown, maybeNext?: SnapCb) => {
     const onNext = (typeof optionsOrNext === 'function' ? optionsOrNext : maybeNext) as SnapCb;
     if ((target as { kind?: string }).kind === 'doc') cbs.docs.push(onNext);
-    else cbs.data = onNext;
+    else {
+      const source = (target as { args?: unknown[] }).args?.[0] as { kind?: string; args?: unknown[] } | undefined;
+      if (source?.kind === 'collection' && source.args?.includes('items')) cbs.prompts = onNext;
+      else cbs.data = onNext;
+    }
     return () => {};
   });
   return {
-    fire: (docs: unknown[]) =>
+    fire: (docs: unknown[]) => {
       act(() => {
-        cbs.docs.forEach((cb) => cb({ exists: () => true, data: () => ({ admins: [], bannedUids: [] }), metadata: { fromCache: false } }));
+        cbs.docs.forEach((cb) => cb({ exists: () => true, data: () => ({ admins: [], bannedUids: [], days: [{ index: 0 }] }), metadata: { fromCache: false } }));
+      });
+      act(() => {
+        cbs.prompts?.({ docs: ['item-1', 'item-2', 'item-3', 'p1', 'p2'].map((id) => ({ id, data: () => ({ status: 'active', text: TEXT }) })) });
         cbs.data?.({ docs, metadata: { fromCache: false, hasPendingWrites: false } });
-      }),
+      });
+    },
   };
 }
 
 const row = (d: object) => ({ data: () => d });
 const markerRow = (itemId: string, entry: TallyEntry) => ({
-  data: () => entry,
+  id: entry.uid,
+  data: () => ({ ...entry, eventId: 'test-event' }),
   ref: { parent: { parent: { id: itemId, parent: { id: 'tally', parent: { id: 'test-event' } } } } },
 });
 
