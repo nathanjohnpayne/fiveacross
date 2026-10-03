@@ -135,7 +135,7 @@ afterAll(async () => {
 
 describe('w2 offline Tally marker via setMark (ADR 0002 + ADR 0006)', () => {
   it('queues an attributed marker offline, drains it to the Tally on reconnect, then unmark removes it — no Feed write', async () => {
-    await seedEventDoc(PROJECT_ID, EVENT_ID);
+    await seedEventDoc(PROJECT_ID, EVENT_ID, 1, Array.from({ length: 25 }, (_, index) => `item-${index}`));
     const tab = await makeClient('gcb-tally-tab');
     const boardPath = `events/${EVENT_ID}/days/0/boards/${tab.uid}`;
     const playerPath = `events/${EVENT_ID}/players/${tab.uid}`;
