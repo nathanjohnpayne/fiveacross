@@ -15,7 +15,7 @@ A Player hearts posts in the Feed—many posts, each post only once—with a Luc
 
 ## Data model
 
-One flat collection, `events/{eventId}/hearts/{heartId}`, mirroring doubts/moments. `HeartDoc` (src/types.ts): `uid`, `targetKind` (`'proof' | 'moment'`), `targetId`, `targetCreatedAt`, `createdAt`—exactly these five fields; no display name is denormalized (nothing to misattribute, so the write needs no identityKnown gate).
+One flat collection, `events/{eventId}/hearts/{heartId}`, mirroring doubts/moments. `HeartDoc` (src/types.ts): `uid`, `targetKind` (`'proof' | 'moment'`), `targetId`, `targetCreatedAt`, `createdAt` plus optional server-owned `bindingCommittedAt` (Firestore Timestamp); no display name is denormalized (nothing to misattribute, so the write needs no identityKnown gate).
 
 **The slot id IS the once-only guarantee.** `heartId = ${uid}_${targetKind}_${targetId}` (`heartDocId`, src/data/hearts.ts)—the Doubt slot's shape. The rules bind the id to the payload (no squatting another Player's slot), so one Player can never hold more than one doc per post and counts cannot inflate no matter how writes race. Because the SLOT—not an update denial—carries the guarantee, the owner may create **and overwrite** their own slot under the same full validation; a foreign update is structurally impossible (the slot id embeds the owner's uid, the writer's payload uid must equal their own). Toggle = create to heart, owner-delete to unheart; re-heart is a fresh create (or overwrite) at the same slot.
 
@@ -50,3 +50,10 @@ Hearts stay a live, client-derived surface with one exception: at the Standings 
 ## Test coverage
 
 `src/components/feed-hearts.test.tsx`: `heartDocId` binding, `heartState` counting/keying/incarnation-scoping/ban semantics with the own-content exception, HeartButton's pressed/label/burst/quiet-unheart/keyed-count contract plus the double-tap intent alternation and the optimistic override yielding to echo and rollback, and the CSS pins (keyframes exist, token-only fill, defined ahead of the kill switch). `tests/rules/feed-hearts.test.ts`: the full write gate against the emulator—bound slot, forged uid, phantom/wrong-kind targets, unknown kind, extra fields, stale/forged incarnation stamps, clock window, owner-overwrite-still-one-doc, no cross-Player update, owner/admin delete, re-heart, public read. The cross-block denial is pinned in `tests/rules/player-blocking.test.ts`.
+
+
+## Award binding time and offline compatibility (#1408)
+
+A stamped Heart keeps `bindingCommittedAt` unchanged for the same declared target incarnation. Creating or rebinding a stamped slot requires `serverTimestamp()` equal to the Rules request time; clients cannot remove or backdate an existing binding. The client inspects only local cache and serializes write enqueue per slot, preserving rapid offline on/off intent without waiting for server acknowledgment. A same-target merge omits the timestamp field so it also preserves a pending offline server transform.
+
+Old clients and already queued fieldless payloads remain accepted on fieldless rows. The award treats their latest native `updateTime` as the binding boundary, conservatively excluding any legacy rewrite after cutoff. An old replacement payload cannot strip an existing stamped row; it is rejected and its optimistic echo rolls back. A new-client cache miss may likewise fail a same-target overwrite whose server stamp was unknown locally; the existing Heart remains intact and the listener reconciles. No grandfathering from client timestamps and no production backfill are performed. Queued Marks are unchanged.

@@ -1,18 +1,18 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, it, expect } from 'vitest';
 import {
   assertFails,
   assertSucceeds,
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { deleteDoc, doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
+import { deleteDoc, doc, getDoc, setDoc, updateDoc, serverTimestamp, Timestamp } from 'firebase/firestore';
 
 // specs/feed-hearts.md — the Hearts rules contract. A Heart is one Player's
 // like on a Feed post (a Proof or a Moment): the Doubt slot's structure
 // without the accusation. Pinned invariants:
-//   - create/update: OWN uid only, exactly the contract's five fields, a
+//   - create/update: OWN uid only, the contract's five fields plus optional server binding time, a
 //     real targetKind, the doc id BOUND to `${uid}_${targetKind}_${targetId}`
 //     (no squatting another Player's slot), the hearted post must EXIST as
 //     its declared kind WITH a matching `targetCreatedAt` incarnation stamp
@@ -173,5 +173,30 @@ describe('firestore.rules — Hearts (specs/feed-hearts.md)', () => {
   it('hearts are publicly readable to signed-in Players, never to signed-out', async () => {
     await assertSucceeds(getDoc(doc(db(ALICE), slot(BOB, 'proof', PROOF))));
     await assertFails(getDoc(doc(testEnv.unauthenticatedContext().firestore(), slot(BOB, 'proof', PROOF))));
+  });
+});
+
+
+describe('server-owned binding timestamp', () => {
+  it('allows old fieldless queued writes, but forbids forged stamps and removal of an existing binding', async () => {
+    const ref = doc(db(ALICE), slot(ALICE, 'proof', PROOF));
+    await assertFails(setDoc(ref, { ...heart(ALICE, 'proof', PROOF), bindingCommittedAt: Timestamp.fromMillis(NOW() - 1000) }));
+    await assertSucceeds(setDoc(ref, { ...heart(ALICE, 'proof', PROOF), bindingCommittedAt: serverTimestamp() }));
+    const stamp = (await getDoc(ref)).data()?.bindingCommittedAt;
+    await assertSucceeds(setDoc(ref, heart(ALICE, 'proof', PROOF), { merge: true }));
+    expect((await getDoc(ref)).data()?.bindingCommittedAt).toEqual(stamp);
+    await assertFails(setDoc(ref, heart(ALICE, 'proof', PROOF)));
+    await assertFails(updateDoc(ref, { bindingCommittedAt: serverTimestamp() }));
+  });
+  it('requires a fresh server-owned stamp for actual incarnation rebinding', async () => {
+    const ref = doc(db(ALICE), slot(ALICE, 'proof', PROOF));
+    await assertSucceeds(setDoc(ref, { ...heart(ALICE, 'proof', PROOF), bindingCommittedAt: serverTimestamp() }));
+    const stamp = (await getDoc(ref)).data()?.bindingCommittedAt;
+    const newAt = PROOF_AT + 1;
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await updateDoc(doc(ctx.firestore(), at(`proofs/${PROOF}`)), { createdAt: newAt });
+    });
+    await assertFails(setDoc(ref, { ...heart(ALICE, 'proof', PROOF), targetCreatedAt: newAt, bindingCommittedAt: stamp }));
+    await assertSucceeds(setDoc(ref, { ...heart(ALICE, 'proof', PROOF), targetCreatedAt: newAt, bindingCommittedAt: serverTimestamp() }));
   });
 });

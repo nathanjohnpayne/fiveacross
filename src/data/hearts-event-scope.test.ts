@@ -4,6 +4,8 @@ const H = vi.hoisted(() => ({
   eventId: 'event-a',
   setDoc: vi.fn(),
   deleteDoc: vi.fn(),
+  getDocFromCache: vi.fn(),
+  serverTimestamp: vi.fn(() => ({ transform: 'serverTimestamp' })),
   track: vi.fn(),
   heartRef: vi.fn((id: string, eventId: string) => ({ path: `events/${eventId}/hearts/${id}` })),
 }));
@@ -15,7 +17,7 @@ vi.mock('../firebase', () => ({
 }));
 vi.mock('../analytics', () => ({ track: H.track }));
 vi.mock('./paths', () => ({ heartRef: H.heartRef }));
-vi.mock('firebase/firestore', () => ({ setDoc: H.setDoc, deleteDoc: H.deleteDoc }));
+vi.mock('firebase/firestore', () => ({ setDoc: H.setDoc, deleteDoc: H.deleteDoc, getDocFromCache: H.getDocFromCache, serverTimestamp: H.serverTimestamp }));
 
 import { setHeart } from './hearts';
 
@@ -24,6 +26,7 @@ beforeEach(() => {
   H.eventId = 'event-a';
   H.setDoc.mockResolvedValue(undefined);
   H.deleteDoc.mockResolvedValue(undefined);
+  H.getDocFromCache.mockResolvedValue({ exists: () => false });
 });
 
 describe('Heart Event ownership', () => {
@@ -49,6 +52,7 @@ describe('Heart Event ownership', () => {
 
     expect(H.heartRef).toHaveBeenCalledWith('alice_proof_post-1', 'event-a');
     H.eventId = 'event-b';
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
     finish();
     await pending;
 
@@ -65,5 +69,33 @@ describe('Heart Event ownership', () => {
     });
 
     expect(H.track).toHaveBeenCalledWith('heart_post', { targetKind: 'moment', on: true });
+  });
+});
+
+
+describe('server-owned Heart binding enqueue', () => {
+  const intent = { uid: 'alice', targetKind: 'proof' as const, targetId: 'post-1', targetCreatedAt: 123, on: true };
+  it('preserves a matching committed or pending timestamp through a merge retry', async () => {
+    H.getDocFromCache.mockResolvedValue({ exists: () => true, data: () => ({ ...intent, bindingCommittedAt: null }) });
+    await setHeart(intent);
+    expect(H.setDoc.mock.calls[0][1]).not.toHaveProperty('bindingCommittedAt');
+    expect(H.setDoc.mock.calls[0][2]).toEqual({ merge: true });
+  });
+  it('stamps a genuine incarnation rebinding instead of adopting the old slot timestamp', async () => {
+    H.getDocFromCache.mockResolvedValue({ exists: () => true, data: () => ({ ...intent, targetCreatedAt: 122, bindingCommittedAt: { seconds: 1, nanoseconds: 0 } }) });
+    await setHeart(intent);
+    expect(H.setDoc.mock.calls[0][1].bindingCommittedAt).toEqual({ transform: 'serverTimestamp' });
+  });
+  it('keeps rapid offline on/off writes in intent order without holding on server ACK', async () => {
+    let cache!: (value: unknown) => void;
+    H.getDocFromCache.mockImplementationOnce(() => new Promise(resolve => { cache = resolve; }));
+    H.setDoc.mockImplementationOnce(() => new Promise(() => {}));
+    void setHeart(intent);
+    const off = setHeart({ ...intent, on: false });
+    await vi.waitFor(() => expect(cache).toBeTypeOf('function'));
+    expect(H.deleteDoc).not.toHaveBeenCalled();
+    cache({ exists: () => false });
+    await off;
+    expect(H.setDoc.mock.invocationCallOrder[0]).toBeLessThan(H.deleteDoc.mock.invocationCallOrder[0]);
   });
 });

@@ -84,7 +84,11 @@ function makeDb(seed: {
             exists: true,
             id: row.id as string,
             data: () => row,
-            createTime: (() => {
+            updateTime: row.missingUpdateTime ? undefined : (() => {
+              const millis = Number(row.serverUpdatedAt ?? row.serverCreatedAt ?? row.createdAt);
+              return { toMillis: () => millis, seconds: Number(row.serverUpdatedAtSeconds ?? row.serverCreatedAtSeconds ?? Math.floor(millis / 1000)), nanoseconds: Number(row.serverUpdatedAtNanoseconds ?? row.serverCreatedAtNanoseconds ?? Math.round((millis % 1000) * 1_000_000)) };
+            })(),
+            createTime: row.missingCreateTime ? undefined : (() => {
               const millis = Number(row.serverCreatedAt ?? row.createdAt);
               const seconds = Number(row.serverCreatedAtSeconds ?? Math.floor(millis / 1000));
               const nanoseconds = Number(
@@ -374,6 +378,61 @@ describe('runFinaleBeats — the Most-Loved award beat through the write path (#
     const award = db.readEvent().mostLovedPhoto!;
     expect(award.winners.map((w) => w.proofId)).toEqual(['p2']);
     expect(award.heartCount).toBe(1);
+  });
+
+  it.each([false, true])('excludes a post-cutoff rebinding of an old slot (server binding stamp: %s)', async (stamped) => {
+    const after = D10_UNLOCK + 1000;
+    const db = makeDb({ eventId: 'e1', event: { days: mainDays() },
+      proofs: [proof('p1')], hearts: [heart('fan', 'p1', D9_UNLOCK + 1000, {
+        serverCreatedAt: D10_UNLOCK - 1000, serverUpdatedAt: after,
+        ...(stamped ? { bindingCommittedAt: { seconds: after / 1000, nanoseconds: 0 } } : {}),
+      })] });
+    await runFinaleBeats(db, 'e1', { now: () => after + 1000 });
+    expect(db.readEvent().mostLovedPhoto?.heartCount).toBe(0);
+  });
+
+  it('preserves a pre-cutoff binding through a harmless same-target update after cutoff', async () => {
+    const before = D10_UNLOCK - 1000;
+    const db = makeDb({ eventId: 'e1', event: { days: mainDays() },
+      proofs: [proof('p1')], hearts: [heart('fan', 'p1', D9_UNLOCK + 1000, {
+        serverCreatedAt: before, serverUpdatedAt: D10_UNLOCK + 1000,
+        bindingCommittedAt: { seconds: before / 1000, nanoseconds: 0 },
+      })] });
+    await runFinaleBeats(db, 'e1', { now: () => D10_UNLOCK + 2000 });
+    expect(db.readEvent().mostLovedPhoto?.heartCount).toBe(1);
+  });
+
+  it('excludes a recreated Proof born after cutoff even when both client stamps are backdated', async () => {
+    const old = D9_UNLOCK + 1000;
+    const db = makeDb({ eventId: 'e1', event: { days: mainDays() },
+      proofs: [proof('p1', { createdAt: old, serverCreatedAt: D10_UNLOCK + 1000 })],
+      hearts: [heart('fan', 'p1', old, { bindingCommittedAt: { seconds: D10_UNLOCK / 1000, nanoseconds: 0 } })] });
+    await runFinaleBeats(db, 'e1', { now: () => D10_UNLOCK + 2000 });
+    expect(db.readEvent().mostLovedPhoto?.heartCount).toBe(0);
+  });
+
+  it.each([0, 2])('compares recreated Proof birth and binding at exact nanosecond precision (%s)', async (bindingNanos) => {
+    const seconds = D9_UNLOCK / 1000;
+    const db = makeDb({ eventId: 'e1', event: { days: mainDays() },
+      proofs: [proof('p1', { serverCreatedAtSeconds: seconds, serverCreatedAtNanoseconds: 1 })],
+      hearts: [heart('fan', 'p1', D9_UNLOCK + 1000, { bindingCommittedAt: { seconds, nanoseconds: bindingNanos } })] });
+    await runFinaleBeats(db, 'e1', { now: () => D10_UNLOCK + 2000 });
+    expect(db.readEvent().mostLovedPhoto?.heartCount).toBe(bindingNanos === 0 ? 0 : 1);
+  });
+
+  it('rejects malformed binding metadata rather than falling back to a backdated creation time', async () => {
+    const db = makeDb({ eventId: 'e1', event: { days: mainDays() }, proofs: [proof('p1')],
+      hearts: [heart('fan', 'p1', D9_UNLOCK + 1000, { bindingCommittedAt: { seconds: 1, nanoseconds: 'bad' } })] });
+    await runFinaleBeats(db, 'e1', { now: () => D10_UNLOCK + 2000 });
+    expect(db.readEvent().mostLovedPhoto?.heartCount).toBe(0);
+  });
+
+  it.each(['proof', 'heart'])('excludes unverifiable missing native %s metadata', async (missing) => {
+    const db = makeDb({ eventId: 'e1', event: { days: mainDays() },
+      proofs: [proof('p1', { missingCreateTime: missing === 'proof' })],
+      hearts: [heart('fan', 'p1', D9_UNLOCK + 1000, { missingUpdateTime: missing === 'heart' })] });
+    await runFinaleBeats(db, 'e1', { now: () => D10_UNLOCK + 2000 });
+    expect(db.readEvent().mostLovedPhoto?.heartCount).toBe(0);
   });
 
   it('(g) an award-snapshot read failure keeps the freeze coupled to the award, and holds the podium with it', async () => {

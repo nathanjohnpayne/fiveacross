@@ -719,6 +719,7 @@ interface DocSnapshot {
   readonly id: string;
   /** Server-assigned document creation time, present on Admin SDK snapshots. */
   readonly createTime?: { toMillis(): number; seconds?: number; nanoseconds?: number };
+  readonly updateTime?: { toMillis(): number; seconds?: number; nanoseconds?: number };
   data(): Record<string, unknown> | undefined;
 }
 interface DocRef {
@@ -1175,6 +1176,8 @@ function mostLovedProofsFrom(snap: { docs: DocSnapshot[] }): MostLovedProofLike[
     const data = d.data() ?? {};
     return {
       id: d.id,
+      serverCreatedAt: nativeTimeCeilingMillis(d.createTime),
+      serverCreatedTimestamp: awardTimestamp(d.createTime),
       uid: typeof data.uid === 'string' ? data.uid : '',
       displayName: typeof data.displayName === 'string' ? data.displayName : '',
       type: typeof data.type === 'string' ? data.type : '',
@@ -1191,7 +1194,8 @@ function mostLovedProofsFrom(snap: { docs: DocSnapshot[] }): MostLovedProofLike[
 /** Map a hearts collection read onto the pure builder's input shape. A missing
  *  `targetCreatedAt` defaults to -1 so a malformed heart can never
  *  incarnation-match a proof whose own missing `createdAt` defaulted to 0.
- *  `createTime` is Firestore's server-assigned document-creation instant; the
+ *  The server-owned binding timestamp survives same-target retries; legacy
+ *  fieldless rows use their latest native update instant. The
  *  client-set `createdAt` remains Feed ordering data, but is not trustworthy
  *  enough to freeze eligibility because the rules intentionally tolerate clock
  *  drift. A missing/malformed metadata value becomes NaN, which the pure
@@ -1199,13 +1203,18 @@ function mostLovedProofsFrom(snap: { docs: DocSnapshot[] }): MostLovedProofLike[
 function mostLovedHeartsFrom(snap: { docs: DocSnapshot[] }): MostLovedHeartLike[] {
   return snap.docs.map((d) => {
     const data = d.data() ?? {};
-    const serverCreatedAt = createTimeCeilingMillis(d.createTime);
+    // A stamped binding survives harmless same-target retries. Legacy fieldless
+    // rows use latest native updateTime conservatively, never a client stamp.
+    const binding = 'bindingCommittedAt' in data ? data.bindingCommittedAt : d.updateTime;
+    const serverCreatedAt = nativeTimeCeilingMillis(binding);
+    const serverBindingTimestamp = awardTimestamp(binding);
     return {
       uid: typeof data.uid === 'string' ? data.uid : '',
       targetKind: typeof data.targetKind === 'string' ? data.targetKind : '',
       targetId: typeof data.targetId === 'string' ? data.targetId : '',
       targetCreatedAt: finiteNumber(data.targetCreatedAt, -1),
       createdAt: finiteNumber(data.createdAt, 0),
+      serverBindingTimestamp,
       serverCreatedAt:
         typeof serverCreatedAt === 'number' && Number.isFinite(serverCreatedAt)
           ? serverCreatedAt
@@ -1217,16 +1226,21 @@ function mostLovedHeartsFrom(snap: { docs: DocSnapshot[] }): MostLovedHeartLike[
 /**
  * Represent Firestore's nanosecond timestamp as the smallest whole millisecond
  * that is not earlier than it. The award cutoff is millisecond precision, so
- * this preserves the exact `createTime <= cutoff` predicate: a Heart at the
+ * this preserves the exact native-time `<= cutoff` predicate: a binding at the
  * cutoff stays at that millisecond, while one nanosecond after it rounds up and
  * is excluded. `Timestamp#toMillis()` floors and would incorrectly include the
  * latter. Missing precision fails closed rather than guessing from client data.
  */
-function createTimeCeilingMillis(
-  createTime: { toMillis(): number; seconds?: number; nanoseconds?: number } | undefined,
+function nativeTimeCeilingMillis(
+  nativeTime: unknown,
 ): number {
-  const seconds = createTime?.seconds;
-  const nanoseconds = createTime?.nanoseconds;
+  const stamp = awardTimestamp(nativeTime);
+  return stamp ? stamp.seconds * 1000 + Math.ceil(stamp.nanoseconds / 1_000_000) : Number.NaN;
+}
+
+function awardTimestamp(value: unknown): { seconds: number; nanoseconds: number } | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const { seconds, nanoseconds } = value as { seconds?: unknown; nanoseconds?: unknown };
   if (
     typeof seconds !== 'number' ||
     !Number.isSafeInteger(seconds) ||
@@ -1235,16 +1249,16 @@ function createTimeCeilingMillis(
     nanoseconds < 0 ||
     nanoseconds >= 1_000_000_000
   ) {
-    return Number.NaN;
+    return undefined;
   }
-  return seconds * 1000 + Math.ceil(nanoseconds / 1_000_000);
+  return { seconds, nanoseconds };
 }
 
 /**
  * Atomically freeze standings and persist the Most-Loved Photo award (#560).
  *
  * The Event's ban roster/report threshold, every eligible Proof's visibility,
- * and every Heart's server creation time are read inside the same transaction
+ * and every Proof's native birth and Heart's server binding time are read inside the same transaction
  * that stamps `frozenAt` and `mostLovedPhoto`. That coupling is essential: a
  * retry after an award-read/write failure must not rebuild an ostensibly frozen
  * award from mutable moderation state. If any read fails, neither frozen field

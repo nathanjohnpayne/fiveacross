@@ -1274,7 +1274,7 @@ export interface TallyDoc {
 // hearts). ONE slot per (Player, post): the doc id IS
 // `${uid}_${targetKind}_${targetId}` — the same deterministic-slot shape as a
 // Doubt — so a Player can heart many posts but each post only once; toggling
-// off is a delete, never an update (a Heart is immutable). Carries no
+// off is a delete; owner updates can rebind a recreated post. Carries no
 // displayName (nothing to misattribute, so no identityKnown gate): counts are
 // derived client-side from this collection's live size, per ADR 0001.
 export type HeartTargetKind = 'proof' | 'moment';
@@ -1291,6 +1291,7 @@ export interface HeartDoc {
   // display filters by it. A recreated post starts at zero hearts.
   targetCreatedAt: number;
   createdAt: number; // ms epoch
+  bindingCommittedAt?: unknown; // opaque Firestore Timestamp; server-owned binding instant
 }
 
 // Player blocking (#689, specs/player-blocking.md, ADR 0016): a Player's

@@ -252,3 +252,13 @@ describe('client/functions parity — Most-Loved Photo eligibility (#560)', () =
     expect(award.winners.at(-1)?.proofId).toBe('p-99');
   });
 });
+
+
+describe('native binding/birth parity', () => {
+  it('rejects post-cutoff Proofs and pre-birth bindings with exact precision', () => {
+    const p = P('p1', { serverCreatedAt: 1001, serverCreatedTimestamp: { seconds: 1, nanoseconds: 1 } });
+    expect(both([p], [H('fan', 'p1', 1000, { serverBindingTimestamp: { seconds: 1, nanoseconds: 0 } })])).toEqual(NO_AWARD);
+    expect(both([p], [H('fan', 'p1', 1000, { serverBindingTimestamp: { seconds: 1, nanoseconds: 2 } })]).heartCount).toBe(1);
+    expect(both([P('p1', { serverCreatedAt: CUTOFF + 1 })], [H('fan', 'p1', 1000)])).toEqual(NO_AWARD);
+  });
+});
