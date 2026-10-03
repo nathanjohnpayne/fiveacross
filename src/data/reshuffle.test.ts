@@ -252,6 +252,26 @@ describe('reshuffleBoard — the happy path', () => {
     expect(H.txSet).not.toHaveBeenCalled();
   });
 
+  it('refuses a null hydrated Day without spending an allowance', async () => {
+    H.txGet.mockImplementationOnce(() => {
+      H.event = { ...H.event, days: [day(0), null] as unknown as DayDef[] };
+    });
+    await expect(reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 })).rejects.toThrow('Day changed');
+    expect(H.txSet).not.toHaveBeenCalled();
+  });
+
+  it.each([{ index: 7 }, { pool: 'easy' as const }, { freeText: 'Changed centre' }])(
+    'refuses changed hydrated Day inputs %j without spending an allowance', async (change) => {
+      H.txGet.mockImplementationOnce(() => {
+        const days = [...H.event!.days!];
+        days[1] = { ...days[1], ...change };
+        H.event = { ...H.event, days };
+      });
+      await expect(reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 })).rejects.toThrow('Day changed');
+      expect(H.txSet).not.toHaveBeenCalled();
+    },
+  );
+
   it('withholds explicit snapshot Prompts until the 18+ posture is published', async () => {
     for (const [i, id] of SNAPSHOT_IDS.entries()) {
       H.itemsById.set(id, { text: `Prompt ${id}`, spicy: i >= 24, isFreeSpace: false });

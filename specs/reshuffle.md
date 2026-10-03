@@ -71,3 +71,5 @@ Monotonic is equivalent for the property that matters. Every Board reshuffle sti
 - Given a counter write that decrements, jumps by 2, or exceeds 3, then it is denied by rules.
 - Given my first app open after deploy, the intro overlay shows exactly once and never again (`src/components/reshuffle-intro.test.tsx`).
 - Given I tap "Keep my card", then nothing is written (`src/components/reshuffle-sheet.test.tsx`).
+
+The consuming transaction compares the hydrated Day’s index, pool, free-centre text, unlock time, frozen easy-mix ratio and snapshot IDs with its authoritative re-read. A changed card input refuses the attempt before any Board/stat/allowance write; first deal returns its existing no-op, and Reshuffle reports its existing retryable Day-changed error. Admin changes can still be attempted again against fresh data.

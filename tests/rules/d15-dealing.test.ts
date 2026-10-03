@@ -7,7 +7,7 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { doc, setDoc, getDoc, updateDoc, type Firestore, type Transaction, type DocumentReference } from 'firebase/firestore';
+import { doc, setDoc, getDoc, updateDoc, type Firestore, type Transaction, type TransactionOptions, type DocumentReference } from 'firebase/firestore';
 import type { User } from 'firebase/auth';
 
 const dealSeam = vi.hoisted(() => ({ database: null as Firestore | null, eventRead: vi.fn<() => Promise<void>>() }));
@@ -15,18 +15,18 @@ vi.mock('../../src/firebase', () => ({ get db() { return dealSeam.database; }, E
 vi.mock('../../src/analytics', () => ({ track: vi.fn() }));
 vi.mock('firebase/firestore', async (importOriginal) => {
   const sdk = await importOriginal<typeof import('firebase/firestore')>();
-  return { ...sdk, runTransaction: (database: Firestore, callback: (tx: Transaction) => Promise<unknown>) =>
+  return { ...sdk, runTransaction: (database: Firestore, callback: (tx: Transaction) => Promise<unknown>, options?: TransactionOptions) =>
     sdk.runTransaction(database, (tx) => callback(new Proxy(tx, {
       get(target, key) {
         if (key === 'get') return async (ref: DocumentReference) => {
           const snapshot = await target.get(ref);
-          if (ref.path === 'events/cruise') await dealSeam.eventRead();
+          if (ref.path === `events/${EVENT}`) await dealSeam.eventRead();
           return snapshot;
         };
         const value = Reflect.get(target, key);
         return typeof value === 'function' ? value.bind(target) : value;
       },
-    }))),
+    })), options),
   };
 });
 import { dealDayCard, reshuffleBoard } from '../../src/data/api';

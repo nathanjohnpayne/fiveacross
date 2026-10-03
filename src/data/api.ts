@@ -177,6 +177,17 @@ function sameStringArray(a: readonly string[] | undefined, b: readonly string[] 
   return a.every((value, index) => value === b[index]);
 }
 
+/** Compare every Day field used to hydrate or construct this attempted card. */
+function sameHydratedDay(current: DayDef | null | undefined, hydrated: DayDef, snapshotIds: readonly string[]): boolean {
+  return current != null
+    && current.index === hydrated.index
+    && current.pool === hydrated.pool
+    && current.freeText === hydrated.freeText
+    && current.unlockAt === hydrated.unlockAt
+    && current.snapshotEasyMixRatio === hydrated.snapshotEasyMixRatio
+    && sameStringArray(current.snapshotItemIds, snapshotIds);
+}
+
 function eventEasyMixRatio(eventData: Partial<EventDoc> | null | undefined): number {
   return typeof eventData?.settings?.easyMixRatio === 'number' ? eventData.settings.easyMixRatio : 0.5;
 }
@@ -951,12 +962,7 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
     const latestEventData = latestEventSnap.exists() ? (latestEventSnap.data() as Partial<EventDoc>) : null;
     const latestDays = Array.isArray(latestEventData?.days) ? (latestEventData.days as DayDef[]) : [];
     const latestDay = latestDays[dayIndex];
-    if (
-      !latestDay ||
-      latestDay.unlockAt !== day.unlockAt ||
-      latestDay.snapshotEasyMixRatio !== day.snapshotEasyMixRatio ||
-      !sameStringArray(latestDay.snapshotItemIds, snapshotIds)
-    ) {
+    if (!sameHydratedDay(latestDay, day, snapshotIds)) {
       return false;
     }
 
@@ -1303,9 +1309,7 @@ export async function reshuffleBoard(params: {
     const latestEventData = latestEventSnap.exists() ? (latestEventSnap.data() as Partial<EventDoc>) : null;
     const latestDays = Array.isArray(latestEventData?.days) ? (latestEventData.days as DayDef[]) : [];
     const latestDay = latestDays[dayIndex];
-    if (!latestDay || latestDay.unlockAt !== day.unlockAt ||
-        latestDay.snapshotEasyMixRatio !== day.snapshotEasyMixRatio ||
-        !sameStringArray(latestDay.snapshotItemIds, snapshotIds)) {
+    if (!sameHydratedDay(latestDay, day, snapshotIds)) {
       throw new Error('This Day changed while reshuffling. Try again.');
     }
 

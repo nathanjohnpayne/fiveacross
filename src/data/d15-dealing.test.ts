@@ -518,6 +518,32 @@ describe('dealDayCard — snapshot-gated lazy dealing', () => {
     expect(writtenBoard()).toBeNull();
   });
 
+  it('refuses a null hydrated Day before creating a card', async () => {
+    const ids = seedPool(30);
+    H.event = { days: daysWith(mkDay({ index: 2, unlockAt: PAST, snapshotItemIds: ids })), settings: {} };
+    H.txGet.mockImplementationOnce(() => {
+      const days = [...H.event!.days!];
+      days[2] = null as unknown as DayDef;
+      H.event = { ...H.event, days };
+    });
+    await expect(dealDayCard(U, 2)).resolves.toBe(false);
+    expect(H.txSet).not.toHaveBeenCalled();
+  });
+
+  it.each([{ index: 7 }, { pool: 'easy' as const }, { freeText: 'Changed centre' }])(
+    'refuses changed hydrated Day inputs %j before creating a card', async (change) => {
+      const ids = seedPool(30);
+      H.event = { days: daysWith(mkDay({ index: 2, unlockAt: PAST, snapshotItemIds: ids })), settings: {} };
+      H.txGet.mockImplementationOnce(() => {
+        const days = [...H.event!.days!];
+        days[2] = { ...days[2], ...change };
+        H.event = { ...H.event, days };
+      });
+      await expect(dealDayCard(U, 2)).resolves.toBe(false);
+      expect(H.txSet).not.toHaveBeenCalled();
+    },
+  );
+
   it('excludes Prompts already on the Player’s earlier Day Cards (no repeats across the cruise)', async () => {
     // A 50-item snapshot; earlier Days 0 and 1 already used p0..p23. After
     // exclusion 26 remain (>= MIN_POOL), so the exclusion holds and none of the
