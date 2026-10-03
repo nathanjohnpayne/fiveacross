@@ -1168,7 +1168,7 @@ async function visibleWinners(
   for (const winner of winners) {
     try {
       const proof = (await db.doc(`events/${eventId}/proofs/${winner.proofId}`).get()).data() as
-        | { type?: unknown; status?: unknown; reportCount?: unknown; createdAt?: unknown; uid?: unknown }
+        | { type?: unknown; status?: unknown; reportCount?: unknown; reportHideSuppressed?: unknown; createdAt?: unknown; uid?: unknown }
         | undefined;
       if (!proof) continue; // deleted after the freeze — display-only drop
       if (proof.createdAt !== winner.proofCreatedAt) continue; // another incarnation
@@ -1176,6 +1176,7 @@ async function visibleWinners(
       if (proof.status !== 'active') continue; // hidden, pending or flagged
       const reports = typeof proof.reportCount === 'number' ? proof.reportCount : 0;
       if (
+        proof.reportHideSuppressed !== true &&
         typeof reportHideThreshold === 'number' &&
         reportHideThreshold > 0 &&
         reports >= reportHideThreshold
