@@ -147,6 +147,8 @@ async function seedEventContent(
   eventId: string,
 ): Promise<void> {
   const at = (suffix: string) => `${eventPath(eventId)}/${suffix}`;
+  for (const id of ['shared-item', 'write-item'])
+    await setDoc(doc(database, at(`items/${id}`)), { text: 'Existing prompt', status: 'active' });
   await setDoc(doc(database, at('items/active-item')), {
     text: 'Active prompt',
     createdBy: TALLY_TARGET,

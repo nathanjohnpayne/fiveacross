@@ -21,7 +21,7 @@ import {
 // specs/d15-tally-cards.md — day-scoped Tally Cards (#216). A Mark stamps the
 // viewed `dayIndex` and the Prompt `itemText` as ADDITIVE fields on the same
 // `tally/{itemId}/markers/{uid}` doc (the marker create rule validates
-// uid/displayName/markedAt but not the full key set), so the Feed groups markers
+// the known keys, target, Day, text, name and timestamp), so the Feed groups markers
 // into per-(itemId, dayIndex) cards while the Square badge (`useTally`) and the
 // Doubt `exists()` gate keep reading the unchanged path. This suite pins that the
 // day-scoped marker is still self-writable + attributed + publicly readable, and
@@ -42,7 +42,7 @@ const db = (uid: string) => testEnv.authenticatedContext(uid).firestore();
 const at = (p: string) => `events/${EVENT}/${p}`;
 const markerPath = (itemId: string, uid: string) => at(`tally/${itemId}/markers/${uid}`);
 // The day-scoped marker shape setMark writes (#216): the per-Prompt entry PLUS
-// the additive dayIndex + itemText the Feed groups/labels on.
+// the additive dayIndex + bounded itemText compatibility fields; the Feed groups by Day and joins trusted Prompt labels.
 const marker = (uid: string, over: Record<string, unknown> = {}) => ({
   eventId: EVENT,
   uid,
@@ -73,7 +73,7 @@ beforeEach(async () => {
     await setDoc(doc(s, `events/${EVENT}`), {
       name: 'Cruise', sailStart: '2026-01-01', sailEnd: '2026-01-07', status: 'active',
       defaultTheme: 'neon-playground', claimMode: 'honor', admins: [ADMIN],
-      settings: { reportHideThreshold: 3 },
+      settings: { reportHideThreshold: 3 }, days: [0, 1, 2].map((index) => ({ index, unlockAt: 0 })),
     });
     await setDoc(doc(s, at(`items/${ITEM}`)), {
       text: 'Balcony or porthole photo', createdBy: ALICE, createdAt: NOW(), isFreeSpace: false,
@@ -84,6 +84,58 @@ beforeEach(async () => {
 });
 
 describe('firestore.rules — day-scoped Tally Card markers (specs/d15-tally-cards.md)', () => {
+  it('rejects the audit reproduction: phantom target, object text and far-future sort time', async () => {
+    await assertFails(setDoc(doc(db(ALICE), markerPath('phantom', ALICE)), marker(ALICE)));
+    const mine = doc(db(ALICE), markerPath(ITEM, ALICE));
+    await assertFails(setDoc(mine, marker(ALICE, { itemText: { boom: true } })));
+    await assertFails(setDoc(mine, marker(ALICE, { markedAt: 1e15 })));
+  });
+
+  it.each([
+    { itemText: '' }, { itemText: 'x'.repeat(81) }, { itemText: ['text'] },
+    { dayIndex: -1 }, { dayIndex: 0.5 }, { dayIndex: 3 }, { dayIndex: 20 },
+    { markedAt: 0 }, { markedAt: -1 }, { markedAt: 1.5 },
+    { extra: 'unvalidated' },
+    { cellIndex: -1 }, { cellIndex: 25 }, { cellIndex: 0.5 }, { cellIndex: '2' },
+  ])('rejects invalid persisted shape on create and update: %j', async (over) => {
+    const mine = doc(db(ALICE), markerPath(ITEM, ALICE));
+    await assertFails(setDoc(mine, marker(ALICE, over)));
+    await assertSucceeds(setDoc(mine, marker(ALICE)));
+    await assertFails(setDoc(mine, marker(ALICE, over)));
+  });
+
+  it.each([false, true])('preserves a queued Mark for a deleted frozen Prompt (slot identity supplied: %s)', async (slot) => {
+    const deletedId = 'deleted-pool-prompt';
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), at(`days/2/boards/${ALICE}`)), {
+        uid: ALICE, cells: { '24': { itemId: deletedId, text: 'Frozen label', marked: false } },
+      });
+    });
+    const payload = marker(ALICE, { markedAt: NOW() - 7 * 86400000, itemText: 'Forged mutable label', ...(slot ? { cellIndex: 24 } : {}) });
+    await assertSucceeds(setDoc(doc(db(ALICE), markerPath(deletedId, ALICE)), payload));
+    await assertFails(setDoc(doc(db(ALICE), markerPath('not-on-card', ALICE)), payload));
+    await assertFails(setDoc(doc(db(ALICE), markerPath(deletedId, ALICE)), { ...payload, cellIndex: 0 }));
+    await assertFails(setDoc(doc(db(BOB), markerPath(deletedId, BOB)), marker(BOB, { cellIndex: 24 })));
+  });
+
+  it.each([
+    { days: [{ index: 1, unlockAt: 0 }, { index: 0, unlockAt: 0 }], accepted: [0, 1], absent: 2 },
+    { days: [{ index: 4, unlockAt: 0 }], accepted: [4], absent: 0 },
+  ])('validates scheduled Day identities independently of offsets: %j', async schedule => {
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await setDoc(doc(ctx.firestore(), `events/${EVENT}`), { days: schedule.days }, { merge: true });
+    });
+    for (const dayIndex of schedule.accepted) await assertSucceeds(setDoc(doc(db(ALICE), markerPath(ITEM, ALICE)), marker(ALICE, { dayIndex })));
+    await assertFails(setDoc(doc(db(ALICE), markerPath(ITEM, ALICE)), marker(ALICE, { dayIndex: schedule.absent })));
+  });
+
+  it('keeps long-offline queued marks and legacy square-only markers admissible', async () => {
+    const mine = doc(db(ALICE), markerPath(ITEM, ALICE));
+    await assertSucceeds(setDoc(mine, marker(ALICE, { markedAt: NOW() - 7 * 86400000 })));
+    const { dayIndex: _day, itemText: _text, ...legacy } = marker(ALICE);
+    await assertSucceeds(setDoc(mine, legacy));
+  });
+
   it('a Player self-publishes their OWN day-scoped marker (dayIndex + itemText), then unmarks it', async () => {
     const mine = doc(db(ALICE), markerPath(ITEM, ALICE));
     await assertSucceeds(setDoc(mine, marker(ALICE))); // additive fields are accepted
