@@ -45,7 +45,7 @@ Every claim below maps to an assertion in `src/components/w1-prompt-pool.test.ts
 - Given a Player adds/reports rapidly, when they exceed the client rate-limit, then further add/report is throttled (disabled control + human message) until the window passes—`src/components/w1-prompt-pool.test.tsx` (the Add and Report throttle tests).
 - Before-the-Event framing strengthened per ADR 0003—framing test above.
 - Pool stays dense (~30–50): unaffected by this ticket: seeded and maintained by `specs/w1-event-seed.md` and admin pruning; this ticket only keeps the live count visible in the strengthened copy.
-- Reports require distinct reporter/incarnation receipts, acknowledge matching retries, and increment the target count exactly once. Controls await acceptance; write failures remain retryable with no success analytics. Real admission checks live in `tests/rules/report-hide-server.test.ts`.
+- Reports require distinct reporter/incarnation receipts, acknowledge matching retries, and increment the target count exactly once. Controls await acceptance; write failures remain retryable with no success analytics. Real admission checks live in `tests/rules/report-admission.test.ts`.
 
 ## Scope and honest bounds
 

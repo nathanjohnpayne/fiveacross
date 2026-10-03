@@ -33,7 +33,7 @@ This ticket landed after #34, so the Feed is already the merged Proofs + Moments
 
 ## Client visibility and server enforcement
 
-The client threshold filter remains presentational: a patched bundle can ignore it while a Proof still has Rules-readable `status: active`. Source server threshold hiding is documented in `specs/report-hide-server.md`; it moves unsuppressed over-threshold rows to hidden and respects the same restore marker. This preserves the honor-system contract without treating client presentation as a privacy boundary. Deployed enforcement requires deployment/readback evidence separately from source tests.
+The client threshold filter remains presentational: a patched bundle can ignore it while a Proof still has Rules-readable `status: active`. Source server threshold hiding is documented in `specs/w4-server-authoritative-hide.md`; it moves unsuppressed over-threshold rows to hidden and respects the same restore marker. This preserves the honor-system contract without treating client presentation as a privacy boundary. Deployed enforcement requires deployment/readback evidence separately from source tests.
 
 Reports require a distinct reporter receipt per target incarnation (#1405), with banned reporters denied and a paired server-clock cadence fence. The counter still moves by exactly one for a new accepted receipt; it is not an independently writable increment-only API. `reportItem` and `reportProof` await the transaction or an incarnation-matching duplicate acknowledgment, and UI failures remain retryable without success analytics.
 
@@ -53,7 +53,7 @@ The filter runs **before** `dealBoard`, which keeps the `MIN_POOL` thin-pool gua
 
 ## Lifting the community auto-hide
 
-Restore and Clear reports reset the count and stamp `reportHideSuppressed: true` for the current incarnation (#1355 owner decision, implemented by #1405). A restored target can receive new distinct reports, which remain visible to Admins but cannot automatically hide that incarnation again. Existing receipts survive the reset, preventing the same reporter from incrementing again. New target incarnations accept new receipts.
+Restore stamps `reportHideSuppressed: true` for the current incarnation while retaining its report count/history; Clear reports separately zeroes the count and stamps the same suppression marker (#1355 owner decision, implemented by #1405). A restored target can receive new distinct reports, which remain visible to Admins but cannot automatically hide that incarnation again. Existing receipts survive the reset, preventing the same reporter from incrementing again. New target incarnations accept new receipts.
 
 Restore retains the existing claim-aware safety/status gate; Clear reports dismisses report debt without overriding unrelated safety holds. The queue offers Clear reports both for automatically hidden rows and for suppressed rows with new reports, so a fresh report on restored content remains dismissible. Moderation privacy and retained report receipts are separate from Mark credit.
 
