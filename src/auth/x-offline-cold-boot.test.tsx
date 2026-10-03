@@ -198,7 +198,7 @@ beforeEach(() => {
   mocks.hasCachedCard.mockResolvedValue(false); // default: no cached card either (#403)
   mocks.attestAdult.mockResolvedValue(undefined);
   mocks.joinAndDeal.mockResolvedValue(undefined);
-  mocks.signInWithPopup.mockResolvedValue({});
+  mocks.signInWithPopup.mockResolvedValue({ user: RETURNING_USER });
   mocks.signOut.mockResolvedValue(undefined);
 });
 

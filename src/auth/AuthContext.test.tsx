@@ -1,11 +1,12 @@
 import { render, screen, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { StrictMode } from 'react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   AUTH_BOOTSTRAP_TIMEOUT_MS,
   AuthProvider,
   DEAL_TIMEOUT_MS,
+  EXPLICIT_LOGOUT_KEY,
   PENDING_REDIRECT_ATTESTATION_KEY,
   REDIRECT_PENDING_KEY,
   SIGNIN_ADULT_ACK_KEY,
@@ -88,13 +89,15 @@ const HANDOFF_USER = { ...FAKE_USER, refreshToken: 'handoff-refresh-token' };
 let emitAuth: (u: unknown) => unknown = () => {};
 
 function Harness() {
-  const { dealError, dealing, retryDeal, signIn } = useAuth();
+  const { dealError, dealing, retryDeal, signIn, signOutUser, user } = useAuth();
   return (
     <div>
       {dealError ? <p role="alert">{dealError}</p> : null}
       <span data-testid="dealing">{dealing ? 'dealing' : 'idle'}</span>
       <button onClick={() => retryDeal()}>retry</button>
       <button onClick={() => void signIn(false)}>signin</button>
+      <button onClick={() => void signOutUser()}>signout</button>
+      <span data-testid="auth-user">{user?.uid ?? "signed out"}</span>
     </div>
   );
 }
@@ -223,6 +226,12 @@ Object.defineProperty(globalThis, 'localStorage', {
   },
 });
 
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
   eventScope.eventId = 'event-a';
@@ -249,7 +258,7 @@ beforeEach(() => {
   mocks.hasCachedCard.mockResolvedValue(false);
   mocks.attestAdult.mockResolvedValue(undefined);
   mocks.getRedirectResult.mockResolvedValue(null);
-  mocks.signInWithPopup.mockResolvedValue({});
+  mocks.signInWithPopup.mockResolvedValue({ user: FAKE_USER });
   mocks.signInWithRedirect.mockResolvedValue(undefined);
   mocks.signOut.mockResolvedValue(undefined);
 });
@@ -987,7 +996,7 @@ describe('AuthContext deal-error hardening', () => {
   });
 
   it('leaves a popup attempt alone on a persisted pageshow, since nothing navigated away (#1123)', async () => {
-    const popup = deferred<Record<string, never>>();
+    const popup = deferred<{ user: typeof FAKE_USER }>();
     mocks.signInWithPopup.mockReturnValueOnce(popup.promise);
     mount();
     await userEvent.click(screen.getByText('signin'));
@@ -996,7 +1005,59 @@ describe('AuthContext deal-error hardening', () => {
     });
     await userEvent.click(screen.getByText('signin'));
     expect(mocks.signInWithPopup).toHaveBeenCalledTimes(1);
-    popup.settle({});
+    popup.settle({ user: FAKE_USER });
+  });
+
+  it('restores prior logout when Back abandons a redirect, without treating an ordinary pageshow as cancellation', async () => {
+    localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
+    mocks.signInWithRedirect.mockReturnValueOnce(new Promise<never>(() => {}));
+    const authMock = mockedAuth as { config?: { authDomain: string } };
+    authMock.config = { authDomain: window.location.hostname };
+    try {
+      mount();
+      await userEvent.click(screen.getByText('signin'));
+      expect(localStorage.getItem(EXPLICIT_LOGOUT_KEY)).toBeNull();
+      act(() => { window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: false })); });
+      expect(localStorage.getItem(EXPLICIT_LOGOUT_KEY)).toBeNull();
+      act(() => { window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true })); });
+      expect(localStorage.getItem(EXPLICIT_LOGOUT_KEY)).toBe('1');
+      expect(sessionStorage.getItem(PENDING_REDIRECT_ATTESTATION_KEY)).toBeNull();
+      await act(async () => { await emitAuth(FAKE_USER); });
+      expect(screen.getByTestId('auth-user')).toHaveTextContent('signed out');
+      expect(mocks.signOut).toHaveBeenCalledOnce();
+    } finally { delete authMock.config; }
+  });
+
+  it('cannot retire a fresh popup from an older redirect Back event', async () => {
+    mocks.joinAndDeal.mockResolvedValueOnce(true);
+    localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
+    mocks.signInWithRedirect.mockReturnValueOnce(new Promise<never>(() => {}));
+    const authMock = mockedAuth as { config?: { authDomain: string } };
+    authMock.config = { authDomain: window.location.hostname };
+    const popup = deferred<{ user: typeof FAKE_USER }>();
+    mocks.signInWithPopup.mockReturnValueOnce(popup.promise);
+    let signIn!: (acknowledged: boolean) => Promise<void>;
+    let signOutUser!: () => Promise<void>;
+    function Controls() { ({ signIn, signOutUser } = useAuth()); return null; }
+    let remove: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      render(<AuthProvider><Harness /><Controls /></AuthProvider>);
+      void signIn(false);
+      await act(async () => { await signOutUser(); });
+      // The new deliberate attempt stays in this mount; the older redirect's
+      // token must not let a delayed Back event retire its owner or slot.
+      remove = vi.spyOn(localStorage, 'removeItem').mockImplementation(() => { throw new Error('write denied'); });
+      const fresh = signIn(false);
+      act(() => { window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true })); });
+      expect(signIn(false)).toBe(fresh);
+      expect(mocks.signInWithPopup).toHaveBeenCalledOnce();
+      await act(async () => { await emitAuth(FAKE_USER); popup.settle({ user: FAKE_USER }); await fresh; });
+      expect(screen.getByTestId('auth-user')).toHaveTextContent(FAKE_USER.uid);
+      expect(mocks.signOut).toHaveBeenCalledOnce();
+    } finally {
+      remove?.mockRestore();
+      delete authMock.config;
+    }
   });
 
   // The retired device matrix, kept only as the INPUT space the rule must be
@@ -1104,7 +1165,7 @@ describe('AuthContext deal-error hardening', () => {
   });
 
   it('coalesces repeated sign-in calls into one Firebase auth transaction', async () => {
-    const popup = deferred<Record<string, never>>();
+    const popup = deferred<{ user: typeof FAKE_USER }>();
     mocks.signInWithPopup.mockReturnValueOnce(popup.promise);
 
     let signIn!: (acknowledgedAdultContent: boolean) => Promise<void>;
@@ -1122,7 +1183,7 @@ describe('AuthContext deal-error hardening', () => {
     const second = signIn(false);
     expect(mocks.signInWithPopup).toHaveBeenCalledTimes(1);
 
-    popup.settle({});
+    popup.settle({ user: FAKE_USER });
     await Promise.all([first, second]);
   });
 
@@ -2175,7 +2236,7 @@ describe('AuthContext deal-error hardening', () => {
     vi.unstubAllGlobals();
   });
 
-  it('hands off web.app on a mid-session sign-out, not only on first load (#353)', async () => {
+  it('hands off web.app on spontaneous mid-session session loss (#353)', async () => {
     const replace = vi.fn();
     vi.stubGlobal('location', {
       hostname: 'gaycruisebingo.web.app',
@@ -2189,9 +2250,7 @@ describe('AuthContext deal-error hardening', () => {
     await act(async () => void (await emitAuth(FAKE_USER)));
     expect(replace).not.toHaveBeenCalled(); // signed-in cached sessions stay put
 
-    // An explicit sign-out lands on the canonical origin: any sign-in tap from
-    // web.app would hand off anyway, so staying would only add a second
-    // acknowledgement screen before the same navigation.
+    // A null SDK callback without an explicit logout retains fallback recovery.
     await act(async () => void (await emitAuth(null)));
     expect(replace).toHaveBeenCalledOnce();
     expect(replace).toHaveBeenCalledWith('https://gaycruisebingo.firebaseapp.com/card');
@@ -2199,7 +2258,7 @@ describe('AuthContext deal-error hardening', () => {
     vi.unstubAllGlobals();
   });
 
-  it('hands off a mid-session sign-out to the CURRENT route, not the mount-time one (#376)', async () => {
+  it('hands off spontaneous session loss to the CURRENT route, not the mount-time one (#376)', async () => {
     const replace = vi.fn();
     const location = {
       hostname: 'gaycruisebingo.web.app',
@@ -2213,7 +2272,7 @@ describe('AuthContext deal-error hardening', () => {
     mount();
     await act(async () => void (await emitAuth(FAKE_USER)));
 
-    // The signed-in session navigates before signing out; the handoff target
+    // The signed-in session navigates before spontaneous session loss; the handoff target
     // must be computed from the live location at navigation time, so the
     // canonical origin receives the route the Player was actually on.
     location.pathname = '/more';
@@ -2223,6 +2282,423 @@ describe('AuthContext deal-error hardening', () => {
     expect(replace).toHaveBeenCalledOnce();
     expect(replace).toHaveBeenCalledWith('https://gaycruisebingo.firebaseapp.com/more?tab=stats');
 
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps explicit logout on the current route through null settles, timers and a fresh mount', async () => {
+    const replace = vi.fn();
+    const location = { hostname: 'gaycruisebingo.web.app', pathname: '/card', search: '', hash: '', replace };
+    vi.stubGlobal('location', location);
+    const first = mount();
+    await act(async () => void (await emitAuth(FAKE_USER)));
+    location.pathname = '/more';
+    location.search = '?tab=stats';
+    mocks.signOut.mockImplementationOnce(async () => { await emitAuth(null); });
+    await userEvent.click(screen.getByText('signout'));
+    expect(mocks.signOut).toHaveBeenCalledWith(mockedAuth);
+    expect(localStorage.getItem(EXPLICIT_LOGOUT_KEY)).toBe('1');
+    expect(screen.getByTestId('auth-user')).toHaveTextContent('signed out');
+    await act(async () => void (await emitAuth(null)));
+    expect(replace).not.toHaveBeenCalled();
+    first.unmount();
+    // Browser reload creates a fresh provider while origin persistence survives.
+    vi.useFakeTimers();
+    mount();
+    await act(async () => void (await emitAuth(null)));
+    await vi.advanceTimersByTimeAsync(WEB_APP_AUTH_SETTLE_TIMEOUT_MS * 2);
+    expect(replace).not.toHaveBeenCalled();
+    expect(screen.getByTestId('auth-user')).toHaveTextContent('signed out');
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('rejects a late non-null popup callback after explicit logout until a deliberate sign-in', async () => {
+    mocks.joinAndDeal.mockResolvedValue(true);
+    const authMock = mockedAuth as { currentUser?: typeof FAKE_USER };
+    const latePopup = deferred<{ user: typeof FAKE_USER }>();
+    mocks.signInWithPopup.mockReturnValueOnce(latePopup.promise);
+    let signIn!: (acknowledged: boolean) => Promise<void>;
+    function Controls() {
+      ({ signIn } = useAuth());
+      return null;
+    }
+    render(<AuthProvider><Harness /><Controls /></AuthProvider>);
+    authMock.currentUser = FAKE_USER;
+    await act(async () => void (await emitAuth(FAKE_USER)));
+    const retired = signIn(true);
+    mocks.signOut.mockImplementation(async () => {
+      delete authMock.currentUser;
+      await emitAuth(null);
+    });
+    await userEvent.click(screen.getByText('signout'));
+    expect(screen.getByTestId('auth-user')).toHaveTextContent('signed out');
+    mocks.ensureUserProfile.mockClear();
+    // Firebase publishes the credential before resolving its popup promise.
+    authMock.currentUser = FAKE_USER;
+    await act(async () => { await emitAuth(FAKE_USER); });
+    await act(async () => { latePopup.settle({ user: FAKE_USER }); await retired; });
+    expect(screen.getByTestId('auth-user')).toHaveTextContent('signed out');
+    expect(authMock.currentUser).toBeUndefined();
+    expect(mocks.signOut).toHaveBeenCalledTimes(2);
+    expect(mocks.ensureUserProfile).not.toHaveBeenCalled();
+    expect(mocks.attestAdult).not.toHaveBeenCalled();
+    // A new deliberate attempt clears intent and can publish its own session.
+    mocks.signInWithPopup.mockResolvedValueOnce({ user: FAKE_USER });
+    await act(async () => { await signIn(false); });
+    authMock.currentUser = FAKE_USER;
+    await act(async () => { await emitAuth(FAKE_USER); });
+    expect(screen.getByTestId('auth-user')).toHaveTextContent(FAKE_USER.uid);
+    delete authMock.currentUser;
+  });
+
+  it('accepts a deliberate sign-in when readable logout persistence cannot be cleared', async () => {
+    mocks.joinAndDeal.mockResolvedValue(true);
+    localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
+    const remove = vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {
+      throw new Error('storage is write-denied');
+    });
+    mount();
+    await act(async () => { await emitAuth(null); });
+    await userEvent.click(screen.getByText('signin'));
+    await act(async () => { await emitAuth(FAKE_USER); });
+    expect(screen.getByTestId('auth-user')).toHaveTextContent(FAKE_USER.uid);
+    expect(mocks.signOut).not.toHaveBeenCalled();
+    expect(localStorage.getItem(EXPLICIT_LOGOUT_KEY)).toBe('1');
+    remove.mockRestore();
+  });
+
+  it('keeps a same-origin deliberate sign-in in this mount when logout persistence cannot be cleared', async () => {
+    mocks.joinAndDeal.mockResolvedValue(true);
+    localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
+    const authMock = mockedAuth as { config?: { authDomain: string }; currentUser?: typeof FAKE_USER };
+    authMock.config = { authDomain: window.location.hostname };
+    const remove = vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {
+      throw new Error('storage is write-denied');
+    });
+    try {
+      mocks.signInWithPopup.mockImplementationOnce(async () => {
+        authMock.currentUser = FAKE_USER;
+        await emitAuth(FAKE_USER);
+        return { user: FAKE_USER };
+      });
+      mount();
+      await act(async () => { await emitAuth(null); });
+      await userEvent.click(screen.getByText('signin'));
+      expect(mocks.signInWithPopup).toHaveBeenCalledOnce();
+      expect(mocks.signInWithRedirect).not.toHaveBeenCalled();
+      expect(screen.getByTestId('auth-user')).toHaveTextContent(FAKE_USER.uid);
+      expect(mocks.signOut).not.toHaveBeenCalled();
+      expect(localStorage.getItem(EXPLICIT_LOGOUT_KEY)).toBe('1');
+    } finally {
+      remove.mockRestore();
+      delete authMock.config;
+      delete authMock.currentUser;
+    }
+  });
+
+  it('honors a later same-origin tab logout after a deliberate local sign-in', async () => {
+    mocks.joinAndDeal.mockResolvedValue(true);
+    mount();
+    await act(async () => { await emitAuth(null); });
+    await userEvent.click(screen.getByText('signin'));
+    await act(async () => { await emitAuth(FAKE_USER); });
+    expect(screen.getByTestId('auth-user')).toHaveTextContent(FAKE_USER.uid);
+    localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
+    window.dispatchEvent(new StorageEvent('storage', { key: EXPLICIT_LOGOUT_KEY, newValue: '1' }));
+    await act(async () => { await emitAuth(FAKE_USER); });
+    expect(screen.getByTestId('auth-user')).toHaveTextContent('signed out');
+    expect(mocks.signOut).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { sameOrigin: false, cleanupDenied: false },
+    { sameOrigin: true, cleanupDenied: false },
+    { sameOrigin: true, cleanupDenied: true },
+  ])('restores explicit logout after owned OAuth failure (sameOrigin=$sameOrigin cleanupDenied=$cleanupDenied)', async ({ sameOrigin, cleanupDenied }) => {
+    mocks.joinAndDeal.mockResolvedValue(true);
+    localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
+    const authMock = mockedAuth as { config?: { authDomain: string }; currentUser?: typeof FAKE_USER };
+    if (sameOrigin) authMock.config = { authDomain: window.location.hostname };
+    const remove = cleanupDenied ? vi.spyOn(localStorage, 'removeItem').mockImplementation(() => {
+      throw new Error('storage is write-denied');
+    }) : null;
+    const failure = Object.assign(new Error('cancelled'), { code: 'auth/popup-closed-by-user' });
+    const oauth = sameOrigin && !cleanupDenied ? mocks.signInWithRedirect : mocks.signInWithPopup;
+    oauth.mockRejectedValueOnce(failure);
+    let signIn!: (acknowledged: boolean) => Promise<void>;
+    function Controls() { ({ signIn } = useAuth()); return null; }
+    try {
+      render(<AuthProvider><Harness /><Controls /></AuthProvider>);
+      await act(async () => { await emitAuth(null); });
+      await act(async () => { await expect(signIn(false)).rejects.toBe(failure); });
+      expect(localStorage.getItem(EXPLICIT_LOGOUT_KEY)).toBe('1');
+      // A later stale callback still cannot reopen the explicitly logged-out session.
+      authMock.currentUser = FAKE_USER;
+      await act(async () => { await emitAuth(FAKE_USER); });
+      expect(screen.getByTestId('auth-user')).toHaveTextContent('signed out');
+      expect(mocks.signOut).toHaveBeenCalledOnce();
+      expect(mocks.attestAdult).not.toHaveBeenCalled();
+    } finally {
+      remove?.mockRestore();
+      delete authMock.config;
+      delete authMock.currentUser;
+    }
+  });
+
+  it('clears a prematurely published session when its owned popup later rejects', async () => {
+    mocks.joinAndDeal.mockResolvedValueOnce(true);
+    localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
+    const popup = deferred<{ user: typeof FAKE_USER }>();
+    mocks.signInWithPopup.mockReturnValueOnce(popup.promise);
+    mocks.signOut.mockRejectedValueOnce(new Error('cleanup unavailable'));
+    let signIn!: (acknowledged: boolean) => Promise<void>;
+    function Controls() { ({ signIn } = useAuth()); return null; }
+    render(<AuthProvider><Harness /><Controls /></AuthProvider>);
+    const authMock = mockedAuth as { currentUser?: typeof FAKE_USER };
+    const attempt = signIn(false);
+    const rejection = expect(attempt).rejects.toThrow('cancelled');
+    authMock.currentUser = FAKE_USER;
+    await act(async () => { await emitAuth(FAKE_USER); });
+    expect(screen.getByTestId('auth-user')).toHaveTextContent(FAKE_USER.uid);
+    await act(async () => { popup.fail(new Error('cancelled')); await rejection; });
+    expect(localStorage.getItem(EXPLICIT_LOGOUT_KEY)).toBe('1');
+    expect(screen.getByTestId('auth-user')).toHaveTextContent('signed out');
+    expect(mocks.signOut).toHaveBeenCalledOnce();
+    delete authMock.currentUser;
+  });
+
+  it('does not invent logout intent when an ordinary sign-in fails', async () => {
+    mocks.joinAndDeal.mockResolvedValue(true);
+    const failure = new Error('cancelled');
+    mocks.signInWithPopup.mockRejectedValueOnce(failure);
+    let signIn!: (acknowledged: boolean) => Promise<void>;
+    function Controls() { ({ signIn } = useAuth()); return null; }
+    render(<AuthProvider><Harness /><Controls /></AuthProvider>);
+    await act(async () => { await expect(signIn(false)).rejects.toBe(failure); });
+    expect(localStorage.getItem(EXPLICIT_LOGOUT_KEY)).toBeNull();
+    await act(async () => { await emitAuth(FAKE_USER); });
+    expect(screen.getByTestId('auth-user')).toHaveTextContent(FAKE_USER.uid);
+    expect(mocks.signOut).not.toHaveBeenCalled();
+  });
+
+  it('does not restore logout after a successful credential whose attestation fails', async () => {
+    mocks.joinAndDeal.mockResolvedValue(true);
+    localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
+    const authMock = mockedAuth as { currentUser?: typeof FAKE_USER };
+    mocks.signInWithPopup.mockImplementationOnce(async () => {
+      authMock.currentUser = FAKE_USER;
+      await emitAuth(FAKE_USER);
+      return { user: FAKE_USER };
+    });
+    const failure = new Error('attestation unavailable');
+    mocks.attestAdult.mockRejectedValueOnce(failure);
+    let signIn!: (acknowledged: boolean) => Promise<void>;
+    function Controls() { ({ signIn } = useAuth()); return null; }
+    try {
+      render(<AuthProvider><Harness /><Controls /></AuthProvider>);
+      await act(async () => { await signIn(true); });
+      expect(mocks.attestAdult).toHaveBeenCalledOnce();
+      expect(localStorage.getItem(EXPLICIT_LOGOUT_KEY)).toBeNull();
+      expect(screen.getByTestId('auth-user')).toHaveTextContent(FAKE_USER.uid);
+      expect(mocks.signOut).not.toHaveBeenCalled();
+    } finally { delete authMock.currentUser; }
+  });
+
+  it('cannot restore logout from a retired OAuth failure over a fresh sign-in', async () => {
+    mocks.joinAndDeal.mockResolvedValue(true);
+    localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
+    let rejectOld!: (reason: unknown) => void;
+    mocks.signInWithPopup.mockReturnValueOnce(new Promise((_resolve, reject) => { rejectOld = reject; }));
+    const freshPopup = deferred<{ user: typeof FAKE_USER }>();
+    mocks.signInWithPopup.mockReturnValueOnce(freshPopup.promise);
+    let signIn!: (acknowledged: boolean) => Promise<void>;
+    let signOutUser!: () => Promise<void>;
+    function Controls() { ({ signIn, signOutUser } = useAuth()); return null; }
+    render(<AuthProvider><Harness /><Controls /></AuthProvider>);
+    const retired = signIn(false);
+    await act(async () => { await signOutUser(); });
+    const fresh = signIn(false);
+    await act(async () => { rejectOld(new Error('old popup cancelled')); await retired; });
+    expect(localStorage.getItem(EXPLICIT_LOGOUT_KEY)).toBeNull();
+    expect(signIn(false)).toBe(fresh);
+    await act(async () => { await emitAuth(FAKE_USER); freshPopup.settle({ user: FAKE_USER }); await fresh; });
+    expect(screen.getByTestId('auth-user')).toHaveTextContent(FAKE_USER.uid);
+    expect(mocks.track).not.toHaveBeenCalledWith('login_failed', expect.anything());
+    expect(mocks.signOut).toHaveBeenCalledOnce();
+  });
+
+  it('retires a pending popup on same-origin logout and preserves a fresh attempt', async () => {
+    let signIn!: (acknowledged: boolean) => Promise<void>;
+    function Controls() {
+      ({ signIn } = useAuth());
+      return null;
+    }
+    const retiredPopup = deferred<{ user: typeof FAKE_USER }>();
+    const freshPopup = deferred<{ user: typeof FAKE_USER }>();
+    const authMock = mockedAuth as { currentUser?: typeof FAKE_USER };
+    authMock.currentUser = FAKE_USER;
+    mocks.signInWithPopup.mockReturnValueOnce(retiredPopup.promise).mockReturnValueOnce(freshPopup.promise);
+    render(<AuthProvider><Controls /></AuthProvider>);
+    let retired!: Promise<void>;
+    await act(async () => { retired = signIn(true); await Promise.resolve(); });
+    localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
+    window.dispatchEvent(new StorageEvent('storage', { key: EXPLICIT_LOGOUT_KEY, newValue: '1' }));
+    let fresh!: Promise<void>;
+    await act(async () => { fresh = signIn(false); await Promise.resolve(); });
+    expect(mocks.signInWithPopup).toHaveBeenCalledTimes(2);
+    await act(async () => { retiredPopup.settle({ user: FAKE_USER }); await retired; });
+    expect(mocks.attestAdult).not.toHaveBeenCalled();
+    expect(mocks.track.mock.calls.filter(([event]) => event === 'login')).toHaveLength(0);
+    expect(signIn(false)).toBe(fresh);
+    await act(async () => { freshPopup.settle({ user: FAKE_USER }); await fresh; });
+    expect(mocks.track.mock.calls.filter(([event]) => event === 'login')).toHaveLength(1);
+    delete authMock.currentUser;
+  });
+
+  it('rejects a persisted logout session callback even when SDK cleanup fails', async () => {
+    localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
+    mocks.signOut.mockRejectedValueOnce(new Error('SDK cleanup failed'));
+    mount();
+    await act(async () => { await emitAuth(FAKE_USER); });
+    expect(screen.getByTestId('auth-user')).toHaveTextContent('signed out');
+    expect(mocks.ensureUserProfile).not.toHaveBeenCalled();
+    expect(mocks.signOut).toHaveBeenCalledOnce();
+    expect(localStorage.getItem(EXPLICIT_LOGOUT_KEY)).toBe('1');
+  });
+
+  it('does not restore another origin session when readable storage refuses intent writes', async () => {
+    const replace = vi.fn();
+    vi.stubGlobal('location', { hostname: 'gaycruisebingo.web.app', pathname: '/more', search: '', hash: '', replace });
+    const write = vi.spyOn(localStorage, 'setItem').mockImplementation(() => { throw new Error('quota exceeded'); });
+    const first = mount();
+    await act(async () => void (await emitAuth(FAKE_USER)));
+    mocks.signOut.mockImplementationOnce(async () => { await emitAuth(null); });
+    await userEvent.click(screen.getByText('signout'));
+    expect(replace).not.toHaveBeenCalled();
+    first.unmount();
+    mount();
+    await act(async () => void (await emitAuth(null)));
+    expect(replace).not.toHaveBeenCalled();
+    write.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
+  it('starts a fresh deliberate sign-in after logout while the previous popup attestation is pending', async () => {
+    let signIn!: (acknowledged: boolean) => Promise<void>;
+    let logout!: () => Promise<void>;
+    function Controls() {
+      const context = useAuth();
+      signIn = context.signIn;
+      logout = context.signOutUser;
+      return null;
+    }
+    const pending = deferred<void>();
+    const authMock = mockedAuth as { currentUser?: unknown };
+    authMock.currentUser = FAKE_USER;
+    mocks.signInWithPopup.mockResolvedValue({ user: FAKE_USER });
+    mocks.attestAdult.mockReturnValueOnce(pending.promise);
+    render(<AuthProvider><Controls /></AuthProvider>);
+    await act(async () => void (await emitAuth(FAKE_USER)));
+    let first!: Promise<void>;
+    await act(async () => { first = signIn(true); await Promise.resolve(); });
+    await waitFor(() => expect(mocks.attestAdult).toHaveBeenCalledOnce());
+    mocks.signOut.mockImplementationOnce(async () => {
+      delete authMock.currentUser;
+      await emitAuth(null);
+    });
+    await act(async () => { await logout(); });
+    expect(localStorage.getItem(EXPLICIT_LOGOUT_KEY)).toBe('1');
+    const secondPopup = deferred<{ user: typeof FAKE_USER }>();
+    mocks.signInWithPopup.mockReturnValueOnce(secondPopup.promise);
+    let second!: Promise<void>;
+    await act(async () => { second = signIn(false); await Promise.resolve(); });
+    expect(mocks.signInWithPopup).toHaveBeenCalledTimes(2);
+    expect(localStorage.getItem(EXPLICIT_LOGOUT_KEY)).toBeNull();
+    await act(async () => { pending.settle(); await first; });
+    // Completion of the retired promise does not erase later attempt ownership.
+    expect(signIn(false)).toBe(second);
+    expect(mocks.signInWithPopup).toHaveBeenCalledTimes(2);
+    await act(async () => { secondPopup.settle({ user: FAKE_USER }); await second; });
+    await act(async () => { await signIn(false); });
+    expect(mocks.signInWithPopup).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not adopt a retired popup acknowledgement after another user signs in', async () => {
+    let signIn!: (acknowledged: boolean) => Promise<void>;
+    let logout!: () => Promise<void>;
+    function Controls() {
+      ({ signIn, signOutUser: logout } = useAuth());
+      return null;
+    }
+    const oldPopup = deferred<{ user: typeof FAKE_USER }>();
+    mocks.joinAndDeal.mockResolvedValue(true);
+    const otherUser = { ...FAKE_USER, uid: 'sailor-2' };
+    const authMock = mockedAuth as { currentUser?: typeof FAKE_USER };
+    authMock.currentUser = FAKE_USER;
+    mocks.signInWithPopup.mockReturnValueOnce(oldPopup.promise);
+    render(<AuthProvider><Controls /></AuthProvider>);
+    await act(async () => void (await emitAuth(FAKE_USER)));
+    const retired = signIn(true);
+    mocks.signOut.mockImplementationOnce(async () => {
+      delete authMock.currentUser;
+      await emitAuth(null);
+    });
+    await act(async () => { await logout(); });
+    authMock.currentUser = otherUser;
+    mocks.signInWithPopup.mockResolvedValueOnce({ user: otherUser });
+    await act(async () => { await signIn(false); });
+    await act(async () => { oldPopup.settle({ user: FAKE_USER }); await retired; });
+    expect(mocks.attestAdult).not.toHaveBeenCalled();
+    expect(mocks.track.mock.calls.filter(([event]) => event === 'login')).toHaveLength(1);
+    delete authMock.currentUser;
+  });
+
+  it('does not attest a different current account with a live popup acknowledgement', async () => {
+    let signIn!: (acknowledged: boolean) => Promise<void>;
+    function Controls() {
+      ({ signIn } = useAuth());
+      return null;
+    }
+    const popup = deferred<{ user: typeof FAKE_USER }>();
+    const authMock = mockedAuth as { currentUser?: typeof FAKE_USER };
+    mocks.signInWithPopup.mockReturnValueOnce(popup.promise);
+    render(<AuthProvider><Controls /></AuthProvider>);
+    const attempt = signIn(true);
+    authMock.currentUser = { ...FAKE_USER, uid: 'sailor-2' };
+    await act(async () => { popup.settle({ user: FAKE_USER }); await attempt; });
+    expect(mocks.attestAdult).not.toHaveBeenCalled();
+    delete authMock.currentUser;
+  });
+
+  it('allows a deliberate sign-in after explicit logout and uses the current route', async () => {
+    const replace = vi.fn();
+    vi.stubGlobal('location', { hostname: 'gaycruisebingo.web.app', pathname: '/more', search: '?tab=stats', hash: '', replace });
+    localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
+    mount();
+    await act(async () => void (await emitAuth(null)));
+    expect(replace).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByText('signin'));
+    expect(localStorage.getItem(EXPLICIT_LOGOUT_KEY)).toBeNull();
+    expect(replace).toHaveBeenCalledOnce();
+    expect(replace).toHaveBeenCalledWith('https://gaycruisebingo.firebaseapp.com/more?tab=stats');
+    expect(mocks.signInWithPopup).not.toHaveBeenCalled();
+    expect(mocks.signInWithRedirect).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it('honors another same-origin tab logout and does not automatically hop with unreadable storage', async () => {
+    const replace = vi.fn();
+    vi.stubGlobal('location', { hostname: 'gaycruisebingo.web.app', pathname: '/card', search: '', hash: '', replace });
+    mount();
+    await act(async () => void (await emitAuth(FAKE_USER)));
+    // Other tab's logout writes the shared origin marker before SDK publication.
+    localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
+    await act(async () => void (await emitAuth(null)));
+    expect(replace).not.toHaveBeenCalled();
+    const get = vi.spyOn(localStorage, 'getItem').mockImplementation(() => { throw new Error('storage denied'); });
+    await act(async () => void (await emitAuth(null)));
+    expect(replace).not.toHaveBeenCalled();
+    get.mockRestore();
     vi.unstubAllGlobals();
   });
 
