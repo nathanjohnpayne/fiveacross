@@ -760,6 +760,22 @@ describe('server-authoritative Prompt submission retries (#1311)', () => {
     expect(track).not.toHaveBeenCalledWith('add_item');
     expect(track).not.toHaveBeenCalledWith('prompt_suggestion_submitted', expect.anything());
   });
+  it('asks the host to check admission preconditions and preserves the draft and retry ID without raw errors', async () => {
+    H.addItem.mockRejectedValueOnce(Object.assign(new Error('private provider details'), { code: 'functions/failed-precondition' }))
+      .mockImplementationOnce(async (...args: unknown[]) => ({ id: args[5], targetDayIndex: 19 }));
+    render(<ItemPool />);
+    const input = screen.getByPlaceholderText(/add a prompt/i);
+    fireEvent.change(input, { target: { value: 'Keep this draft' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/ask your host.*Event.*submission settings/i);
+    expect(screen.getByRole('alert')).not.toHaveTextContent(/private provider details|try again with signal/i);
+    expect(input).toHaveValue('Keep this draft');
+    expect(track).not.toHaveBeenCalledWith('add_item');
+    const id = H.addItem.mock.calls[0][5];
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await waitFor(() => expect(input).toHaveValue(''));
+    expect(H.addItem.mock.calls[1][5]).toBe(id);
+  });
   it('a changed draft gets a new ID and pending calls cannot double-submit', async () => {
     let reject!: (error: Error) => void;
     H.addItem.mockReturnValueOnce(new Promise((_, r) => { reject = r; }));

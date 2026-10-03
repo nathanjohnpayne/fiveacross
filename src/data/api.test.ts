@@ -75,6 +75,12 @@ describe('addItem — server admission wire (#1311)', () => {
     await addItem('u1', 'Event A prompt', false, undefined, 'event-a', 'retry-a');
     expect(submitMock).toHaveBeenCalledWith(expect.objectContaining({ eventId: 'event-a', itemId: 'retry-a' }));
   });
+  it('preserves server precondition refusal for host guidance without a pending-write fallback', async () => {
+    const error = Object.assign(new Error('safe server refusal'), { code: 'functions/failed-precondition' });
+    submitMock.mockRejectedValueOnce(error);
+    await expect(addItem('u1', 'Keep this draft', false, undefined, 'event-a', 'retry-a')).rejects.toBe(error);
+    expect(addDocMock).not.toHaveBeenCalled();
+  });
 });
 
 describe('hasCachedCard — cached-card probe for the #403 deal-failure fallback', () => {
