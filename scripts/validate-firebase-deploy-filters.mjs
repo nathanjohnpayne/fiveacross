@@ -173,9 +173,10 @@ const ADMIN_CALLABLE_EXPORTS = Object.freeze([
 
 // The single-service invoker families (#1299), inventoried as one table because
 // each service name is unique across them: the bug report, the email
-// unsubscribe endpoint, and the two auth-handoff halves.
+// unsubscribe endpoint, the prompt-intake endpoint, and the two auth-handoff halves.
 const SINGLE_SERVICE_EXPORTS = Object.freeze([
   ["submitBugReport", "bugReport"],
+  ["submitPrompt", "submitPrompt"],
   ["emailUnsubscribe", "emailUnsubscribe"],
   ["mintAuthHandoff", "mint"],
   ["exchangeAuthHandoff", "exchange"],
@@ -4285,11 +4286,11 @@ export async function classifyInvokerScope(
   pinnedFunctionIds = [],
   pinnedOwnershipUnknown = false,
   exportedAdminCallableServices = [],
-  // Direct callers that predate #1299 assume the default codebase exports all four.
+  // Direct callers that predate #1299 assume the default codebase exports these services.
   exportedSingleServiceCallables = SINGLE_SERVICE_EXPORTS.map(([, service]) => service),
 ) {
   // The syntax scan proves PRESENCE only, never absence (#1335, amending Q1 on
-  // #1282 for all five families): a scope that releases a whole codebase, or
+  // #1282 for all six families): a scope that releases a whole codebase, or
   // every codebase (Q3), selects EVERY family, strict for exactly the services
   // the released codebases are proven to export and allowing every other one
   // absent. An uninventoried codebase proves nothing, so it adds nothing strict.
@@ -4303,11 +4304,13 @@ export async function classifyInvokerScope(
   const allInvitationsSelected = everyCodebaseSelects;
   const allAdminsSelected = everyCodebaseSelects;
   const allBugReportsSelected = everyCodebaseSelects;
+  const allSubmitPromptsSelected = everyCodebaseSelects;
   const allUnsubscribesSelected = everyCodebaseSelects;
   const allAuthHandoffsSelected = everyCodebaseSelects;
   let functionsAttempted = true;
   let hostingAttempted = true;
   let bugReportInvokerSelected = allBugReportsSelected;
+  let submitPromptInvokerSelected = allSubmitPromptsSelected;
   let emailUnsubscribeInvokerSelected = allUnsubscribesSelected;
   let authHandoffInvokerSelected = allAuthHandoffsSelected;
   let eventInvitationsInvokerSelected = allInvitationsSelected;
@@ -4324,6 +4327,7 @@ export async function classifyInvokerScope(
     functionsAttempted = false;
     hostingAttempted = false;
     bugReportInvokerSelected = false;
+    submitPromptInvokerSelected = false;
     emailUnsubscribeInvokerSelected = false;
     authHandoffInvokerSelected = false;
     eventInvitationsInvokerSelected = false;
@@ -4334,6 +4338,7 @@ export async function classifyInvokerScope(
     strictSingleServices = new Set();
     const selectSingleFamily = (service) => {
       if (service === "bugReport") bugReportInvokerSelected = true;
+      else if (service === "submitPrompt") submitPromptInvokerSelected = true;
       else if (service === "emailUnsubscribe") emailUnsubscribeInvokerSelected = true;
       else authHandoffInvokerSelected = true;
     };
@@ -4343,6 +4348,7 @@ export async function classifyInvokerScope(
     const selectEveryInvokerConservatively = () => {
       functionsAttempted = true;
       bugReportInvokerSelected = true;
+      submitPromptInvokerSelected = true;
       emailUnsubscribeInvokerSelected = true;
       authHandoffInvokerSelected = true;
       eventInvitationsInvokerSelected = true;
@@ -4397,6 +4403,8 @@ export async function classifyInvokerScope(
         // name deploys its whole surface, not that endpoint: precedence must
         // win before the name branches below can read it as one callable.
         releaseProtectedCallables(selector.slice("functions:".length));
+      } else if (/^functions:(?:[^:]+:)?submitPrompt$/.test(selector)) {
+        nameSingle(selector, "submitPrompt");
       } else if (/^functions:(?:[^:]+:)?submitBugReport$/.test(selector)) {
         nameSingle(selector, "bugReport");
       } else if (/^functions:(?:[^:]+:)?emailUnsubscribe$/.test(selector)) {
@@ -4460,6 +4468,7 @@ export async function classifyInvokerScope(
       if (selector === "functions") {
         functionsAttempted = false;
         bugReportInvokerSelected = false;
+        submitPromptInvokerSelected = false;
         emailUnsubscribeInvokerSelected = false;
         authHandoffInvokerSelected = false;
         eventInvitationsInvokerSelected = false;
@@ -4479,6 +4488,7 @@ export async function classifyInvokerScope(
     if (hostingAttempted && pinnedFunctionIds.length > 0 && !functionsAttempted) {
       functionsAttempted = true;
       bugReportInvokerSelected = allBugReportsSelected;
+      submitPromptInvokerSelected = allSubmitPromptsSelected;
       emailUnsubscribeInvokerSelected = allUnsubscribesSelected;
       authHandoffInvokerSelected = allAuthHandoffsSelected;
       eventInvitationsInvokerSelected = allInvitationsSelected;
@@ -4496,6 +4506,7 @@ export async function classifyInvokerScope(
   const mintStrict = strictSingleServices.has("mint");
   const exchangeStrict = strictSingleServices.has("exchange");
   const bugReportInvokerConservative = bugReportInvokerSelected && !strictSingleServices.has("bugReport");
+  const submitPromptInvokerConservative = submitPromptInvokerSelected && !strictSingleServices.has("submitPrompt");
   const emailUnsubscribeInvokerConservative =
     emailUnsubscribeInvokerSelected && !strictSingleServices.has("emailUnsubscribe");
   const authHandoffInvokerConservative = authHandoffInvokerSelected && !mintStrict && !exchangeStrict;
@@ -4506,11 +4517,13 @@ export async function classifyInvokerScope(
     functionsAttempted,
     hostingAttempted,
     bugReportInvokerSelected,
+    submitPromptInvokerSelected,
     emailUnsubscribeInvokerSelected,
     authHandoffInvokerSelected,
     eventInvitationsInvokerSelected,
     adminCallablesInvokerSelected,
     bugReportInvokerConservative,
+    submitPromptInvokerConservative,
     emailUnsubscribeInvokerConservative,
     authHandoffInvokerConservative,
     eventInvitationsInvokerConservative,
@@ -4758,10 +4771,12 @@ function printShellClassification(result) {
     HOSTING_ATTEMPTED: result.hostingAttempted,
     FIREBASE_DRY_RUN: result.firebaseDryRun,
     BUG_REPORT_INVOKER_SELECTED: result.bugReportInvokerSelected,
+    SUBMIT_PROMPT_INVOKER_SELECTED: result.submitPromptInvokerSelected,
     EMAIL_UNSUBSCRIBE_INVOKER_SELECTED: result.emailUnsubscribeInvokerSelected,
     AUTH_HANDOFF_INVOKER_SELECTED: result.authHandoffInvokerSelected,
     EVENT_INVITATIONS_INVOKER_SELECTED: result.eventInvitationsInvokerSelected,
     BUG_REPORT_INVOKER_CONSERVATIVE: result.bugReportInvokerConservative,
+    SUBMIT_PROMPT_INVOKER_CONSERVATIVE: result.submitPromptInvokerConservative,
     EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE:
       result.emailUnsubscribeInvokerConservative,
     AUTH_HANDOFF_INVOKER_CONSERVATIVE: result.authHandoffInvokerConservative,

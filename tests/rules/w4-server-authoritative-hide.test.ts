@@ -17,7 +17,7 @@ import { collection, doc, getDoc, getDocs, increment, query, setDoc, updateDoc, 
 // existing legitimate writes are untouched:
 //   1. A non-admin's report is a pure reportCount+1 — setting `status` (alone or
 //      alongside the bump) is DENIED by `hasOnly(['reportCount'])`.
-//   2. A bare reportCount+1 (no status) still SUCCEEDS (the Phase-0 report path).
+//   2. A bare reportCount+1 is DENIED without the paired receipt/rate (#1405).
 //   3. An admin manual hide/restore still SUCCEEDS (the `isAdmin` branch).
 //   4. Proof creation (status active/pending) still SUCCEEDS.
 //   5. F4 — item READS are gated: a non-admin reads only active Prompts (mirroring
@@ -93,9 +93,9 @@ describe('firestore.rules — status is server-authoritative for the community h
     await assertFails(updateDoc(doc(db(BOB), at('proofs/phidden')), { status: 'active' })); // cannot un-hide
   });
 
-  it('a bare reportCount+1 (no status) still SUCCEEDS — the Phase-0 report path is intact', async () => {
-    await assertSucceeds(updateDoc(doc(db(BOB), at('items/item1')), { reportCount: increment(1) }));
-    await assertSucceeds(updateDoc(doc(db(BOB), at('proofs/p1')), { reportCount: increment(1) }));
+  it('denies bare reportCount+1 without the paired receipt/rate (#1405)', async () => {
+    await assertFails(updateDoc(doc(db(BOB), at('items/item1')), { reportCount: increment(1) }));
+    await assertFails(updateDoc(doc(db(BOB), at('proofs/p1')), { reportCount: increment(1) }));
   });
 
   it('an admin manual hide AND restore still SUCCEED (the isAdmin branch)', async () => {

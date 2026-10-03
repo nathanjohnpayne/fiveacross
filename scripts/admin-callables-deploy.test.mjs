@@ -196,7 +196,7 @@ describe("admin-callables deploy scope (#1277)", () => {
     expect(result.stdout).toContain("ADMIN_CALLABLES_INVOKER_SELECTED=true\n");
     expect(result.stdout).toContain("ADMIN_CALLABLES_INVOKER_CONSERVATIVE=false\n");
     expect(result.stdout).toContain("ADMIN_CALLABLES_STRICT_SERVICES=unlock\n");
-    expect(result.stdout.trim().split("\n")).toHaveLength(17);
+    expect(result.stdout.trim().split("\n")).toHaveLength(19);
   });
 });
 
