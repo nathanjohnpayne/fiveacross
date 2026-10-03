@@ -213,7 +213,7 @@ beforeEach(() => {
   // surface here rather than being swallowed, so the watcher assertions hold.
   mocks.hasCachedCard.mockResolvedValue(false);
   mocks.attestAdult.mockResolvedValue(undefined);
-  mocks.signInWithPopup.mockResolvedValue({});
+  mocks.signInWithPopup.mockResolvedValue({ user: FAKE_USER });
   mocks.signOut.mockResolvedValue(undefined);
 });
 
