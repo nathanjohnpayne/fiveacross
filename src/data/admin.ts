@@ -1951,9 +1951,10 @@ async function resolve(
     // The claim's Proof, read LIVE and BEFORE any write (Firestore's
     // reads-before-writes contract), so the publish below can be conditional on
     // the state Cloud Vision may have moved it to since the Player submitted it
-    // (#133). `null` whenever there is nothing to publish — a reject, or a
-    // legacy claim carrying no proofId — so no other resolve pays for the read.
-    const claimProofRef = status === 'confirmed' && c.proofId ? proof(c.proofId, eventId) : null;
+    // (#133). Confirm and reject also normalize deletion classification for
+    // an owned Proof bound to this live Claim and Board cell; absent proofId
+    // leaves the legacy artifact-less path unchanged.
+    const claimProofRef = c.proofId ? proof(c.proofId, eventId) : null;
     const claimProofSnap = claimProofRef ? await tx.get(claimProofRef) : null;
 
     tx.set(
@@ -2117,13 +2118,26 @@ async function resolve(
       const liveProof = claimProofSnap?.exists()
         ? (claimProofSnap.data() as Partial<ProofDoc> | undefined)
         : undefined;
-      if (
-        liveProof !== undefined &&
-        liveProof.uid === c.uid &&
-        liveProof.status === 'pending' &&
-        !safetyHideStands(liveProof)
-      ) {
-        tx.set(claimProofRef, { status: 'active' }, { merge: true });
+      const storedClaim = claimSnap.data() as Partial<ClaimDoc>;
+      // A mode change can establish Honor credit after this Proof was born.
+      // Persist the terminal live classification for deletion, but only when
+      // stored Claim, owner, Proof identity, cell and Day all bind this artifact.
+      // Missing/legacy binding metadata grants no new deletion guarantee.
+      const classificationBound = liveProof !== undefined &&
+        storedClaim.uid === c.uid && storedClaim.proofId === c.proofId &&
+        storedClaim.cellIndex === c.cellIndex &&
+        (daily ? storedClaim.dayIndex === c.dayIndex : storedClaim.dayIndex == null) &&
+        liveProof.uid === c.uid && liveProof.cellIndex === c.cellIndex &&
+        (daily ? liveProof.dayIndex === c.dayIndex : liveProof.dayIndex == null) &&
+        claimCellBefore?.index === c.cellIndex && claimCellBefore.proofId === c.proofId;
+      const publish = status === 'confirmed' && liveProof !== undefined &&
+        liveProof.uid === c.uid && liveProof.status === 'pending' &&
+        !safetyHideStands(liveProof);
+      if (classificationBound || publish) {
+        tx.set(claimProofRef, {
+          ...(classificationBound ? { contentOnly } : {}),
+          ...(publish ? { status: 'active' } : {}),
+        }, { merge: true });
       }
     }
     return { transitioned: transitionedToConfirmed };

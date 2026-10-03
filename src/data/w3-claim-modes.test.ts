@@ -100,6 +100,7 @@ vi.mock('firebase/firestore', async (importOriginal) => {
 
 import { computeMark } from './api';
 import { confirmClaim, rejectClaim } from './admin';
+import { deleteProof } from './proofs';
 import { planConfirmBroadcasts } from './moments';
 import { getDoc } from 'firebase/firestore';
 
@@ -162,6 +163,7 @@ describe('Claim Mode at the mark fold — Honor instant, admin_confirmed pending
 let boardState: { cells: Cell[] } | undefined;
 let playerState: Record<string, unknown> | undefined;
 let claimState: Record<string, unknown> | undefined;
+let proofState: Record<string, unknown> | undefined;
 const getDocMock = vi.mocked(getDoc);
 
 function setPayload(frag: string): Record<string, unknown> | undefined {
@@ -213,6 +215,7 @@ beforeEach(() => {
   boardState = undefined;
   playerState = { firstBingoAt: null };
   claimState = { ...pendingClaim() };
+  proofState = { uid: pendingClaim().uid, status: 'pending' };
   runTx.mockImplementation((_db: unknown, fn: (tx: unknown) => unknown) =>
     fn({ get: txGet, set: txSet, delete: txDelete }),
   );
@@ -224,13 +227,81 @@ beforeEach(() => {
     // The claim's own pending Proof: `confirmClaim` publishes it only when the
     // live read shows the claimant's own, still-pending upload.
     if (ref.path.includes('/proofs/')) {
-      return Promise.resolve({ exists, data: () => ({ uid: pendingClaim().uid, status: 'pending' }) });
+      return Promise.resolve({ exists: () => !!proofState, data: () => proofState });
     }
     return Promise.resolve({ exists: () => false, data: () => undefined });
   });
 });
 
 describe('confirmClaim — the pending win materializes: credit + publish the Proof (specs/w3-claim-modes.md)', () => {
+  it.each(['confirmed', 'rejected'] as const)('normalizes Proof deletion classification after independently earned Honor credit (%s)', async outcome => {
+    const pending = boardWith([0, 1, 2, 3]);
+    pending[4] = { ...pending[4], marked: true, status: 'pending', proofId: 'P', markedAt: 9 };
+    const unmarked = computeMark({ cells: pending, index: 4, nextMarked: false,
+      claimMode: 'honor', currentFirstBingoAt: null, now: 20 });
+    const earned = computeMark({ cells: unmarked.cells, index: 4, nextMarked: true,
+      claimMode: 'honor', currentFirstBingoAt: null, now: 30 });
+    expect(earned.cells[4]).toMatchObject({ marked: true, status: 'confirmed', proofId: 'P', markedAt: 30 });
+    boardState = { cells: earned.cells };
+    playerState = { firstBingoAt: 30, bingoCount: 1, squaresMarked: 5 };
+    claimState = { ...pendingClaim(), contentOnly: false };
+    proofState = { uid: 'u1', cellIndex: 4, dayIndex: null, status: 'pending' };
+    if (outcome === 'confirmed') await confirmClaim(pendingClaim(), 'admin-1');
+    else await rejectClaim(pendingClaim(), 'admin-1');
+    expect(setPayload('/proofs/')).toMatchObject({ contentOnly: true });
+    const decisionProofWrite = setPayload('/proofs/')!;
+    if (outcome === 'rejected') expect(decisionProofWrite).not.toHaveProperty('status');
+    proofState = { ...proofState, ...decisionProofWrite };
+    txSet.mockClear(); txDelete.mockClear(); txGet.mockClear();
+    await deleteProof('P');
+    expect(setPayload('/players/')).toBeUndefined();
+    expect(txDelete.mock.calls.some(([ref]) => (ref as Ref).path.includes('/tally/'))).toBe(false);
+    const boardWrite = setPayload('/boards/') as { cells?: Record<string, Partial<Cell>> };
+    expect(boardWrite.cells?.['4']).toMatchObject({ marked: true, markedAt: 30, status: 'confirmed', proofId: null });
+  });
+
+  it.each(['confirmed', 'rejected'] as const)('normalizes a bound daily fresh-credit Proof to contentOnly false (%s)', async outcome => {
+    const cells = boardWith([0, 1, 2, 3]);
+    cells[4] = { ...cells[4], marked: true, markedAt: 9, proofId: 'P', status: 'pending' };
+    boardState = { cells };
+    const claimed = pendingClaim({ dayIndex: 0 });
+    claimState = { ...claimed, contentOnly: true };
+    proofState = { uid: 'u1', cellIndex: 4, dayIndex: 0, status: 'pending', contentOnly: true };
+    if (outcome === 'confirmed') await confirmClaim(claimed, 'admin-1');
+    else await rejectClaim(claimed, 'admin-1');
+    expect(setPayload('/proofs/')).toMatchObject({ contentOnly: false });
+    expect(Math.max(...txGet.mock.invocationCallOrder)).toBeLessThan(Math.min(...txSet.mock.invocationCallOrder));
+  });
+
+  it.each(['hidden', 'flagged'] as const)('normalizes bound established-credit deletion metadata without publishing a %s Proof', async proofStatus => {
+    const cells = boardWith(ROW0);
+    cells[4] = { ...cells[4], proofId: 'P', markedAt: 30 };
+    boardState = { cells };
+    const claimed = pendingClaim({ dayIndex: 0 });
+    claimState = { ...claimed };
+    proofState = { uid: 'u1', cellIndex: 4, dayIndex: 0, status: proofStatus, safetyHide: true };
+    await confirmClaim(claimed, 'admin-1');
+    expect(setPayload('/proofs/')).toEqual({ contentOnly: true });
+  });
+
+  it.each(['foreign owner', 'missing Proof', 'wrong cell', 'wrong Day', 'stored foreign Claim', 'stored other Proof', 'newer attachment', 'missing legacy cell'] as const)('does not normalize deletion metadata for %s', async mismatch => {
+    const cells = boardWith(ROW0);
+    cells[4] = { ...cells[4], proofId: mismatch === 'newer attachment' ? 'Q' : 'P' };
+    boardState = { cells };
+    const claimed = pendingClaim({ dayIndex: 0 });
+    claimState = { ...claimed };
+    proofState = { uid: 'u1', cellIndex: 4, dayIndex: 0, status: 'pending' };
+    if (mismatch === 'foreign owner') proofState.uid = 'u2';
+    if (mismatch === 'missing Proof') proofState = undefined;
+    if (mismatch === 'wrong cell') proofState!.cellIndex = 3;
+    if (mismatch === 'wrong Day') proofState!.dayIndex = 1;
+    if (mismatch === 'stored foreign Claim') claimState.uid = 'u2';
+    if (mismatch === 'stored other Proof') claimState.proofId = 'Q';
+    if (mismatch === 'missing legacy cell') delete proofState!.cellIndex;
+    await rejectClaim(claimed, 'admin-1');
+    expect(setPayload('/proofs/')).toBeUndefined();
+  });
+
   it.each(['confirmed', 'rejected'] as const)('corrects a forged content-only hint on fresh credit when %s', async outcome => {
     const cells = boardWith([0, 1, 2, 3]);
     cells[4] = { ...cells[4], marked: true, markedAt: 9, proofId: 'P', status: 'pending' };
