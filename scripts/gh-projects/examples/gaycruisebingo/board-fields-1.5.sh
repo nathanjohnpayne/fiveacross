@@ -55,7 +55,7 @@ require_author() {
 ghp_gh() {
   # A rejected identity must stop this driver even when a caller handles a gh failure.
   ( unset GITHUB_TOKEN; require_author ) || exit 2
-  if [[ "$1" == project && ( "$2" == item-add || "$2" == item-edit ) ]]; then
+  if [[ "$1" == project && ( "$2" == item-add || "$2" == item-edit || "$2" == edit ) ]]; then
     [[ -x "$AUTHOR_WRAPPER" ]] || { echo "Error: author wrapper missing or non-executable." >&2; exit 2; }
     ( unset GITHUB_TOKEN; "$AUTHOR_WRAPPER" -- gh "$@"; )
   else

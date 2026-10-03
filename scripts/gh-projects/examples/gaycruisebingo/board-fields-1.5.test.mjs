@@ -24,7 +24,9 @@ function fixture({ checker = 'author', env = {}, rejectAt = 0, rejectOnly = fals
   const driver = join(example, 'board-fields-1.5.sh');
   writeFileSync(driver, script);
   writeFileSync(join(example, 'slug-num-1.5.map'), 'd15-epic=1\nd15-tab-contract=2\n');
-  writeFileSync(join(root, 'project.json'), JSON.stringify({ id: 'project', readme: '', shortDescription: 'daily cards' }));
+  mkdirSync(join(example, 'additions'), { recursive: true });
+  writeFileSync(join(example, 'additions', 'readme-phase-1.5.md'), 'Phase 1.5 — Daily Cards\n');
+  writeFileSync(join(root, 'project.json'), JSON.stringify({ id: 'project', readme: '', shortDescription: 'board' }));
   writeFileSync(join(root, 'fields.json'), JSON.stringify({ fields: [{ id: 'status', name: 'Status', options: [{ id: 'backlog', name: 'Backlog' }, { id: 'ready', name: 'Ready' }] }] }));
   writeFileSync(join(root, 'items.json'), JSON.stringify({ items: [1, 2].map(n => ({ id: `item-${n}`, content: { url: `https://github.com/nathanjohnpayne/fiveacross/issues/${n}` } })) }));
   const helper = join(root, 'scripts', 'identity-check.sh');
@@ -49,7 +51,7 @@ case "$1 $2" in
   'project view') cat "$FIXTURE_ROOT/project.json" ;;
   'project field-list') cat "$FIXTURE_ROOT/fields.json" ;;
   'project item-list') cat "$FIXTURE_ROOT/items.json" ;;
-  'project item-add'|'project item-edit') ;;
+  'project item-add'|'project item-edit'|'project edit') ;;
   *) exit 99 ;;
 esac
 `);
@@ -91,8 +93,9 @@ describe('Phase 1.5 board driver requires the fixed author identity', () => {
     expect(calls.filter(c => c === 'project item-edit')).toHaveLength(2);
     expect(Number(readFileSync(join(f.root, 'checks'), 'utf8'))).toBe(calls.length + 1);
     const wrapped = readFileSync(join(f.root, 'wrapper-calls'), 'utf8').trim().split('\n');
-    expect(wrapped).toHaveLength(4);
-    expect(wrapped.every(c => /^gh project item-(add|edit) /.test(c))).toBe(true);
+    expect(wrapped).toHaveLength(6);
+    expect(calls.filter(c => c === 'project edit')).toHaveLength(2);
+    expect(wrapped.every(c => /^gh project (item-(add|edit)|edit) /.test(c))).toBe(true);
   });
 
   it('rejects a missing author wrapper before any mutation', () => {
