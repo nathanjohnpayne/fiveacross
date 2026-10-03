@@ -9,8 +9,9 @@ import { FieldValue, getFirestore, Timestamp } from 'firebase-admin/firestore';
 import { getStorage } from 'firebase-admin/storage';
 import vision from '@google-cloud/vision';
 import sharp from 'sharp';
-import { APPROVE_PROMPTS_APP_CHECK, AUTH_HANDOFF_APP_CHECK, BUG_REPORT_APP_CHECK, RESEND_API_KEY } from './params';
+import { APPROVE_PROMPTS_APP_CHECK, SUBMIT_PROMPT_APP_CHECK, AUTH_HANDOFF_APP_CHECK, BUG_REPORT_APP_CHECK, RESEND_API_KEY } from './params';
 import { approvePromptsCallable } from './approvePrompts';
+import { submitPromptCallable } from './submitPrompt';
 import {
   markAdminAlertsUnsettled,
   recordAdminAlerts,
@@ -1290,4 +1291,10 @@ export const adminAlertDigest = onSchedule(
 export const emailUnsubscribe = onRequest(
   { serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT, maxInstances: 10, timeoutSeconds: 30 },
   (req, res) => handleUnsubscribeRequest(db as unknown as DailyEmailFirestore, req, res),
+);
+
+/** Dark intake callable first; client/Rules cutover is a separate release. */
+export const submitPrompt = onCall(
+  { maxInstances: 10, timeoutSeconds: 60, serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  request => submitPromptCallable(request, SUBMIT_PROMPT_APP_CHECK.value(), { db, now: Date.now, logger: console }),
 );
