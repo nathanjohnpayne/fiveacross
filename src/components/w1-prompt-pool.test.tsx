@@ -21,7 +21,7 @@ const { addItemMock, reportItemMock } = vi.hoisted(() => ({
   reportItemMock: vi.fn(async () => undefined),
 }));
 
-// api.ts's addItem/reportItem write to Firestore; stub only those two and
+// Stub addItem's callable admission and reportItem's transport, and
 // keep everything else (including the real checkItemRateLimit + its shared
 // module-scope timestamp map) so the throttle logic under test is real.
 vi.mock('../data/api', async (importOriginal) => {
@@ -96,10 +96,11 @@ describe('adding a Prompt', () => {
     await waitFor(() => expect(addItemMock).toHaveBeenCalledTimes(1));
     expect(addItemMock).toHaveBeenCalledWith(
       'add-basic-uid',
-      '  Cabin karaoke incident  ',
+      'Cabin karaoke incident',
       false,
       undefined,
       'test-event',
+      expect.any(String),
     );
     await waitFor(() => expect(input).toHaveValue(''));
   });
@@ -120,6 +121,7 @@ describe('adding a Prompt', () => {
       true,
       undefined,
       'test-event',
+      expect.any(String),
     );
     await waitFor(() => expect(screen.getByRole('checkbox')).not.toBeChecked());
   });
@@ -146,20 +148,12 @@ describe('client-side rate limit on Add (Phase 0, presentational only)', () => {
     const addButton = () => screen.getByRole('button', { name: 'Add' });
 
     fireEvent.change(input, { target: { value: 'First prompt' } });
-    // Two rapid submits of the SAME pending add — `add()` records the
-    // `addItem` CALL synchronously (before it awaits the write), so the
-    // second click's synchronous prefix still sees the same non-blank `text`
-    // state and reaches the real rate-limit check before either promise
-    // settles — no `waitFor` needed for the call-count assertions below.
+    // In-flight submits are single-flight. After its ACK, another draft in
+    // the same three-second UI window still reaches the cadence guard.
     fireEvent.click(addButton());
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.change(input, { target: { value: 'Second prompt' } });
     fireEvent.click(addButton());
-    // Let the first call's pending `addItem()` promise (a native microtask —
-    // unaffected by the faked setTimeout/Date above) settle, so its
-    // `track`/`setText('')` continuation runs inside `act` rather than
-    // leaking into a later assertion or test.
-    await act(async () => {
-      await Promise.resolve();
-    });
 
     expect(addItemMock).toHaveBeenCalledTimes(1);
     expect(addItemMock).toHaveBeenCalledWith(
@@ -168,18 +162,19 @@ describe('client-side rate limit on Add (Phase 0, presentational only)', () => {
       false,
       undefined,
       'test-event',
+      expect.any(String),
     );
     expect(screen.getByRole('alert')).toHaveTextContent(/slow down/i);
     expect(addButton()).toBeDisabled();
 
     // Still within the window: a further attempt — via Enter, since the
-    // input itself is never disabled — is also suppressed.
+    // completed request has re-enabled the input — is also suppressed.
     fireEvent.change(input, { target: { value: 'Second prompt' } });
     fireEvent.keyDown(input, { key: 'Enter' });
     expect(addItemMock).toHaveBeenCalledTimes(1);
 
     // The auto-clear timer fires once the window passes.
-    act(() => {
+    await act(async () => {
       vi.advanceTimersByTime(ITEM_RATE_LIMIT_MS);
     });
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
@@ -193,6 +188,7 @@ describe('client-side rate limit on Add (Phase 0, presentational only)', () => {
       false,
       undefined,
       'test-event',
+      expect.any(String),
     );
     await act(async () => {
       await Promise.resolve();
@@ -259,6 +255,7 @@ describe('client-side rate limit on Add (Phase 0, presentational only)', () => {
       false,
       undefined,
       'test-event',
+      expect.any(String),
     );
     await act(async () => {
       await Promise.resolve();
@@ -282,20 +279,18 @@ describe('client-side rate limit on Report (Phase 0, presentational only)', () =
     const reportButtons = () => screen.getAllByTitle('Report');
 
     // The limit is per-Player, not per-Prompt: reporting a SECOND, DIFFERENT
-    // item right after the first still hits the same throttle bucket. Unlike
-    // `add`, `report` has no `await` before its (fire-and-forget) write call,
-    // so both clicks' effects are fully synchronous — no microtask flush
-    // needed before asserting call counts.
+    // item right after the first still hits the same throttle bucket. Admission
+    // is synchronous; the accepted report stays busy until its write settles.
     fireEvent.click(reportButtons()[0]);
     fireEvent.click(reportButtons()[1]);
 
     expect(reportItemMock).toHaveBeenCalledTimes(1);
-    expect(reportItemMock).toHaveBeenCalledWith('i1', 'test-event');
+    expect(reportItemMock).toHaveBeenCalledWith('i1', 'test-event', undefined);
     expect(screen.getByRole('alert')).toHaveTextContent(/slow down/i);
     expect(reportButtons()[0]).toBeDisabled();
     expect(reportButtons()[1]).toBeDisabled();
 
-    act(() => {
+    await act(async () => {
       vi.advanceTimersByTime(ITEM_RATE_LIMIT_MS);
     });
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
@@ -303,6 +298,6 @@ describe('client-side rate limit on Report (Phase 0, presentational only)', () =
 
     fireEvent.click(reportButtons()[1]);
     expect(reportItemMock).toHaveBeenCalledTimes(2);
-    expect(reportItemMock).toHaveBeenLastCalledWith('i2', 'test-event');
+    expect(reportItemMock).toHaveBeenLastCalledWith('i2', 'test-event', undefined);
   });
 });
