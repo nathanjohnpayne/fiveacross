@@ -2033,7 +2033,7 @@ async function repointMarkerFromServer(params: {
   await runTransaction(database, async (tx) => {
     const marker = await tx.get(markerRef);
     if (!marker.exists()) return;
-    let best: { dayIndex: number; markedAt: number; text: string } | null = null;
+    let best: { dayIndex: number; cellIndex: number; markedAt: number; text: string } | null = null;
     for (const dayIndex of dayIndexes) {
       const board = await tx.get(doc(database, 'events', eventId, 'days', String(dayIndex), 'boards', uid));
       if (!board.exists()) continue;
@@ -2045,7 +2045,7 @@ async function repointMarkerFromServer(params: {
       if (!carrier) continue;
       const markedAt = typeof carrier.markedAt === 'number' ? carrier.markedAt : 0;
       if (!best || markedAt > best.markedAt || (markedAt === best.markedAt && dayIndex > best.dayIndex)) {
-        best = { dayIndex, markedAt, text: carrier.text };
+        best = { dayIndex, cellIndex: carrier.index, markedAt, text: carrier.text };
       }
     }
     if (!best) {
@@ -2053,8 +2053,15 @@ async function repointMarkerFromServer(params: {
       return;
     }
     const current = marker.data() as Record<string, unknown>;
-    if (current.dayIndex === best.dayIndex && current.markedAt === best.markedAt) return;
-    tx.set(markerRef, { ...current, dayIndex: best.dayIndex, markedAt: best.markedAt, itemText: best.text });
+    const normalized = {
+      uid, eventId, displayName: markerDisplayName(undefined, current.displayName),
+      dayIndex: best.dayIndex, cellIndex: best.cellIndex,
+      markedAt: Number.isSafeInteger(best.markedAt) && best.markedAt > 0 && best.markedAt <= Date.now() + 60_000 ? best.markedAt : Date.now(),
+      itemText: best.text,
+    };
+    if (Object.keys(current).length === Object.keys(normalized).length
+        && Object.entries(normalized).every(([key, value]) => current[key] === value)) return;
+    tx.set(markerRef, normalized);
   });
 }
 
@@ -2400,10 +2407,9 @@ async function runSetMark(
     if (params.nextMarked) {
       // Day-scoped Tally Cards (#216): stamp the viewed `dayIndex` and the Prompt
       // TEXT onto the marker so the Feed can group markers of the SAME
-      // `(itemId, dayIndex)` into one live card and label it without a pool read.
-      // Both are ADDITIVE fields the marker create rule already permits (it
-      // validates uid/displayName/markedAt, not the full key set), so no
-      // firestore.rules change — and the marker path stays the per-Prompt
+      // `(itemId, dayIndex)` into one live card. The reader resolves the label
+      // from a visible trusted Prompt; Rules bound these additive fields and
+      // require an existing Prompt or the owner’s frozen dealt Square. The marker path stays the per-Prompt
       // `tally/{itemId}/markers/{uid}`, so the Square badge (`useTally`) and the
       // Doubt `exists()` gate are untouched. The Feed re-sort time is DERIVED
       // (`max(marker.markedAt)`), never a client write to the admin-only parent
@@ -2415,6 +2421,7 @@ async function runSetMark(
         displayName: markerDisplayName(params.displayName, cachedPlayerName),
         markedAt: now,
         itemText: toggled!.text,
+        cellIndex: toggled!.index,
         ...(typeof params.dayIndex === 'number' ? { dayIndex: params.dayIndex } : {}),
       });
       // A normal mark recreates the marker ITSELF, superseding any persisted
@@ -2806,12 +2813,15 @@ async function reconcileEchoStatsFromServer(params: {
  * are live, so both are cached), the call is SERIALIZED through the same
  * per-player `markChains` chain as `setMark` (an overlapping Mark can't fold
  * onto sibling state this reconcile is mid-way through changing), and the
- * Board write rides the offline-queueable batch with its own `markSeed`.
- * Player stats are re-derived in a detached server transaction after ACK;
- * eligible missing-stamp debt keeps a changed pass incomplete for later-open
- * retry, without holding the offline Mark chain. Echo-caused wins are
- * enqueued after ACK under this board's own Day, and Board's standard drain
- * publishes them. Nothing posts directly from here. Idempotent: an
+ * Board patch + at most 16 marker repairs ride the first offline-queueable
+ * batch, carrying this Board's own `markSeed`. After its acknowledgement,
+ * remaining repairs re-enter the enqueue chain, refresh cache/witness state,
+ * and queue only still-applicable targets. Player stats re-derive in a detached
+ * server transaction after every repair ACK; eligible missing-stamp debt keeps
+ * a changed pass incomplete for later-open retry without holding the offline
+ * Mark chain. Echo-caused wins are enqueued after all repair ACKs under this
+ * board's own Day, and Board's standard drain publishes them. Nothing posts
+ * directly from here. Idempotent: an
  * already-reconciled board is a no-op with zero writes.
  */
 export async function reconcileEchoes(params: {
@@ -3081,7 +3091,12 @@ async function runReconcileEchoes(
     if (markerRepairs.length === 0) return none;
   }
 
+  // Target validation spends one Rules access per distinct Prompt. Leave room
+  // for the Event, membership, compatibility control and first Board patch.
+  const markerBatchLimit = 16;
   const batch = writeBatch(database);
+  const repairWitnesses = new Map(markerRepairs.map((cell) => [cell.itemId!, pendingMarkerRepairs.get(markerRepairKey(eventId, uid, cell.itemId!))]));
+  const acknowledgedRepairs = markerRepairs.slice(0, markerBatchLimit);
   if (res.changed) {
     // Per-cell merge (#457): only the newly echoed cells ride the write. The
     // player stats write no longer rides this batch — the bucket and roots are
@@ -3095,17 +3110,62 @@ async function runReconcileEchoes(
       }),
     );
   }
-  for (const cell of markerRepairs) {
-    batch.set(doc(database, 'events', eventId, 'tally', cell.itemId as string, 'markers', uid), {
+  const writeRepair = (target: ReturnType<typeof writeBatch>, cell: Cell) => {
+    // Legacy Board timestamps were not structurally bounded. Normalize only
+    // the derived marker, using the current enqueue clock even for a delayed
+    // tail; valid old offline timestamps and the Board's Mark stay unchanged.
+    const repairNow = Date.now();
+    const markedAt = typeof cell.markedAt === 'number' && Number.isSafeInteger(cell.markedAt)
+      && cell.markedAt > 0 && cell.markedAt <= repairNow + 60_000 ? cell.markedAt : repairNow;
+    target.set(doc(database, 'events', eventId, 'tally', cell.itemId as string, 'markers', uid), {
       uid,
       eventId,
       displayName: markerDisplayName(undefined, cachedPlayerData?.displayName),
-      markedAt: cell.markedAt ?? now,
+      markedAt,
       itemText: cell.text,
+      cellIndex: cell.index,
       dayIndex,
     });
-  }
-  const committed = batch.commit();
+  };
+  acknowledgedRepairs.forEach((cell) => writeRepair(batch, cell));
+  const tail = markerRepairs.slice(markerBatchLimit);
+  // Do not hold the ordinary Mark chain on a network ack. A later Mark/unmark
+  // must still queue offline. Once the first ack arrives, re-enter its short
+  // enqueue phase and refresh the cache before publishing any delayed repair.
+  // A newer Mark owns its Day/time and clears the witness; a newer unmark must
+  // not have its DELETE overtaken by a stale SET. Unknown cache retains the
+  // durable witness for a later card visit, without guessing a carrier.
+  const committed = batch.commit().then(async () => {
+    if (tail.length === 0) return;
+    const chainKey = markChainKey(database, eventId, uid);
+    const previous = markChains.get(chainKey) ?? Promise.resolve();
+    const enqueueTail = async () => {
+      const [latestBoard, ...latestMarkers] = await Promise.allSettled([
+        getDocFromCache(boardRef),
+        ...tail.map((cell) => getDocFromCache(doc(database, 'events', eventId, 'tally', cell.itemId!, 'markers', uid))),
+      ]);
+      if (latestBoard.status !== 'fulfilled' || !latestBoard.value.exists()) return {};
+      const latest = latestBoard.value.data() as { uid?: string; cells?: unknown };
+      if (latest.uid !== uid) return {};
+      const currentCells = cellsFromData(latest.cells);
+      const applicable = tail.flatMap((planned, index) => {
+        const marker = latestMarkers[index];
+        const current = currentCells.find((cell) => cell.itemId === planned.itemId && cell.marked && !cell.free);
+        return current && hasMarkerRepair(eventId, uid, planned.itemId!)
+          && marker.status === 'fulfilled' && !marker.value.exists() ? [current] : [];
+      });
+      if (applicable.length === 0) return {};
+      const repair = writeBatch(database);
+      applicable.forEach((cell) => writeRepair(repair, cell));
+      acknowledgedRepairs.push(...applicable);
+      // An object keeps the enqueue chain independent of the server promise.
+      return { committed: repair.commit() };
+    };
+    const enqueued = previous.then(enqueueTail, enqueueTail);
+    markChains.set(chainKey, enqueued.then(() => undefined, () => undefined));
+    const result = await enqueued;
+    await result.committed;
+  });
   void committed.catch((err: unknown) => {
     // Same posture as setMark: offline PENDS durably (never lands here); a
     // rejection is a genuine online failure, rolled back by latency
@@ -3133,7 +3193,12 @@ async function runReconcileEchoes(
   if (markerRepairs.length > 0) {
     void committed
       .then(() =>
-        markerRepairs.forEach((cell) => forgetMarkerRepair(eventId, uid, cell.itemId as string)),
+        acknowledgedRepairs.forEach((cell) => {
+          // Never erase a newer unmark's repair intent while awaiting the tail.
+          const itemId = cell.itemId!;
+          if (pendingMarkerRepairs.get(markerRepairKey(eventId, uid, itemId)) === repairWitnesses.get(itemId))
+            forgetMarkerRepair(eventId, uid, itemId);
+        }),
       )
       .catch(() => undefined);
   }
