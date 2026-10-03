@@ -153,7 +153,7 @@ beforeEach(() => {
   // so any offline-path call would simply fall through to the authoritative read.
   mocks.readAdultAttestationFromCache.mockRejectedValue(new Error('cache miss'));
   mocks.joinAndDeal.mockResolvedValue(undefined);
-  mocks.signInWithPopup.mockResolvedValue({});
+  mocks.signInWithPopup.mockResolvedValue({ user: FAKE_USER });
   mocks.signOut.mockResolvedValue(undefined);
 });
 
