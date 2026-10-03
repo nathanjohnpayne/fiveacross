@@ -1,12 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// specs/d15-approvals.md, data layer. The one write-side claim this file pins:
-// `addItem` submits via server admission; pending shape is covered by submit-prompt tests. Previously it landed a main-pool submission `status: 'pending'` (was
-// `'active'`) — the gate the rest of the approval flow (the Admin Approvals
-// queue, the submitter's own "pending review" row in ItemPool) hangs off. No
-// emulator needed — this is a pure "what payload did addDoc receive" check,
-// mirroring the mocking shape src/data/w3-claim-modes.test.ts already uses for
-// this module's sibling writes.
+// specs/d15-approvals.md, data layer: addItem sends a content-only callable
+// payload and never queues a pending Firestore create. These mocked wire checks
+// also pin captured Event/retry identity. Actual server pending/main stamps and
+// admission are covered by tests/rules/community-prompt-admission.test.ts.
 
 type Ref = { __kind: 'doc' | 'collection'; id?: string; path: string };
 

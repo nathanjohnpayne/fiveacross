@@ -6,10 +6,10 @@ import type { BoardDoc, EventDoc, ItemDoc, MomentDoc } from '../types';
 import { THEMES } from '../theme/themes';
 import { hasCanonicalMomentId } from '../hooks/useData';
 
-// addItem writes through Firestore's addDoc; stub the write so we can assert the
-// document SHAPE it stamps (the required Phase 1.5 `pool` field) without a live
-// backend. Everything else in firebase/firestore stays real (converters and the
-// moment filter never call it at runtime).
+// addItem sends content-only callable input; the server SDK suite pins its
+// pending/main stamps. Mock that transport while keeping Firestore converter
+// helpers real for the independent schema and Moment-filter assertions.
+
 const { addDocMock, submitMock } = vi.hoisted(() => ({
   addDocMock: vi.fn(async () => ({ id: 'new-item' })),
   submitMock: vi.fn(async (input: { itemId: string }) => ({ data: { id: input.itemId } })),

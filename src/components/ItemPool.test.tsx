@@ -4,7 +4,7 @@ import type { ItemDoc } from '../types';
 
 // specs/d15-approvals.md, component layer (RTL-jsdom). Drives the REAL ItemPool
 // with the data boundary (useData hooks + data/api writes) stubbed. Proves: a
-// submission calls the (now-pending) addItem write; the "goes to admin review"
+// submission calls addItem server admission; the "goes to admin review"
 // caption renders alongside the existing pre-sail note (additive, not a
 // replacement); and the submitter's own pending item — invisible via useItems,
 // only reachable via useMyPendingItems — still renders in their list, tagged
@@ -84,7 +84,7 @@ beforeEach(() => {
 });
 
 describe('ItemPool submission (specs/d15-approvals.md)', () => {
-  it('calls addItem (which now lands status: "pending" — pinned at the data layer)', () => {
+  it('calls addItem server admission (pending stamps are pinned by the server SDK tests)', () => {
     render(<ItemPool />);
     fireEvent.change(screen.getByPlaceholderText('Add a prompt…'), {
       target: { value: 'A new prompt' },
