@@ -357,6 +357,12 @@
 #       retries, most often a rate-limited token. Distinct from 2 on purpose:
 #       2 means "we looked and it went wrong", 4 means "we never got to look",
 #       and a sweep loop must not treat the second as a completed pass.
+#   6 — CEILING (#1057): a GraphQL operation this helper needs was refused
+#       by the session's proxy ("This GraphQL query is not enabled for this
+#       session"), as in a Claude Code cloud session. Thread state and thread
+#       resolution exist only in GraphQL, so no credential or retry changes
+#       the answer: hand the step to a session that can reach GraphQL. See
+#       scripts/lib/graphql-ceiling.sh.
 #   3 — unresolved threads exist (in --list mode), or a resolve mode left
 #       threads unresolved (human-authored, stale-HEAD, not-actioned,
 #       comments-incomplete, not-propagation-routed, drifted,
@@ -578,11 +584,27 @@ fi
 # and the write consistent. The name is now token-centric, not
 # read-centric, to reflect that.
 PAT_GH_TOKEN="${OP_PREFLIGHT_REVIEWER_PAT:-${GH_TOKEN:-}}"
+# #1057 A3: classify the cloud proxy's GraphQL refusal as a ceiling (exit 6).
+# Optional like the other helper libs above: without it a refusal is reported
+# as the generic GraphQL failure it was before, which is still fail-closed.
+if [ -r "$__RESOLVE_THREADS_DIR/lib/graphql-ceiling.sh" ]; then
+  # shellcheck source=lib/graphql-ceiling.sh
+  . "$__RESOLVE_THREADS_DIR/lib/graphql-ceiling.sh"
+  # The per-thread comment refetch runs inside nested command substitutions;
+  # a refusal there must still end the run with exit 6 (Codex P2 on #1529).
+  graphql_ceiling_install_trap
+else
+  graphql_ceiling_hit() { return 1; }
+fi
+
+# Every call is pinned to github.com, the only host the write-identity check
+# verifies: with a sole GHES host in hosts.yml a bare call would otherwise go
+# there under its stored credential (#1541).
 gh_pat() {
   if [ -n "$PAT_GH_TOKEN" ]; then
-    GH_TOKEN="$PAT_GH_TOKEN" gh "$@"
+    GH_HOST=github.com GH_TOKEN="$PAT_GH_TOKEN" gh "$@"
   else
-    gh "$@"
+    GH_HOST=github.com gh "$@"
   fi
 }
 
@@ -797,12 +819,14 @@ while :; do
   if [ -z "$CURSOR" ]; then
     PAGE=$(gh_pat api graphql -f query="$QUERY" \
       -F owner="$OWNER" -F repo="$NAME" -F pr="$PR_NUM" -F cursor=null 2>&1) || {
+      graphql_ceiling_hit "$PAGE" && graphql_ceiling_refuse resolve-pr-threads "reading $REPO#$PR_NUM's review threads"
       echo "GraphQL query failed: $PAGE" >&2
       exit 2
     }
   else
     PAGE=$(gh_pat api graphql -f query="$QUERY" \
       -F owner="$OWNER" -F repo="$NAME" -F pr="$PR_NUM" -f cursor="$CURSOR" 2>&1) || {
+      graphql_ceiling_hit "$PAGE" && graphql_ceiling_refuse resolve-pr-threads "reading $REPO#$PR_NUM's review threads"
       echo "GraphQL query failed: $PAGE" >&2
       exit 2
     }
@@ -928,7 +952,7 @@ if [ "${RESOLVE_PR_THREADS_SKIP_IDENTITY_CHECK:-0}" != "1" ] && ! $DRY_RUN; then
     expected_login="nathanpayne-${MERGEPATH_AGENT:-claude}"
   fi
   if ! GH_TOKEN="$PAT_GH_TOKEN" "$CHECKER" \
-       --expect-token-identity "$expected_login"; then
+       --expect-write-identity "$expected_login"; then
     echo "ERROR: identity-check failed before any mutation. Refusing to" >&2
     echo "       resolve threads. Confirm GH_TOKEN / OP_PREFLIGHT_REVIEWER_PAT" >&2
     echo "       resolves to $expected_login, then re-run." >&2
@@ -1070,11 +1094,13 @@ fetch_all_thread_comments() {
     # call, string cursor (-f) on every subsequent page.
     if [ -z "$cursor" ]; then
       resp=$(gh_pat api graphql -f query="$query" -F id="$thread_id" -F cursor=null 2>&1) || {
+        graphql_ceiling_hit "$resp" && graphql_ceiling_refuse resolve-pr-threads "re-fetching the full comment history of review thread $thread_id"
         echo "thread-comments page fetch failed for $thread_id: $resp" >&2
         return 1
       }
     else
       resp=$(gh_pat api graphql -f query="$query" -F id="$thread_id" -f cursor="$cursor" 2>&1) || {
+        graphql_ceiling_hit "$resp" && graphql_ceiling_refuse resolve-pr-threads "re-fetching the full comment history of review thread $thread_id"
         echo "thread-comments page fetch failed for $thread_id: $resp" >&2
         return 1
       }
@@ -2785,23 +2811,36 @@ thread_reply_disposition() {
 # finding_dispositioned <thread_json> → prints the evidence description,
 # exit 0; exit 1 when this specific finding was never dispositioned.
 #
-# The finding's comment id is .all_comments[0].databaseId — the thread's
-# ORIGINAL comment, which is the id both recorder scripts key their ledger
-# rows on. That index is only trustworthy over a COMPLETE comment list, which
-# every caller already guarantees via complete_thread_comments (fail-closed on
-# a re-fetch failure, #573 item 2).
+# Recorder scripts key their ledger rows to the comment they dispositioned.
+# A current bot/reviewer re-raise has a new comment id, so consult every
+# eligible current-round non-agent comment id rather than only the original
+# .all_comments[0] id. The current round begins at latest_nonagent_created;
+# ledger_verdict_for_finding separately requires recorded_at to be after that
+# same floor. The complete list invariant remains mandatory (fail-closed on a
+# re-fetch failure, #573 item 2).
 finding_dispositioned() {
-  local tj="$1" cid floor lf
+  local tj="$1" cid floor lf cnt i login created
   if thread_reply_disposition "$tj"; then
     printf 'agent reply on the thread after the latest re-raise'
     return 0
   fi
-  cid=$(printf '%s' "$tj" | jq -r '.all_comments[0].databaseId // ""' 2>/dev/null) || cid=""
   floor=$(latest_nonagent_created "$tj")
-  if lf=$(ledger_verdict_for_finding "$cid" "$floor"); then
-    printf 'verdict for finding %s recorded in %s' "$cid" "${lf##*/}"
-    return 0
-  fi
+  cnt=$(printf '%s' "$tj" | jq '.all_comments | length' 2>/dev/null || echo 0)
+  case "$cnt" in ''|*[!0-9]*) cnt=0 ;; esac
+  i=0
+  while [ "$i" -lt "$cnt" ]; do
+    login=$(printf '%s' "$tj" | jq -r ".all_comments[$i].author.login // \"\"")
+    created=$(printf '%s' "$tj" | jq -r ".all_comments[$i].createdAt // \"\"")
+    cid=$(printf '%s' "$tj" | jq -r ".all_comments[$i].databaseId // \"\"")
+    if ! is_agent_author_local "$login" \
+      && { [ "$created" = "$floor" ] || [ "$created" \> "$floor" ]; }; then
+      if lf=$(ledger_verdict_for_finding "$cid" "$floor"); then
+        printf 'verdict for finding %s recorded in %s' "$cid" "${lf##*/}"
+        return 0
+      fi
+    fi
+    i=$((i + 1))
+  done
   return 1
 }
 
@@ -2945,12 +2984,10 @@ post_tag_reply() {
   local rationale="$3"
   local body
   body="[mergepath-resolve: $class] $rationale"
-  # Suppress stdout (the mutation response is noise), but capture
-  # stderr for failure-mode logging. The redirection order matters:
-  # `2>&1 1>/dev/null` first dups stderr to stdout (so it lands in
-  # the command substitution), then redirects the original stdout to
-  # /dev/null. The reversed form (`>/dev/null 2>&1`) discards both
-  # streams and leaves $err empty — see #shellcheck SC2327/SC2328.
+  # Capture BOTH streams: `gh api` writes an HTTP error BODY to stdout and
+  # only a summary to stderr, so the proxy's refusal phrase can be in either
+  # (Codex P2 on #1529). On success the captured mutation response is simply
+  # unused; it is only read on the failure path below.
   local err
   if ! err=$(gh_pat api graphql \
     -f query='mutation($id: ID!, $body: String!) {
@@ -2960,7 +2997,10 @@ post_tag_reply() {
     }' \
     -F id="$thread_id" \
     -F body="$body" \
-    2>&1 1>/dev/null); then
+    2>&1); then
+    # Called in the main shell (`if post_tag_reply ...`), so the refusal ends
+    # the run before any thread is resolved without its disposition tag.
+    graphql_ceiling_hit "$err" && graphql_ceiling_refuse resolve-pr-threads "posting the disposition reply on review thread $thread_id"
     printf 'tag-reply mutation failed: %s\n' "$err" >&2
     return 1
   fi
@@ -3471,16 +3511,21 @@ while IFS= read -r thread; do
   # as FAILED, not RESOLVED. Threads confirmed true here are collected into
   # RESOLVED_IDS for the consolidated reviewThreads readback after the loop.
   resolve_state=""
+  mutation_err="$(mktemp "${TMPDIR:-/tmp}/resolve-pr-threads-mutation.XXXXXX")"
   if mutation_out=$(gh_pat api graphql -f query='
     mutation($id: ID!) {
       resolveReviewThread(input: {threadId: $id}) {
         thread { isResolved }
       }
     }
-  ' -F id="$THREAD_ID" 2>/dev/null); then
+  ' -F id="$THREAD_ID" 2>"$mutation_err"); then
     resolve_state=$(printf '%s' "$mutation_out" \
       | jq -r '.data.resolveReviewThread.thread.isResolved' 2>/dev/null || echo "")
+  elif graphql_ceiling_hit "$(cat "$mutation_err" 2>/dev/null) ${mutation_out:-}"; then
+    rm -f "$mutation_err"
+    graphql_ceiling_refuse resolve-pr-threads "resolving review thread $THREAD_ID (${RESOLVED_COUNT} resolved before the refusal)"
   fi
+  rm -f "$mutation_err"
   if [ "$resolve_state" = "true" ]; then
     echo "  RESOLVED [$AUTHOR] $PATH_"
     RESOLVED_COUNT=$((RESOLVED_COUNT + 1))
@@ -3544,6 +3589,7 @@ if [ "${#RESOLVED_IDS[@]}" -gt 0 ]; then
     rb_ids_json=$(printf '%s\n' "${rb_batch[@]}" | jq -R . | jq -s -c .)
     rb_query="query { nodes(ids: ${rb_ids_json}) { ... on PullRequestReviewThread { id isResolved } } }"
     if ! rb_resp=$(gh_pat api graphql -f query="$rb_query" 2>&1); then
+      graphql_ceiling_hit "$rb_resp" && graphql_ceiling_refuse resolve-pr-threads "reading back ${#rb_batch[@]} resolved thread(s); they may be resolved but are UNCONFIRMED"
       echo "  READBACK FAILED: reviewThreads readback query errored: $rb_resp" >&2
       # Fail closed — count every id in this batch as unconfirmed.
       for rb_id in "${rb_batch[@]}"; do READBACK_FAILED=$((READBACK_FAILED + 1)); done

@@ -198,20 +198,20 @@ describe('firestore.rules — honor-system invariants', () => {
   it('ADR 0004: items are report-only increments; reportHideThreshold validated', async () => {
     const item = doc(db(ALICE), at('items/item1'));
     await assertFails(updateDoc(item, { reportCount: 1, text: 'changed' })); // any other field
-    await assertSucceeds(updateDoc(item, { reportCount: 1 })); // +1 only
+    await assertFails(updateDoc(item, { reportCount: 1 })); // a bare +1 cannot bypass the receipt/rate boundary
     const event = doc(db(ADMIN), `events/${EVENT}`);
     await assertSucceeds(updateDoc(event, { 'settings.reportHideThreshold': 5 })); // numeric
     await assertFails(updateDoc(event, { 'settings.reportHideThreshold': 'high' })); // non-numeric
     await assertFails(updateDoc(doc(db(ALICE), `events/${EVENT}`), { name: 'Hacked' })); // non-admin
   });
 
-  it('items create requires a boolean spicy tag for stratified board composition', async () => {
+  it('curated active admin create requires a boolean spicy tag for stratified board composition', async () => {
     const item = (over = {}) => ({
       text: 'New prompt',
-      createdBy: ALICE,
+      createdBy: ADMIN,
       createdAt: NOW(),
       isFreeSpace: false,
-      status: 'pending',
+      status: 'active',
       pool: 'main',
       reportCount: 0,
       spicy: false,
@@ -220,10 +220,10 @@ describe('firestore.rules — honor-system invariants', () => {
     const missingSpicy = item() as Record<string, unknown>;
     delete missingSpicy.spicy;
 
-    await assertSucceeds(setDoc(doc(db(ALICE), at('items/tame')), item({ spicy: false })));
-    await assertSucceeds(setDoc(doc(db(ALICE), at('items/spicy')), item({ spicy: true })));
-    await assertFails(setDoc(doc(db(ALICE), at('items/missing-spicy')), missingSpicy));
-    await assertFails(setDoc(doc(db(ALICE), at('items/string-spicy')), item({ spicy: 'false' })));
+    await assertSucceeds(setDoc(doc(db(ADMIN), at('items/tame')), item({ spicy: false })));
+    await assertSucceeds(setDoc(doc(db(ADMIN), at('items/spicy')), item({ spicy: true })));
+    await assertFails(setDoc(doc(db(ADMIN), at('items/missing-spicy')), missingSpicy));
+    await assertFails(setDoc(doc(db(ADMIN), at('items/string-spicy')), item({ spicy: 'false' })));
   });
 
   it('proofs media is pinned to the proof’s own Storage object', async () => {

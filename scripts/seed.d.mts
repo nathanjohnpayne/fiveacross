@@ -12,6 +12,8 @@ export type SeedDoc = {
   isFreeSpace: boolean;
   status: string;
   reportCount: number;
+  /** Raw persisted marker; only literal true suppresses the report visibility axis. */
+  reportHideSuppressed?: unknown;
   pool?: string;
 };
 

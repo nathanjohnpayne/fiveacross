@@ -82,6 +82,7 @@ describe('proofFeedVisible — the Feed filter as one named predicate', () => {
   });
   it('rejects a report-hidden proof AT the threshold and fails OPEN without one', () => {
     expect(proofFeedVisible(P('p1', { reportCount: 5 }), 5, [])).toBe(false);
+    expect(proofFeedVisible(P('p1', { reportCount: 5, reportHideSuppressed: true }), 5, [])).toBe(true);
     expect(proofFeedVisible(P('p1', { reportCount: 99 }), undefined, [])).toBe(true);
     expect(proofFeedVisible(P('p1', { reportCount: 99 }), 0, [])).toBe(true);
   });

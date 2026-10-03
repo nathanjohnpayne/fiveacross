@@ -188,3 +188,6 @@ export const APPROVE_PROMPTS_APP_CHECK = defineBoolean('APPROVE_PROMPTS_APP_CHEC
 export const EMAIL_UNSUBSCRIBE_URL = defineString('EMAIL_UNSUBSCRIBE_URL', {
   default: 'https://gaycruisebingo.com/unsubscribe',
 });
+
+/** Off by default, matching the existing callable rollout posture. */
+export const SUBMIT_PROMPT_APP_CHECK = defineBoolean('SUBMIT_PROMPT_APP_CHECK', { default: false });

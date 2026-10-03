@@ -32,8 +32,8 @@ export interface TargetableDay {
  *   - `unlockAt > now` — the Day's cutoff is still ahead. See the module note:
  *     a due-but-unstamped Day would drop the Prompt at freeze time.
  *   - the Day deals the MAIN pool. A Community Prompt is always a main-pool
- *     submission — `addItem` writes `pool: 'main'` and `firestore.rules` admits
- *     nothing else from a non-admin — while a curated Day freezes only its own
+ *     submission — `submitPrompt` supplies `pool: 'main'` and client pending
+ *     creates are denied — while a curated Day freezes only its own
  *     pool (`snapshotPoolsFor`: main → main+easy, easy → easy, closing →
  *     closing). So a suggestion aimed at a Tutorial or closing Day would be
  *     dropped by the snapshot's POOL filter even though its Day, timing and
