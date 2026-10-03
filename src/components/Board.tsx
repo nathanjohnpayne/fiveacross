@@ -1248,7 +1248,8 @@ export default function Board() {
     reconcileInFlightRef.current.add(key);
     // An INCOMPLETE pass (a sibling board this device has never cached — its
     // cache read rejected, so the achieved set may be missing the source
-    // Mark; or a #491 stats-lag heal that failed) must not settle the
+    // Mark; a #491 stats-lag heal that failed; or a changed pass whose
+    // eligible missing-stamp repair is detached until ACK) must not settle the
     // once-per-board guard: drop the key so a later open retries with more
     // of the cache populated (Codex P2 on #447). Then, by where the player
     // is looking NOW:

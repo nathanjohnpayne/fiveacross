@@ -660,6 +660,45 @@ describe('open-time reconcile churn gate (#492)', () => {
     }
   });
 
+  it('#1424: a changed missing-stamp pass pins the visit and retries on a later open', async () => {
+    const store = new MemoryStorage();
+    store.setItem('gcb.coachOverlay.test-event.dismissedAt', '1');
+    store.setItem('gcb.seen.reshuffleIntro', '1');
+    vi.stubGlobal('localStorage', store);
+    const { reconcileEchoes } = await import('../data/api');
+    const mocked = vi.mocked(reconcileEchoes);
+    mocked.mockResolvedValue({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true });
+    mocked.mockResolvedValueOnce({ changed: true, bingoTransition: false, blackoutTransition: false, complete: false });
+    H.event = { claimMode: 'honor', timezone: 'UTC', days: reconcileDays(Date.now()).map((d) => ({
+      ...d, unlockAt: Date.now() - (2 - d.index) * DAY_MS,
+    })) } as unknown as EventDoc;
+    H.player = { uid: 'u1', bingoCount: 1, squaresMarked: 4, firstBingoAt: 2,
+      dayStats: { 1: { bingoCount: 1, squaresMarked: 4, firstBingoAt: null } },
+    } as unknown as PlayerDoc;
+    H.board = { uid: 'u1', dayIndex: 1, seed: 1, createdAt: 0, cells: dealt() };
+    const view = render(<Board />);
+    await act(async () => {});
+    expect(mocked).toHaveBeenCalledTimes(1);
+    // The detached transaction failed. Neither the unchanged missing-stamp
+    // row nor new same-card snapshots may churn this visit's repair.
+    H.player = { ...H.player } as PlayerDoc;
+    H.board = { ...H.board };
+    view.rerender(<Board />);
+    await act(async () => {});
+    expect(mocked).toHaveBeenCalledTimes(1);
+    H.board = { ...H.board, dayIndex: 0 };
+    fireEvent.click(screen.getAllByRole('tab')[0]);
+    view.rerender(<Board />);
+    await act(async () => {});
+    expect(mocked).toHaveBeenCalledTimes(2);
+    H.board = { ...H.board, dayIndex: 1 };
+    fireEvent.click(screen.getAllByRole('tab')[1]);
+    view.rerender(<Board />);
+    await act(async () => {});
+    expect(mocked).toHaveBeenCalledTimes(3);
+    expect(mocked).toHaveBeenLastCalledWith(expect.objectContaining({ dayIndex: 1 }));
+  });
+
   it('#1370: every card VISIT retries pending marker passes, even on a card the reconcile guard already settled', async () => {
     const { reconcileEchoes, retryPendingMarkerRepoints } = await import('../data/api');
     const reconcile = vi.mocked(reconcileEchoes);

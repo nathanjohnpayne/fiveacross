@@ -2804,11 +2804,12 @@ async function reconcileEchoStatsFromServer(params: {
  * are live, so both are cached), the call is SERIALIZED through the same
  * per-player `markChains` chain as `setMark` (an overlapping Mark can't fold
  * onto sibling state this reconcile is mid-way through changing), and the
- * board + aggregated player write ride ONE offline-queueable batch, the
- * echoed board write carrying its own `markSeed`. Echo-caused wins are
- * enqueued into the existing pending-Moment queue under this board's own Day;
- * the board's next snapshot (this batch's own latency-compensated echo) runs
- * Board's standard drain, so nothing posts directly from here. Idempotent: an
+ * Board write rides the offline-queueable batch with its own `markSeed`.
+ * Player stats are re-derived in a detached server transaction after ACK;
+ * eligible missing-stamp debt keeps a changed pass incomplete for later-open
+ * retry, without holding the offline Mark chain. Echo-caused wins are
+ * enqueued after ACK under this board's own Day, and Board's standard drain
+ * publishes them. Nothing posts directly from here. Idempotent: an
  * already-reconciled board is a no-op with zero writes.
  */
 export async function reconcileEchoes(params: {
@@ -2913,6 +2914,13 @@ async function runReconcileEchoes(
       ? (playerSnap.value.data() as Partial<PlayerDoc>)
       : undefined;
 
+  // A changed pass queues its server-stats repair after ACK without holding
+  // the offline Mark chain. Until eligible missing-stamp debt is observed
+  // repaired, return incomplete so a later open retries if that detached
+  // transaction fails or the tab disappears before it runs (#1424).
+  const healEligible = !params.statsFrozen || params.ceremonialDayIndexes?.includes(dayIndex) === true;
+  const missingStampRepair = healEligible && boardBingoStampMissing(cachedPlayerData, dayIndex);
+
   // Marker self-heal (Codex P2 on #447 round 2): an unmark on a device that
   // could not see a sibling carrier deletes the Prompt's single Tally marker
   // out from under a still-standing echo — and that echo needs its marker back
@@ -2995,12 +3003,11 @@ async function runReconcileEchoes(
     // Post-freeze a non-ceremonial Day's bucket never writes again, so its lag
     // can never converge — skip the heal entirely rather than re-reading the
     // server on every open (CodeRabbit on #495).
-    const healEligible = !params.statsFrozen || params.ceremonialDayIndexes?.includes(dayIndex) === true;
     const bucketLag =
       healEligible &&
       (res.squaresMarked > (rowBucket?.squaresMarked ?? 0) ||
         res.bingoCount > (rowBucket?.bingoCount ?? 0) ||
-        boardBingoStampMissing(cachedPlayerData, dayIndex));
+        missingStampRepair);
     // #496: the ROOT-total half of the same lag, which the per-Day comparison
     // above cannot see. Compound case (Codex on #495): an offline echo
     // overwrote a cell another device had already marked, so every
@@ -3170,7 +3177,7 @@ async function runReconcileEchoes(
     changed: res.changed,
     bingoTransition: res.bingoTransition,
     blackoutTransition: res.blackoutTransition,
-    complete,
+    complete: complete && !(res.changed && missingStampRepair),
   };
 }
 
