@@ -1,13 +1,36 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, it, expect, vi } from 'vitest';
 import {
   assertFails,
   assertSucceeds,
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { doc, setDoc } from 'firebase/firestore';
+import { doc, setDoc, getDoc, updateDoc, deleteDoc, type Firestore, type Transaction, type TransactionOptions, type DocumentReference } from 'firebase/firestore';
+import type { User } from 'firebase/auth';
+
+const dealSeam = vi.hoisted(() => ({ database: null as Firestore | null, eventRead: vi.fn<() => Promise<void>>(), itemRead: vi.fn<(path: string) => Promise<void>>() }));
+vi.mock('../../src/firebase', () => ({ get db() { return dealSeam.database; }, EVENT_ID: 'cruise' }));
+vi.mock('../../src/analytics', () => ({ track: vi.fn() }));
+vi.mock('firebase/firestore', async (importOriginal) => {
+  const sdk = await importOriginal<typeof import('firebase/firestore')>();
+  return { ...sdk, runTransaction: (database: Firestore, callback: (tx: Transaction) => Promise<unknown>, options?: TransactionOptions) =>
+    sdk.runTransaction(database, (tx) => callback(new Proxy(tx, {
+      get(target, key) {
+        if (key === 'get') return async (ref: DocumentReference) => {
+          const snapshot = await target.get(ref);
+          if (ref.path === `events/${EVENT}`) await dealSeam.eventRead();
+          if (ref.path.startsWith(`events/${EVENT}/items/`)) await dealSeam.itemRead(ref.path);
+          return snapshot;
+        };
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    })), options),
+  };
+});
+import { dealDayCard, reshuffleBoard } from '../../src/data/api';
 
 // A minimal CANONICAL cells map (#458: the board rule requires exactly the 25
 // decimal keys) — these suites test gates other than cell mechanics, so the
@@ -77,6 +100,9 @@ afterAll(async () => {
 // the day-scoped Board write gate reads `unlockAt` from.
 beforeEach(async () => {
   await testEnv.clearFirestore();
+  dealSeam.database = db(ALICE) as unknown as Firestore;
+  dealSeam.eventRead.mockReset();
+  dealSeam.itemRead.mockReset();
   await testEnv.withSecurityRulesDisabled(async (ctx) => {
     await setDoc(doc(ctx.firestore(), `events/${EVENT}`), {
       name: 'Cruise',
@@ -99,5 +125,212 @@ describe('d15-dealing — the deal write is gated by the Day unlock', () => {
 
   it('ALLOWS dealing a Day Card at/after unlockAt when the board doc is absent (unlocked Day 0)', async () => {
     await assertSucceeds(setDoc(doc(db(ALICE), at(`days/0/boards/${ALICE}`)), dayCard(ALICE, 0)));
+  });
+});
+
+
+describe('frozen snapshot hydration through the real deal path (#1406)', () => {
+  async function seedSnapshot(hidden = false) {
+    const ids = Array.from({ length: 30 }, (_, i) => `prompt-${i}`);
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const trusted = ctx.firestore();
+      await setDoc(doc(trusted, `events/${EVENT}`), {
+        status: 'active', admins: [], settings: {},
+        days: [{ index: 0, unlockAt: PAST(), pool: 'main', snapshotItemIds: ids }],
+      });
+      await setDoc(doc(trusted, at(`players/${ALICE}`)), { uid: ALICE, displayName: 'Alice', joinedAt: PAST() });
+      await Promise.all(ids.map((id, i) => setDoc(doc(trusted, at(`items/${id}`)), {
+        text: `Prompt ${i}`, status: hidden && i === 0 ? 'hidden' : 'active',
+        spicy: false, isFreeSpace: false, pool: 'main', reportCount: 0,
+      })));
+    });
+    return ids;
+  }
+
+  it('denies hidden Prompt reads and never commits a card from the remaining snapshot', async () => {
+    const ids = await seedSnapshot(true);
+    await assertFails(getDoc(doc(db(ALICE), at(`items/${ids[0]}`))));
+    await expect(dealDayCard({ uid: ALICE } as User, 0)).rejects.toThrow('frozen');
+    expect((await getDoc(doc(db(ALICE), at(`days/0/boards/${ALICE}`)))).exists()).toBe(false);
+  });
+
+  it.each(['deal', 'reshuffle'] as const)('preserves a complete readable snapshot through the real %s transaction', async (operation) => {
+    await seedSnapshot();
+    if (operation === 'reshuffle') {
+      await testEnv.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), at(`days/0/boards/${ALICE}`)), { ...dayCard(ALICE, 0), seed: 111 });
+        await updateDoc(doc(ctx.firestore(), at(`players/${ALICE}`)), { reshufflesUsed: 0 });
+      });
+    }
+    if (operation === 'deal') await expect(dealDayCard({ uid: ALICE } as User, 0)).resolves.toBe(true);
+    else await expect(reshuffleBoard({ uid: ALICE, dayIndex: 0, expectedSeed: 111 })).resolves.toBe(1);
+    const board = (await getDoc(doc(db(ALICE), at(`days/0/boards/${ALICE}`)))).data()!;
+    expect(Object.keys(board.cells)).toHaveLength(25);
+  });
+
+  it.each([
+    ['deal', 'hide'], ['deal', 'delete'], ['deal', 'edit'],
+    ['reshuffle', 'hide'], ['reshuffle', 'delete'], ['reshuffle', 'edit'],
+  ] as const)('refuses %s when a frozen Prompt is changed by %s after readable preflight', async (operation, mutation) => {
+    const ids = await seedSnapshot();
+    if (operation === 'reshuffle') {
+      await testEnv.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), at(`days/0/boards/${ALICE}`)), { ...dayCard(ALICE, 0), seed: 111 });
+        await updateDoc(doc(ctx.firestore(), at(`players/${ALICE}`)), { reshufflesUsed: 0 });
+      });
+    }
+    const beforePlayer = (await getDoc(doc(db(ALICE), at(`players/${ALICE}`)))).data();
+    let signalRead!: () => void;
+    let releaseRead!: () => void;
+    const read = new Promise<void>((resolve) => { signalRead = resolve; });
+    const release = new Promise<void>((resolve) => { releaseRead = resolve; });
+    // This existing Event-TX seam runs only after all preflight item reads and
+    // preserves exactly the same Event/snapshot IDs throughout the mutation.
+    dealSeam.eventRead.mockImplementationOnce(async () => { signalRead(); await release; });
+    const publishing = operation === 'deal'
+      ? dealDayCard({ uid: ALICE } as User, 0)
+      : reshuffleBoard({ uid: ALICE, dayIndex: 0, expectedSeed: 111 });
+    await read;
+    try {
+      await testEnv.withSecurityRulesDisabled(async (ctx) => {
+        const item = doc(ctx.firestore(), at(`items/${ids[0]}`));
+        if (mutation === 'delete') await deleteDoc(item);
+        else await updateDoc(item, mutation === 'hide' ? { status: 'hidden' } : { text: 'Changed after hydration' });
+      });
+    } finally { releaseRead(); }
+    await expect(publishing).rejects.toThrow('frozen');
+    const board = await getDoc(doc(db(ALICE), at(`days/0/boards/${ALICE}`)));
+    if (operation === 'deal') expect(board.exists()).toBe(false);
+    else expect(board.data()?.seed).toBe(111);
+    expect((await getDoc(doc(db(ALICE), at(`players/${ALICE}`)))).data()).toEqual(beforePlayer);
+    expect((await getDoc(doc(db(ALICE), at(`reshuffles/${ALICE}-1`)))).exists()).toBe(false);
+  });
+
+  it.each(['deal', 'reshuffle'] as const)('retries the real %s transaction when a Prompt changes after its transaction read', async (operation) => {
+    const ids = await seedSnapshot();
+    if (operation === 'reshuffle') {
+      await testEnv.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), at(`days/0/boards/${ALICE}`)), { ...dayCard(ALICE, 0), seed: 111 });
+        await updateDoc(doc(ctx.firestore(), at(`players/${ALICE}`)), { reshufflesUsed: 0 });
+      });
+    }
+    const beforePlayer = (await getDoc(doc(db(ALICE), at(`players/${ALICE}`)))).data();
+    let signalRead!: () => void;
+    let releaseRead!: () => void;
+    const read = new Promise<void>((resolve) => { signalRead = resolve; });
+    const release = new Promise<void>((resolve) => { releaseRead = resolve; });
+    let held = false;
+    dealSeam.itemRead.mockImplementation(async (path) => {
+      if (path !== at(`items/${ids[0]}`) || held) return;
+      held = true;
+      signalRead();
+      await release;
+    });
+    const publishing = operation === 'deal'
+      ? dealDayCard({ uid: ALICE } as User, 0)
+      : reshuffleBoard({ uid: ALICE, dayIndex: 0, expectedSeed: 111 });
+    await Promise.race([read, publishing.then(() => { throw new Error('Published without reading the Prompt in its transaction'); })]);
+    try {
+      // The native transaction has read the old Prompt version; no Event
+      // field changes. Its commit must conflict, then refuse stale hydration.
+      await testEnv.withSecurityRulesDisabled(async (ctx) => {
+        await updateDoc(doc(ctx.firestore(), at(`items/${ids[0]}`)), { text: 'Changed after transaction read' });
+      });
+    } finally { releaseRead(); }
+    await expect(publishing).rejects.toThrow('frozen');
+    expect(dealSeam.eventRead.mock.calls.length).toBeGreaterThan(1);
+    const board = await getDoc(doc(db(ALICE), at(`days/0/boards/${ALICE}`)));
+    if (operation === 'deal') expect(board.exists()).toBe(false);
+    else expect(board.data()?.seed).toBe(111);
+    expect((await getDoc(doc(db(ALICE), at(`players/${ALICE}`)))).data()).toEqual(beforePlayer);
+    expect((await getDoc(doc(db(ALICE), at(`reshuffles/${ALICE}-1`)))).exists()).toBe(false);
+  });
+
+  it.each(['echo-disabled', 'standings-frozen'] as const)('re-judges reshuffle credit from the native retry Event when %s after preflight', async (change) => {
+    const ids = await seedSnapshot();
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const trusted = ctx.firestore();
+      const eventRef = doc(trusted, `events/${EVENT}`);
+      const event = (await getDoc(eventRef)).data()!;
+      await updateDoc(eventRef, { days: [...event.days, { index: 1, unlockAt: PAST(), pool: 'main' }] });
+      await setDoc(doc(trusted, at(`days/0/boards/${ALICE}`)), { ...dayCard(ALICE, 0), seed: 111 });
+      let cursor = 0;
+      const peerCells = Object.fromEntries(Array.from({ length: 25 }, (_, index) => [String(index), {
+        index, itemId: index === 12 ? null : ids[cursor++], text: 'Peer', free: index === 12,
+        marked: true, markedAt: index === 12 ? null : PAST(), status: 'confirmed',
+      }]));
+      await setDoc(doc(trusted, at(`days/1/boards/${ALICE}`)), { ...dayCard(ALICE, 1), cells: peerCells });
+      await updateDoc(doc(trusted, at(`players/${ALICE}`)), {
+        reshufflesUsed: 0, bingoCount: 0, squaresMarked: 24, firstBingoAt: null,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 0, firstBingoAt: null }, 1: { bingoCount: 0, squaresMarked: 24, firstBingoAt: null } },
+      });
+    });
+    const beforePlayer = (await getDoc(doc(db(ALICE), at(`players/${ALICE}`)))).data()!;
+    let signalRead!: () => void;
+    let releaseRead!: () => void;
+    const read = new Promise<void>((resolve) => { signalRead = resolve; });
+    const release = new Promise<void>((resolve) => { releaseRead = resolve; });
+    dealSeam.eventRead.mockImplementationOnce(async () => { signalRead(); await release; });
+    const publishing = reshuffleBoard({ uid: ALICE, dayIndex: 0, expectedSeed: 111 });
+    await read;
+    try {
+      await testEnv.withSecurityRulesDisabled(async (ctx) => {
+        await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), change === 'echo-disabled'
+          ? { settings: { echoMarks: false } } : { frozenAt: PAST() });
+      });
+    } finally { releaseRead(); }
+    await expect(publishing).resolves.toBe(1);
+    expect(dealSeam.eventRead.mock.calls.length).toBeGreaterThan(1);
+    const board = (await getDoc(doc(db(ALICE), at(`days/0/boards/${ALICE}`)))).data()!;
+    if (change === 'echo-disabled') expect(Object.values(board.cells).some((cell: unknown) => (cell as { echo?: boolean }).echo)).toBe(false);
+    else expect((await getDoc(doc(db(ALICE), at(`players/${ALICE}`)))).data()).toEqual({ ...beforePlayer, reshufflesUsed: 1 });
+  });
+
+  it('retries the real transaction when re-snapshot changes Event after the deal read', async () => {
+    const ids = await seedSnapshot();
+    let signalRead!: () => void;
+    let releaseRead!: () => void;
+    const read = new Promise<void>((resolve) => { signalRead = resolve; });
+    const release = new Promise<void>((resolve) => { releaseRead = resolve; });
+    dealSeam.eventRead.mockImplementationOnce(async () => { signalRead(); await release; });
+    const dealing = dealDayCard({ uid: ALICE } as User, 0);
+    await read;
+    try {
+      await testEnv.withSecurityRulesDisabled(async (ctx) => {
+        const ref = doc(ctx.firestore(), `events/${EVENT}`);
+        const event = (await getDoc(ref)).data()!;
+        await updateDoc(ref, { days: [{ ...event.days[0], snapshotItemIds: ids.slice(1) }] });
+      });
+    } finally { releaseRead(); }
+    await expect(dealing).resolves.toBe(false);
+    expect(dealSeam.eventRead.mock.calls.length).toBeGreaterThan(1);
+    expect((await getDoc(doc(db(ALICE), at(`days/0/boards/${ALICE}`)))).exists()).toBe(false);
+  });
+
+  it('retries a real reshuffle transaction after re-snapshot without replacing the card or spending', async () => {
+    const ids = await seedSnapshot();
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), at(`days/0/boards/${ALICE}`)), { ...dayCard(ALICE, 0), seed: 111 });
+      await updateDoc(doc(ctx.firestore(), at(`players/${ALICE}`)), { reshufflesUsed: 0 });
+    });
+    let signalRead!: () => void;
+    let releaseRead!: () => void;
+    const read = new Promise<void>((resolve) => { signalRead = resolve; });
+    const release = new Promise<void>((resolve) => { releaseRead = resolve; });
+    dealSeam.eventRead.mockImplementationOnce(async () => { signalRead(); await release; });
+    const reshuffling = reshuffleBoard({ uid: ALICE, dayIndex: 0, expectedSeed: 111 });
+    await read;
+    try {
+      await testEnv.withSecurityRulesDisabled(async (ctx) => {
+        const ref = doc(ctx.firestore(), `events/${EVENT}`);
+        const event = (await getDoc(ref)).data()!;
+        await updateDoc(ref, { days: [{ ...event.days[0], snapshotItemIds: ids.slice(1) }] });
+      });
+    } finally { releaseRead(); }
+    await expect(reshuffling).rejects.toThrow('Day changed');
+    expect(dealSeam.eventRead.mock.calls.length).toBeGreaterThan(1);
+    expect((await getDoc(doc(db(ALICE), at(`days/0/boards/${ALICE}`)))).data()?.seed).toBe(111);
+    expect((await getDoc(doc(db(ALICE), at(`players/${ALICE}`)))).data()?.reshufflesUsed).toBe(0);
+    expect((await getDoc(doc(db(ALICE), at(`reshuffles/${ALICE}-1`)))).exists()).toBe(false);
   });
 });

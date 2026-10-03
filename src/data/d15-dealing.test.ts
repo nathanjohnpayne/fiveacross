@@ -352,6 +352,81 @@ describe('dealDayCard — snapshot-gated lazy dealing', () => {
     for (const id of nonFree) expect(ids).toContain(id);
   });
 
+  it('refuses an incomplete frozen snapshot even when enough readable Prompts remain', async () => {
+    const ids = seedPool(30);
+    H.event = { days: daysWith(mkDay({ snapshotItemIds: ids })), settings: {} };
+    H.itemsById.delete(ids[0]);
+
+    await expect(dealDayCard(U, 2)).rejects.toThrow('frozen');
+    expect(writtenBoard()).toBeNull();
+    expect(H.txSet).not.toHaveBeenCalled();
+    expect(H.trackSpy).not.toHaveBeenCalled();
+  });
+
+  it('refuses a hidden snapshot member denied by rules instead of dealing from the remainder', async () => {
+    const ids = seedPool(30);
+    H.event = { days: daysWith(mkDay({ snapshotItemIds: ids })), settings: {} };
+    H.getDoc.mockImplementation(async (ref: { args?: unknown[] }) => {
+      const path = (ref.args ?? []).filter((part): part is string => typeof part === 'string');
+      if (path[2] === 'items' && path[3] === ids[0]) {
+        throw Object.assign(new Error('hidden'), { code: 'permission-denied' });
+      }
+      return route(ref);
+    });
+
+    await expect(dealDayCard(U, 2)).rejects.toThrow('frozen');
+    expect(H.txSet).not.toHaveBeenCalled();
+    expect(H.getDocs).not.toHaveBeenCalled();
+
+    // The same frozen ids can be dealt on Retry after the member is readable;
+    // no fallback pool or replacement snapshot was written by the failed attempt.
+    H.getDoc.mockImplementation(async (ref: { args?: unknown[] }) => route(ref));
+    await expect(dealDayCard(U, 2)).resolves.toBe(true);
+    expect(writtenBoard()!.data.cells).toHaveLength(25);
+  });
+
+  it('refuses a frozen member deleted after preflight hydration without card, stats or analytics writes', async () => {
+    const ids = seedPool(30);
+    H.event = { days: daysWith(mkDay({ snapshotItemIds: ids })), settings: {} };
+    H.txGet.mockImplementationOnce(() => { H.itemsById.delete(ids[0]); });
+    await expect(dealDayCard(U, 2)).rejects.toThrow('frozen');
+    expect(H.txSet).not.toHaveBeenCalled();
+    expect(H.trackSpy).not.toHaveBeenCalled();
+  });
+
+  it('refuses a frozen member whose transaction read becomes denied after readable preflight', async () => {
+    const ids = seedPool(30);
+    H.event = { days: daysWith(mkDay({ snapshotItemIds: ids })), settings: {} };
+    H.txGet.mockImplementation((ref: { args?: unknown[] }) => {
+      if (ref.args?.includes(ids[0])) throw new Error('permission-denied');
+    });
+    await expect(dealDayCard(U, 2)).rejects.toThrow('frozen');
+    expect(H.txSet).not.toHaveBeenCalled();
+    expect(H.trackSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { text: 'Changed text' }, { spicy: true }, { isFreeSpace: true },
+    { pool: 'easy' as const }, { targetDayIndex: 1 }, { createdBy: 'different-owner' },
+  ])('refuses changed hydrated Prompt fields %j before card publication', async (change) => {
+    const ids = seedPool(30);
+    H.event = { days: daysWith(mkDay({ snapshotItemIds: ids })), settings: {} };
+    H.txGet.mockImplementationOnce(() => {
+      H.itemsById.set(ids[0], { ...H.itemsById.get(ids[0]), ...change });
+    });
+    await expect(dealDayCard(U, 2)).rejects.toThrow('frozen');
+    expect(H.txSet).not.toHaveBeenCalled();
+    expect(H.trackSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects a complete snapshot below the minimum without writing a partial card', async () => {
+    const ids = seedPool(23);
+    H.event = { days: daysWith(mkDay({ snapshotItemIds: ids })), settings: {} };
+
+    await expect(dealDayCard(U, 2)).rejects.toThrow('at least 24');
+    expect(H.txSet).not.toHaveBeenCalled();
+  });
+
   // #559, Codex P2, PR #845 round 6: catalog-membership tests alone don't
   // prove this call site actually FIRES `community_prompt_dealt` after a
   // genuinely new deal, with the right aggregate count and no Prompt text.
@@ -476,6 +551,32 @@ describe('dealDayCard — snapshot-gated lazy dealing', () => {
     expect(dealt).toBe(false);
     expect(writtenBoard()).toBeNull();
   });
+
+  it('refuses a null hydrated Day before creating a card', async () => {
+    const ids = seedPool(30);
+    H.event = { days: daysWith(mkDay({ index: 2, unlockAt: PAST, snapshotItemIds: ids })), settings: {} };
+    H.txGet.mockImplementationOnce(() => {
+      const days = [...H.event!.days!];
+      days[2] = null as unknown as DayDef;
+      H.event = { ...H.event, days };
+    });
+    await expect(dealDayCard(U, 2)).resolves.toBe(false);
+    expect(H.txSet).not.toHaveBeenCalled();
+  });
+
+  it.each([{ index: 7 }, { pool: 'easy' as const }, { freeText: 'Changed centre' }])(
+    'refuses changed hydrated Day inputs %j before creating a card', async (change) => {
+      const ids = seedPool(30);
+      H.event = { days: daysWith(mkDay({ index: 2, unlockAt: PAST, snapshotItemIds: ids })), settings: {} };
+      H.txGet.mockImplementationOnce(() => {
+        const days = [...H.event!.days!];
+        days[2] = { ...days[2], ...change };
+        H.event = { ...H.event, days };
+      });
+      await expect(dealDayCard(U, 2)).resolves.toBe(false);
+      expect(H.txSet).not.toHaveBeenCalled();
+    },
+  );
 
   it('excludes Prompts already on the Player’s earlier Day Cards (no repeats across the cruise)', async () => {
     // A 50-item snapshot; earlier Days 0 and 1 already used p0..p23. After
