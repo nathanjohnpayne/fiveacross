@@ -288,8 +288,8 @@ export function qualifiesForVisionHide(doc: VisionFlaggedDoc | undefined): boole
  *     a hide whose marker write was lost to a swallowed best-effort failure.
  *     Left unstamped, the Proof reads as a PLAIN hide: a current `confirmClaim`
  *     publishes only a still-`'pending'` Proof, so it no longer publishes this
- *     one directly, but a CACHED pre-gate bundle would, and a Restore to
- *     `'pending'` followed by a Confirm would too — the hole this arm closes.
+ *     one directly, but a CACHED pre-gate bundle would, and without the marker
+ *     the `'rehide'` arm could not take it back down — the hole this arm closes.
  *   - `'rehide'` — an `'active'` Proof whose marker still says `true`. That
  *     combination is not reachable from any current client: every legitimate lift
  *     writes `safetyHide: false` in the SAME update as the status (`restoreProof`,

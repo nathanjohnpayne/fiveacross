@@ -1382,8 +1382,9 @@ describe('the confirm-time gate reads the SERVER marker, not the verdict (#133)'
 
   it('stands down wherever this trigger never wrote a marker — including a plain hide', () => {
     // A 'hidden' Proof with no marker was hidden by an admin's own Hide or by the
-    // #43 report threshold; each has its own console lift and confirm has never
-    // withheld for either. A restored Proof carries the admin's explicit `false`.
+    // #43 report threshold; each has its own console lift, and confirm (which
+    // publishes only a still-'pending' Proof) never publishes either. A restored
+    // Proof carries the admin's explicit `false`.
     expect(safetyHideStands({ status: 'hidden' })).toBe(false);
     expect(safetyHideStands({ status: 'hidden', safetyHide: false })).toBe(false);
     expect(safetyHideStands({ status: 'active', safetyHide: false })).toBe(false);
