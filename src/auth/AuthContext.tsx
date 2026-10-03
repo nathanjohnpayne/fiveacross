@@ -85,6 +85,26 @@ export const DEAL_TIMEOUT_MS = 20_000;
 // room for a slow device without preserving an unbounded signed-out stall.
 export const WEB_APP_AUTH_SETTLE_TIMEOUT_MS = 3_000;
 export const PENDING_REDIRECT_ATTESTATION_KEY = 'gcb:pending-redirect-attestation';
+// Firebase sessions and explicit logout intent are both origin-wide. This stores
+// no account data; it only prevents an automatic hop into another origin's session.
+export const EXPLICIT_LOGOUT_KEY = 'gcb:explicit-logout';
+
+function automaticAuthHandoffSuppressed(): boolean {
+  try {
+    if (localStorage.getItem(EXPLICIT_LOGOUT_KEY) === '1') return true;
+    // A prior logout may have failed to record intent in readable but full or
+    // write-denied storage. Do not automatically visit another session unless
+    // this origin can also persist logout intent; deliberate Sign in still works.
+    const probeKey = `${EXPLICIT_LOGOUT_KEY}:write-probe`;
+    localStorage.setItem(probeKey, '1');
+    localStorage.removeItem(probeKey);
+    return false;
+  } catch {
+    // Without readable persistence, do not guess whether logout happened before
+    // reload. The deliberate Sign in action still works.
+    return true;
+  }
+}
 
 // A random per-attempt identifier (Phase 4b P1 round 3 on #836), generated
 // once at redirect start and threaded through every durable AND session
@@ -772,10 +792,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // reconnect, which only happens if `online` flipping true re-runs that effect.
   const [online, setOnline] = useState(isOnline());
   const signInAttemptRef = useRef<Promise<void> | null>(null);
+  const signInAttemptOwnerRef = useRef<symbol | null>(null);
+  // null follows persisted intent; false grants this mount's deliberate sign-in
+  // even when storage cannot clear an older marker; true records a new logout.
+  const explicitLogoutRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    const onLogoutStorage = (event: StorageEvent) => {
+      if (event.key === EXPLICIT_LOGOUT_KEY) {
+        // A new same-origin tab logout supersedes our local sign-in choice.
+        explicitLogoutRef.current = event.newValue === '1' ? true : null;
+        if (event.newValue === '1') {
+          // Remote logout retires the same continuation and coalescing slot as
+          // this tab's logout; the old finally cannot erase a fresh attempt.
+          signInAttemptRef.current = null;
+          signInAttemptOwnerRef.current = null;
+        }
+      }
+    };
+    window.addEventListener('storage', onLogoutStorage);
+    return () => window.removeEventListener('storage', onLogoutStorage);
+  }, []);
   // The token of the redirect attempt this tab most recently STARTED and has
   // not yet seen fail — the handle the bfcache recovery below needs to retire
   // that attempt's records without touching any other tab's (#1123).
   const redirectAttemptTokenRef = useRef<string | null>(null);
+  const redirectAbandonmentRef = useRef<{ token: string; owner: symbol; restoreLogout: () => void } | null>(null);
   const redirectResultHandledRef = useRef(false);
   // Whether onAuthStateChanged has ever fired for this mount — see its own
   // check-and-clear site (Phase 4b P1 on #836) for why signal (b) is scoped
@@ -789,7 +830,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // gating decisions (the settle-timer arm and the sign-in tap branch, #358).
   // The DECISION is the only thing snapshotted: the navigated-to URL is not
   // (#376) — a signed-in web.app session can change route/query/hash before a
-  // mid-session sign-out hands off, so the chokepoint recomputes the full
+  // spontaneous session loss may hand off, so the chokepoint recomputes the full
   // target from the live location at navigation time, preserving the active
   // route instead of replaying the mount-time one.
   const [onFallbackAuthOrigin] = useState(() => firebaseAuthOriginRedirectUrl(window.location) !== null);
@@ -930,13 +971,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // dedupe and the pending-redirect-return guard apply to every navigation path
   // (#354: a raw replace() beside this ref could fire a duplicate/late
   // navigation). The target URL is computed HERE, from the live location at
-  // navigation time (#376): a mid-session sign-out fires from wherever the
+  // navigation time (#376): spontaneous session loss fires from wherever the
   // signed-in session navigated, so a mount-time snapshot would replay a stale
   // route/query/hash. Returns true when the signed-out visit is handled by
   // navigation (started now or earlier); false when this origin is already
   // canonical, or while an app-owned redirect return is completing (#357) — the
   // caller then renders normally and the settle timer re-arms on settlement.
-  const handoffSignedOutWebApp = useCallback((): boolean => {
+  // Explicit logout additionally suppresses automatic callers until a deliberate
+  // sign-in, including later tabs/reloads through the origin-wide intent marker.
+  const handoffSignedOutWebApp = useCallback((explicitSignIn = false): boolean => {
+    if (!explicitSignIn && (explicitLogoutRef.current || automaticAuthHandoffSuppressed())) return false;
     if (redirectReturnPendingRef.current) return false;
     if (webAppHandoffStartedRef.current) return true;
     // This hop fires from the auth callback, before SignIn renders, so neither
@@ -1422,7 +1466,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [bootstrapUser, eventId, profileBootstrapOk, user]);
 
   useEffect(() => {
-    return onAuthStateChanged(auth, (u) => {
+    return onAuthStateChanged(auth, (incomingUser) => {
+      // Firebase can publish a pending popup's User after signOut completed.
+      // Logout intent rejects that session until a deliberate new sign-in
+      // permits it; a reloaded mount follows persisted intent again.
+      let logoutRequested = explicitLogoutRef.current === true;
+      try {
+        if (explicitLogoutRef.current === null) {
+          logoutRequested = localStorage.getItem(EXPLICIT_LOGOUT_KEY) === '1';
+        }
+      } catch {
+        // This mount's recorded intent still applies when persistence is unreadable.
+      }
+      const u = logoutRequested ? null : incomingUser;
+      if (incomingUser && logoutRequested) {
+        // Keep the provider signed out even when SDK cleanup fails; the next
+        // late callback retries without bootstrapping or attesting this User.
+        void signOut(auth).catch(() => {});
+      }
       const ownedEventId = activeEventIdRef.current;
       // Whether THIS is the very first auth-state callback this mount has
       // ever seen — checked and cleared unconditionally, before any other
@@ -1471,11 +1532,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (handoffSignedOutWebApp()) {
           // Move a signed-out web.app visit before rendering SignIn, so the Player
           // sees one acknowledgement and one Google transaction on firebaseapp.com.
-          // Deliberately EVERY signed-out settle, not just first load (#353): a
-          // mid-session sign-out on web.app also lands on the canonical origin,
-          // because any sign-in tap from web.app would hand off anyway — leaving
-          // the Player on web.app's SignIn would only add a second
-          // acknowledgement screen before the same navigation.
+          // A spontaneous session loss still follows the existing fallback
+          // route (#353). Explicit logout suppresses this hop, including after
+          // reload, so another origin's cached User cannot undo the logout.
           return undefined;
         }
         // Signed out → App renders SignIn, never "Loading…".
@@ -2414,16 +2473,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // on "Signing in…" until a reload — where cancelling the retired popup used to
   // allow a retry. A persisted `pageshow` IS that abandonment: nothing signed
   // in (a completed return is a fresh navigation, never a bfcache restore), so
-  // release the guard and retire exactly this attempt's records, the same
-  // terminal cleanup a failed start performs. Token-addressed removal keeps a
-  // different tab's live attempt untouched.
+  // restore prior logout intent, release the guard and retire exactly this
+  // still-owned attempt's records, the same terminal cleanup a failed start
+  // performs. Token/owner checks preserve a newer local attempt; token-addressed
+  // removal keeps a different tab's live attempt untouched.
   useEffect(() => {
     const onPageShow = (event: Event) => {
       if ((event as PageTransitionEvent).persisted !== true) return;
       const token = redirectAttemptTokenRef.current;
       if (token === null) return;
+      const abandoned = redirectAbandonmentRef.current;
+      if (!abandoned || abandoned.token !== token || signInAttemptOwnerRef.current !== abandoned.owner) return;
+      abandoned.restoreLogout();
+      redirectAbandonmentRef.current = null;
       redirectAttemptTokenRef.current = null;
       signInAttemptRef.current = null;
+      signInAttemptOwnerRef.current = null;
       clearPendingRedirectAttestationIfToken(token);
       clearCollectedAcknowledgementIfToken(token);
       clearRedirectPendingIfToken(token);
@@ -2435,12 +2500,43 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signIn = useCallback((acknowledgedAdultContent: boolean): Promise<void> => {
     if (signInAttemptRef.current) return signInAttemptRef.current;
+    let priorLogoutIntent = explicitLogoutRef.current === true;
+    if (explicitLogoutRef.current === null) {
+      try { priorLogoutIntent = localStorage.getItem(EXPLICIT_LOGOUT_KEY) === '1'; }
+      catch { priorLogoutIntent = true; }
+    }
+    explicitLogoutRef.current = false;
+    let logoutIntentCleanupFailed = false;
+    try {
+      localStorage.removeItem(EXPLICIT_LOGOUT_KEY);
+    } catch {
+      // A deliberate sign-in bypasses automatic-hop suppression even if storage
+      // is unavailable. Keep this attempt in the current mount: a redirect's
+      // fresh mount would read the stale logout marker and reject its new User.
+      logoutIntentCleanupFailed = true;
+    }
 
     // Captured from SignIn's actual checkbox state BEFORE any auth transaction
     // starts, and threaded through both paths. The mutable Event posture answers
     // whether a box is needed now; it cannot prove one was shown and ticked on
     // the render whose button the player pressed.
     const acknowledged = acknowledgedAdultContent === true;
+    const owner = Symbol('sign-in attempt');
+    signInAttemptOwnerRef.current = owner;
+    const restorePriorLogoutIntent = () => {
+      if (!priorLogoutIntent || signInAttemptOwnerRef.current !== owner) return;
+      explicitLogoutRef.current = true;
+      try { localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1'); }
+      catch { /* This mount still honors intent when persistence refuses it. */ }
+      // The SDK may publish its User before rejecting the credential promise.
+      // Retire that provisional session even when best-effort SDK cleanup fails.
+      authUidRef.current = null;
+      profileAttemptRef.current += 1;
+      dealAttemptRef.current += 1;
+      setUser(null);
+      setLoading(false);
+      if (auth.currentUser) void signOut(auth).catch(() => {});
+    };
 
     const attempt = (async () => {
       if (onFallbackAuthOrigin) {
@@ -2453,7 +2549,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // suppressed (handoff already started, or a redirect return is
         // completing), the tap is a no-op and the chokepoint's owner — the
         // in-flight navigation or the re-armed settle timer — finishes the job.
-        handoffSignedOutWebApp();
+        handoffSignedOutWebApp(true);
         return;
       }
       const sameOriginHandler =
@@ -2470,18 +2566,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const invitationHeldInMemoryOnly =
         readPendingEventInvitation({ origin: window.location.origin, now: Date.now() })?.durable ===
         false;
-      if (sameOriginHandler && !invitationHeldInMemoryOnly) {
-        // One top-level redirect on EVERY surface whose OAuth handler is
-        // same-origin (#765): the tap navigates this tab or app window to
+      if (sameOriginHandler && !invitationHeldInMemoryOnly && !logoutIntentCleanupFailed) {
+        // One top-level redirect on a same-origin-handler surface whose
+        // state survives navigation (the memory-only exceptions above stay
+        // in a popup; #765): the tap navigates this tab or app window to
         // Google, and Google returns the Player to the page they started from
         // with the session restored — no second window ever opens. There is no
         // device or display-mode heuristic here on purpose: the same-origin
-        // handler is the only condition, because it is what keeps the helper's
+        // handler is the origin condition, because it keeps the helper's
         // sessionStorage on one origin across the round trip (#161), and the
         // durable redirect-return records below carry the surfaces that lose
         // even that (#346, #836). Every production host pins its own hostname
-        // as authDomain (src/auth-domain.ts), so this IS the production flow;
-        // the popup below is the cross-origin-handler fallback only.
+        // as authDomain (src/auth-domain.ts), so this is the normal production
+        // flow; the state-preserving exceptions above also use the popup.
         // One random id for this attempt (Phase 4b P1 round 3 on #836),
         // threaded through the session marker and token-addressed durable
         // records below. A failed or abandoned prior attempt lives under a
@@ -2490,6 +2587,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         pruneExpiredRedirectAttemptRecords();
         const attemptToken = generateAttemptToken();
         redirectAttemptTokenRef.current = attemptToken;
+        redirectAbandonmentRef.current = { token: attemptToken, owner, restoreLogout: restorePriorLogoutIntent };
         markPendingRedirectAttestation(attemptToken);
         // The durable #346 signal (b) companion to the marker above — written
         // alongside it, in the same store as the acknowledgement record, for
@@ -2517,6 +2615,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (redirectAttemptTokenRef.current === attemptToken) {
             redirectAttemptTokenRef.current = null;
           }
+          if (redirectAbandonmentRef.current?.token === attemptToken) redirectAbandonmentRef.current = null;
+          if (signInAttemptOwnerRef.current !== owner) return;
+          restorePriorLogoutIntent();
           trackSignInFailure(err);
           throw err;
         }
@@ -2525,12 +2626,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       // Cross-origin handler — local development and the Auth Emulator (#765)
       // — or a same-origin surface whose pending Invitation lives in memory
-      // only (above). A redirect against a foreign authDomain is exactly the
+      // only or whose logout marker cannot be cleared (above). Keep that local
+      // deliberate authority alive instead of losing it across a redirect.
+      // A redirect against a foreign authDomain is exactly the
       // storage-partition failure the same-origin pin exists to avoid (#161),
       // and the e2e harness drives the emulator's account-chooser popup.
+      let popupUser: User;
       try {
-        await signInWithPopup(auth, googleProvider);
+        const credential = await signInWithPopup(auth, googleProvider);
+        popupUser = credential.user;
       } catch (err) {
+        if (signInAttemptOwnerRef.current !== owner) return;
+        restorePriorLogoutIntent();
         // Sign-in failures were invisible in analytics (#163): track('login') only
         // fires on success, and the storage-partition handler error (#161) renders
         // on the OAuth handler's own origin, which PostHog never loads. Emit an
@@ -2543,6 +2650,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         trackSignInFailure(err);
         throw err;
       }
+      // Logout retires this attempt. A late popup must not log or attest a
+      // newer account, even when a new deliberate attempt has already started.
+      if (signInAttemptOwnerRef.current !== owner) return;
       track('login', { method: 'google' });
       // The 18+ checkbox gated this sign-in (SignIn.tsx), so signing in IS the
       // attestation — persist it now that we have a uid, so a first-time User is not
@@ -2557,19 +2667,37 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // re-read here: a popup can stay open while an admin approves the first
       // explicit Prompt, and the posture that governs what the player agreed to
       // is the one that was on their screen.
-      if (acknowledged) await attest();
+      if (acknowledged && auth.currentUser?.uid === popupUser.uid) {
+        await persistAttestation(popupUser);
+      }
     })();
 
     signInAttemptRef.current = attempt;
     void attempt
       .finally(() => {
-        if (signInAttemptRef.current === attempt) signInAttemptRef.current = null;
+        if (signInAttemptRef.current === attempt) {
+          signInAttemptRef.current = null;
+          signInAttemptOwnerRef.current = null;
+        }
       })
       .catch(() => {});
     return attempt;
-  }, [attest, handoffSignedOutWebApp, onFallbackAuthOrigin]);
+  }, [persistAttestation, handoffSignedOutWebApp, onFallbackAuthOrigin]);
 
   const signOutUser = async () => {
+    // Install intent before Firebase publishes null (which may be synchronous).
+    explicitLogoutRef.current = true;
+    // A popup may have published its User while its attestation write remains
+    // pending. Retire its slot and continuation so a deliberate new sign-in
+    // can start without adopting the old acknowledgement. The old finally
+    // cannot clear the new slot because it compares attempt identity.
+    signInAttemptRef.current = null;
+    signInAttemptOwnerRef.current = null;
+    try {
+      localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
+    } catch {
+      // Keep this mount suppressed; unreadable storage also suppresses reload.
+    }
     await signOut(auth);
   };
 

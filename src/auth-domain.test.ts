@@ -154,7 +154,8 @@ describe('isSignInReachableOnHost — may main.tsx mount the app here?', () => {
   });
 
   it('mounts web.app so the AuthProvider handoff to firebaseapp.com can run', () => {
-    // The ship-network fallback host: signed-out visits history-replace to
+    // The ship-network fallback host: initial empty sessions or spontaneous
+    // loss without logout intent, and deliberate sign-in, history-replace to
     // gaycruisebingo.firebaseapp.com BEFORE auth (specs/w1-auth-google.md), so
     // the gate must not report auth-unconfigured here.
     expect(isAuthConfiguredForHost(CONFIGURED, 'gaycruisebingo.web.app')).toBe(false);
