@@ -5,8 +5,10 @@ import { HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
 import {
   BugReportInputError,
   nextRateState,
+  nextRequestRateState,
   validateBugReportInput,
   type RateState,
+  type RequestRateState,
   type ValidBugReport,
 } from './bugReportCore';
 import { firestoreErrorCodeForLog, isAlreadyExists } from './firestoreErrors';
@@ -113,8 +115,9 @@ type Coordination = {
 };
 
 const INTAKE_LEASE_MS = 60_000;
-const FOLLOWER_POLL_MS = 100;
+const FOLLOWER_POLL_MS = 1_000;
 const FOLLOWER_WAIT_MS = 20_000;
+const FOLLOWER_MAX_READS = 21;
 
 function timestampMs(value: unknown): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -162,6 +165,14 @@ async function chargeLegacyRate(db: IntakeFirestore, reporterHash: string, nowMs
   await db.runTransaction(async (transaction) => {
     const snapshot = await transaction.get(rateRef);
     transaction.set(rateRef, nextRateState(snapshot.exists ? snapshot.data() as unknown as RateState : undefined, nowMs));
+  });
+}
+
+async function chargeRequestWork(db: IntakeFirestore, uid: string, nowMs: number): Promise<void> {
+  const ref = db.doc(`bugReportRequestLimits/${deriveReporterHash(uid)}`);
+  await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(ref);
+    transaction.set(ref, nextRequestRateState(snapshot.exists ? snapshot.data() as unknown as RequestRateState : undefined, nowMs));
   });
 }
 
@@ -291,7 +302,7 @@ async function followSubmission(
   expected: Coordination,
   deadlineMs: number,
 ): Promise<IntakeReceipt> {
-  while (true) {
+  for (let reads = 0; reads < FOLLOWER_MAX_READS; reads++) {
     const data = await verifiedReadback(ref, expected);
     if (data.intakeState === 'complete') return receiptFrom(data, expected.reportId);
     const leaseExpiresAt = timestampMs(data.leaseExpiresAt);
@@ -299,11 +310,12 @@ async function followSubmission(
       throw new HttpsError('failed-precondition', 'Stored submission has an invalid intake state.');
     }
     const remainingMs = Math.min(deadlineMs, leaseExpiresAt) - deps.nowMs();
-    if (remainingMs <= 0) {
+    if (remainingMs <= 0 || reads === FOLLOWER_MAX_READS - 1) {
       throw new HttpsError('unavailable', 'Submission is still being processed. Try again.');
     }
     await deps.sleep(Math.min(FOLLOWER_POLL_MS, remainingMs));
   }
+  throw new HttpsError('unavailable', 'Submission is still being processed. Try again.');
 }
 
 export async function submitValidatedBugReport(
@@ -579,6 +591,7 @@ export async function handleSubmitBugReport(
   if (!uid) throw new HttpsError('unauthenticated', 'Sign in before reporting a bug.');
   if (requireAppCheck && !request.app) throw new HttpsError('failed-precondition', 'App Check is required.');
   try {
+    await chargeRequestWork(deps.db, uid, deps.nowMs());
     const report = validateBugReportInput(request.data);
     return await submitValidatedBugReport(uid, report, deps);
   } catch (error) {
