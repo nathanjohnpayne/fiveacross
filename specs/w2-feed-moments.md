@@ -281,7 +281,7 @@ Runner: `npm run test:rules` (Firestore emulator). Test: `tests/rules/w2-feed-mo
 - The tombstone is immutable (no update for owner or admin) and **not** owner-deletable—an undoable tombstone would restore the repost loop; an admin may delete it, after which the win posts again.
 - **An owner Moment delete must CARRY its tombstone** (Codex P1): a bare delete is denied, a delete batched with a tombstone for a *different* win is denied, the Moment survives both, and the real atomic retraction lands. An **admin** may still delete a Moment without spending its win—the player can post it again—because moderation is not retraction.
 - **The sibling-form spend (Codex round 2):** retracting a LEGACY Moment denies the same (Player, Day) win's day-scoped repost—and the blackout twin behaves identically; retracting a DAY-SCOPED Moment denies the legacy repost (day-less or day-stamped payload alike, the check is id-keyed); another Day and the other kind stay creatable in both directions. The delete rule **enforces** it: a day-scoped delete carrying only its own tombstone is denied, as is a legacy delete whose payload names a Day carrying only the legacy tombstone—a hand-built client cannot do the half-retraction. A legacy Moment naming NO Day needs only its own tombstone (no sibling id is derivable), and a second same-kind retraction on another Day lands with its single new tombstone (getAfter accepts the pre-existing legacy one).
-- Tombstone reads are public.
+- Tombstone reads require `admitted(eventId)`.
 
 ### Unit—the broadcast writer + the Feed merge
 
