@@ -231,6 +231,27 @@ beforeEach(() => {
 });
 
 describe('confirmClaim — the pending win materializes: credit + publish the Proof (specs/w3-claim-modes.md)', () => {
+  it.each(['confirmed', 'rejected'] as const)('corrects a forged content-only hint on fresh credit when %s', async outcome => {
+    const cells = boardWith([0, 1, 2, 3]);
+    cells[4] = { ...cells[4], marked: true, markedAt: 9, proofId: 'P', status: 'pending' };
+    boardState = { cells };
+    claimState = { ...pendingClaim(), contentOnly: true };
+    if (outcome === 'confirmed') await confirmClaim(pendingClaim(), 'admin-1');
+    else await rejectClaim(pendingClaim(), 'admin-1');
+    expect(setPayload('/claims/')).toMatchObject({ status: outcome, contentOnly: false });
+  });
+
+  it.each(['confirmed', 'rejected'] as const)('corrects a false content-only hint on established credit when %s', async outcome => {
+    const cells = boardWith(ROW0);
+    cells[4] = { ...cells[4], markedAt: 9, proofId: 'P' };
+    boardState = { cells };
+    claimState = { ...pendingClaim(), contentOnly: false };
+    if (outcome === 'confirmed') await confirmClaim(pendingClaim(), 'admin-1');
+    else await rejectClaim(pendingClaim(), 'admin-1');
+    expect(setPayload('/claims/')).toMatchObject({ status: outcome, contentOnly: true });
+    expect(setPayload('/players/')).toBeUndefined();
+  });
+
   it.each(['confirmed', 'rejected'] as const)('reviews new content without rewriting established Mark credit (%s)', async outcome => {
     const cells = boardWith(ROW0);
     cells[4] = { ...cells[4], markedAt: 9, proofId: 'P' };
@@ -248,6 +269,7 @@ describe('confirmClaim — the pending win materializes: credit + publish the Pr
       expect(board.cells).toBeUndefined(); // no Mark fields changed
     }
     expect(setPayload('/claims/')).toMatchObject({ status: outcome });
+    expect(setPayload('/claims/')).not.toHaveProperty('contentOnly'); // flag-less legacy behavior remains
   });
 
   it.each(['confirmed', 'rejected'] as const)('an opposite resolution retry cannot rewrite the winning %s Claim', async (winner) => {

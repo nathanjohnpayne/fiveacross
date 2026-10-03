@@ -2067,7 +2067,13 @@ async function resolve(
         tx.delete(marker(before.itemId, c.uid, eventId));
       }
     });
-    tx.set(claimRef, { status, resolvedBy: adminUid }, { merge: true });
+    // The caller's optional hint controls ceremony only after an Admin decision.
+    // Normalize it to this live credit fold; retain flag-less legacy semantics.
+    tx.set(claimRef, {
+      status,
+      resolvedBy: adminUid,
+      ...(typeof claimSnap.data().contentOnly === 'boolean' ? { contentOnly } : {}),
+    }, { merge: true });
     // Confirming an admin-confirmed claim publishes its proof, which was created 'pending'
     // (admin-only readable) so it stayed hidden from the public feed until now. A
     // rejected proof is left 'pending' (still admin-only) rather than exposed.

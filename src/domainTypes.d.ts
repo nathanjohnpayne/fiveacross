@@ -1202,7 +1202,8 @@ export interface ClaimDoc {
   cellIndex: number;
   itemText: string;
   proofId?: string | null;
-  // New content review on already-confirmed credit; no new win transition.
+  // Optional ceremony hint at creation; an Admin terminal decision normalizes
+  // a present boolean to the live Board-derived established-credit classification.
   // Absent on older credit Claims, whose existing ceremony behavior remains.
   contentOnly?: boolean;
   status: 'pending' | 'confirmed' | 'rejected';

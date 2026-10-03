@@ -455,10 +455,13 @@ export default function ConfirmWinMoments() {
       // uid at the point of use, so a prior account's Claim can neither seed this
       // account's witness nor adjudicate against its board (belt-and-braces beyond the
       // effect-time clear, the same synchronous attribution guard #110/#106 use).
-      if (c.uid !== uid || c.contentOnly === true) continue; // content review creates no credit edge
+      if (c.uid !== uid) continue;
       if (c.status === 'pending') {
+        // The creator's hint is untrusted until Admin resolution normalizes it.
+        // Retain this owned server witness so a corrected fresh-credit Claim
+        // can announce its actual win; confirmed content-only decisions skip below.
         if (!claimsFromCache) st.seenPending.add(c.id);
-      } else if (c.status === 'confirmed' && st.seenPending.has(c.id) && !st.handled.has(c.id)) {
+      } else if (c.status === 'confirmed' && c.contentOnly !== true && st.seenPending.has(c.id) && !st.handled.has(c.id)) {
         st.handled.add(c.id);
         // Carry the proofId so reflection is claim-SPECIFIC (R4 finding 2): a
         // different claim's confirm at the same square must not count as this one's.
