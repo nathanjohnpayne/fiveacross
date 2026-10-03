@@ -63,7 +63,7 @@ Unknown first-bingo stamps (#1424) also use this existing server-derived stats t
 
 - **Name:** "Echo Mark" (glossary in CONTEXT.md).
 - **Echo indicator UI:** yes, minimal—a subtle ⟲ glyph top-left plus a slightly dimmed ✓ on echoed Squares; it shifts below a live Doubt badge, CSS-only (`.cell.echo`, src/index.css).
-- **Echoes skip admin re-confirmation** in admin_confirmed mode: yes—born `confirmed`, no second Claim.
+- **Echoes skip admin re-confirmation** in admin_confirmed mode: yes—born `confirmed`, no second credit Claim. A subsequently attached Proof still queues content-only review without revoking that credit.
 - **Tally for echoes:** yes in the adapted single-slot form above (the ticket's literal per-day marker contradicts the deployed marker schema; see Residuals).
 - **Unmark independence:** no cascades either direction.
 
@@ -89,7 +89,7 @@ Unknown first-bingo stamps (#1424) also use this existing server-derived stats t
 - Given echoes complete new lines, `bingoCount`/`squaresMarked`/`blackout`/`firstBingoAt` update through the propagation path's documented aggregated stats writes—folded in-transaction on the transactional paths; mark-time commits its acted-day batch write followed by the single post-ack server-derived reconcile write for the echoed buckets, and the open-time reconcile's ONLY stats write is that post-ack reconcile (#491)—and the wins enter the pending-Moment queue under their own Day—never the Feed directly (`src/game/echo-marks.test.ts`, `src/data/echo-marks.test.ts`).
 - Given a sibling Day another device has marked, a stale-cache echo drain never regresses that Day's `dayStats` bucket, and the FINAL server-committed root totals reflect every device's Marks: the drain's batch carries no sibling bucket, and the post-ack transactional stats write re-derives buckets and roots from server state. The batch's own acted-day root re-sum may transiently lag until that write lands—the pre-#447 acted-day class § Residuals documents (#491, `src/data/echo-marks.test.ts`, `tests/offline/echo-marks.test.ts`).
 - Given a player row whose per-Day buckets out-sum its root `bingoCount`/`squaresMarked`—self-inconsistent, so the roots are understated—opening ANY board runs the server-derived transactional reconcile and rewrites the roots from server state, while a consistent row triggers no write at all (#496, `src/data/echo-marks.test.ts`).
-- Given admin_confirmed mode, nothing echoes while the Claim is pending; the confirm echoes in its own transaction with echoed cells born confirmed (`src/data/echo-marks.test.ts`).
+- Given a fresh-credit admin_confirmed Claim, nothing echoes while it is pending; confirmation echoes in its own transaction with echoed cells born confirmed. Content-only review preserves prior achievement and adds no Echo (`src/data/echo-marks.test.ts`).
 - Given a Reshuffle, prior echoes never cost pristine-ness (client predicate and rules gate agree) and the fresh card re-echoes with its bucket re-derived (`tests/rules/echo-marks.test.ts`, `src/data/echo-marks.test.ts`).
 - Given an echoed board write, it carries that board's own `markSeed`; a stale or borrowed seed is rejected by rules (`tests/rules/echo-marks.test.ts`).
 - Given a schedule at the supported maximum (`MAX_DAYS`, twenty Days since #1357), the maximum Mark batch and bounded reconciliation chunks pass the membership-budget preview; a `MAX_DAYS + 1`-entry schedule is rejected before any Firestore read or batch construction (`tests/rules/membership-mark-batch-budget.test.ts`, `src/data/echo-marks.test.ts`).

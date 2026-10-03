@@ -2649,7 +2649,7 @@ service cloud.firestore {
           && request.resource.data.keys().hasOnly([
                'uid', 'displayName', 'photoURL', 'type', 'cellIndex', 'itemText',
                'storagePath', 'mediaURL', 'thumbURL', 'text', 'createdAt',
-               'reportCount', 'status', 'visionFlag', 'source', 'dayIndex'
+               'reportCount', 'status', 'visionFlag', 'source', 'dayIndex', 'contentOnly'
              ])
           // #190/#211: `source` stamps which affordance produced a photo (📷 camera
           // vs 🖼️ library) so the Feed badges a pick; `dayIndex` threads the viewed
@@ -2666,6 +2666,9 @@ service cloud.firestore {
           && (!('dayIndex' in request.resource.data)
               || request.resource.data.dayIndex == null
               || request.resource.data.dayIndex is number)
+          // Deletion-only hint for established credit; no moderation authority.
+          // Existing update bounds prevent non-admin mutation after creation.
+          && (!('contentOnly' in request.resource.data) || request.resource.data.contentOnly is bool)
           && request.resource.data.type in ['photo', 'audio', 'text']
           && request.resource.data.itemText is string
           && request.resource.data.itemText.size() <= 200
@@ -2975,8 +2978,9 @@ service cloud.firestore {
           let d = request.resource.data;
           return d.keys().hasOnly([
               'uid', 'displayName', 'cellIndex', 'itemText', 'proofId',
-              'status', 'createdAt', 'resolvedBy', 'dayIndex'
+              'status', 'createdAt', 'resolvedBy', 'dayIndex', 'contentOnly'
             ])
+            && (!('contentOnly' in d) || d.contentOnly is bool)
             && d.status == 'pending'
             && d.get('resolvedBy', null) == null
             && displayNameOk(d.displayName)

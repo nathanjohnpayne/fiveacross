@@ -467,7 +467,7 @@ export default function ReviewQueue({
   // Restore can say where the photo is going. `restoreProof` returns such a Proof
   // to `'pending'` rather than publishing it `'active'` — an unconditional publish
   // would put it in the Feed ahead of the decision, and a later reject would leave
-  // it there (rejectClaim deliberately writes nothing to the Proof). Derived from
+  // it there (rejectClaim never publishes the Proof). Derived from
   // `usePendingClaims`, which the console already subscribes to for the group
   // below, and read whatever the claim mode is: a Proof left pending by a mode
   // switch is still a Proof no confirm has published.
@@ -885,7 +885,7 @@ export default function ReviewQueue({
                     <div className="sub">{c.itemText}</div>
                     {held && (
                       <div className="sub">
-                        Confirming credits the mark; the photo stays hidden for moderation.
+                        Confirming resolves the claim; the photo stays hidden for moderation.
                       </div>
                     )}
                   </div>

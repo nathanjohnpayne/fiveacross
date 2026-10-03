@@ -356,7 +356,7 @@ describe('Pending claims — a Vision-held photo is named on the row (specs/clou
     const row = rowFor('Deck Daddy');
     expect(row.getByText('hidden · AI screen: violence')).toBeInTheDocument();
     expect(
-      row.getByText('Confirming credits the mark; the photo stays hidden for moderation.'),
+      row.getByText('Confirming resolves the claim; the photo stays hidden for moderation.'),
     ).toBeInTheDocument();
   });
 

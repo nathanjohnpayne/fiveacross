@@ -388,8 +388,8 @@ export function hideProof(id: string, eventId: string = EVENT_ID): Promise<void>
  * and Cloud Vision scans the uploaded object — so a photo whose claim is still
  * undecided can be flagged, hidden, and then Restored. Publishing it `'active'`
  * there would put it in every Player's Feed BEFORE the claim was judged, and
- * rejecting the claim afterwards leaves it public: `rejectClaim` deliberately
- * writes nothing to the Proof (it leaves a rejected Proof `'pending'` rather than
+ * rejecting the claim afterwards leaves it public: `rejectClaim`
+ * never publishes the Proof (it leaves a rejected Proof `'pending'` rather than
  * exposed), so nothing would ever take it back down. Restoring to `'pending'`
  * hands the Proof back to the claim queue instead, where Confirm publishes it and
  * Reject leaves it unpublished — the decision the console is actually asking for.
@@ -1820,6 +1820,13 @@ async function resolve(
     }
   }
   return await runTransaction(db, async (tx): Promise<ResolveResult> => {
+    // ReviewQueue only acts on pending Claims. Read that state in the same
+    // transaction as the Board so an opposite admin decision forces a retry
+    // that observes the winner's terminal status instead of reclassifying its
+    // newly credited Mark as content-only review. A stale/removed Claim is a no-op.
+    const claimRef = claim(c.id, eventId);
+    const claimSnap = await tx.get(claimRef);
+    if (!claimSnap.exists() || claimSnap.data().status !== 'pending') return { transitioned: false };
     // Read board + player inside the txn so a concurrent mark/proof from the same
     // player isn't clobbered by a stale snapshot (mirrors setMark/attachProof).
     const bSnap = await tx.get(boardRef);
@@ -1841,6 +1848,10 @@ async function resolve(
     // 'pending' means either it was never pending (a legacy/malformed claim)
     // or another confirm already credited it.
     const claimCellBefore = cells.find((x) => isClaimCell(x, c));
+    // A new Proof on an established Mark queues content review, not new credit.
+    // Confirm/reject may publish/remove its artifact but cannot rewrite stats,
+    // timestamps or propagate achievements that were already confirmed.
+    const contentOnly = claimCellBefore?.marked === true && claimCellBefore.status === 'confirmed';
     const claimCellAfter = next.find((x) => isClaimCell(x, c));
     const transitionedToConfirmed =
       status === 'confirmed' && claimCellBefore?.status === 'pending' && claimCellAfter?.status === 'confirmed';
@@ -1884,7 +1895,7 @@ async function resolve(
     // (Firestore's reads-before-writes transaction contract).
     const confirmedCell = status === 'confirmed' ? next.find((x) => isClaimCell(x, c)) : undefined;
     const echoItemId =
-      echoOn && confirmedCell && !confirmedCell.free && confirmedCell.marked ? confirmedCell.itemId : null;
+      !contentOnly && echoOn && confirmedCell && !confirmedCell.free && confirmedCell.marked ? confirmedCell.itemId : null;
     const echoBuckets: EchoBucket[] = [];
     const echoWrites: Array<{ ref: ReturnType<typeof dayBoard>; set: ReturnType<typeof cellsMergeSet> }> = [];
     const echoPinDays: number[] = [];
@@ -1935,9 +1946,10 @@ async function resolve(
     // The claim's Proof, read LIVE and BEFORE any write (Firestore's
     // reads-before-writes contract), so the publish below can be conditional on
     // the state Cloud Vision may have moved it to since the Player submitted it
-    // (#133). `null` whenever there is nothing to publish — a reject, or a
-    // legacy claim carrying no proofId — so no other resolve pays for the read.
-    const claimProofRef = status === 'confirmed' && c.proofId ? proof(c.proofId, eventId) : null;
+    // (#133). Confirm and reject also normalize deletion classification for
+    // an owned Proof bound to this live Claim and Board cell; absent proofId
+    // leaves the legacy artifact-less path unchanged.
+    const claimProofRef = c.proofId ? proof(c.proofId, eventId) : null;
     const claimProofSnap = claimProofRef ? await tx.get(claimProofRef) : null;
 
     tx.set(
@@ -1961,7 +1973,9 @@ async function resolve(
         },
       });
     }
-    if (daily) {
+    // An old Claim may outlive its Board attachment. Resolve its review without
+    // folding an unrelated current Day over prior wins or root blackout.
+    if (claimCellBefore !== undefined && !contentOnly && daily) {
       const siblingBlackout =
         status === 'rejected' &&
         pSnap.exists() &&
@@ -2019,7 +2033,7 @@ async function resolve(
           });
         }
       }
-    } else {
+    } else if (claimCellBefore !== undefined && !contentOnly) {
       tx.set(
         player(c.uid, eventId),
         { squaresMarked: squares, bingoCount, blackout, firstBingoAt },
@@ -2029,7 +2043,8 @@ async function resolve(
     // Tally symmetry (ADR 0002): wherever a write flips a cell marked→unmarked it
     // must delete that cell's per-Prompt Tally marker, and wherever it flips
     // →marked it must ensure the marker (setMark and attachProof do). Rejecting a
-    // claim unmarks the claim's cell via the transform above, so diff old→new and
+    // pending-credit claim unmarks its cell via the transform above; a content-only
+    // reject keeps established credit and its marker. Diff old→new and
     // delete the marker for exactly the cells that lost their mark — the SAME
     // conditionality as the flip itself; without this, a rejected admin_confirmed
     // claim would reverse the board + stats but leave the player in the Prompt's
@@ -2050,7 +2065,13 @@ async function resolve(
         tx.delete(marker(before.itemId, c.uid, eventId));
       }
     });
-    tx.set(claim(c.id, eventId), { status, resolvedBy: adminUid }, { merge: true });
+    // The caller's optional hint controls ceremony only after an Admin decision.
+    // Normalize it to this live credit fold; retain flag-less legacy semantics.
+    tx.set(claimRef, {
+      status,
+      resolvedBy: adminUid,
+      ...(typeof claimSnap.data().contentOnly === 'boolean' ? { contentOnly } : {}),
+    }, { merge: true });
     // Confirming an admin-confirmed claim publishes its proof, which was created 'pending'
     // (admin-only readable) so it stayed hidden from the public feed until now. A
     // rejected proof is left 'pending' (still admin-only) rather than exposed.
@@ -2083,24 +2104,38 @@ async function resolve(
     // the live read shows it is the claimant's own upload (`uid === c.uid`) and
     // is still the admin-only `'pending'` Proof this Claim was filed with — the
     // same owner-first discipline `restoreProof` applies to the claims that
-    // steer it. Anything else is left exactly as it stands: another Player's
+    // steer it. The publication gate leaves every other status as it stands: another Player's
     // Proof (a hidden or pending one must not reach the Feed through somebody
     // else's Claim), an already-active one (publishing it would be a no-op), a
     // report- or admin-hidden one (its lift is `Clear reports` / `Restore`, not
     // a confirm), and a missing one (a merge `set` would CREATE a ghost Proof
-    // carrying nothing but a status). The Claim still resolves and the Mark is
-    // still confirmed in every case.
+    // carrying nothing but a status). The Claim still resolves; matched fresh
+    // credit confirms its Mark, and content-only review preserves established
+    // credit. Bound deletion classification is independent of publication.
     if (claimProofRef) {
       const liveProof = claimProofSnap?.exists()
         ? (claimProofSnap.data() as Partial<ProofDoc> | undefined)
         : undefined;
-      if (
-        liveProof !== undefined &&
-        liveProof.uid === c.uid &&
-        liveProof.status === 'pending' &&
-        !safetyHideStands(liveProof)
-      ) {
-        tx.set(claimProofRef, { status: 'active' }, { merge: true });
+      const storedClaim = claimSnap.data() as Partial<ClaimDoc>;
+      // A mode change can establish Honor credit after this Proof was born.
+      // Persist the terminal live classification for deletion, but only when
+      // stored Claim, owner, Proof identity, cell and Day all bind this artifact.
+      // Missing/legacy binding metadata grants no new deletion guarantee.
+      const classificationBound = liveProof !== undefined &&
+        storedClaim.uid === c.uid && storedClaim.proofId === c.proofId &&
+        storedClaim.cellIndex === c.cellIndex &&
+        (daily ? storedClaim.dayIndex === c.dayIndex : storedClaim.dayIndex == null) &&
+        liveProof.uid === c.uid && liveProof.cellIndex === c.cellIndex &&
+        (daily ? liveProof.dayIndex === c.dayIndex : liveProof.dayIndex == null) &&
+        claimCellBefore?.index === c.cellIndex && claimCellBefore.proofId === c.proofId;
+      const publish = status === 'confirmed' && liveProof !== undefined &&
+        liveProof.uid === c.uid && liveProof.status === 'pending' &&
+        !safetyHideStands(liveProof);
+      if (classificationBound || publish) {
+        tx.set(claimProofRef, {
+          ...(classificationBound ? { contentOnly } : {}),
+          ...(publish ? { status: 'active' } : {}),
+        }, { merge: true });
       }
     }
     return { transitioned: transitionedToConfirmed };
@@ -2122,7 +2157,8 @@ export function confirmClaim(c: ClaimDoc, adminUid: string): Promise<void> {
     c,
     (cells) =>
       cells.map((x) =>
-        isClaimCell(x, c) ? { ...x, status: 'confirmed' as const, markedAt: creditedAt } : x,
+        isClaimCell(x, c) && !(x.marked && x.status === 'confirmed')
+          ? { ...x, status: 'confirmed' as const, markedAt: creditedAt } : x,
       ),
     adminUid,
     'confirmed',
@@ -2147,7 +2183,7 @@ export function confirmClaim(c: ClaimDoc, adminUid: string): Promise<void> {
   // board — a reshuffle traded the cell away) resolves without moving the
   // Square from pending to confirmed at all, and two admins racing the SAME
   // claim have their loser's transaction replay against the winner's
-  // already-confirmed cell — a rewrite, not a transition. Firing here
+  // terminal Claim — a no-op, not a transition. Firing here
   // unconditionally would report a credited Square in both cases even though
   // `dayStats[*].squaresMarked` never moved, breaking the reconciliation
   // identity specs/w2-ga4-events.md § Reconciliation documents.
@@ -2173,7 +2209,9 @@ export function rejectClaim(c: ClaimDoc, adminUid: string): Promise<void> {
     (cells) =>
       cells.map((x) =>
         isClaimCell(x, c)
-          ? { ...x, marked: false, status: 'confirmed' as const, proofId: null, markedAt: null }
+          ? (x.marked && x.status === 'confirmed'
+              ? { ...x, proofId: null }
+              : { ...x, marked: false, status: 'confirmed' as const, proofId: null, markedAt: null })
           : x,
       ),
     adminUid,

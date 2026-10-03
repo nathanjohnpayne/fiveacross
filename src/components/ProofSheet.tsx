@@ -55,6 +55,8 @@ interface Props {
   // already claimed, so the row does not render at all. Enabled only in honor
   // mode; stricter modes show it disabled so Players learn the option exists.
   onPledge?: () => void;
+  // Keep the intentional strict-mode teaser without granting a bare-Mark callback.
+  showPledge?: boolean;
   // The event-level photo-source override (#190): `camera_only` hides the 🖼️
   // Library affordance, leaving only 📷 Take photo. Default `camera_or_library` —
   // both affordances in EVERY Claim Mode. A presentational restriction (ADR
@@ -113,7 +115,7 @@ export function resolveSuggestedByName(
 }
 
 export default function ProofSheet(props: Props) {
-  const { uid, displayName, photoURL, cells, cell, claimMode, currentFirstBingoAt, onAttached, onPledge, photoProofSource, dayIndex, daily, tutorialDayIndexes, ceremonialDayIndexes, statsFrozen, stripExif, tallyCount, restoreFocusTo, onClose } = props;
+  const { uid, displayName, photoURL, cells, cell, claimMode, currentFirstBingoAt, onAttached, onPledge, showPledge = onPledge !== undefined, photoProofSource, dayIndex, daily, tutorialDayIndexes, ceremonialDayIndexes, statsFrozen, stripExif, tallyCount, restoreFocusTo, onClose } = props;
   // Photo opens pre-selected (#309, folding in the #310 row-16 parity note):
   // the wireframe paints the claim sheet with the Photo body OPEN — Take photo
   // + Library visible on first paint — which drops one tap from the mainline
@@ -448,7 +450,7 @@ export default function ProofSheet(props: Props) {
           // this Square before they claim it. "so far" keeps it a running count.
           <div className="heat-line">🔥 Marked by {heatOthers} {heatOthers === 1 ? 'other' : 'others'} so far</div>
         )}
-        {onPledge && (
+        {showPledge && (
           // The one-tap honor pledge (issue #181): its own full-width row —
           // never a fourth segment — so the label always fits on one line at
           // 320px. Pressing it IS the claim: Board marks the Square (the same
@@ -464,7 +466,7 @@ export default function ProofSheet(props: Props) {
             // per sheet: the pledge locks while a submit is saving.
             disabled={claimMode !== 'honor' || busy}
             title={claimMode !== 'honor' ? 'Available when the event runs honor mode' : undefined}
-            onClick={onPledge}
+            onClick={() => { if (claimMode === 'honor') onPledge?.(); }}
           >
             🎖️ Cross My Heart
           </button>
