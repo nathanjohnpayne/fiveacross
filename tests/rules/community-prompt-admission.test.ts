@@ -1,10 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { initializeApp, deleteApp, type App } from 'firebase-admin/app';
 import { getFirestore, type Firestore } from 'firebase-admin/firestore';
-import { initializeTestEnvironment, type RulesTestEnvironment } from '@firebase/rules-unit-testing';
+import { assertSucceeds, initializeTestEnvironment, type RulesTestEnvironment } from '@firebase/rules-unit-testing';
 import { beforeAll, afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { submitPromptCore, submitPromptCallable } from '../../functions/src/submitPrompt';
 import type { CallableRequest } from 'firebase-functions/v2/https';
+import { doc, setDoc } from 'firebase/firestore';
 
 // Actual Admin SDK transactions: cap and fence are source behavior; this dark
 // PR deliberately retains the current client pending-create Rules until cutover.
@@ -121,6 +122,19 @@ describe('server Community Prompt intake', () => {
     // The bypass is the authenticated Event roster; no ordinary member gains it.
     await expect(submit('not-admin', 'other')).rejects.toMatchObject({ code: 'permission-denied' });
     expect((await db.doc(`${base}/promptQuota/other`).get()).exists).toBe(false);
+  });
+  it.each(['off', 'enforced'])('preserves presentational-ban Prompt eligibility under %s membership', async membershipEnforcement => {
+    await db.doc(base).update({ membershipEnforcement, admins: ['admin'], bannedUids: [UID] });
+    if (membershipEnforcement === 'enforced') await db.doc(`${base}/memberships/${UID}`).set({ status: 'active' });
+    // The dark branch retains baseline pending-create Rules: bans are not a
+    // universal write prohibition. Cutover closes this direct path for everyone.
+    await assertSucceeds(setDoc(doc(env.authenticatedContext(UID).firestore(), `${base}/items/legacy-ban-control`), {
+      text: 'Legacy ban control', createdBy: UID, pool: 'main', status: 'pending', reportCount: 0, spicy: false,
+    }));
+    expect(await submit('banned-callable')).toEqual({ id: 'banned-callable', targetDayIndex: 2 });
+    expect((await db.doc(`${base}/items/banned-callable`).get()).data()?.createdBy).toBe(UID);
+    expect((await db.doc(`${base}/promptQuota/${UID}`).get()).data()?.seq).toBe(1);
+    expect((await db.doc(`${base}/items/banned-callable`).get()).data()).not.toHaveProperty('expectedUid');
   });
   it('scheduleless Events preserve untargeted legacy behavior', async () => {
     await db.doc(base).set({ status: 'active' }); expect(await submit('new')).toEqual({ id: 'new' });
