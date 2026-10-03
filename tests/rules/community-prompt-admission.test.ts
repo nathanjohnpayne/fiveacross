@@ -94,6 +94,31 @@ describe('server Community Prompt intake', () => {
     await db.doc(base).set({ status: 'active' }); expect(await submit('new')).toEqual({ id: 'new' });
     expect((await db.doc(`${base}/items/new`).get()).data()).not.toHaveProperty('targetDayIndex');
   });
+  it.each([-1, 1.5, 20, 4000, Number.MAX_SAFE_INTEGER + 1])('refuses unsupported new default target %s before item/fence writes', async index => {
+    await db.doc(base).update({ days: [{ index, pool: 'main', unlockAt: NOW + 1 }] });
+    await expect(submit('new')).rejects.toMatchObject({ code: 'failed-precondition', message: 'Prompt submission needs an Admin check.' });
+    expect((await db.doc(`${base}/items/new`).get()).exists).toBe(false);
+    expect((await db.doc(`${base}/promptQuota/${UID}`).get()).exists).toBe(false);
+  });
+  it.each([null, '2', -1, 1.5, 20, Number.MAX_SAFE_INTEGER + 1])('refuses malformed owned target metadata %j without changing the existing row or fence', async targetDayIndex => {
+    await submit('same');
+    await db.doc(`${base}/items/same`).update({ targetDayIndex });
+    const item = (await db.doc(`${base}/items/same`).get()).data();
+    const fence = (await db.doc(`${base}/promptQuota/${UID}`).get()).data();
+    await expect(submit('same')).rejects.toMatchObject({ code: 'failed-precondition', message: 'Prompt submission needs an Admin check.' });
+    expect((await db.doc(`${base}/items/same`).get()).data()).toEqual(item);
+    expect((await db.doc(`${base}/promptQuota/${UID}`).get()).data()).toEqual(fence);
+  });
+  it('acknowledges a supported owned target despite later invalid schedule and closure without writes', async () => {
+    await db.doc(base).update({ days: [{ index: 19, pool: 'main', unlockAt: NOW + 1 }] });
+    const response = await submit('same');
+    const item = (await db.doc(`${base}/items/same`).get()).data();
+    const fence = (await db.doc(`${base}/promptQuota/${UID}`).get()).data();
+    await db.doc(base).update({ status: 'archived', days: [{ index: 4000, pool: 'main', unlockAt: NOW + 1 }] });
+    expect(await submit('same')).toEqual({ ...response, targetDayIndex: 19 });
+    expect((await db.doc(`${base}/items/same`).get()).data()).toEqual(item);
+    expect((await db.doc(`${base}/promptQuota/${UID}`).get()).data()).toEqual(fence);
+  });
   it('malformed fence state and server clock fail closed without persisting content', async () => {
     await db.doc(`${base}/promptQuota/${UID}`).set({ seq: 'bad' });
     await expect(submit('new')).rejects.toMatchObject({ code: 'failed-precondition' });

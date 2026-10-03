@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Firestore } from 'firebase-admin/firestore';
 import type { CallableRequest } from 'firebase-functions/v2/https';
-import { parseSubmitPromptRequest, submitPromptCallable, MAX_PENDING_PROMPTS } from '../../functions/src/submitPrompt';
+import { parseSubmitPromptRequest, submitPromptCallable, MAX_PENDING_PROMPTS, MAX_PROMPT_TARGET_DAYS } from '../../functions/src/submitPrompt';
+import { MAX_DAYS } from '../../src/data/eventLimits';
 
 const good = { eventId: 'event', itemId: 'item', text: '  Dance  ', spicy: false };
 const request = (data: unknown = good, uid?: string, app?: object) => ({ data, ...(uid ? { auth: { uid } } : {}), ...(app ? { app } : {}) }) as CallableRequest<unknown>;
@@ -13,6 +14,9 @@ describe('submitPrompt callable boundary', () => {
     return { db: { doc } as unknown as Firestore, doc, now: () => 123 };
   };
   it('uses the owner-approved fixed pending cap', () => expect(MAX_PENDING_PROMPTS).toBe(10));
+  it('keeps the separately built admission target ceiling at the canonical Event bound', () => {
+    expect(MAX_PROMPT_TARGET_DAYS).toBe(MAX_DAYS);
+  });
   it('trims text and ignores forged server-owned fields', () => {
     expect(parseSubmitPromptRequest({ ...good, createdAt: 0, createdBy: 'other', targetDayIndex: 99, status: 'active' }))
       .toEqual({ ...good, text: 'Dance' });

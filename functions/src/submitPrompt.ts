@@ -6,13 +6,20 @@
 import type { Firestore } from 'firebase-admin/firestore';
 import { HttpsError, type CallableRequest } from 'firebase-functions/v2/https';
 import type { SubmitPromptRequest, SubmitPromptResponse, EventDoc } from '../../src/domainTypes';
-import { defaultTargetDayIndex, isUsableTarget } from './communityPromptRouting.generated';
+import { defaultTargetDayIndex } from './communityPromptRouting.generated';
 import { isActiveMembershipData, membershipPath } from './eventMembership.generated';
 import { isFirestoreDocumentId } from './firestoreIds';
 import { firestoreErrorCodeForLog } from './firestoreErrors';
 import { eventClosedToPlay } from './unlockDay';
 
 export const MAX_PENDING_PROMPTS = 10;
+// Functions rootDir forbids a runtime import from src/data/eventLimits.ts.
+// The admission tests pin this mirror to its canonical MAX_DAYS contract.
+export const MAX_PROMPT_TARGET_DAYS = 20;
+function supportedSubmissionTarget(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value)
+    && value >= 0 && value < MAX_PROMPT_TARGET_DAYS;
+}
 export interface SubmitPromptDeps {
   db: Firestore;
   now: () => number;
@@ -56,9 +63,12 @@ export async function submitPromptCore(
     if (existing.exists) {
       const row = existing.data();
       if (row?.createdBy !== uid) throw new HttpsError('already-exists', 'Choose a new submission ID.');
+      if (row.targetDayIndex !== undefined && !supportedSubmissionTarget(row.targetDayIndex)) {
+        throw new HttpsError('failed-precondition', 'Prompt submission needs an Admin check.');
+      }
       // A lost response may be retried after approval/rejection or at capacity.
       // Never rewrite content, routing or status on the already-owned ID.
-      return { id: input.itemId, ...(isUsableTarget(row.targetDayIndex) ? { targetDayIndex: row.targetDayIndex } : {}) };
+      return { id: input.itemId, ...(row.targetDayIndex === undefined ? {} : { targetDayIndex: row.targetDayIndex }) };
     }
     // Acknowledgment above makes no gameplay write: a committed request remains
     // retryable when the Event closes after its response was lost. New IDs stop.
@@ -74,6 +84,9 @@ export async function submitPromptCore(
       throw new HttpsError('internal', 'Prompt submission failed; try again with signal.');
     }
     const target = defaultTargetDayIndex(Array.isArray(event.days) ? event.days : [], createdAt);
+    if (target !== null && !supportedSubmissionTarget(target)) {
+      throw new HttpsError('failed-precondition', 'Prompt submission needs an Admin check.');
+    }
     tx.create(itemRef, {
       text: input.text, createdBy: uid, createdAt, isFreeSpace: false,
       status: 'pending', reportCount: 0, spicy: input.spicy, pool: 'main',
