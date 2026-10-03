@@ -36,7 +36,7 @@ Eighty seeded Prompts therefore produce one email listing eighty—structurally,
 
 `alertsForWrite(collection, docId, before, after)` returns every alert a single write earns—`[]` for the overwhelming majority, which is what keeps the producers cheap enough to sit on a hot trigger path. A single write can legitimately raise more than one (an admin hiding an already-reported Prompt in one update).
 
-- **`item-created`**—the Prompt is CURRENTLY `pending` and was not before. That is exactly the community-submission signal: `addItem` (the player path) writes `status: 'pending'`, while `adminAddItem` and every seed write `'active'`, so an admin adding their own Prompt correctly notifies nobody. It is also [#533](https://github.com/nathanjohnpayne/fiveacross/issues/533)-proof—community Prompts land in the same `pending` state, so the predicate does not change when they ship. Items only; a Proof has no approval queue.
+- **`item-created`**—the Prompt is CURRENTLY `pending` and was not before. That is exactly the community-submission signal: `addItem` calls `submitPrompt`, which creates server-owned `status: 'pending'` rows; curated `adminAddItem` and seed writes are `active` and earn no item-created alert. Admin suggestions through the player form use the same pending intake as other Players. It is also [#533](https://github.com/nathanjohnpayne/fiveacross/issues/533)-proof—community Prompts land in the same `pending` state, so the predicate does not change when they ship. This kind is items-only; Proof Claim/content review follows its separate route.
 - **`content-reported`**—`reportCount` strictly ROSE. `reportItem`/`reportProof` increment it, so this is the explicit report action. Deliberately not a bare `reportCount > 0`: an admin Clear-reports (to `0`) is not a rise, and neither is a restore, which leaves the count alone.
 - **`moderation`**—`status` CHANGED into `flagged`/`hidden`. The same transition `shouldNotify` has always covered: Cloud Vision flagging a Proof, the threshold auto-hide ([#43](https://github.com/nathanjohnpayne/fiveacross/issues/43)), and a manual admin hide.
 
@@ -158,12 +158,12 @@ Deletion is the one thing that ends it, and the delay can be long: a digest with
 
 ### The detail line
 
-`reviewDetail` is the one place this family makes a causal claim, and it makes only claims the stored facts support. It reuses `notify.ts`'s `deriveReason` rather than re-deriving the same three-way decision: a Vision flag names itself, a hide is `reports >= threshold` only when the count and the Event threshold are both known and the count is at/over it, `by an admin` when both are known and it is under, and nothing at all when either is unknown—so a manual hide of an unreported Prompt is never mislabelled ([#101](https://github.com/nathanjohnpayne/fiveacross/issues/101) Codex R2 F1).
+`reviewDetail` is the one place this family makes a causal claim, and it reuses `notify.ts`'s `deriveReason`. A Vision flag names itself first. For hidden content, report suppression yields `by an admin` regardless of count or threshold. An unsuppressed hide with an unknown count or threshold makes no causal claim; when both are known, a count at or above the threshold yields `reports >= threshold`, and a lower count yields `by an admin`. This keeps a manual hide of an unreported Prompt from being mislabelled ([#101](https://github.com/nathanjohnpayne/fiveacross/issues/101) Codex R2 F1).
 
-A still-active report additionally shows the distance to the auto-hide bar, which is the number an admin actually acts on.
+An unsuppressed active report below a positive threshold shows the distance to auto-hide. A suppressed/restored incarnation retains its new report count without an auto-hide promise.
 
-- **Given** a Vision flag **then** the flag names itself; **given** a hide at/over the threshold **then** `reports >= threshold`; **given** a hide under it **then** `by an admin`; **given** an unknown threshold **then** no causal claim. (Tests under "reviewDetail".)
-- **Given** an active report under the threshold **then** the row states how many more reports auto-hide it. (Test: "states the distance to the auto-hide bar".)
+- **Given** a Vision flag **then** the flag names itself; **given** an unsuppressed hide at/over the threshold **then** `reports >= threshold`; **given** a hide under it or a report-suppressed hide **then** `by an admin`; **given** an unsuppressed hide with an unknown count or threshold **then** no causal claim. (Tests under "reviewDetail".)
+- **Given** an unsuppressed active report under the threshold **then** the row states how many more reports auto-hide it. (Tests: "states the distance to the auto-hide bar" and "keeps new suppressed reports visible without promising automatic hiding".)
 
 ## Deep links
 
