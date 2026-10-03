@@ -251,6 +251,24 @@ describe('firestore.rules — Feed Moments (specs/w2-feed-moments.md)', () => {
     await assertFails(setDoc(doc(db(ALICE), momentPath(`${ALICE}-bingo`)), moment(ALICE, { dayIndex })));
   });
 
+  it.each([
+    ['map', { url: 'https://lh3.googleusercontent.com/avatar' }],
+    ['array', ['https://lh3.googleusercontent.com/avatar']],
+    ['number', 1],
+    ['boolean', true],
+    ['oversized allowed host', 'https://lh3.googleusercontent.com/' + 'x'.repeat(1025)],
+  ])('Moment avatar DENIES %s through the create-rule photoUrlOk guard', async (_label, photoURL) => {
+    await assertFails(setDoc(doc(db(ALICE), momentPath(`${ALICE}-bingo`)), moment(ALICE, { photoURL })));
+    expect((await getDoc(doc(db(ALICE), momentPath(`${ALICE}-bingo`)))).exists()).toBe(false);
+  });
+
+  it('Moment avatar accepts the 1024-character allowed-host boundary', async () => {
+    const prefix = 'https://lh3.googleusercontent.com/';
+    await assertSucceeds(setDoc(doc(db(ALICE), momentPath(`${ALICE}-bingo`)), moment(ALICE, {
+      photoURL: prefix + 'x'.repeat(1024 - prefix.length),
+    })));
+  });
+
   it('DENIES an oversized authenticated UID even at its canonical Moment id', async () => {
     const uid = 'x'.repeat(129);
     await assertFails(setDoc(doc(db(uid), momentPath(`${uid}-bingo`)), moment(uid)));

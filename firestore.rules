@@ -2544,7 +2544,9 @@ service cloud.firestore {
         // immutability pattern: `create` is allowed once (no prior doc) by the
         // achieving Player (firstBingo.uid == auth.uid — own-attributed, "written
         // via the same client path that posts first-bingo Moments today") OR by an
-        // admin resolving an admin_confirmed claim for that Player. There is NO
+        // trusted admin attributing a ceremony to another Player (normal writers
+        // resolve claims or repair the pin). Rules do not bind a Claim or profile.
+        // There is NO
         // `update` path at all. A second write to the SAME day-meta doc is therefore
         // a doc-exists update, denied for EVERYONE including admins — the per-day
         // honor cannot be reassigned once claimed, exactly like the deny-all update
