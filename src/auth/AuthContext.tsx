@@ -810,7 +810,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // gating decisions (the settle-timer arm and the sign-in tap branch, #358).
   // The DECISION is the only thing snapshotted: the navigated-to URL is not
   // (#376) — a signed-in web.app session can change route/query/hash before a
-  // mid-session sign-out hands off, so the chokepoint recomputes the full
+  // spontaneous session loss may hand off, so the chokepoint recomputes the full
   // target from the live location at navigation time, preserving the active
   // route instead of replaying the mount-time one.
   const [onFallbackAuthOrigin] = useState(() => firebaseAuthOriginRedirectUrl(window.location) !== null);
@@ -951,7 +951,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // dedupe and the pending-redirect-return guard apply to every navigation path
   // (#354: a raw replace() beside this ref could fire a duplicate/late
   // navigation). The target URL is computed HERE, from the live location at
-  // navigation time (#376): a mid-session sign-out fires from wherever the
+  // navigation time (#376): spontaneous session loss fires from wherever the
   // signed-in session navigated, so a mount-time snapshot would replay a stale
   // route/query/hash. Returns true when the signed-out visit is handled by
   // navigation (started now or earlier); false when this origin is already
@@ -2601,6 +2601,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signOutUser = async () => {
     // Install intent before Firebase publishes null (which may be synchronous).
     explicitLogoutRef.current = true;
+    // A popup may have published its User while its attestation write remains
+    // pending. Retire only its coalescing slot so a deliberate new sign-in can
+    // start; the old finally cannot clear the new slot because it compares identity.
+    signInAttemptRef.current = null;
     try {
       localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
     } catch {

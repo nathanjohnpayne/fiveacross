@@ -2206,7 +2206,7 @@ describe('AuthContext deal-error hardening', () => {
     vi.unstubAllGlobals();
   });
 
-  it('hands off a mid-session sign-out to the CURRENT route, not the mount-time one (#376)', async () => {
+  it('hands off spontaneous session loss to the CURRENT route, not the mount-time one (#376)', async () => {
     const replace = vi.fn();
     const location = {
       hostname: 'gaycruisebingo.web.app',
@@ -2220,7 +2220,7 @@ describe('AuthContext deal-error hardening', () => {
     mount();
     await act(async () => void (await emitAuth(FAKE_USER)));
 
-    // The signed-in session navigates before signing out; the handoff target
+    // The signed-in session navigates before spontaneous session loss; the handoff target
     // must be computed from the live location at navigation time, so the
     // canonical origin receives the route the Player was actually on.
     location.pathname = '/more';
@@ -2275,6 +2275,46 @@ describe('AuthContext deal-error hardening', () => {
     expect(replace).not.toHaveBeenCalled();
     write.mockRestore();
     vi.unstubAllGlobals();
+  });
+
+  it('starts a fresh deliberate sign-in after logout while the previous popup attestation is pending', async () => {
+    let signIn!: (acknowledged: boolean) => Promise<void>;
+    let logout!: () => Promise<void>;
+    function Controls() {
+      const context = useAuth();
+      signIn = context.signIn;
+      logout = context.signOutUser;
+      return null;
+    }
+    const pending = deferred<void>();
+    const authMock = mockedAuth as { currentUser?: unknown };
+    authMock.currentUser = FAKE_USER;
+    mocks.signInWithPopup.mockResolvedValue({ user: FAKE_USER });
+    mocks.attestAdult.mockReturnValueOnce(pending.promise);
+    render(<AuthProvider><Controls /></AuthProvider>);
+    await act(async () => void (await emitAuth(FAKE_USER)));
+    let first!: Promise<void>;
+    await act(async () => { first = signIn(true); await Promise.resolve(); });
+    await waitFor(() => expect(mocks.attestAdult).toHaveBeenCalledOnce());
+    mocks.signOut.mockImplementationOnce(async () => {
+      delete authMock.currentUser;
+      await emitAuth(null);
+    });
+    await act(async () => { await logout(); });
+    expect(localStorage.getItem(EXPLICIT_LOGOUT_KEY)).toBe('1');
+    const secondPopup = deferred<{ user: typeof FAKE_USER }>();
+    mocks.signInWithPopup.mockReturnValueOnce(secondPopup.promise);
+    let second!: Promise<void>;
+    await act(async () => { second = signIn(false); await Promise.resolve(); });
+    expect(mocks.signInWithPopup).toHaveBeenCalledTimes(2);
+    expect(localStorage.getItem(EXPLICIT_LOGOUT_KEY)).toBeNull();
+    await act(async () => { pending.settle(); await first; });
+    // Completion of the retired promise does not erase later attempt ownership.
+    expect(signIn(false)).toBe(second);
+    expect(mocks.signInWithPopup).toHaveBeenCalledTimes(2);
+    await act(async () => { secondPopup.settle({ user: FAKE_USER }); await second; });
+    await act(async () => { await signIn(false); });
+    expect(mocks.signInWithPopup).toHaveBeenCalledTimes(3);
   });
 
   it('allows a deliberate sign-in after explicit logout and uses the current route', async () => {
