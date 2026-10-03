@@ -9,6 +9,7 @@ export async function seedEventDoc(
   projectId: string,
   eventId: string,
   dayCount = 1,
+  itemIds: string[] = [],
 ): Promise<void> {
   const host = process.env.FIRESTORE_EMULATOR_HOST ?? '127.0.0.1:8080';
   const int = (n: number) => ({ integerValue: String(n) });
@@ -45,4 +46,18 @@ export async function seedEventDoc(
     },
   );
   if (!res.ok) throw new Error(`event seed failed: ${res.status} ${await res.text()}`);
+  await seedItemDocs(projectId, eventId, itemIds);
+}
+
+/** Boards in these fixtures name real approved Prompts, as a genuine deal does. */
+export async function seedItemDocs(projectId: string, eventId: string, itemIds: string[]): Promise<void> {
+  const host = process.env.FIRESTORE_EMULATOR_HOST ?? '127.0.0.1:8080';
+  for (const itemId of new Set(itemIds)) {
+    const result = await fetch(`http://${host}/v1/projects/${projectId}/databases/(default)/documents/events/${eventId}/items/${itemId}`, {
+      method: 'PATCH',
+      headers: { Authorization: 'Bearer owner', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fields: { text: { stringValue: 'Approved prompt' }, status: { stringValue: 'active' } } }),
+    });
+    if (!result.ok) throw new Error(`item seed failed: ${result.status} ${await result.text()}`);
+  }
 }

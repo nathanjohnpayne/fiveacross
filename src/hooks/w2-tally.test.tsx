@@ -64,6 +64,13 @@ const tallySnap = (markers: Array<{ uid: string; displayName: string; markedAt: 
 });
 
 describe('useTally (specs/w2-tally.md)', () => {
+  it('returns normalized legacy names rather than only validating their source rows', () => {
+    const sub = captureOnNext();
+    const { result } = renderHook(() => useTally('i3'));
+    sub.fire(tallySnap([{ uid: 'alice', displayName: 'x'.repeat(99) + '😀', markedAt: 1 }]));
+    expect(result.current.markers).toEqual([{ uid: 'alice', displayName: 'x'.repeat(99), markedAt: 1 }]);
+  });
+
   it('returns the count and the who-list, sorted chronologically by markedAt', () => {
     const sub = captureOnNext();
     const { result } = renderHook(() => useTally('i3'));
