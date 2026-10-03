@@ -1984,3 +1984,15 @@ export interface AdmissionDecision {
   admitted: boolean;
   outcome: AdmissionOutcome;
 }
+
+/** Server-authoritative Community Prompt intake (#1311, ADR 0017). */
+export interface SubmitPromptRequest {
+  eventId: string;
+  itemId: string;
+  text: string;
+  spicy: boolean;
+}
+export interface SubmitPromptResponse {
+  id: string;
+  targetDayIndex?: number;
+}
