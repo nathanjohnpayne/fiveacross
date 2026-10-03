@@ -793,6 +793,8 @@ describe('exchange admission before Firestore (#1417)', () => {
     const deps = exchangeDeps(fake, { admitRequest });
     for (let i = 0; i < 100; i++) {
       await exchangeHandoff({ ...payload, code: 'bad' }, deps);
+      await exchangeHandoff({ ...payload, transactionVerifier: '!' }, deps);
+      await exchangeHandoff({ ...payload, origin: 'nonsense' }, deps);
       await exchangeHandoff({ ...payload, headerOrigin: OTHER_ORIGIN }, deps);
       await exchangeHandoff(payload, { ...deps, requireAppCheck: true });
     }
