@@ -92,6 +92,39 @@ beforeEach(() => {
 });
 
 describe('manual Event-scoped listener lifecycles (#807)', () => {
+  it('keeps a restored Prompt in Tally cards while requiring strict suppression and active status', () => {
+    const view = renderHook(() => useTallyCards());
+    act(() => {
+      for (const sub of H.subscriptions.filter((s) => s.target.kind === 'doc')) {
+        sub.listener(docSnapshot({ days: [{ index: 0 }], bannedUids: [], settings: { reportHideThreshold: 3 } }));
+      }
+    });
+    const current = () => H.subscriptions.filter((s) => !s.unsubscribe.mock.calls.length);
+    const promptSub = current().find((sub) => {
+      const source = sub.target.args?.[0] as { kind?: string; args?: unknown[] } | undefined;
+      return source?.kind === 'collection' && source.args?.includes('items');
+    })!;
+    const markerSub = current().find((sub) => {
+      const source = sub.target.args?.[0] as { kind?: string; args?: unknown[] } | undefined;
+      return source?.kind === 'collectionGroup' && source.args?.[1] === 'markers';
+    })!;
+    const publishPrompt = (reportHideSuppressed: unknown, status = 'active') => act(() => {
+      promptSub.listener({ ...collectionSnapshot([]), docs: [{ id: 'same-item', data: () => ({
+        status, text: 'Restored trusted prompt', reportCount: 5, reportHideSuppressed,
+      }) }] });
+    });
+    act(() => markerSub.listener(markerSnapshot('event-a', 'same-item')));
+    publishPrompt(false);
+    expect(view.result.current.cards).toEqual([]);
+    publishPrompt(true);
+    expect(view.result.current.cards).toHaveLength(1);
+    expect(view.result.current.cards[0].itemText).toBe('Restored trusted prompt');
+    publishPrompt('true');
+    expect(view.result.current.cards).toEqual([]);
+    publishPrompt(true, 'hidden');
+    expect(view.result.current.cards).toEqual([]);
+  });
+
   it('rekeys one-Day metadata and ignores the old listener after cleanup', () => {
     const view = renderHook(() => useDayMeta(0));
     const a = H.subscriptions[0];

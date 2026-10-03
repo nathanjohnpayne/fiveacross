@@ -1357,7 +1357,7 @@ export function useTallyCards() {
         prompts = new Map();
         for (const doc of snap.docs) {
           const item = doc.data();
-          if (item.status !== 'active' || isReportHidden(item.reportCount, threshold)
+          if (item.status !== 'active' || isReportHidden(item.reportCount, threshold, item.reportHideSuppressed)
               || isBanned(item.createdBy, bannedUids) || isExplicitWithheld(item.spicy, adultRequired)
               || typeof item.text !== 'string' || !item.text || item.text.length > 80) continue;
           prompts.set(doc.id, item.text);
