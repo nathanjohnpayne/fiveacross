@@ -577,7 +577,7 @@ async function seed() {
   // between commits. A doc whose id is unchanged across reseeds (same text)
   // gets a delete followed by a set within the transaction, so the set is what
   // lands. The delete pass is scoped to `createdBy === 'seed'`
-  // (CodeRabbit Major, PR #135) — addItem writes live Player-submitted
+  // (CodeRabbit Major, PR #135) — submitPrompt creates Player suggestions
   // prompts into this SAME collection with their own uid as createdBy, so an
   // unscoped delete-everything would erase user content on every reseed.
   // A seed is a single Firestore transaction, rather than a preflight read

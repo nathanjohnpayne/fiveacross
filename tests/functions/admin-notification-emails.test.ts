@@ -1008,11 +1008,11 @@ const NOW = 5_000;
 
 describe('alertsForWrite', () => {
   it('queues item-created for a player submission landing pending, and for nothing else on the items path', () => {
-    // `addItem` (the player path) writes status: 'pending'.
+    // `submitPrompt`, called by addItem, creates the server-owned pending row.
     expect(alertsForWrite('items', 'i1', undefined, ITEM({ status: 'pending' })).map((a) => a.kind)).toEqual([
       'item-created',
     ]);
-    // `adminAddItem` and every seed write 'active' — an admin's own Prompt notifies nobody.
+    // Curated `adminAddItem` and seeds write active; that management path earns no item-created alert.
     expect(alertsForWrite('items', 'i1', undefined, ITEM({ status: 'active' }))).toEqual([]);
     // The admin's approval (pending → active) is not news; it IS the response.
     expect(alertsForWrite('items', 'i1', ITEM({ status: 'pending' }), ITEM({ status: 'active' }))).toEqual([]);

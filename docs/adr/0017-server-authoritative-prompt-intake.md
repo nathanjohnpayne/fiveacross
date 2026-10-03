@@ -1,6 +1,6 @@
 ---
 status: accepted
-implemented: partial
+implemented: source
 ---
 
 # Server-authoritative Community Prompt intake
@@ -11,8 +11,10 @@ Auth, optional App Check and the existing membership/archive admission contract 
 
 Ship two source PRs: first the callable dark, with the existing client and pending-create Rules unchanged; then the dependent client and Rules cutover, closing stale-client direct pending creates. The dark PR alone does not enforce the cap on all production submissions. Deploy and verify callable reachability before authorizing the client/Rules cutover. This source work does not authorize production writes or deployment.
 
-Prompt submission after cutover requires signal: keep typed text and retry ID on failure; for admission preconditions ask the host to check Event/submission settings, and for transient failures say to retry with signal; do not promise a queued submission. Offline Marks and their durable queued writes retain ADR 0006. Before any deployment, perform the owner-required read-only real pending-queue distribution check, assess whether legitimate contributors commonly need more than ten, and obtain separate deployment authorization. Issued media URLs and privacy policy decisions are independent.
+Prompt submission after cutover requires signal: keep typed text and retry ID on failure; for Event/membership permission denial or admission preconditions ask the host to check Event/submission settings, for auth mismatch ask for the account that started the Prompt, and for transient failures say to retry with signal; do not promise a queued submission. Offline Marks and their durable queued writes retain ADR 0006. Before any deployment, perform the owner-required read-only real pending-queue distribution check, assess whether legitimate contributors commonly need more than ten, and obtain separate deployment authorization. Issued media URLs and privacy policy decisions are independent.
 
 For the callable release, separately authorize and verify `SUBMIT_PROMPT_APP_CHECK=false` in each selected project’s merged Functions dotenv files (`functions/.env.gaycruisebingo` and `functions/.env.fiveacross` for the two current projects). The declared false default does not exempt the name from Firebase’s non-interactive param-coverage guard. No environment file is modified by this source work.
 
 The callable requires a canonical `expectedUid` captured when submission starts and compares it with the eventual authenticated UID before any Admin path/read. Missing or malformed intent is rejected; a mismatch is unauthenticated and makes no item/fence write. `createdBy` remains derived only from authenticated identity; expectedUid is never persisted or used to grant authority. The updated dark callable must precede cutover because this is a required new protocol field; existing deployed clients do not invoke it. This guard prevents a cross-account admission after SDK auth-header resolution, but does not cancel a request already admitted under its captured identity or promise a global auth epoch. Same-account same-ID retry and capacity serialization remain unchanged.
+
+The dependent source cutover denies every client pending create, including Admin suggestions, while retaining curated active Admin management and approval. The UI keeps the retry identity with unchanged typed content under the captured Event/account, rejects mismatched server acknowledgments, and does not enqueue a Firestore fallback. Both source PRs still require separate deployment and acceptance; `implemented: source` does not claim live enforcement.

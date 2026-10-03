@@ -1,14 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { initializeApp, deleteApp, type App } from 'firebase-admin/app';
 import { getFirestore, type Firestore } from 'firebase-admin/firestore';
-import { assertSucceeds, initializeTestEnvironment, type RulesTestEnvironment } from '@firebase/rules-unit-testing';
+import { assertFails, assertSucceeds, initializeTestEnvironment, type RulesTestEnvironment } from '@firebase/rules-unit-testing';
+import { doc, setDoc, getDoc, writeBatch } from 'firebase/firestore';
 import { beforeAll, afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { submitPromptCore, submitPromptCallable } from '../../functions/src/submitPrompt';
 import type { CallableRequest } from 'firebase-functions/v2/https';
-import { doc, setDoc } from 'firebase/firestore';
 
-// Actual Admin SDK transactions: cap and fence are source behavior; this dark
-// PR deliberately retains the current client pending-create Rules until cutover.
+// Actual Admin SDK transactions plus client cutover Rules: the callable owns
+// pending intake; every direct pending create and quota-fence write is denied.
 const projectId = 'demo-fiveacross-prompt-admission';
 const EVENT = 'event'; const UID = 'player'; const NOW = 1_770_000_000_000;
 let env: RulesTestEnvironment; let app: App; let db: Firestore;
@@ -23,13 +23,13 @@ const pending = (uid = UID) => db.collection(`${base}/items`).where('createdBy',
 beforeAll(async () => {
   process.env.FIRESTORE_EMULATOR_HOST ??= '127.0.0.1:8080';
   const [host, port] = process.env.FIRESTORE_EMULATOR_HOST.split(':');
-  env = await initializeTestEnvironment({ projectId, firestore: { host, port: Number(port), rules: readFileSync('firestore.rules', 'utf8') } });
+  env = await initializeTestEnvironment({ projectId, firestore: { host, port: Number(port), rules: readFileSync(process.env.PROMPT_ADMISSION_TEST_RULES ?? 'firestore.rules', 'utf8') } });
   app = initializeApp({ projectId }, `prompt-admission-${process.pid}`); db = getFirestore(app);
 });
 afterAll(async () => { await deleteApp(app); await env.cleanup(); });
 beforeEach(async () => {
   await env.clearFirestore();
-  await db.doc(base).set({ status: 'active', days: [{ index: 0, pool: 'main', unlockAt: NOW - 1 }, { index: 2, pool: 'main', unlockAt: NOW + 1 }] });
+  await db.doc(base).set({ status: 'active', admins: ['admin'], days: [{ index: 0, pool: 'main', unlockAt: NOW - 1 }, { index: 2, pool: 'main', unlockAt: NOW + 1 }] });
 });
 
 describe('server Community Prompt intake', () => {
@@ -126,9 +126,9 @@ describe('server Community Prompt intake', () => {
   it.each(['off', 'enforced'])('preserves presentational-ban Prompt eligibility under %s membership', async membershipEnforcement => {
     await db.doc(base).update({ membershipEnforcement, admins: ['admin'], bannedUids: [UID] });
     if (membershipEnforcement === 'enforced') await db.doc(`${base}/memberships/${UID}`).set({ status: 'active' });
-    // The dark branch retains baseline pending-create Rules: bans are not a
-    // universal write prohibition. Cutover closes this direct path for everyone.
-    await assertSucceeds(setDoc(doc(env.authenticatedContext(UID).firestore(), `${base}/items/legacy-ban-control`), {
+    // Presentational bans do not add a callable prohibition. Cutover closes
+    // the baseline direct pending path for everyone, including this caller.
+    await assertFails(setDoc(doc(env.authenticatedContext(UID).firestore(), `${base}/items/legacy-ban-control`), {
       text: 'Legacy ban control', createdBy: UID, pool: 'main', status: 'pending', reportCount: 0, spicy: false,
     }));
     expect(await submit('banned-callable')).toEqual({ id: 'banned-callable', targetDayIndex: 2 });
@@ -172,5 +172,41 @@ describe('server Community Prompt intake', () => {
     await db.doc(`${base}/promptQuota/${UID}`).delete();
     await expect(submitPromptCore({ db, now: () => NaN }, UID, { expectedUid: UID, eventId: EVENT, itemId: 'new', text: 'Dance', spicy: false })).rejects.toMatchObject({ code: 'internal' });
     expect((await db.doc(`${base}/items/new`).get()).exists).toBe(false);
+  });
+});
+
+
+describe('Prompt admission cutover — stale client bypasses denied', () => {
+  const row = (uid: string, status = 'pending') => ({ text: 'Direct create', createdBy: uid,
+    createdAt: NOW, isFreeSpace: false, status, pool: 'main', reportCount: 0, spicy: false });
+  it.each([UID, 'admin'])('denies direct pending creates by %s, even with plausible server stamps', async uid => {
+    const client = env.authenticatedContext(uid).firestore();
+    await assertFails(setDoc(doc(client, `${base}/items/direct`), row(uid)));
+    expect((await db.doc(`${base}/items/direct`).get()).exists).toBe(false);
+  });
+  it('denies batch pending-create plus fabricated fence admission and quota reads/writes', async () => {
+    const client = env.authenticatedContext(UID).firestore();
+    const batch = writeBatch(client);
+    batch.set(doc(client, `${base}/items/bypass`), row(UID));
+    batch.set(doc(client, `${base}/promptQuota/${UID}`), { seq: 1 });
+    await assertFails(batch.commit());
+    await assertFails(getDoc(doc(client, `${base}/promptQuota/${UID}`)));
+    await assertFails(setDoc(doc(client, `${base}/promptQuota/${UID}`), { seq: 99 }));
+    expect((await db.doc(`${base}/items/bypass`).get()).exists).toBe(false);
+  });
+  it('keeps curated active Admin management available while ordinary active creation stays denied', async () => {
+    const admin = env.authenticatedContext('admin').firestore();
+    await assertSucceeds(setDoc(doc(admin, `${base}/items/curated`), row('admin', 'active')));
+    const ordinary = env.authenticatedContext(UID).firestore();
+    await assertFails(setDoc(doc(ordinary, `${base}/items/active-bypass`), row(UID, 'active')));
+  });
+  it('retains existing over-cap pending rows and the submitter read boundary after cutover', async () => {
+    await seedPending(13);
+    const owner = env.authenticatedContext(UID).firestore();
+    const other = env.authenticatedContext('other').firestore();
+    await assertSucceeds(getDoc(doc(owner, `${base}/items/${UID}-0`)));
+    await assertFails(getDoc(doc(other, `${base}/items/${UID}-0`)));
+    await expect(submit('new')).rejects.toMatchObject({ code: 'resource-exhausted' });
+    expect((await pending()).size).toBe(13);
   });
 });
