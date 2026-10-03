@@ -39,6 +39,17 @@ describe('rules-paired reports per reporter and target incarnation', () => {
     await assertSucceeds(submission(db('bob'), 'bob', kind).commit());
     expect((await getDoc(doc(db('admin'), path(`${kind}/target`)))).data()?.reportCount).toBe(2);
   });
+  it('accepts a player Proof create but denies forged report-hide suppression', async () => {
+    const fs = db('owner');
+    const proof = { uid: 'owner', displayName: 'Owner', photoURL: null, type: 'text',
+      cellIndex: 4, itemText: 'Dance', storagePath: null, mediaURL: null,
+      thumbURL: null, text: 'A caption', createdAt: Date.now(), reportCount: 0,
+      status: 'active', visionFlag: null, source: null, dayIndex: 0 };
+    await assertSucceeds(setDoc(doc(fs, path('proofs/valid-proof')), proof));
+    await assertFails(setDoc(doc(fs, path('proofs/forged-proof')), { ...proof, reportHideSuppressed: true }));
+    expect((await getDoc(doc(db('admin'), path('proofs/valid-proof')))).data()?.reportHideSuppressed).toBeUndefined();
+    expect((await getDoc(doc(db('admin'), path('proofs/forged-proof')))).exists()).toBe(false);
+  });
   it('denies banned reporters even when membership admission is off', async () => {
     await assertFails(submission(db('banned'), 'banned').commit());
     await assertFails(updateDoc(doc(db('banned'), path('items/target')), { reportCount: 1 }));

@@ -2526,6 +2526,8 @@ service cloud.firestore {
           && proofId.matches('^[A-Za-z0-9-]{1,40}$')
           && !exists(/databases/$(database)/documents/events/$(eventId)/proofStorageDeletes/$(proofId))
           && request.resource.data.uid == request.auth.uid
+          // Strict create fields exclude the Admin-owned reportHideSuppressed
+          // flag; a player cannot immunize a Proof from community auto-hide.
           && request.resource.data.keys().hasOnly([
                'uid', 'displayName', 'photoURL', 'type', 'cellIndex', 'itemText',
                'storagePath', 'mediaURL', 'thumbURL', 'text', 'createdAt',
