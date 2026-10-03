@@ -337,9 +337,11 @@ export function bulkApproveItems(
  * retry). An admin who clicks it there is agreeing with the AI screen, not
  * overriding it — but a bare `status: 'hidden'` moves the doc OUT of the state
  * the trigger's hide arm looks for while leaving no marker behind, and
- * `safetyHideStands` then reads the result as a PLAIN hide: a later Restore to
- * `'pending'` followed by a Confirm publishes the media the admin had just
- * taken down (a Confirm never publishes a `'hidden'` Proof directly).
+ * `safetyHideStands` then reads the result as a PLAIN hide. A current console
+ * never publishes a `'hidden'` Proof on Confirm, but a cached pre-gate console
+ * does, directly — and without the marker the server's `'rehide'` arm (which
+ * fires on `safetyHide: true`) cannot take it back down, so the media the admin
+ * had just taken down would stay public.
  *
  * So the hide carries the hold forward. `safetyHideStands` (./moderation) is the
  * same predicate `confirmClaim` gates on, read here against the LIVE doc inside a

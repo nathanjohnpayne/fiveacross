@@ -426,10 +426,10 @@ describe('confirmClaim — a Vision safety hide survives the claim confirm (spec
 // retried on the next write). An admin clicking Hide there AGREES with the AI
 // screen. A bare `status: 'hidden'` would nonetheless move the doc out of the
 // state the trigger's hide arm looks for while leaving no marker behind, and
-// `safetyHideStands` reads that as a PLAIN hide — so a later Restore to
-// 'pending' followed by a Confirm would publish the media the admin had just
-// taken down (Codex P1 on #1143; a Confirm never publishes a 'hidden' Proof
-// directly).
+// `safetyHideStands` reads that as a PLAIN hide. A current console never
+// publishes a 'hidden' Proof on Confirm, but a cached pre-gate console does,
+// directly — and without the marker the server's 'rehide' arm cannot take it
+// back down (Codex P1 on #1143).
 
 describe('hideProof — an admin Hide preserves a standing safety hold (#1143)', () => {
   it('carries the hold onto the hidden doc when one stands on the Proof', async () => {

@@ -213,10 +213,10 @@ describe('hideVisionFlaggedIfQualifies — transactional conditional hide', () =
 // instantaneous nor guaranteed (its write is best-effort and a failure is
 // swallowed). An admin who clicks it there agrees WITH the AI screen, but the
 // resulting doc is 'hidden' with no marker, which is exactly the shape
-// `safetyHideStands` reads as a PLAIN hide — so a later Restore to 'pending'
-// followed by a Confirm publishes the media the admin had just taken down (a
-// Confirm never publishes a 'hidden' Proof directly), and the trigger's hide arm
-// (flagged-only) can never fire on it again. The backfill arm supplies the
+// `safetyHideStands` reads as a PLAIN hide. A cached pre-gate console would
+// publish it directly on Confirm, the 'rehide' arm (marker-keyed) could not take
+// it back down, and the trigger's hide arm (flagged-only) can never fire on it
+// again. The backfill arm supplies the
 // missing record instead.
 
 describe('the backfill arm — a marker-less hidden extreme Proof is stamped (#1143)', () => {
