@@ -33,7 +33,7 @@ This ticket landed after #34, so the Feed is already the merged Proofs + Moments
 
 ## Client visibility and server enforcement
 
-The client threshold filter remains presentational: a patched bundle can ignore it while a Proof still has Rules-readable `status: active`. Source server threshold hiding is documented in `specs/w4-server-authoritative-hide.md`; it moves unsuppressed over-threshold rows to hidden and respects the same restore marker. This preserves the honor-system contract without treating client presentation as a privacy boundary. Deployed enforcement requires deployment/readback evidence separately from source tests.
+The client threshold filter remains presentational: a patched bundle can ignore it while a Proof still has Rules-readable `status: active`. Source server threshold hiding is documented in `specs/w4-server-authoritative-hide.md`; it moves unsuppressed rows at or above the threshold to hidden and respects the same restore marker. This preserves the honor-system contract without treating client presentation as a privacy boundary. Deployed enforcement requires deployment/readback evidence separately from source tests.
 
 Reports require a distinct reporter receipt per target incarnation (#1405), with banned reporters denied and a paired server-clock cadence fence. The counter still moves by exactly one for a new accepted receipt; it is not an independently writable increment-only API. `reportItem` and `reportProof` await the transaction or an incarnation-matching duplicate acknowledgment, and UI failures remain retryable without success analytics.
 
