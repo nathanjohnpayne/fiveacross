@@ -163,7 +163,8 @@ describe('remember / read / forget', () => {
   // The durability property. iOS Safari is documented in this repo as dropping
   // sessionStorage across a provider round trip while localStorage survives —
   // and a lost verifier is not a security failure, it is an unrecoverable dead
-  // end, because the code it was paired with is single-use and already spent.
+  // end for this attempt because the matching verifier is unavailable. The server
+  // code may still be unconsumed; this client requires a fresh handoff.
   it('survives sessionStorage being wiped mid-round-trip', () => {
     rememberHandoffTransaction(record());
     sessionStorage.clear();
@@ -198,7 +199,8 @@ describe('remember / read / forget', () => {
 
   // Reporting failure is what lets the caller abort BEFORE navigating. Leaving
   // without a retrievable verifier guarantees the return leg fails, and it fails
-  // only after a code has been minted and spent.
+  // after a code has been minted without a usable verifier; minting alone
+  // does not consume it.
   it('reports failure when no store will accept the write', () => {
     vi.stubGlobal('sessionStorage', deadStorage());
     vi.stubGlobal('localStorage', deadStorage());
