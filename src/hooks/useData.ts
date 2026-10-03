@@ -11,6 +11,7 @@ import { recordArchiveConfirmation, type SnapshotOrigin } from '../data/archiveC
 import { isEventArchived, isEventArchiving, usableDayIndexes, withReadableDayStats } from '../data/eventArchive';
 import { recordEventPlayPhase } from '../data/eventPlayPhase';
 import { supportedDayIndex } from '../data/eventLimits';
+import { readableTallyEntry } from '../data/converters';
 import { sortPlayers, dayDealState, type DayDealState, nextDisplayBumpTime, BUMP_DEBOUNCE_MS } from '../game/logic';
 import type { EventDoc, ItemDoc, BoardDoc, DayDef, DayMetaDoc, PlayerDoc, ProofDoc, ClaimDoc, UserDoc, TallyEntry, TallyCard, MomentDoc, NoticeDoc, DoubtDoc, HeartDoc } from '../types';
 
@@ -361,12 +362,13 @@ export { isBanned, isSystemAuthor };
  * disabled the config reads as unset (threshold `undefined`, bannedUids `[]`), which
  * both filters fail open on anyway.
  */
-function useEventModeration(enabled = true): { threshold: number | undefined; bannedUids: string[] } {
+function useEventModeration(enabled = true): { threshold: number | undefined; bannedUids: string[]; days: DayDef[] } {
   const { data: event } = useEventDoc(enabled);
   const threshold = event?.settings?.reportHideThreshold;
   return {
     threshold: typeof threshold === 'number' ? threshold : undefined,
     bannedUids: event?.bannedUids ?? [],
+    days: event?.days ?? [],
   };
 }
 
@@ -897,7 +899,10 @@ export function useTally(itemId: string | null | undefined) {
   // (and so no Doubt button) for them and the badge count matches the names.
   const markers = ready
     ? [...data]
-        .filter((m) => !isBanned(m.uid, bannedUids) && !isHiddenFor(m.uid, hidden))
+        .map((m) => readableTallyEntry(m, m.uid))
+        .filter((m): m is TallyEntry => m !== null)
+        .filter((m) => (m.eventId === undefined || m.eventId === EVENT_ID)
+          && !isBanned(m.uid, bannedUids) && !isHiddenFor(m.uid, hidden))
         .sort((a, b) => a.markedAt - b.markedAt)
     : [];
   return { markers, count: markers.length, loading: loading || !ready, hasServerData };
@@ -1228,20 +1233,28 @@ export interface TallyMarkerRow extends TallyEntry {
  * (`prevDisplayed[key]`) via `nextDisplayBumpTime` — so the count updates live but
  * the Feed position holds for `windowMs`. Empty groups never exist here, so an
  * emptied Tally simply produces no card (it drops out). Returns the cards plus the
- * NEXT displayed-bump map for the caller to carry forward.
+ * NEXT displayed-bump map for the caller to carry forward. Labels come from
+ * `prompts`, never marker text; the explicitly supplied `now` bounds timestamps
+ * without introducing an implicit clock into this pure fold.
  */
 export function deriveTallyCards(
   rows: TallyMarkerRow[],
+  prompts: ReadonlyMap<string, string>,
+  now: number,
   prevDisplayed: Record<string, number> = {},
   windowMs: number = BUMP_DEBOUNCE_MS,
 ): { cards: TallyCard[]; displayed: Record<string, number> } {
   const groups = new Map<string, TallyMarkerRow[]>();
   for (const r of rows) {
-    if (typeof r.dayIndex !== 'number' || !r.itemText) continue;
+    const entry = readableTallyEntry(r, r.uid, now);
+    if (!entry || !supportedDayIndex(entry.dayIndex) || !entry.itemText) continue;
+    const text = prompts.get(r.itemId);
+    if (typeof text !== 'string' || !text || text.length > 80) continue;
     const key = `${r.itemId}::${r.dayIndex}`;
     const bucket = groups.get(key);
-    if (bucket) bucket.push(r);
-    else groups.set(key, [r]);
+    const row = { ...entry, itemId: r.itemId };
+    if (bucket) bucket.push(row);
+    else groups.set(key, [row]);
   }
   const displayed: Record<string, number> = {};
   const cards: TallyCard[] = [];
@@ -1263,7 +1276,7 @@ export function deriveTallyCards(
     cards.push({
       itemId: markers[0].itemId,
       dayIndex: markers[0].dayIndex as number,
-      itemText: markers[0].itemText as string,
+      itemText: prompts.get(markers[0].itemId)!,
       count: markers.length,
       markers,
       lastMarkedAt,
@@ -1283,10 +1296,12 @@ export function deriveTallyCards(
  * `BUMP_DEBOUNCE_MS` even as its count updates live.
  */
 export function useTallyCards() {
-  const { bannedUids } = useEventModeration();
+  const { bannedUids, threshold, days } = useEventModeration();
+  const adultRequired = useAdultContent();
+  const dayKey = JSON.stringify(days.map((day) => day.index).filter(supportedDayIndex));
   const eventId = EVENT_ID;
   const key = eventScopeKey(eventId, 'tally-cards');
-  const displayedRef = useRef<{ eventId: string; hiddenKey?: string; displayed: Record<string, number> }>({
+  const displayedRef = useRef<{ eventId: string; policyKey?: string; hiddenKey?: string; displayed: Record<string, number> }>({
     eventId,
     displayed: {},
   });
@@ -1299,7 +1314,12 @@ export function useTallyCards() {
   // never returned unscrubbed after it changes: until the new listener answers
   // they are served with the new set's Marks removed (`scrubTallyCards`).
   const { hidden, ready, hiddenKey } = useBlockFilter();
-  const derivedKey = `${key}|${hiddenKey}`;
+  // Withheld Prompt labels must disappear immediately when any visibility
+  // policy changes, before replacement listeners answer. Only a hidden-set
+  // change under the SAME policy may carry scrubbed cards across subscriptions.
+  const policyKey = JSON.stringify([dayKey, threshold, adultRequired, bannedUids]);
+  const policyScope = `${key}|${policyKey}`;
+  const derivedKey = `${policyScope}|${hiddenKey}`;
   // `carried` marks cards scrubbed over from an older hidden set that the new
   // listener has not yet re-answered (see the carry-over below).
   const [state, setState] = useState<{ key: string; cards: TallyCard[]; loading: boolean; carried?: boolean }>(() => ({
@@ -1310,17 +1330,28 @@ export function useTallyCards() {
   useEffect(() => {
     if (!ready) return;
     let active = true;
-    // The bump history is scoped to the hidden set as well as the Event: a bump
+    const dayIndexes = new Set<number>(JSON.parse(dayKey));
+    let rows: TallyMarkerRow[] = [];
+    let prompts = new Map<string, string>();
+    let markersLoaded = false;
+    let promptsLoaded = false;
+    const publish = () => {
+      if (!active || !markersLoaded || !promptsLoaded) return;
+      const { cards, displayed } = deriveTallyCards(rows, prompts, Date.now(), displayedRef.current.displayed);
+      displayedRef.current = { eventId, policyKey, hiddenKey, displayed };
+      setState({ key: derivedKey, cards, loading: false });
+    };
+    // Bump history is scoped to the Event, visibility policy and hidden set: a bump
     // never moves backward (`nextDisplayBumpTime`), so a history carried across
-    // a block would keep the Feed position a now-hidden Mark earned. A new set
-    // recomputes every bump from the visible Marks alone.
-    if (displayedRef.current.eventId !== eventId || displayedRef.current.hiddenKey !== hiddenKey) {
-      displayedRef.current = { eventId, hiddenKey, displayed: {} };
+    // block or policy change would keep the position a now-hidden Mark earned.
+    // Each new scope recomputes every bump from the visible Marks alone.
+    if (displayedRef.current.eventId !== eventId || displayedRef.current.policyKey !== policyKey || displayedRef.current.hiddenKey !== hiddenKey) {
+      displayedRef.current = { eventId, policyKey, hiddenKey, displayed: {} };
     }
     setState((previous) =>
       previous.key === derivedKey
         ? { ...previous, loading: true }
-        : carriesAcrossHiddenSet(previous, key)
+        : carriesAcrossHiddenSet(previous, policyScope)
           ? { key: derivedKey, cards: scrubTallyCards(previous.cards, hidden), loading: false, carried: true }
           : { key: derivedKey, cards: [], loading: true },
     );
@@ -1328,12 +1359,37 @@ export function useTallyCards() {
     // markers are never delivered over the wire. Keep the callback's path guard
     // below through the migration/legacy-client compatibility window as a
     // fail-closed check against malformed or stale snapshots.
+    // Trusted labels come from the same active-Prompt read boundary as the pool.
+    // A forged marker cannot invent a Prompt or preserve a hidden Prompt's text.
+    const unsubPrompts = onSnapshot(
+      query(itemsCol(), where('status', '==', 'active')),
+      { includeMetadataChanges: true },
+      (snap) => {
+        if (!active) return;
+        prompts = new Map();
+        for (const doc of snap.docs) {
+          const item = doc.data();
+          if (item.status !== 'active' || isReportHidden(item.reportCount, threshold, item.reportHideSuppressed)
+              || isBanned(item.createdBy, bannedUids) || isExplicitWithheld(item.spicy, adultRequired)
+              || typeof item.text !== 'string' || !item.text || item.text.length > 80) continue;
+          prompts.set(doc.id, item.text);
+        }
+        promptsLoaded = true;
+        publish();
+      },
+      () => {
+        if (!active) return;
+        prompts = new Map();
+        promptsLoaded = true;
+        publish();
+      },
+    );
     const unsub = onSnapshot(
       query(collectionGroup(db, 'markers'), where('eventId', '==', eventId)),
       { includeMetadataChanges: true },
       (snap) => {
         if (!active) return;
-        const rows: TallyMarkerRow[] = [];
+        rows = [];
         for (const d of snap.docs) {
           // Guard the collection group to THIS Event's Tally markers only:
           // events/{EVENT_ID}/tally/{itemId}/markers/{uid}. The parent.id check
@@ -1342,32 +1398,28 @@ export function useTallyCards() {
           const tallyDoc = d.ref.parent.parent;
           if (!tallyDoc || tallyDoc.parent.id !== 'tally') continue;
           if (tallyDoc.parent.parent?.id !== eventId) continue;
-          const data = d.data() as TallyEntry;
+          const data = readableTallyEntry(d.data(), d.id);
+          if (!data || data.eventId !== eventId || !dayIndexes.has(data.dayIndex!)) continue;
           if (isBanned(data.uid, bannedUids) || isHiddenFor(data.uid, hidden)) continue;
           rows.push({ ...data, itemId: tallyDoc.id });
         }
-        const { cards, displayed } = deriveTallyCards(rows, displayedRef.current.displayed);
-        displayedRef.current = { eventId, hiddenKey, displayed };
-        setState({ key: derivedKey, cards, loading: false });
+        markersLoaded = true;
+        publish();
       },
       () => {
         if (!active) return;
-        // A failed listener gives no further answer, so a carry-over (#689)
-        // is as settled as it will get: clear `carried` so consumers stop
-        // waiting on it.
-        setState((previous) =>
-          previous.key === derivedKey
-            ? { ...previous, loading: false, carried: false }
-            : { key: derivedKey, cards: [], loading: false },
-        );
+        rows = [];
+        markersLoaded = true;
+        publish();
       },
     );
     return () => {
       active = false;
       unsub();
+      unsubPrompts();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [derivedKey, bannedKey, ready]);
+  }, [derivedKey, bannedKey, dayKey, threshold, adultRequired, ready]);
   // `resubscribing` is true while the cards are a scrubbed carry-over rather
   // than the new listener's answer: they render, but a consumer must not read a
   // card's absence from them as proof the card is gone (a visible Mark may not
@@ -1375,16 +1427,16 @@ export function useTallyCards() {
   if (!ready) return { key, cards: [], loading: true, resubscribing: false };
   if (state.key === derivedKey)
     return { key, cards: state.cards, loading: state.loading, resubscribing: state.carried === true };
-  // A hidden-set change within the same Event (#689) keeps serving the cards
+  // A hidden-set change under the same Event/visibility policy (#689) serves cards
   // already in hand, scrubbed against the new set, while the listener
   // resubscribes: blanking them would drop the whole Feed to its loading state
   // and unmount an open who-list sheet for a change that only removes rows.
-  if (carriesAcrossHiddenSet(state, key))
+  if (carriesAcrossHiddenSet(state, policyScope))
     return { key, cards: scrubTallyCards(state.cards, hidden), loading: false, resubscribing: true };
   return { key, cards: [], loading: true, resubscribing: false };
 }
 
-/** True when `state` holds settled cards for this Event under an older hidden set. */
+/** Settled cards from the same Event/visibility policy under an older hidden set. */
 function carriesAcrossHiddenSet(state: { key: string; loading: boolean }, key: string): boolean {
   return !state.loading && state.key.startsWith(`${key}|`);
 }

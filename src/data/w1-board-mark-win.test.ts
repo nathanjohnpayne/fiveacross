@@ -148,7 +148,7 @@ describe('computeMark (win detection + stats)', () => {
     expect(r.player.firstBingoAt).toBeNull();
   });
 
-  it('stamps firstBingoAt when UNKNOWN prior state transitions from no bingo to bingo', () => {
+  it('omits firstBingoAt when an UNKNOWN prior state locally transitions to bingo', () => {
     const r = computeMark({
       cells: withMarked([0, 1, 2, 3]),
       index: 4, // completes the top row
@@ -160,7 +160,7 @@ describe('computeMark (win detection + stats)', () => {
     expect(r.bingo).toBe(true);
     expect(r.player.bingoCount).toBe(1);
     expect(r.player.squaresMarked).toBe(5);
-    expect(r.player.firstBingoAt).toBe(2000);
+    expect(r.player).not.toHaveProperty('firstBingoAt');
   });
 
   it('OMITS firstBingoAt when the caller value is UNKNOWN and a bingo already stood', () => {
@@ -168,7 +168,7 @@ describe('computeMark (win detection + stats)', () => {
     // further mark while a bingo stands, firstBingoAt must be left off the
     // payload so the { merge:true } write preserves whatever earlier stamp the
     // server holds, instead of clobbering it with `now` (Codex P2, PR #75). A
-    // no-bingo -> bingo transition still stamps in the previous test.
+    // local no-bingo -> bingo transition also omits in the previous test.
     const r = computeMark({
       cells: withMarked([0, 1, 2, 3, 4]), // top row already complete
       index: 6,
@@ -592,7 +592,7 @@ describe('setMark (preserves firstBingoAt across a player-doc cache miss)', () =
     expect('firstBingoAt' in playerWrite).toBe(false); // omitted → merge preserves the server value
   });
 
-  it('cache-miss + UNKNOWN caller: stamps firstBingoAt on a fresh no-bingo -> bingo transition', async () => {
+  it('cache-miss + UNKNOWN caller: stale local rising edge preserves an earlier server stamp', async () => {
     cacheBoardOnly(withMarked([0, 1, 2, 3])); // one square shy of the top row
 
     await setMark({
@@ -606,7 +606,11 @@ describe('setMark (preserves firstBingoAt across a player-doc cache miss)', () =
 
     const playerWrite = setSpy.mock.calls[1][1] as { firstBingoAt?: number | null; bingoCount: number };
     expect(playerWrite.bingoCount).toBe(1);
-    expect(typeof playerWrite.firstBingoAt).toBe('number');
+    expect(playerWrite).not.toHaveProperty('firstBingoAt');
+    // The cached Board can predate a win on another tab. Firestore's merge
+    // must preserve the timestamp this client has never loaded.
+    const serverPlayer = { firstBingoAt: 111, ...playerWrite };
+    expect(serverPlayer.firstBingoAt).toBe(111);
   });
 
   it('cache-miss + loaded-null caller: stamps firstBingoAt on a fresh bingo (KNOWN "none")', async () => {

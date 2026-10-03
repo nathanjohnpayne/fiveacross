@@ -74,6 +74,7 @@ function mount(streams: {
     const args = ref.args ?? [];
     const source = ref.kind === 'query' ? (args[0] as { kind?: string; args?: unknown[] }) : undefined;
     if (source?.kind === 'collectionGroup') cbs.byName.markers = onNext;
+    else if (ref.kind === 'query' && source?.args?.includes('items')) cbs.byName.prompts = onNext;
     else if (source?.kind === 'collection' && source.args?.[3] === 'hearts') {
       if (onError) cbs.heartErrors.push(onError);
       const constraints = args.slice(1) as { args: [string, string, unknown] }[];
@@ -86,19 +87,24 @@ function mount(streams: {
     return () => {};
   });
   const view = render(<ProofFeed />);
-  const deliverMarkers = (markers: { itemId: string; entry: TallyEntry }[]) =>
+  const deliverMarkers = (markers: { itemId: string; entry: TallyEntry }[]) => {
+    cbs.byName.prompts?.(col(markers.map(({ itemId, entry }) => ({ id: itemId, data: () => ({ status: 'active', text: entry.itemText }) }))));
     cbs.byName.markers?.(
       col(
         markers.map(({ itemId, entry }) => ({
-          data: () => entry,
+          id: entry.uid,
+          data: () => ({ ...entry, eventId: 'test-event' }),
           ref: { parent: { parent: { id: itemId, parent: { id: 'tally', parent: { id: 'test-event' } } } } },
         })),
       ),
     );
+  };
   act(() => {
     cbs.docs.forEach((cb) =>
-      cb({ exists: () => true, data: () => ({ admins: [], bannedUids: [] }), metadata: settled }),
+      cb({ exists: () => true, data: () => ({ admins: [], bannedUids: [], days: [{ index: 0 }] }), metadata: settled }),
     );
+  });
+  act(() => {
     cbs.player?.({ exists: () => true, data: () => ({ uid: 'viewer', displayName: 'Vic Viewer' }), metadata: settled });
     cbs.byName.proofs?.(col((streams.proofs ?? []).map(row)));
     cbs.byName.moments?.(col((streams.moments ?? []).map(row)));
