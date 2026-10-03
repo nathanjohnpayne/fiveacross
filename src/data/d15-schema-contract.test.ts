@@ -10,10 +10,12 @@ import { hasCanonicalMomentId } from '../hooks/useData';
 // document SHAPE it stamps (the required Phase 1.5 `pool` field) without a live
 // backend. Everything else in firebase/firestore stays real (converters and the
 // moment filter never call it at runtime).
-const { addDocMock } = vi.hoisted(() => ({
+const { addDocMock, submitMock } = vi.hoisted(() => ({
   addDocMock: vi.fn(async () => ({ id: 'new-item' })),
+  submitMock: vi.fn(async (input: { itemId: string }) => ({ data: { id: input.itemId } })),
 }));
-vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'd15-test-event' }));
+vi.mock('../firebase', () => ({ db: {}, functions: {}, EVENT_ID: 'd15-test-event' }));
+vi.mock('firebase/functions', () => ({ httpsCallable: () => submitMock }));
 vi.mock('firebase/firestore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('firebase/firestore')>();
   return {
@@ -258,20 +260,14 @@ describe('hasCanonicalMomentId (Phase 1.5 finale beats render)', () => {
   });
 });
 
-describe('addItem (Phase 1.5 pool stamp)', () => {
-  it('stamps pool: main on the submitted prompt so the required field is honored', async () => {
+describe('addItem (server-owned Phase 1.5 pool stamp)', () => {
+  it('sends content only; pending/main pool authority belongs to submitPrompt', async () => {
     const { addItem } = await import('./api');
+    submitMock.mockClear();
     addDocMock.mockClear();
-    await addItem('player-uid', 'Cabin karaoke incident', true);
-    expect(addDocMock).toHaveBeenCalledTimes(1);
-    // status: 'pending' (not 'active') as of #210/specs/d15-approvals.md — the
-    // approval-flow write itself is pinned in more depth over there
-    // (src/data/api.test.ts); this suite only re-asserts the pool stamp still
-    // rides along on the SAME write.
-    expect(addDocMock).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ pool: 'main', status: 'pending', spicy: true }),
-    );
+    await addItem('player-uid', 'Cabin karaoke incident', true, undefined, 'd15-test-event', 'stable');
+    expect(submitMock).toHaveBeenCalledWith({ eventId: 'd15-test-event', itemId: 'stable', text: 'Cabin karaoke incident', spicy: true });
+    expect(addDocMock).not.toHaveBeenCalled();
   });
 });
 

@@ -116,14 +116,14 @@ describe("Community Prompt pool/spicy resulting-state invariant (#558)", () => {
     );
   });
 
-  it("denies a submitter-provided spicy revision on pending create", async () => {
+  it("denies both ordinary and poisoned direct pending creates after intake cutover", async () => {
     const pending = {
       ...activePayload("main", false),
       createdBy: PLAYER,
       status: "pending",
     };
 
-    await assertSucceeds(
+    await assertFails(
       setDoc(doc(db(PLAYER), itemPath("pending-normal")), pending),
     );
     await assertFails(

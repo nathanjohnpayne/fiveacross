@@ -20,13 +20,14 @@ import {
   type Firestore,
 } from 'firebase/firestore';
 import type { User } from 'firebase/auth';
-import { db, EVENT_ID } from '../firebase';
+import { httpsCallable } from 'firebase/functions';
+import { db, functions, EVENT_ID } from '../firebase';
 import { honorDisplayName, markerDisplayName } from './attribution';
 import { isReportHidden, isBanned, isExplicitWithheld } from './moderation';
 import { isEventArchived, isEventArchiving } from './eventArchive';
 import { adultContentRequired } from '../adultContent';
 import { itemsCol, eventRef } from './paths';
-import { defaultTargetDayIndex, isUsableTarget } from './communityPrompts';
+import { supportedDayIndex } from './eventLimits';
 import { FREE_TEXT } from './seed';
 import { normalizePool } from '../game/pool';
 import {
@@ -64,7 +65,7 @@ import { stampEchoAnalyticsTransitions } from './echoAnalytics';
 import { eventScopeKey } from './eventScope';
 import { assertSupportedDayIndexes } from './eventLimits';
 import { allowedPhotoUrlOrNull } from './photoUrl';
-import type { Cell, ClaimMode, DayDef, EventDoc, ItemDoc, PlayerDoc, UserDoc } from '../types';
+import type { Cell, ClaimMode, DayDef, EventDoc, ItemDoc, PlayerDoc, UserDoc, SubmitPromptRequest } from '../types';
 
 // Raw (converter-free) refs for writes, to keep partial merges simple.
 const rawUser = (uid: string) => doc(db, 'users', uid);
@@ -3216,124 +3217,43 @@ export function itemRateLimitRemainingMs(key: string, now: number = Date.now()):
   return remaining > 0 ? remaining : 0;
 }
 
-/** `addItem`'s result (#559): the new item's id, plus the target it was
- *  ACTUALLY committed with — absent when the write resolved untargeted
- *  (no schedule, or no Day left to name), exactly mirroring what
- *  `ItemDoc.targetDayIndex` itself holds. */
+/** Server-acknowledged submission identity and default target (#1311). */
 export interface AddItemResult {
   id: string;
   targetDayIndex?: number;
 }
 
-/**
- * Add a prompt to the community pool.
- *
- * No rate limit is enforced HERE — the caller (`ItemPool.tsx`) checks
- * `checkItemRateLimit` before invoking this, so the guard lives at the one
- * real call site rather than inside the write itself (checking again in here
- * would consume the SAME window a second time and silently drop the write
- * the caller's own check just approved).
- *
- * `spicy` defaults to `false`: a user-added Prompt is tame unless the ItemPool
- * 🔞 toggle was checked when they submitted it.
+/** Submit with signal; callable admission, stamps and routing are authoritative.
+ * No Firestore pending create is queued. ItemPool retains the same request ID
+ * and typed text on a failed response so a lost ACK can be retried idempotently.
+ * uid remains the caller attribution seam; the callable uses Firebase Auth.
+ * The old target argument is retained only to reject stale override callers.
  */
 export async function addItem(
-  uid: string,
+  _uid: string,
   text: string,
   spicy = false,
-  // The Day this suggestion is meant for (#557, specs/community-prompt-targeting.md).
-  // OMITTED is the normal player path and means "put it on tomorrow's card": the
-  // schedule is read here and the earliest still-targetable Day is recorded, so a
-  // suggestion carries its intended Day from the moment it is written rather than
-  // being aimed later at approval time. An explicit value is the override seam for
-  // a Day picker (#559). When the Event has no schedule, or no Day can still take
-  // one, NO target is written at all and the Prompt keeps the untargeted every-Day
-  // behaviour that predates this feature — see `targetDayIndex` in ItemDoc.
   targetDayIndex?: number,
-  // Capture the Event at the UI action boundary. The default preserves every
-  // existing caller, while an Event-aware surface can pass its rendered scope
-  // so the schedule read and later write cannot split across Events.
   eventId: string = EVENT_ID,
-  // Returns the new item's id and the target it was ACTUALLY committed with
-  // (or `undefined` for the blank-text no-op below) — never a caller-side
-  // recomputation. `ItemPool.tsx` uses the id to track its own submission for
-  // a later state check (#559, `trackSuggestion` — a rejected row is
-  // unreadable by its own submitter, see communityPrompts.ts's
-  // `submitterStatus` doc comment) and the target for its
-  // `prompt_suggestion_submitted` analytics payload: recomputing the default
-  // target client-side, off a schedule snapshot that can be stale or reload
-  // mid-await, could report a Day that disagrees with what this write
-  // actually persisted (Codex P2, PR #845) — this return is the single
-  // source of truth for both.
+  itemId: string = globalThis.crypto.randomUUID(),
 ): Promise<AddItemResult | undefined> {
-  const t = text.trim();
-  if (!t) return undefined;
-  // An OMITTED argument means "resolve the default"; an argument that is present
-  // but malformed is a caller bug, and it must not be quietly dropped. Dropping
-  // it would write an UNTARGETED row, which means every future main Day — the
-  // precise failure this feature exists to prevent, arriving through the one
-  // path that is supposed to set the target (Phase 4b P1, PR #812). `NaN`, `-1`
-  // and `1.5` are all valid TypeScript `number`s, so the type does not catch
-  // this; fail closed and loudly instead. `firestore.rules` would reject the
-  // value anyway — throwing here turns a silent mis-placement into an obvious
-  // programming error at the call site.
-  if (targetDayIndex !== undefined && !isUsableTarget(targetDayIndex)) {
-    throw new Error(
-      `addItem: targetDayIndex must be a non-negative integer, received ${String(targetDayIndex)}`,
-    );
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  if (targetDayIndex !== undefined) {
+    throw new Error('addItem: targetDayIndex is server-owned; omit the override.');
   }
-  const target = targetDayIndex ?? (await resolveDefaultTargetDayIndex(eventId));
-  const ref = await addDoc(rawItems(eventId), {
-    text: t.slice(0, 80),
-    createdBy: uid,
-    createdAt: Date.now(),
-    isFreeSpace: false,
-    // Phase 1.5 approval flow (daily-cards-spec § "Item pools and the approval
-    // flow", #210): a main-pool player submission now lands `pending`, invisible
-    // everywhere except the Admin Approvals queue and (as "pending review") its
-    // own submitter, until an admin approves (→ 'active') or rejects it. Curated
-    // pools (embark/farewell) are seeded/edited by admins directly — this path is
-    // the main pool's ONLY writer, so it is the only one the gate applies to.
-    status: 'pending',
-    reportCount: 0,
-    spicy,
-    // Honor the now-required ItemDoc.pool: a player prompt-submission lands in
-    // the main game pool. Embark/farewell pools are seeded directly (#207).
-    pool: 'main',
-    // Written only when a Day can actually take it. The field is ABSENT rather
-    // than null when there is no target, because absent is the untargeted
-    // contract every pre-#557 Prompt already satisfies — writing an explicit
-    // null would mint a third state the snapshot filter would have to know about.
-    ...(isUsableTarget(target) ? { targetDayIndex: target } : {}),
-  });
-  return { id: ref.id, ...(isUsableTarget(target) ? { targetDayIndex: target } : {}) };
-}
-
-/**
- * The Day a fresh suggestion defaults to — the earliest Day that can still take
- * one (#557). Reads the Event's schedule at submission time.
- *
- * A read failure PROPAGATES rather than resolving to `null`. This used to be
- * swallowed as best-effort, on the reasoning that losing the targeting mattered
- * less than refusing a suggestion — which was wrong, because an untargeted row
- * does not lose anything: it means EVERY future main Day (`targetsDay` admits an
- * absent target everywhere, and approval deliberately preserves that absence).
- * So a transient offline blip would have put one suggestion on every card of the
- * cruise — the precise failure this feature exists to prevent — and it is the
- * same mistake as silently dropping an explicit malformed argument, which
- * `addItem` already refuses (Phase 4b P1, PR #812). Failing closed costs the
- * player a retry with their text still in the box; failing open costs the
- * organiser every Day.
- *
- * `null` remains the answer when the read SUCCEEDS and there is simply no Day to
- * aim at — a schedule-less legacy Event, or no Day that can still take one.
- * Those are known states rather than unknown ones, and untargeted is the honest
- * record of them.
- */
-async function resolveDefaultTargetDayIndex(eventId: string): Promise<number | null> {
-  const snap = await getDoc(doc(db, 'events', eventId));
-  const days = snap.exists() ? snap.data().days : undefined;
-  return Array.isArray(days) ? defaultTargetDayIndex(days, Date.now()) : null;
+  const submit = httpsCallable<SubmitPromptRequest, unknown>(functions, 'submitPrompt');
+  const { data } = await submit({ eventId, itemId, text: trimmed.slice(0, 80), spicy });
+  // SDK result generics do not validate wire data. Never clear a draft or track
+  // success for a malformed/mismatched response; retry keeps the owned ID.
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('Prompt submission was not acknowledged. Try again with signal.');
+  }
+  const result = data as Partial<AddItemResult>;
+  if (result.id !== itemId || (result.targetDayIndex !== undefined && !supportedDayIndex(result.targetDayIndex))) {
+    throw new Error('Prompt submission was not acknowledged. Try again with signal.');
+  }
+  return { id: itemId, ...(result.targetDayIndex === undefined ? {} : { targetDayIndex: result.targetDayIndex }) };
 }
 
 /**

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // specs/d15-approvals.md, data layer. The one write-side claim this file pins:
-// `addItem` now lands a main-pool submission `status: 'pending'` (was
+// `addItem` submits via server admission; pending shape is covered by submit-prompt tests. Previously it landed a main-pool submission `status: 'pending'` (was
 // `'active'`) — the gate the rest of the approval flow (the Admin Approvals
 // queue, the submitter's own "pending review" row in ItemPool) hangs off. No
 // emulator needed — this is a pure "what payload did addDoc receive" check,
@@ -10,12 +10,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 type Ref = { __kind: 'doc' | 'collection'; id?: string; path: string };
 
-const { addDocMock, getDocsFromCacheMock } = vi.hoisted(() => ({
+const { addDocMock, submitMock, getDocsFromCacheMock } = vi.hoisted(() => ({
   addDocMock: vi.fn((..._args: unknown[]) => Promise.resolve({ id: 'new-item' })),
+  submitMock: vi.fn(async (input: { itemId: string }) => ({ data: { id: input.itemId } })),
   getDocsFromCacheMock: vi.fn(),
 }));
 
-vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'med-2026' }));
+vi.mock('../firebase', () => ({ db: {}, functions: {}, EVENT_ID: 'med-2026' }));
+vi.mock('firebase/functions', () => ({ httpsCallable: () => submitMock }));
 vi.mock('firebase/firestore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('firebase/firestore')>();
   return {
@@ -57,37 +59,24 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-describe('addItem — main-pool submissions land pending (specs/d15-approvals.md)', () => {
-  it('writes status: "pending" (not "active") alongside pool: "main"', async () => {
-    await addItem('u1', 'Wore Crocs to dinner', false);
-
-    expect(addDocMock).toHaveBeenCalledTimes(1);
-    const [, payload] = addDocMock.mock.calls[0] as [Ref, Record<string, unknown>];
-    expect(payload).toMatchObject({
-      text: 'Wore Crocs to dinner',
-      createdBy: 'u1',
-      status: 'pending',
-      pool: 'main',
-      reportCount: 0,
-      spicy: false,
-    });
-  });
-
-  it('preserves the spicy flag the submitter checked', async () => {
-    await addItem('u1', 'A spicy one', true);
-    const [, payload] = addDocMock.mock.calls[0] as [Ref, Record<string, unknown>];
-    expect(payload).toMatchObject({ status: 'pending', spicy: true });
-  });
-
-  it('a blank/whitespace-only submission never calls addDoc', async () => {
-    await addItem('u1', '   ');
+describe('addItem — server admission wire (#1311)', () => {
+  it('submits content and request identity without client authority stamps', async () => {
+    await addItem('u1', 'Wore Crocs to dinner', false, undefined, 'med-2026', 'stable-id');
+    expect(submitMock).toHaveBeenCalledWith({ eventId: 'med-2026', itemId: 'stable-id', text: 'Wore Crocs to dinner', spicy: false });
     expect(addDocMock).not.toHaveBeenCalled();
   });
-
-  it('writes through the Event scope captured by the caller', async () => {
-    await addItem('u1', 'Event A prompt', false, undefined, 'event-a');
-    const [ref] = addDocMock.mock.calls[0] as [Ref, Record<string, unknown>];
-    expect(ref.path).toBe('events/event-a/items');
+  it('preserves the spicy flag', async () => {
+    await addItem('u1', 'A spicy one', true);
+    expect(submitMock).toHaveBeenCalledWith(expect.objectContaining({ spicy: true }));
+  });
+  it('a blank submission calls neither callable nor Firestore', async () => {
+    await addItem('u1', '   ');
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(addDocMock).not.toHaveBeenCalled();
+  });
+  it('uses the captured Event and stable retry identity', async () => {
+    await addItem('u1', 'Event A prompt', false, undefined, 'event-a', 'retry-a');
+    expect(submitMock).toHaveBeenCalledWith(expect.objectContaining({ eventId: 'event-a', itemId: 'retry-a' }));
   });
 });
 

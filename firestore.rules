@@ -698,12 +698,6 @@ service cloud.firestore {
     // as a monotonic acknowledgement fence for transactional spicy corrections;
     // letting a submitter pre-seed an arbitrary or exhausted value could make the
     // first legitimate correction acknowledge against attacker-chosen ordering.
-    function nonAdminPendingMainItemCreate() {
-      return request.resource.data.status == 'pending'
-        && request.resource.data.pool == 'main'
-        && !('retainedAt' in request.resource.data)
-        && !('spicyRevision' in request.resource.data);
-    }
     function adminActiveItemCreate(eventId) {
       return isAdmin(eventId)
         && request.resource.data.status == 'active'
@@ -2125,19 +2119,9 @@ service cloud.firestore {
           || resource.data.status == 'active'
           || (resource.data.status == 'pending' && resource.data.createdBy == request.auth.uid)
         );
-        // Anyone signed in can add a pending main-pool item (basic validation).
-        //
-        // Phase 1.5 approval flow (#210, daily-cards-spec § "Item pools and the
-        // approval flow"): a non-admin's create may now also land 'pending' — the
-        // main-pool submission path (`addItem`, src/data/api.ts) writes `status:
-        // 'pending'` so a new Prompt starts invisible outside the Admin queue and
-        // its own submitter (the read rule's carve-out above already expects a
-        // 'pending' row to exist; this is the write side that actually lets one be
-        // created). Active creates are admin-only now (#282): otherwise a modified
-        // client could bypass the approval queue and inject visible/dealable main,
-        // embark, or farewell Prompts. 'rejected' is deliberately NOT in this set:
-        // only an admin's `update` (the isAdmin(eventId) arm below) may transition
-        // a row to 'rejected' — a non-admin can never CREATE one pre-rejected.
+        // #1311: Community pending creation is callable-only, including Admin
+        // suggestions and stale bundles. Only curated active Admin creates stay
+        // client-writable; submitPrompt owns the pending cap/stamps/default target.
         allow create: if admitted(eventId)
           // #134: an archived Event's pool is closed — to the admin curated-add
           // arm below as well as the community one. Adding a Prompt to a frozen
@@ -2154,7 +2138,7 @@ service cloud.firestore {
           && request.resource.data.spicy is bool
           && validSpicyForItemPool()
           && validTargetDayIndex()
-          && (nonAdminPendingMainItemCreate() || adminActiveItemCreate(eventId));
+          && adminActiveItemCreate(eventId);
         // Report = increment reportCount by 1 only. Admins may make any edit
         // except the status moves `itemStatusMoveAllowedForAdminClient()` denies:
         // approval is the `approvePrompts` callable (#1275).

@@ -309,79 +309,43 @@ describe('isUsableTarget — a malformed target is not a target', () => {
   });
 });
 
-describe('addItem — a submission records the Day it is meant for', () => {
-  const payload = () => (addDocMock.mock.calls[0] as [Ref, Record<string, unknown>])[1];
-  // addItem reads the real clock, so these fixtures are wall-clock relative.
-  const past = (index: number) => ({ index, unlockAt: Date.now() - HOUR, pool: 'main' });
-  const future = (index: number) => ({
-    index,
-    unlockAt: Date.now() + (index + 1) * HOUR,
-    pool: 'main',
-  });
-
-  it('stamps the earliest still-open Day when no target is given', async () => {
-    eventDataMock.mockReturnValue({ days: [past(0), future(1)] });
-    await addItem('u1', 'Wore Crocs to dinner', false);
-    expect(payload()).toMatchObject({ status: 'pending', pool: 'main', targetDayIndex: 1 });
-  });
-
-  it('honours an explicit target (the Day-picker seam, #559)', async () => {
-    eventDataMock.mockReturnValue({ days: [future(1), future(2)] });
-    await addItem('u1', 'Karaoke disaster', false, 2);
-    expect(payload()).toMatchObject({ targetDayIndex: 2 });
-  });
-
-  it('REJECTS an explicit malformed target rather than writing an untargeted row', async () => {
-    // An omitted argument means "resolve the default"; a present-but-malformed
-    // one is a caller bug. Dropping it would write an UNTARGETED row — every
-    // future main Day, the precise failure this feature exists to prevent,
-    // arriving through the one path that is supposed to SET the target (Phase 4b
-    // P1, PR #812). `NaN`, `-1` and `1.5` are all valid TypeScript `number`s, so
-    // only a runtime check catches them.
-    eventDataMock.mockReturnValue({ days: [future(1), future(2)] });
-    for (const bad of [-1, 1.5, Number.NaN]) {
-      await expect(addItem('u1', 'Malformed target', false, bad)).rejects.toThrow(
-        /targetDayIndex/,
-      );
-    }
+describe('addItem — server-owned target acknowledgment (#1311)', () => {
+  it('returns the acknowledged server target without a client schedule read', async () => {
+    callableMock.mockResolvedValue({ data: { id: 'retry-id', targetDayIndex: 4 } });
+    expect(await addItem('u1', '  Prompt  ', false, undefined, 'event-a', 'retry-id')).toEqual({ id: 'retry-id', targetDayIndex: 4 });
+    expect(httpsCallableMock).toHaveBeenCalledWith(expect.anything(), 'submitPrompt');
+    expect(callableMock).toHaveBeenCalledWith({ eventId: 'event-a', itemId: 'retry-id', text: 'Prompt', spicy: false });
+    expect(getDocMock).not.toHaveBeenCalled();
     expect(addDocMock).not.toHaveBeenCalled();
   });
-
-  it('OMITS the field entirely when no Day can take one — the untargeted contract', async () => {
-    // Absent, not null: absent is what every pre-#557 Prompt already is, so the
-    // snapshot filter needs no third state.
-    eventDataMock.mockReturnValue({ days: [past(0)] });
-    await addItem('u1', 'Too late for this one', false);
-    expect(payload()).not.toHaveProperty('targetDayIndex');
+  it('refuses the retired explicit target override', async () => {
+    await expect(addItem('u1', 'Prompt', false, 2)).rejects.toThrow(/server-owned/);
+    expect(callableMock).not.toHaveBeenCalled();
   });
-
-  it('OMITS the field when only a curated Day remains — no false promise', async () => {
-    eventDataMock.mockReturnValue({
-      days: [past(0), { index: 1, unlockAt: Date.now() + HOUR, pool: 'farewell' }],
-    });
-    await addItem('u1', 'Only the closing Day left', false);
-    expect(payload()).not.toHaveProperty('targetDayIndex');
+  it('rejects malformed legacy overrides without creating pending data', async () => {
+    for (const bad of [-1, 1.5, Number.NaN]) await expect(addItem('u1', 'Prompt', false, bad)).rejects.toThrow(/targetDayIndex/);
+    expect(addDocMock).not.toHaveBeenCalled();
   });
-
-  it('still submits when the Event has no schedule at all', async () => {
-    eventDataMock.mockReturnValue({});
-    await addItem('u1', 'Legacy event prompt', false);
-    expect(addDocMock).toHaveBeenCalledTimes(1);
-    expect(payload()).not.toHaveProperty('targetDayIndex');
+  it('retains the untargeted acknowledgment without inventing a client target', async () => {
+    callableMock.mockResolvedValue({ data: { id: 'retry-id' } });
+    expect(await addItem('u1', 'Prompt', false, undefined, 'event-a', 'retry-id')).toEqual({ id: 'retry-id' });
   });
-
-  it('REFUSES to submit when the schedule read fails — an unknown Day is not every Day', async () => {
-    // This was once swallowed as best-effort, on the reasoning that losing the
-    // targeting mattered less than refusing a suggestion. That was wrong: an
-    // untargeted row does not lose anything, it means EVERY future main Day, so
-    // a transient offline blip would have put one suggestion on every card of
-    // the cruise (Phase 4b P1, PR #812). Failing closed costs the player a retry
-    // with their text still in the box — `ItemPool` only clears the field after
-    // a successful write.
-    eventDataMock.mockImplementation(() => {
-      throw new Error('offline');
-    });
-    await expect(addItem('u1', 'Read failed', false)).rejects.toThrow('offline');
+  it('rejects an acknowledgment for another request ID', async () => {
+    callableMock.mockResolvedValue({ data: { id: 'another', targetDayIndex: 3 } });
+    await expect(addItem('u1', 'Prompt', false, undefined, 'event-a', 'retry-id')).rejects.toThrow(/not acknowledged/);
+  });
+  it('rejects malformed server target replies rather than clearing the draft', async () => {
+    for (const targetDayIndex of [-1, 1.5, Number.NaN, null, '1', 20, Number.MAX_SAFE_INTEGER + 1]) {
+      callableMock.mockResolvedValue({ data: { id: 'retry-id', targetDayIndex } });
+      await expect(addItem('u1', 'Prompt', false, undefined, 'event-a', 'retry-id')).rejects.toThrow(/not acknowledged/);
+    }
+  });
+  it('propagates lost response failure and sends the same ID on retry without Firestore fallback', async () => {
+    callableMock.mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce({ data: { id: 'retry-id', targetDayIndex: 1 } });
+    const input = ['u1', 'Prompt', false, undefined, 'event-a', 'retry-id'] as const;
+    await expect(addItem(...input)).rejects.toThrow('offline');
+    expect(await addItem(...input)).toEqual({ id: 'retry-id', targetDayIndex: 1 });
+    expect(callableMock.mock.calls[0]).toEqual(callableMock.mock.calls[1]);
     expect(addDocMock).not.toHaveBeenCalled();
   });
 });

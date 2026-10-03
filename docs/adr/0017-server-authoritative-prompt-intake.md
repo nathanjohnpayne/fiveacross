@@ -1,6 +1,6 @@
 ---
 status: accepted
-implemented: partial
+implemented: source
 ---
 
 # Server-authoritative Community Prompt intake
@@ -16,3 +16,5 @@ Prompt submission after cutover requires signal: keep typed text and retry ID on
 For the callable release, separately authorize and verify `SUBMIT_PROMPT_APP_CHECK=false` in each selected project’s merged Functions dotenv files (`functions/.env.gaycruisebingo` and `functions/.env.fiveacross` for the two current projects). The declared false default does not exempt the name from Firebase’s non-interactive param-coverage guard. No environment file is modified by this source work.
 
 The callable requires a canonical `expectedUid` captured when submission starts and compares it with the eventual authenticated UID before any Admin path/read. Missing or malformed intent is rejected; a mismatch is unauthenticated and makes no item/fence write. `createdBy` remains derived only from authenticated identity; expectedUid is never persisted or used to grant authority. The updated dark callable must precede cutover because this is a required new protocol field; existing deployed clients do not invoke it. This guard prevents a cross-account admission after SDK auth-header resolution, but does not cancel a request already admitted under its captured identity or promise a global auth epoch. Same-account same-ID retry and capacity serialization remain unchanged.
+
+The dependent source cutover denies every client pending create, including Admin suggestions, while retaining curated active Admin management and approval. The UI keeps the retry identity with unchanged typed content under the captured Event/account, rejects mismatched server acknowledgments, and does not enqueue a Firestore fallback. Both source PRs still require separate deployment and acceptance; `implemented: source` does not claim live enforcement.

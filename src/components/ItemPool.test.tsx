@@ -90,7 +90,7 @@ describe('ItemPool submission (specs/d15-approvals.md)', () => {
       target: { value: 'A new prompt' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Add' }));
-    expect(H.addItem).toHaveBeenCalledWith('u1', 'A new prompt', false, undefined, 'ev-1');
+    expect(H.addItem).toHaveBeenCalledWith('u1', 'A new prompt', false, undefined, 'ev-1', expect.any(String));
   });
 
   // #559, Codex P2, PR #845 round 6: catalog-membership tests alone don't
@@ -424,7 +424,7 @@ describe('the first-time 🔞 explainer (#610)', () => {
       target: { value: 'A spicy prompt' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Add' }));
-    expect(H.addItem).toHaveBeenCalledWith('u1', 'A spicy prompt', true, undefined, 'ev-1');
+    expect(H.addItem).toHaveBeenCalledWith('u1', 'A spicy prompt', true, undefined, 'ev-1', expect.any(String));
   });
 });
 
@@ -511,7 +511,7 @@ describe('add() stays correctly attributed across an auth change mid-write (#861
     });
     fireEvent.click(screen.getByRole('button', { name: 'Add' }));
     // Still pending — `addItem` has not resolved yet.
-    expect(H.addItem).toHaveBeenCalledWith('u1', 'Submitted by u1', false, undefined, 'ev-1');
+    expect(H.addItem).toHaveBeenCalledWith('u1', 'Submitted by u1', false, undefined, 'ev-1', expect.any(String));
 
     H.user = { uid: 'u2' };
     await act(async () => {
@@ -729,3 +729,140 @@ describe('ItemPool Event-scope transitions (#807)', () => {
     expect(storage.getItem('gcb.mySuggestions.ev-2.u1')).toBeNull();
   });
 });
+
+
+describe('server-authoritative Prompt submission retries (#1311)', () => {
+  it('retains typed text and the same request ID after a lost response; success clears it', async () => {
+    H.addItem.mockRejectedValueOnce(Object.assign(new Error('network'), { code: 'functions/unavailable' }))
+      .mockImplementationOnce(async (...args: unknown[]) => ({ id: args[5], targetDayIndex: 2 }));
+    render(<ItemPool />);
+    const input = screen.getByPlaceholderText(/add a prompt/i);
+    fireEvent.change(input, { target: { value: 'Retry this Prompt' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await screen.findByRole('alert');
+    expect(input).toHaveValue('Retry this Prompt');
+    expect(screen.getByRole('alert')).toHaveTextContent(/not submitted.*text is still here.*signal/i);
+    const firstId = H.addItem.mock.calls[0][5];
+    expect(firstId).toEqual(expect.any(String));
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await waitFor(() => expect(input).toHaveValue(''));
+    expect(H.addItem.mock.calls[1][5]).toBe(firstId);
+    expect(track).toHaveBeenCalledWith('prompt_suggestion_submitted', { hasTargetDay: true, dayIndex: 2 });
+  });
+  it('shows capacity refusal, retains the draft and emits no success analytics', async () => {
+    H.addItem.mockRejectedValueOnce(Object.assign(new Error('SDK detail'), { code: 'functions/resource-exhausted' }));
+    render(<ItemPool />);
+    const input = screen.getByPlaceholderText(/add a prompt/i);
+    fireEvent.change(input, { target: { value: 'Eleventh Prompt' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/10 Prompts waiting for review/);
+    expect(input).toHaveValue('Eleventh Prompt');
+    expect(track).not.toHaveBeenCalledWith('add_item');
+    expect(track).not.toHaveBeenCalledWith('prompt_suggestion_submitted', expect.anything());
+  });
+  it('a changed draft gets a new ID and pending calls cannot double-submit', async () => {
+    let reject!: (error: Error) => void;
+    H.addItem.mockReturnValueOnce(new Promise((_, r) => { reject = r; }));
+    render(<ItemPool />);
+    const input = screen.getByPlaceholderText(/add a prompt/i);
+    fireEvent.change(input, { target: { value: 'Original Prompt' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled();
+    expect(input).toBeDisabled();
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(H.addItem).toHaveBeenCalledTimes(1);
+    const firstId = H.addItem.mock.calls[0][5];
+    await act(async () => reject(new Error('network')));
+    fireEvent.change(input, { target: { value: 'Changed Prompt' } });
+    H.addItem.mockImplementationOnce(async (...args: unknown[]) => ({ id: args[5] }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await waitFor(() => expect(input).toHaveValue(''));
+    expect(H.addItem.mock.calls[1][5]).not.toBe(firstId);
+  });
+  it('late old-account failure cannot leak its error, busy state or retry ID into the new account', async () => {
+    let reject!: (error: Error) => void;
+    H.addItem.mockReturnValueOnce(new Promise((_, r) => { reject = r; }));
+    const view = render(<ItemPool />);
+    const input = screen.getByPlaceholderText(/add a prompt/i);
+    fireEvent.change(input, { target: { value: 'Same words' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    const oldId = H.addItem.mock.calls[0][5];
+    H.user = { uid: 'new-account' };
+    view.rerender(<ItemPool />);
+    expect(input).toHaveValue('');
+    expect(input).not.toBeDisabled();
+    fireEvent.change(input, { target: { value: 'Same words' } });
+    await act(async () => reject(new Error('old account failure')));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(input).toHaveValue('Same words');
+    H.addItem.mockImplementationOnce(async (...args: unknown[]) => ({ id: args[5] }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await waitFor(() => expect(H.addItem).toHaveBeenCalledTimes(2));
+    expect(H.addItem.mock.calls[1][0]).toBe('new-account');
+    expect(H.addItem.mock.calls[1][5]).not.toBe(oldId);
+  });
+});
+
+
+it('retires an old compose response after switching away and back to the same account (#1311)', async () => {
+  let reject!: (error: Error) => void;
+  H.addItem.mockReturnValueOnce(new Promise((_, r) => { reject = r; }));
+  const view = render(<ItemPool />);
+  const input = screen.getByPlaceholderText(/add a prompt/i);
+  fireEvent.change(input, { target: { value: 'Same words' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+  const oldId = H.addItem.mock.calls[0][5];
+  H.user = { uid: 'other-account' };
+  view.rerender(<ItemPool />);
+  H.user = { uid: 'u1' };
+  view.rerender(<ItemPool />);
+  fireEvent.change(input, { target: { value: 'Same words' } });
+  await act(async () => reject(new Error('old response')));
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  expect(input).toHaveValue('Same words');
+  expect(input).not.toBeDisabled();
+  H.addItem.mockImplementationOnce(async (...args: unknown[]) => ({ id: args[5] }));
+  fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+  await waitFor(() => expect(H.addItem).toHaveBeenCalledTimes(2));
+  expect(H.addItem.mock.calls[1][5]).not.toBe(oldId);
+});
+
+it.each(['success', 'failure'] as const)(
+  'an old A→B→A %s cannot clear the new A request or release its busy slot (#1311)',
+  async outcome => {
+    let finishOld!: (value: unknown) => void;
+    let failOld!: (error: Error) => void;
+    let finishNew!: (value: unknown) => void;
+    H.addItem.mockReturnValueOnce(new Promise((resolve, reject) => { finishOld = resolve; failOld = reject; }))
+      .mockReturnValueOnce(new Promise(resolve => { finishNew = resolve; }));
+    const view = render(<ItemPool />);
+    const input = screen.getByPlaceholderText(/add a prompt/i);
+    fireEvent.change(input, { target: { value: 'Same words' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    const oldId = H.addItem.mock.calls[0][5];
+    H.user = { uid: 'other-account' };
+    view.rerender(<ItemPool />);
+    H.user = { uid: 'u1' };
+    view.rerender(<ItemPool />);
+    fireEvent.change(input, { target: { value: 'Same words' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    expect(H.addItem).toHaveBeenCalledTimes(2);
+    const newId = H.addItem.mock.calls[1][5];
+    expect(newId).not.toBe(oldId);
+    await act(async () => {
+      if (outcome === 'success') finishOld({ id: oldId, targetDayIndex: 2 });
+      else failOld(new Error('old response'));
+    });
+    expect(input).toHaveValue('Same words');
+    expect(input).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(track).not.toHaveBeenCalledWith('add_item');
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(H.addItem).toHaveBeenCalledTimes(2);
+    await act(async () => finishNew({ id: newId }));
+    expect(input).toHaveValue('');
+    expect(input).not.toBeDisabled();
+    expect(track).toHaveBeenCalledWith('add_item');
+  },
+);

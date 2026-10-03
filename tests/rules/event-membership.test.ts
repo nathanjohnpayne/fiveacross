@@ -296,7 +296,7 @@ function clientWriteInventory(
   const momentId = `${uid}-bingo-d0`;
   return [
     [
-      'item create',
+      'pending item create (callable-only)',
       () =>
         setDoc(doc(database, at(`items/pending-${uid}`)), {
           text: 'Pending membership prompt',
@@ -506,7 +506,9 @@ async function expectClientWrites(
 ): Promise<void> {
   for (const [name, run] of clientWriteInventory(database, eventId, uid)) {
     try {
-      if (outcome === 'allow') {
+      // #1311 removes this direct write for every membership posture. Keep
+      // the attempted stale-client bypass in the inventory and assert denial.
+      if (outcome === 'allow' && name !== 'pending item create (callable-only)') {
         await assertSucceeds(run());
       } else {
         await assertFails(run());
