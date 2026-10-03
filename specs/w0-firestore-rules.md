@@ -29,9 +29,9 @@ A Player may post a `moments/{id}` announcement of their own BINGO / Blackout / 
 
 ## Reactive moderation: report-only increments and a validated threshold (ADR 0004)
 
-A Report only increments `reportCount`; when it crosses the Event's `reportHideThreshold` the content is presentationally hidden (Phase 0). An `items` update that touches any field other than a single `reportCount` increment is denied, `settings.reportHideThreshold` must be a number, and `blackoutEnabled` is not reintroduced.
+A player Report atomically pairs a single `reportCount` increment with a fresh per-reporter/current-incarnation receipt and server-clock rate fence. Bare increments are denied. A qualifying report rise on an unsuppressed active incarnation at/over the Event's `reportHideThreshold` triggers a best-effort server hide, with a matching client filter; restored/cleared incarnations retain report suppression. An `items` report update that touches any other field is denied, `settings.reportHideThreshold` must be a number, and `blackoutEnabled` is not reintroduced.
 
-- **Given** an `items` update **When** it only increments `reportCount` by 1 **Then** it is ALLOWED, and any other field change is DENIED. (Test: "ADR 0004: items are report-only increments; reportHideThreshold validated".)
+- **Given** an `items` update **When** it increments `reportCount` by 1 with the matching fresh receipt/rate fence **Then** it is ALLOWED, while a bare increment or any other field change is DENIED. (Test: "ADR 0004: items are report-only increments; reportHideThreshold validated".)
 - **Given** an `items` create **When** the Prompt carries `spicy: true` or `spicy: false` **Then** it is ALLOWED, while a missing or non-boolean `spicy` value is DENIED so the stratified Board composition input stays well-typed. (Test: "items create requires a boolean spicy tag for stratified board composition".)
 - **Given** an Event update **When** an admin sets a numeric `settings.reportHideThreshold` **Then** it is ALLOWED, while a non-numeric value or a non-admin write is DENIED. (Same test.)
 

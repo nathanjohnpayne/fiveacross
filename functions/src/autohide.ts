@@ -3,7 +3,8 @@
  *
  * Promotes the Phase-0 client-side presentational hide (src/data/moderation.ts
  * `isReportHidden`, #107) to an AUTHORITATIVE removal: when a Proof or Prompt's
- * `reportCount` CROSSES up to its Event's `settings.reportHideThreshold`, a
+ * `reportCount` rises to at/over its Event's `settings.reportHideThreshold`
+ * on an active incarnation without reportHideSuppressed, a
  * Cloud Function (admin SDK, which BYPASSES security rules) flips its `status`
  * to `'hidden'`. The client filter stays as the Phase-0 fallback; this makes the
  * hide real for every reader, not just cooperating clients.
@@ -14,8 +15,8 @@
  * reaction to this write — this module never touches `notify.ts`/`moderateProof`.
  *
  * Every write goes through a TRANSACTIONAL re-read guard (`hideIfQualifies`) that
- * re-confirms the LIVE doc + threshold state before writing, so a delayed trigger
- * can never act on the stale event snapshot (round 2 F1). The Firestore surface
+ * re-confirms the LIVE doc + threshold + report-suppression state before writing,
+ * so a delayed trigger can never act on the stale event snapshot (round 2 F1). The Firestore surface
  * is injectable so the whole flow is unit-testable without a Functions runtime
  * (mirrors `notify.ts`).
  */
@@ -38,7 +39,8 @@ export type ModeratedCollection = 'items' | 'proofs';
 /**
  * Pure predicate: does THIS write LOOK like a fresh reason to attempt a hide?
  *
- * True iff the doc is currently `'active'`, the threshold is POSITIVE, and
+ * True iff the doc is currently `'active'` without reportHideSuppressed,
+ * the threshold is POSITIVE, and
  * `reportCount` ROSE on this write to land at/over the threshold
  * (`before.reportCount < after.reportCount` AND `after.reportCount >= threshold`).
  * This is the SNAPSHOT-level gate (decides whether to attempt); the live
@@ -64,7 +66,8 @@ export type ModeratedCollection = 'items' | 'proofs';
  *     `restoreItem`/`restoreProof` (src/data/admin.ts) set `status → 'active'`
  *     but deliberately leave `reportCount` over the threshold. That write does
  *     NOT raise `reportCount`, so it is not a rise and is NOT re-hidden — the
- *     restore remains protected by its report-hide suppression marker even when a later distinct report raises the count.
+ *     restore remains protected by its report-hide suppression marker even when
+ *     a later distinct report raises the count.
  *   - Retry-safe under the transaction. Broadening to "rose" is safe because the
  *     actual write still goes through `hideIfQualifies`, which re-reads live state
  *     — a doc an admin Cleared below threshold between the bump and the write
@@ -90,8 +93,8 @@ export function shouldHideAtThreshold(
 
 /**
  * Pure predicate: does the doc's CURRENT (live, transaction-read) state still
- * warrant a hide? True iff it is `'active'`, the threshold is positive, and
- * `reportCount` is at/over it. This is the write-time re-confirmation (round 2
+ * warrant a hide? True iff it is `'active'` without reportHideSuppressed, the
+ * threshold is positive, and `reportCount` is at/over it. This is the write-time re-confirmation (round 2
  * F1): a delayed trigger or a racing sweep whose doc was cleared below threshold,
  * hidden, or deleted since the event snapshot no longer qualifies, so we never
  * undo an admin Clear-reports or re-hide a restored/deleted doc.
@@ -182,7 +185,8 @@ export async function ensureAdminApp(serviceAccountKey?: Record<string, unknown>
  * transaction, then writes `status: 'hidden'` with `tx.update` (never a
  * re-creating set) iff `stillQualifiesForHide`:
  *
- *   - a doc an admin Cleared below threshold since the trigger fired → no-op, so
+ *   - an admin-restored/report-suppressed doc or one Cleared below threshold
+ *     since the trigger fired → no-op, so
  *     the admin's lift is not silently undone;
  *   - a doc already hidden / flagged / pending, or DELETED (snapshot missing) →
  *     no-op, no re-create (subsumes the round-1 F1 update-not-set guarantee);
@@ -254,7 +258,8 @@ export async function applyThresholdHide(
     if (afterCount <= beforeCount) return false; // reportCount did not rise — no crossing possible; skip the read
     const threshold = await (deps.getReportHideThreshold ?? defaultGetReportHideThreshold)(eventId);
     if (!shouldHideAtThreshold(before, after, threshold)) return false;
-    // Snapshot says a fresh crossing; re-confirm LIVE state transactionally so a
+    // Snapshot shows a qualifying rise (initial crossing or retry); re-confirm
+    // LIVE state transactionally so a
     // delayed trigger cannot undo an admin Clear-reports (round 2 F1).
     return await (deps.hideIfQualifies ?? defaultHideIfQualifies)(collection, eventId, docId);
   } catch (err) {
@@ -365,10 +370,10 @@ export async function applyThresholdBackfill(
 
 // --- One-time rollout sweep (F2, Codex R2) --------------------------------------
 //
-// On the Phase-1 functions DEPLOY, content that already crossed the (unchanged)
-// threshold under Phase 0 never crosses again and never triggers a threshold
-// DECREASE, so it would stay `active` and directly readable despite meeting the
-// server-hide bar. This operator-invokable sweep (scripts/backfill-hide.mjs, run
+// On the Phase-1 functions DEPLOY, content already over the (unchanged)
+// threshold under Phase 0 may receive no later report rise or threshold
+// DECREASE. Unsuppressed active content then needs this sweep for a server-hide
+// attempt. This operator-invokable sweep (scripts/backfill-hide.mjs, run
 // once post-deploy) hides that pre-existing over-threshold content. It reuses the
 // backfill core (DRY) with `before = null` (an enable-from-unset, so it sweeps at
 // the event's CURRENT threshold) and the SAME transactional guard, so it is
