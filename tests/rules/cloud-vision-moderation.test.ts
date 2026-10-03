@@ -252,9 +252,9 @@ describe('firestore.rules — the admin Restore and the community report path st
     );
   });
 
-  it('a bare reportCount+1 still SUCCEEDS on a flagged Proof — #133 did not narrow the report path', async () => {
-    await assertSucceeds(updateDoc(doc(db(BOB), at('proofs/pFlagged')), { reportCount: increment(1) }));
-    await assertSucceeds(updateDoc(doc(db(BOB), at('proofs/pVisionHidden')), { reportCount: increment(1) }));
+  it('a bare reportCount+1 is DENIED without an incarnation receipt (#1405) on a flagged Proof — #133 did not narrow the report path', async () => {
+    await assertFails(updateDoc(doc(db(BOB), at('proofs/pFlagged')), { reportCount: increment(1) }));
+    await assertFails(updateDoc(doc(db(BOB), at('proofs/pVisionHidden')), { reportCount: increment(1) }));
   });
 
   it('an admin restores a claim-backed Proof to PENDING, and reads the claims that decide it', async () => {

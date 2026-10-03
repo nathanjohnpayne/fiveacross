@@ -12,7 +12,8 @@
 import type { ClaimDoc, EventDoc } from '../types';
 
 /**
- * True iff `reportCount` has REACHED a POSITIVE `reportHideThreshold` — at OR
+ * True iff this incarnation has no admin restore suppression and `reportCount`
+ * has REACHED a POSITIVE `reportHideThreshold` — at OR
  * over, not just over. The threshold is only active when it is a number strictly
  * greater than zero:
  *
@@ -29,8 +30,8 @@ import type { ClaimDoc, EventDoc } from '../types';
  * and the Admin report queue is the backstop either way. Pure so the at/over/below
  * boundary AND the non-positive boundary are unit-testable without a subscription.
  */
-export function isReportHidden(reportCount: number, threshold: number | undefined): boolean {
-  return typeof threshold === 'number' && threshold > 0 && reportCount >= threshold;
+export function isReportHidden(reportCount: number, threshold: number | undefined, suppressed?: boolean): boolean {
+  return suppressed !== true && typeof threshold === 'number' && threshold > 0 && reportCount >= threshold;
 }
 
 /**

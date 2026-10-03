@@ -264,7 +264,8 @@ export function verifySeedPool(
   // against the wrong Event's canon — the same failure class Codex P2 (PR
   // #229) flagged when the old default was the main-only ITEMS.
   pool,
-  // The auto-hide visibility threshold to check reportCount against. Defaults
+  // The auto-hide visibility threshold for unsuppressed report counts. Only
+  // literal reportHideSuppressed: true preserves an Admin override. Defaults
   // to 4 — the value every Event seeds today (`settings.reportHideThreshold`,
   // ADR 0004); pass the target Event's own value when they diverge.
   reportHideThreshold = 4,
@@ -362,6 +363,11 @@ export function verifySeedPool(
   for (const expectedDoc of expected) {
     const { canonicalId: id, text } = expectedDoc;
     const live = expectedDoc.acceptedIds.map((acceptedId) => seedById.get(acceptedId)).find(Boolean);
+    // Node cannot import the browser's TypeScript moderation module. Keep this
+    // visibility axis aligned with isReportHidden; the cross-runtime test pins it.
+    const reportHidden = !!live && live.reportHideSuppressed !== true &&
+      typeof reportHideThreshold === 'number' && reportHideThreshold > 0 &&
+      live.reportCount >= reportHideThreshold;
     // A doc matched under its recorded LEGACY id may still carry that
     // prompt's one documented pre-fix wording (#1019) without counting as
     // drift; matched under the canonical id, only the current text counts.
@@ -379,9 +385,7 @@ export function verifySeedPool(
       live.isFreeSpace !== expectedDoc.isFreeSpace ||
       live.status !== expectedDoc.status ||
       live.pool !== expectedDoc.pool ||
-      (typeof reportHideThreshold === 'number' &&
-        reportHideThreshold > 0 &&
-        live.reportCount >= reportHideThreshold)
+      reportHidden
     ) {
       matchedIds.add(live.id);
       mismatched.push({
@@ -399,9 +403,7 @@ export function verifySeedPool(
         ...(live.pool !== expectedDoc.pool
           ? { expectedPool: expectedDoc.pool, actualPool: live.pool }
           : {}),
-        ...(typeof reportHideThreshold === 'number' &&
-        reportHideThreshold > 0 &&
-        live.reportCount >= reportHideThreshold
+        ...(reportHidden
           ? { reportHideThreshold, actualReportCount: live.reportCount }
           : {}),
       });
@@ -690,6 +692,7 @@ async function seed() {
       isFreeSpace: doc.data().isFreeSpace,
       status: doc.data().status,
       reportCount: doc.data().reportCount,
+      reportHideSuppressed: doc.data().reportHideSuppressed,
       pool: doc.data().pool,
     })),
     ALL_ITEMS,
@@ -790,6 +793,7 @@ async function verify() {
       isFreeSpace: doc.data().isFreeSpace,
       status: doc.data().status,
       reportCount: doc.data().reportCount,
+      reportHideSuppressed: doc.data().reportHideSuppressed,
       pool: doc.data().pool,
     })),
     seedEvent.ALL_ITEMS,

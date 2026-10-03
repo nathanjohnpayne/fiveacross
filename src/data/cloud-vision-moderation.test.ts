@@ -509,7 +509,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
 
     await restoreProof('P');
 
-    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false });
+    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false, reportHideSuppressed: true });
   });
 
   it('restores to ACTIVE when no claim references the Proof at all', async () => {
@@ -518,7 +518,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
 
     await restoreProof('P');
 
-    expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false });
+    expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false, reportHideSuppressed: true });
   });
 
   it('restores to ACTIVE once the claim is decided — confirmed or rejected', async () => {
@@ -528,7 +528,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
 
       await restoreProof('P');
 
-      expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false });
+      expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false, reportHideSuppressed: true });
     }
   });
 
@@ -549,7 +549,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
     await restoreProof('P');
 
     expect(ops.filter((o) => o.op === 'get').map((o) => o.path)).toContain('events/med-2026/claims/claim-1');
-    expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false });
+    expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false, reportHideSuppressed: true });
   });
 
   it('reads every claim BEFORE it writes, per the reads-before-writes contract', async () => {
@@ -585,7 +585,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
 
     await restoreProof('P');
 
-    expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false });
+    expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false, reportHideSuppressed: true });
   });
 
   it("still honours the owner's pending claim beside forged ones", async () => {
@@ -596,7 +596,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
 
     await restoreProof('P');
 
-    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false });
+    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false, reportHideSuppressed: true });
   });
 
   it('restores to ACTIVE when the Proof itself is missing, whatever claims name it', async () => {
@@ -605,7 +605,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
 
     await restoreProof('P');
 
-    expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false });
+    expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false, reportHideSuppressed: true });
   });
 
   it("asks for the OWNER's PENDING claims, bounded — all three equalities, then the cap plus one", async () => {
@@ -646,7 +646,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
 
     await restoreProof('P');
 
-    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false });
+    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false, reportHideSuppressed: true });
     // And the forged docs are not even read: the transaction's read budget is
     // spent on the Proof and the owner's own claim.
     expect(ops.filter((o) => o.op === 'get').map((o) => o.path)).toEqual([
@@ -677,7 +677,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
 
     await restoreProof('P');
 
-    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false });
+    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false, reportHideSuppressed: true });
     // And the resolved claims are not read either: the transaction's read budget
     // is spent on the Proof and the one claim that can still steer the restore.
     expect(ops.filter((o) => o.op === 'get').map((o) => o.path)).toEqual([
@@ -720,7 +720,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
 
     await restoreProof('P');
 
-    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false });
+    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false, reportHideSuppressed: true });
     expect(ops.filter((o) => o.op === 'get').map((o) => o.path)).toEqual([
       'events/med-2026/proofs/P',
       ...Array.from({ length: RESTORE_CLAIM_LOOKUP_LIMIT }, (_, i) => `events/med-2026/claims/own-${i}`),
@@ -741,7 +741,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
 
     await restoreProof('P');
 
-    expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false });
+    expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false, reportHideSuppressed: true });
   });
 
   it('does NOT publish when the fetched page resolves in the gap and a DROPPED claim is still pending', async () => {
@@ -768,7 +768,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
 
     await restoreProof('P');
 
-    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false });
+    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false, reportHideSuppressed: true });
   });
 
   it('settles a TRUNCATED page on a still-pending row, re-reading the whole page including the sentinel', async () => {
@@ -785,7 +785,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
 
     await restoreProof('P');
 
-    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false });
+    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false, reportHideSuppressed: true });
     expect(getDocsMock).toHaveBeenCalledTimes(1);
     expect(ops.filter((o) => o.op === 'get').map((o) => o.path)).toEqual([
       'events/med-2026/proofs/P',
@@ -829,7 +829,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
 
     expect(getDocsMock).toHaveBeenCalledTimes(2);
     expect(txUpdate).toHaveBeenCalledTimes(1); // the stale attempt wrote nothing
-    expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false });
+    expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false, reportHideSuppressed: true });
   });
 
   it('keeps a DROPPED claim that is still pending reachable when the whole fetched page resolved', async () => {
@@ -851,7 +851,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
 
     expect(getDocsMock).toHaveBeenCalledTimes(2);
     expect(txUpdate).toHaveBeenCalledTimes(1);
-    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false });
+    expect(updatePayload('/proofs/')).toEqual({ status: 'pending', safetyHide: false, reportHideSuppressed: true });
   });
 
   it('throws WITHOUT writing when the page is still stale on the last attempt, leaving Restore reachable', async () => {
@@ -893,7 +893,7 @@ describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () =
     await restoreProof('P');
 
     expect(getDocsMock).not.toHaveBeenCalled();
-    expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false });
+    expect(updatePayload('/proofs/')).toEqual({ status: 'active', safetyHide: false, reportHideSuppressed: true });
   });
 
   it('never touches the claim itself — Restore moves the photo, not the decision', async () => {

@@ -30,7 +30,7 @@ export const MAX_PERSISTED_MOST_LOVED_WINNERS = 100;
  *  can feed both builders in the parity test. */
 export type MostLovedProofInput = Pick<
   ProofDoc,
-  'id' | 'uid' | 'displayName' | 'type' | 'status' | 'reportCount' | 'createdAt' | 'itemText' | 'dayIndex'
+  'id' | 'uid' | 'displayName' | 'type' | 'status' | 'reportCount' | 'reportHideSuppressed' | 'createdAt' | 'itemText' | 'dayIndex'
 >;
 
 /** The subset of a `HeartDoc` the award computation reads. */
@@ -68,13 +68,13 @@ export interface MostLovedAwardOptions {
  * that `functions/src/finaleContent.ts` must reproduce for every viewer alike.
  */
 export function proofFeedVisible(
-  proof: Pick<ProofDoc, 'uid' | 'status' | 'reportCount'>,
+  proof: Pick<ProofDoc, 'uid' | 'status' | 'reportCount' | 'reportHideSuppressed'>,
   reportHideThreshold: number | undefined,
   bannedUids: readonly string[],
 ): boolean {
   return (
     proof.status === 'active' &&
-    !isReportHidden(proof.reportCount, reportHideThreshold) &&
+    !isReportHidden(proof.reportCount, reportHideThreshold, proof.reportHideSuppressed) &&
     !isBanned(proof.uid, bannedUids)
   );
 }

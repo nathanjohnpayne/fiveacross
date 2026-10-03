@@ -66,6 +66,7 @@ export interface AdminAlertRecord {
   status: string;
   visionFlag: string | null;
   reportCount: number;
+  reportHideSuppressed?: boolean;
   createdAt: number;
 }
 
@@ -165,24 +166,25 @@ function plural(count: number, one: string, many: string): string {
  *
  * `deriveReason` is `notify.ts`'s, reused rather than re-derived: it names a
  * Vision flag from itself, calls a hide `reports >= threshold` only when the
- * count and the Event threshold are both known and the count is at/over it,
- * `by an admin` when both are known and it is under, and nothing at all when
+ * count and the Event threshold are both known, the count is at/over it,
+ * and this incarnation does not suppress report hiding,
+ * `by an admin` when both are known and it is under (or suppressed), and nothing when
  * either is unknown. So a manual hide of an unreported Prompt is never
  * mislabelled as a threshold hide (#101 Codex R2 F1).
  *
- * A still-active report additionally shows the distance to the auto-hide bar,
- * which is the number an admin actually acts on.
+ * An unsuppressed active report below the positive threshold shows its distance
+ * to auto-hide. Suppressed/restored incarnations retain the report count only.
  */
 export function reviewDetail(alert: AdminAlertRecord, threshold: number | null): string {
   const reports = plural(alert.reportCount, 'report', 'reports');
   if (alert.kind === 'moderation') {
     const reason = deriveReason(
-      { status: alert.status, visionFlag: alert.visionFlag, reportCount: alert.reportCount },
+      { status: alert.status, visionFlag: alert.visionFlag, reportCount: alert.reportCount, reportHideSuppressed: alert.reportHideSuppressed },
       threshold,
     );
     return `${alert.status}${reason ? ` (${reason})` : ''} · ${reports}`;
   }
-  if (typeof threshold === 'number' && threshold > 0 && alert.reportCount < threshold) {
+  if (alert.reportHideSuppressed !== true && typeof threshold === 'number' && threshold > 0 && alert.reportCount < threshold) {
     const remaining = threshold - alert.reportCount;
     return `reported · ${reports} · ${plural(remaining, 'more', 'more')} to auto-hide`;
   }

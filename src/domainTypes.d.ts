@@ -829,6 +829,8 @@ export interface ItemDoc {
   // ticket only widens the union, it migrates no data.
   status: 'active' | 'hidden' | 'pending' | 'rejected';
   reportCount: number;
+  /** Admin restore suppresses report auto-hide for this target incarnation. */
+  reportHideSuppressed?: boolean;
   // Whether this Prompt is in the 🔞-tagged "spicy" category (vs. "tame") for
   // stratified Board composition (`dealBoard`'s spicyRatio sampling).
   spicy: boolean;
@@ -1110,6 +1112,8 @@ export interface ProofDoc {
   text?: string | null;
   createdAt: number;
   reportCount: number;
+  /** Admin restore suppresses report auto-hide for this target incarnation. */
+  reportHideSuppressed?: boolean;
   // 'pending' = created under admin_confirmed Claim Mode (data/proofs attachProof);
   // admin-only readable per firestore.rules until confirming the Claim flips it
   // to 'active'. A rejected Claim leaves its Proof 'pending' rather than exposed.

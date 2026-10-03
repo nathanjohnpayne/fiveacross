@@ -98,6 +98,27 @@ if [ "$1" = "api" ]; then
       cat "${FIXTURE_FILES:-/dev/null}"
       exit 0
       ;;
+    repos/*/pulls/*/commits*)
+      # Dependabot commit provenance. FIXTURE_COMMITS_FAIL=1 simulates an
+      # unreadable commits read. With no FIXTURE_COMMITS, synthesize the
+      # ordinary Dependabot shape (one commit on the PR head, authored by
+      # dependabot[bot], committed and signed by GitHub/web-flow) so the
+      # pre-existing Dependabot cases keep exercising the Dependabot rule.
+      if [ "${FIXTURE_COMMITS_FAIL:-0}" = "1" ]; then
+        echo "STUB gh: simulated PR commits API failure" >&2
+        exit 1
+      fi
+      if [ -n "${FIXTURE_COMMITS:-}" ]; then
+        cat "$FIXTURE_COMMITS"
+      else
+        jq -c '[{ sha: .head.sha,
+                  author: { login: "dependabot[bot]" },
+                  committer: { login: "web-flow" },
+                  commit: { verification: { verified: true, reason: "valid" } } }]' \
+          "${FIXTURE_PR:-/dev/null}"
+      fi
+      exit 0
+      ;;
     repos/*/issues/*/comments)
       # FIXTURE_COMMENTS_FAIL=1 simulates a transient comments-API failure
       # (the indeterminate marker-read case, automated-4b round-5 P1).
@@ -219,6 +240,9 @@ if [ "${CODEX_STUB_REQUIRE_HEAD_PIN:-0}" = "1" ] && [ "${CODEX_REVIEW_CHECK_REQU
   echo "codex-check-stub: expected CODEX_REVIEW_CHECK_REQUIRE_APPROVAL_ON_HEAD=1" >&2
   exit 42
 fi
+if [ -n "${CODEX_STUB_EXPECT_EVIDENCE:-}" ] && [ "${CODEX_REVIEW_CHECK_REPORT_REQUEST_EVIDENCE:-0}" != "$CODEX_STUB_EXPECT_EVIDENCE" ]; then
+  echo "unexpected request evidence opt-in" >&2; exit 42
+fi
 [ -z "${CODEX_STUB_STDOUT:-}" ] || printf '%s\n' "$CODEX_STUB_STDOUT"
 exit "${CODEX_STUB_RC:-0}"
 STUB
@@ -277,19 +301,21 @@ make_comments_fixture() {  # <json_array_literal>  issue comments
   echo "$file"
 }
 
-make_pr_fixture() {  # <sha> <author> <labels_json_array> [base_ref] [default_branch]
+make_pr_fixture() {  # <sha> <author> <labels_json_array> [base_ref] [default_branch] [base_sha]
   local sha=$1 author=$2 labels=${3:-'[]'}
   # Default to base_ref == default_branch: the ordinary case, in which the
   # #763 base-policy fetch is deliberately skipped entirely.
-  local base_ref=${4:-main} default_branch=${5:-main}
+  local base_ref=${4:-main} default_branch=${5:-main} base_sha=${6:-$BASE_SHA}
   local file="$WORKDIR/pr.$$.$RANDOM.json"
   jq -n --arg sha "$sha" --arg author "$author" --argjson labels "$labels" \
-        --arg base_ref "$base_ref" --arg default_branch "$default_branch" '
+        --arg base_ref "$base_ref" --arg default_branch "$default_branch" \
+        --arg base_sha "$base_sha" '
     { number: 99,
+      auto_merge: null,
       head: { sha: $sha },
       user: { login: $author },
       labels: $labels,
-      base: { sha: "base000aaa", ref: $base_ref,
+      base: { sha: $base_sha, ref: $base_ref,
               repo: { default_branch: $default_branch } } }
   ' >"$file"
   echo "$file"
@@ -365,8 +391,10 @@ export FIXTURE_RULESET_OBJ
 FIXTURE_ADMIN_ENFORCE=true
 export FIXTURE_ADMIN_ENFORCE
 
-HEAD_SHA="head000aaa"
-OLD_SHA="old111bbb"
+HEAD_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+OLD_SHA="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+BASE_SHA="cccccccccccccccccccccccccccccccccccccccc"
+OLD_BASE_SHA="dddddddddddddddddddddddddddddddddddddddd"
 DEPENDABOT='dependabot[bot]'
 EXT_LABEL='[{"name":"needs-external-review"}]'
 
@@ -597,6 +625,7 @@ FIXTURE_PR=$(make_pr_fixture "$HEAD_SHA" "nathanjohnpayne" "$EXT_LABEL")
 set +e
 OUT=$(FIXTURE_PR="$FIXTURE_PR" \
       MERGE_CLEARANCE_CODEX_CHECK_BIN="$STUB_DIR/codex-check-stub" \
+      CODEX_STUB_EXPECT_EVIDENCE=1 \
       CODEX_STUB_RC=1 \
       run_gate "$SCRATCH" 99 owner/repo 2>&1)
 RC=$?
@@ -652,6 +681,190 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Test 10a–10h: Dependabot commit provenance. The Dependabot rule is earned by
+# the COMMITS the PR would merge, not by its opener. A Dependabot-opened PR
+# carrying any commit that is not Dependabot-authored, GitHub-committed and
+# signature-verified is judged as an ORDINARY PR (external-review / Phase 4
+# derivation); an unreadable commit list fails closed (exit 2).
+# ---------------------------------------------------------------------------
+make_commits_fixture() {  # <json_array_literal>
+  local file="$WORKDIR/commits.$$.$RANDOM.json"
+  echo "$1" >"$file"
+  echo "$file"
+}
+# dep_commit <sha> [author] [committer] [verified]
+dep_commit() {
+  jq -nc --arg sha "$1" --arg a "${2:-dependabot[bot]}" --arg c "${3:-web-flow}" \
+        --argjson v "${4:-true}" '
+    { sha: $sha, author: { login: $a }, committer: { login: $c },
+      commit: { verification: { verified: $v, reason: (if $v then "valid" else "unsigned" end) } } }'
+}
+APPROVED_ON_HEAD=$(make_reviews_fixture "$(jq -n --arg sha "$HEAD_SHA" '
+  [{ user:{login:"nathanpayne-claude"}, state:"APPROVED", commit_id:$sha, submitted_at:"2026-06-01T10:00:00Z" }]
+')")
+OVER_THRESHOLD_FILES=$(make_files_fixture '[{"filename":"src/big.js","additions":400,"deletions":0}]')
+UNDER_THRESHOLD_FILES=$(make_files_fixture '[{"filename":"package.json","additions":1,"deletions":1}]')
+
+# provenance_case <label> <commits_json> <files_fixture> <codex_stub_rc> <expect_rc> <expect_grep> [gate_enabled]
+provenance_case() {
+  local label=$1 commits=$2 files=$3 codex_rc=$4 expect_rc=$5 expect=$6 dep_enabled=${7:-true}
+  echo; echo "--- Test 10*: Dependabot provenance — $label"
+  SCRATCH=$(make_scratch "$dep_enabled" true)
+  FIXTURE_PR=$(make_pr_fixture "$HEAD_SHA" "$DEPENDABOT")
+  : > "$WORKDIR/gh-calls.log"
+  set +e
+  OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_REVIEWS="$APPROVED_ON_HEAD" \
+        FIXTURE_COMMITS="$(make_commits_fixture "$commits")" \
+        FIXTURE_FILES="$files" \
+        MERGE_CLEARANCE_CODEX_CHECK_BIN="$STUB_DIR/codex-check-stub" \
+        CODEX_STUB_RC="$codex_rc" \
+        run_gate "$SCRATCH" 99 owner/repo 2>&1)
+  RC=$?
+  set -e
+  if [ "$RC" = "$expect_rc" ] && echo "$OUT" | grep -qiE -- "$expect"; then
+    pass "Dependabot provenance: $label → rc=$expect_rc"
+  else
+    fail "Dependabot provenance: $label expected rc=$expect_rc matching /$expect/; got rc=$RC"
+    echo "$OUT" | sed 's/^/      /' >&2
+  fi
+}
+
+# 10a — control: every commit is Dependabot's → Dependabot rule, approval clears.
+provenance_case "all commits Dependabot-produced (control)" \
+  "[$(dep_commit "$OLD_SHA"),$(dep_commit "$HEAD_SHA")]" \
+  "$OVER_THRESHOLD_FILES" 1 0 "latest-state APPROVED review on HEAD"
+
+# 10b — an extra commit by another author on top of the Dependabot commit, on
+# an over-threshold diff: the reviewer approval that clears the Dependabot rule
+# must NOT clear it; the external arm applies and its delegate (rc=1) blocks.
+provenance_case "extra non-Dependabot commit + over threshold → external arm blocks" \
+  "[$(dep_commit "$OLD_SHA"),$(dep_commit "$HEAD_SHA" someone-with-push someone-with-push false)]" \
+  "$OVER_THRESHOLD_FILES" 1 1 "BLOCKED"
+
+# 10c — the same extra commit on an UNDER-threshold diff is judged like any
+# ordinary PR: not applicable, exit 0 (no Dependabot shortcut, no Phase 4).
+provenance_case "extra non-Dependabot commit + under threshold → ordinary PR" \
+  "[$(dep_commit "$OLD_SHA"),$(dep_commit "$HEAD_SHA" someone-with-push someone-with-push false)]" \
+  "$UNDER_THRESHOLD_FILES" 1 0 "not applicable"
+
+# 10d — the gate-disabled shortcut must not apply to a mixed PR either: with
+# dependabot.reviewer_gate.enabled=false the ordinary derivation still runs.
+provenance_case "extra commit + Dependabot gate disabled → still external arm" \
+  "[$(dep_commit "$OLD_SHA"),$(dep_commit "$HEAD_SHA" someone-with-push someone-with-push false)]" \
+  "$OVER_THRESHOLD_FILES" 1 1 "BLOCKED" false
+
+# 10c2 — the SAME under-threshold mixed PR while a native auto-merge request
+# armed for an earlier (Dependabot-only) head still stands: BLOCK, because the
+# withdrawing workflow job is not ordered before this gate.
+echo; echo "--- Test 10*: Dependabot provenance — mixed + auto-merge still armed → blocked"
+SCRATCH=$(make_scratch true true)
+FIXTURE_PR=$(make_pr_fixture "$HEAD_SHA" "$DEPENDABOT")
+jq '.auto_merge = {merge_method:"squash", enabled_by:{login:"nathanjohnpayne"}}' "$FIXTURE_PR" >"$FIXTURE_PR.armed"
+MIXED_ARMED_COMMITS=$(make_commits_fixture "[$(dep_commit "$OLD_SHA"),$(dep_commit "$HEAD_SHA" someone-with-push someone-with-push false)]")
+set +e
+OUT=$(FIXTURE_PR="$FIXTURE_PR.armed" FIXTURE_REVIEWS="$APPROVED_ON_HEAD" FIXTURE_COMMITS="$MIXED_ARMED_COMMITS" \
+      FIXTURE_FILES="$UNDER_THRESHOLD_FILES" run_gate "$SCRATCH" 99 owner/repo 2>&1)
+RC=$?
+QOUT=$(FIXTURE_PR="$FIXTURE_PR.armed" FIXTURE_COMMITS="$MIXED_ARMED_COMMITS" FIXTURE_FILES="$UNDER_THRESHOLD_FILES" \
+      run_gate "$SCRATCH" --derive-external-requiredness 99 owner/repo 2>/dev/null)
+QRC=$?
+jq 'del(.auto_merge)' "$FIXTURE_PR" >"$FIXTURE_PR.noam"
+OUT_NOAM=$(FIXTURE_PR="$FIXTURE_PR.noam" FIXTURE_REVIEWS="$APPROVED_ON_HEAD" FIXTURE_COMMITS="$MIXED_ARMED_COMMITS" \
+      FIXTURE_FILES="$UNDER_THRESHOLD_FILES" run_gate "$SCRATCH" 99 owner/repo 2>&1)
+RC_NOAM=$?
+set -e
+if [ "$RC" = 1 ] && echo "$OUT" | grep -q "still carries a native auto-merge request" \
+   && [ "$QRC" = 0 ] && [ "$QOUT" = "false" ] \
+   && [ "$RC_NOAM" = 2 ]; then
+  pass "Dependabot provenance: mixed + armed auto-merge blocks the full gate; query mode keeps ordinary derivation; unreadable auto-merge state → exit 2"
+else
+  fail "mixed + armed expected rc=1 block, query false/0, missing auto_merge rc=2; got rc=$RC q=$QRC/$QOUT noam=$RC_NOAM"
+  echo "$OUT" | sed 's/^/      /' >&2
+fi
+
+# 10e — Dependabot-authored but committed by someone else (e.g. an amended or
+# rebased commit keeping the author) is not Dependabot-produced.
+provenance_case "Dependabot author, foreign committer → ordinary PR" \
+  "[$(dep_commit "$HEAD_SHA" 'dependabot[bot]' someone-with-push true)]" \
+  "$OVER_THRESHOLD_FILES" 1 1 "committer=someone-with-push"
+
+# 10f — Dependabot author + GitHub committer but an unverified signature.
+provenance_case "unverified signature → ordinary PR" \
+  "[$(dep_commit "$HEAD_SHA" 'dependabot[bot]' web-flow false)]" \
+  "$OVER_THRESHOLD_FILES" 1 1 "signature=unsigned"
+
+# 10g — the listed commits do not include the PR head (the branch moved under
+# the read): no verdict, fail closed.
+provenance_case "head not among listed commits → exit 2" \
+  "[$(dep_commit "$OLD_SHA")]" \
+  "$OVER_THRESHOLD_FILES" 0 2 "is not among the listed commits"
+
+# 10h — 250 commits is the endpoint's ceiling: cannot enumerate → not trusted.
+BIG_COMMITS=$(jq -nc --arg head "$HEAD_SHA" '
+  [ range(0; 249) as $i
+    | { sha: ("f" * 30 + ($i | tostring | ("0" * (10 - length)) + .)),
+        author: { login: "dependabot[bot]" }, committer: { login: "web-flow" },
+        commit: { verification: { verified: true } } } ]
+  + [ { sha: $head, author: { login: "dependabot[bot]" }, committer: { login: "web-flow" },
+        commit: { verification: { verified: true } } } ]')
+provenance_case "250-commit ceiling → ordinary PR" \
+  "$BIG_COMMITS" "$OVER_THRESHOLD_FILES" 1 1 "stops at 250"
+
+# 10i — unreadable commit list fails closed (exit 2), never a lane choice.
+echo; echo "--- Test 10*: Dependabot provenance — commits read failure → exit 2"
+SCRATCH=$(make_scratch true true)
+FIXTURE_PR=$(make_pr_fixture "$HEAD_SHA" "$DEPENDABOT")
+set +e
+OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_REVIEWS="$APPROVED_ON_HEAD" FIXTURE_COMMITS_FAIL=1 \
+      run_gate "$SCRATCH" 99 owner/repo 2>&1)
+RC=$?
+set -e
+if [ "$RC" = 2 ] && echo "$OUT" | grep -q "could not verify Dependabot commit provenance"; then
+  pass "Dependabot provenance: unreadable commits → exit 2"
+else
+  fail "Dependabot provenance: unreadable commits expected rc=2; got rc=$RC"; echo "$OUT" | sed 's/^/      /' >&2
+fi
+
+# 10j — a non-Dependabot PR never pays for the commits read.
+echo; echo "--- Test 10*: Dependabot provenance — ordinary author makes no commits read"
+SCRATCH=$(make_scratch true true)
+FIXTURE_PR=$(make_pr_fixture "$HEAD_SHA" "nathanjohnpayne" '[]')
+: > "$WORKDIR/gh-calls.log"
+set +e
+OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_FILES="$UNDER_THRESHOLD_FILES" run_gate "$SCRATCH" 99 owner/repo 2>&1)
+RC=$?
+set -e
+if [ "$RC" = 0 ] && ! grep -q "/commits" "$WORKDIR/gh-calls.log"; then
+  pass "Dependabot provenance: non-Dependabot author → no commits read"
+else
+  fail "Dependabot provenance: non-Dependabot author expected rc=0 and no commits read; got rc=$RC"
+  echo "$OUT" | sed 's/^/      /' >&2
+fi
+
+# 10k — the helper is a hard dependency.
+echo; echo "--- Test 10*: missing dependabot-commit-provenance.sh → exit 2"
+SANDBOX2="$WORKDIR/no-prov-lib/scripts"
+mkdir -p "$SANDBOX2/lib"
+cp "$SCRIPT" "$SANDBOX2/merge-clearance-gate.sh"
+chmod +x "$SANDBOX2/merge-clearance-gate.sh"
+for _lib in reviewers-helpers.sh blocking-labels.sh gh-api-array.sh; do
+  cp "$ROOT/scripts/lib/$_lib" "$SANDBOX2/lib/$_lib"
+done
+SCRATCH=$(make_scratch true false)
+FIXTURE_PR=$(make_pr_fixture "$HEAD_SHA" "$DEPENDABOT")
+set +e
+OUT=$(cd "$SCRATCH" && PATH="$STUB_DIR:$PATH" GH_TOKEN="dummy-token" \
+  GH_CALLS_LOG="$WORKDIR/gh-calls.log" FIXTURE_PR="$FIXTURE_PR" \
+  "$SANDBOX2/merge-clearance-gate.sh" 99 owner/repo 2>&1)
+RC=$?
+set -e
+if [ "$RC" = 2 ] && echo "$OUT" | grep -q "dependabot-commit-provenance helper missing"; then
+  pass "absent dependabot-commit-provenance.sh → exit 2 with a naming error"
+else
+  fail "expected rc=2 'dependabot-commit-provenance helper missing'; got rc=$RC"; echo "$OUT" | sed 's/^/      /' >&2
+fi
+
+# ---------------------------------------------------------------------------
 # Test 11: neither Dependabot nor external-review → exit 0 (not applicable).
 # ---------------------------------------------------------------------------
 echo; echo "--- Test 11: normal under-threshold PR → not applicable"
@@ -669,6 +882,67 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# #1277: human-controlled holds apply before every full-gate class dispatch.
+# The disabled knobs and propagation exemption must not turn a hold green.
+for hold_label in human-hold needs-human-review policy-violation; do
+  for hold_lane in ordinary disabled dependabot propagation; do
+    SCRATCH=$(make_scratch true true)
+    hold_author=nathanjohnpayne
+    FIXTURE_COMMENTS=$(make_comments_fixture '[]')
+    FIXTURE_FILES=$(make_files_fixture '[{"filename":"README.md","additions":3,"deletions":1}]')
+    case "$hold_lane" in
+      disabled) SCRATCH=$(make_scratch false false) ;;
+      dependabot) hold_author="$DEPENDABOT"; SCRATCH=$(make_scratch false false) ;;
+      propagation)
+        FIXTURE_FILES=$(make_files_fixture '[{"filename":".github/workflows/x.yml","additions":400,"deletions":50}]')
+        FIXTURE_COMMENTS=$(make_comments_fixture "[{\"user\":{\"login\":\"github-actions[bot]\"},\"body\":\"<!-- mergepath-propagation-lane:v2 verified-head=$HEAD_SHA verified-base=$BASE_SHA -->\"}]") ;;
+    esac
+    FIXTURE_PR=$(make_pr_fixture "$HEAD_SHA" "$hold_author" "[{\"name\":\"$hold_label\"}]")
+    set +e
+    OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_FILES="$FIXTURE_FILES" FIXTURE_COMMENTS="$FIXTURE_COMMENTS" \
+      run_gate "$SCRATCH" 99 owner/repo 2>&1)
+    RC=$?
+    set -e
+    if [ "$RC" = 1 ] && echo "$OUT" | grep -q "BLOCKED.*$hold_label"; then
+      pass "#1277: $hold_label blocks $hold_lane lane"
+    else
+      fail "#1277: $hold_label/$hold_lane expected block/1; got rc=$RC: $OUT"
+    fi
+  done
+done
+
+# These queries describe external-review applicability/coverage, not permission
+# to merge. A hold must not change their boolean contract.
+SCRATCH=$(make_scratch true true)
+FIXTURE_PR=$(make_pr_fixture "$HEAD_SHA" nathanjohnpayne '[{"name":"human-hold"}]')
+FIXTURE_COMMENTS=$(make_comments_fixture '[]')
+FIXTURE_FILES=$(make_files_fixture '[{"filename":"README.md","additions":3,"deletions":1}]')
+for hold_query in --derive-external-requiredness --derive-phase-4-requiredness --derive-rate-limit-protection; do
+  set +e
+  OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_FILES="$FIXTURE_FILES" FIXTURE_COMMENTS="$FIXTURE_COMMENTS" \
+    run_gate "$SCRATCH" "$hold_query" 99 owner/repo 2>/dev/null)
+  RC=$?
+  set -e
+  if [ "$RC" = 0 ] && [ "$OUT" = false ]; then
+    pass "#1277: hold preserves $hold_query"
+  else
+    fail "#1277: $hold_query expected false/0; got '$OUT'/$RC"
+  fi
+done
+
+# Exact-label control: issue-triage labels and similar names are not holds.
+FIXTURE_PR=$(make_pr_fixture "$HEAD_SHA" nathanjohnpayne '[{"name":"decision-needed"},{"name":"human-hold-extra"}]')
+set +e
+OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_FILES="$FIXTURE_FILES" FIXTURE_COMMENTS="$FIXTURE_COMMENTS" \
+  run_gate "$SCRATCH" 99 owner/repo 2>&1)
+RC=$?
+set -e
+if [ "$RC" = 0 ]; then
+  pass "#1277: unrelated labels preserve ordinary clearance"
+else
+  fail "#1277: unrelated labels expected pass/0; got $RC: $OUT"
+fi
+
 # Test 11e (#763 Codex P1): NON-DEFAULT base whose policy ENABLES the external
 # gate, while the default-branch policy DISABLES it. Parsing the switch from
 # the default-branch checkout made the whole external arm vacuous, so the
@@ -965,12 +1239,12 @@ fi
 # needs-external-review label, with a github-actions[bot] lane marker scoped
 # to the CURRENT head → EXEMPT (not applicable), must NOT delegate.
 # ---------------------------------------------------------------------------
-echo; echo "--- Test 17: verified propagation lane (head-pinned) → exempt"
+echo; echo "--- Test 17: verified propagation lane (head/base-pinned) → exempt"
 SCRATCH=$(make_scratch false true)
 FIXTURE_PR=$(make_pr_fixture "$HEAD_SHA" "nathanjohnpayne" '[]')
 FIXTURE_FILES=$(make_files_fixture '[{"filename":".github/workflows/x.yml","additions":400,"deletions":50}]')
-FIXTURE_COMMENTS=$(make_comments_fixture "$(jq -n --arg h "$HEAD_SHA" '
-  [{user:{login:"github-actions[bot]"}, body:("<!-- mergepath-propagation-lane verified-head=" + $h + " -->\nverified faithful mirror ✅")}]')")
+FIXTURE_COMMENTS=$(make_comments_fixture "$(jq -n --arg h "$HEAD_SHA" --arg b "$BASE_SHA" '
+  [{user:{login:"github-actions[bot]"}, body:("<!-- mergepath-propagation-lane:v2 verified-head=" + $h + " verified-base=" + $b + " -->\nverified faithful mirror ✅")}]')")
 set +e
 OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_FILES="$FIXTURE_FILES" FIXTURE_COMMENTS="$FIXTURE_COMMENTS" \
       MERGE_CLEARANCE_CODEX_CHECK_BIN="$STUB_DIR/codex-check-stub" \
@@ -979,7 +1253,7 @@ OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_FILES="$FIXTURE_FILES" FIXTURE_COMMENTS="
 RC=$?
 set -e
 if [ "$RC" = 0 ] && echo "$OUT" | grep -qi "not applicable"; then
-  pass "verified propagation lane (current-head marker) → exempt (exit 0, no delegate)"
+  pass "verified propagation lane (current-pair marker) → exempt (exit 0, no delegate)"
 else
   fail "expected rc=0 not-applicable (exempt); got rc=$RC"; echo "$OUT" | sed 's/^/      /' >&2
 fi
@@ -995,8 +1269,8 @@ echo; echo "--- Test 17b: STALE bot marker (old head) + diverged head → NOT ex
 SCRATCH=$(make_scratch false true)
 FIXTURE_PR=$(make_pr_fixture "$HEAD_SHA" "nathanjohnpayne" '[]')
 FIXTURE_FILES=$(make_files_fixture '[{"filename":".github/workflows/x.yml","additions":400,"deletions":50}]')
-FIXTURE_COMMENTS=$(make_comments_fixture "$(jq -n --arg old "$OLD_SHA" '
-  [{user:{login:"github-actions[bot]"}, body:("<!-- mergepath-propagation-lane verified-head=" + $old + " -->\nverified faithful mirror ✅")}]')")
+FIXTURE_COMMENTS=$(make_comments_fixture "$(jq -n --arg old "$OLD_SHA" --arg b "$BASE_SHA" '
+  [{user:{login:"github-actions[bot]"}, body:("<!-- mergepath-propagation-lane:v2 verified-head=" + $old + " verified-base=" + $b + " -->\nverified faithful mirror ✅")}]')")
 set +e
 OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_FILES="$FIXTURE_FILES" FIXTURE_COMMENTS="$FIXTURE_COMMENTS" \
       MERGE_CLEARANCE_CODEX_CHECK_BIN="$STUB_DIR/codex-check-stub" \
@@ -1010,6 +1284,58 @@ else
   fail "expected rc=1 BLOCKED (stale marker ignored); got rc=$RC"; echo "$OUT" | sed 's/^/      /' >&2
 fi
 
+# Same head with a marker bound to the former base must not exempt a retarget.
+echo; echo "--- Test 17c: same-head marker for old base after retarget → NOT exempt"
+SCRATCH=$(make_scratch false true)
+FIXTURE_PR=$(make_pr_fixture "$HEAD_SHA" "nathanjohnpayne" '[]')
+FIXTURE_FILES=$(make_files_fixture '[{"filename":".github/workflows/x.yml","additions":400,"deletions":50}]')
+FIXTURE_COMMENTS=$(make_comments_fixture "$(jq -n --arg h "$HEAD_SHA" --arg old "$OLD_BASE_SHA" '
+  [{user:{login:"github-actions[bot]"}, body:("<!-- mergepath-propagation-lane:v2 verified-head=" + $h + " verified-base=" + $old + " -->")}]')")
+set +e
+OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_FILES="$FIXTURE_FILES" FIXTURE_COMMENTS="$FIXTURE_COMMENTS" \
+      MERGE_CLEARANCE_CODEX_CHECK_BIN="$STUB_DIR/codex-check-stub" CODEX_STUB_RC=1 \
+      run_gate "$SCRATCH" 99 owner/repo 2>&1)
+RC=$?
+set -e
+if [ "$RC" = 1 ] && echo "$OUT" | grep -q "BLOCKED"; then
+  pass "same-head marker for old base → NOT exempt → delegate blocks"
+else
+  fail "wrong-base marker unexpectedly exempted the retarget; got rc=$RC: $OUT"
+fi
+
+# Legacy head-only markers cannot prove a base and grant no v2 exemption.
+echo; echo "--- Test 17d: legacy head-only marker → NOT exempt"
+FIXTURE_COMMENTS=$(make_comments_fixture "$(jq -n --arg h "$HEAD_SHA" '
+  [{user:{login:"github-actions[bot]"}, body:("<!-- mergepath-propagation-lane verified-head=" + $h + " -->")}]')")
+set +e
+OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_FILES="$FIXTURE_FILES" FIXTURE_COMMENTS="$FIXTURE_COMMENTS" \
+      MERGE_CLEARANCE_CODEX_CHECK_BIN="$STUB_DIR/codex-check-stub" CODEX_STUB_RC=1 \
+      run_gate "$SCRATCH" 99 owner/repo 2>&1)
+RC=$?
+set -e
+if [ "$RC" = 1 ] && echo "$OUT" | grep -q "BLOCKED"; then
+  pass "legacy head-only marker → NOT exempt → delegate blocks"
+else
+  fail "legacy marker unexpectedly granted the v2 exemption; got rc=$RC: $OUT"
+fi
+
+# A bot-authored marker with extra material inside the machine envelope is not
+# the exact v2 pair marker.
+echo; echo "--- Test 17e: malformed v2 marker → NOT exempt"
+FIXTURE_COMMENTS=$(make_comments_fixture "$(jq -n --arg h "$HEAD_SHA" --arg b "$BASE_SHA" '
+  [{user:{login:"github-actions[bot]"}, body:("<!-- mergepath-propagation-lane:v2 verified-head=" + $h + " verified-base=" + $b + " malformed -->")}]')")
+set +e
+OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_FILES="$FIXTURE_FILES" FIXTURE_COMMENTS="$FIXTURE_COMMENTS" \
+      MERGE_CLEARANCE_CODEX_CHECK_BIN="$STUB_DIR/codex-check-stub" CODEX_STUB_RC=1 \
+      run_gate "$SCRATCH" 99 owner/repo 2>&1)
+RC=$?
+set -e
+if [ "$RC" = 1 ] && echo "$OUT" | grep -q "BLOCKED"; then
+  pass "malformed v2 marker → NOT exempt → delegate blocks"
+else
+  fail "malformed marker unexpectedly granted the v2 exemption; got rc=$RC: $OUT"
+fi
+
 # ---------------------------------------------------------------------------
 # Test 18: SPOOFED lane marker — current-head marker but authored by a NON-bot
 # login → must NOT exempt (a PR author can't forge github-actions[bot]).
@@ -1019,8 +1345,8 @@ echo; echo "--- Test 18: spoofed (non-bot) lane marker → NOT exempt"
 SCRATCH=$(make_scratch false true)
 FIXTURE_PR=$(make_pr_fixture "$HEAD_SHA" "nathanjohnpayne" '[]')
 FIXTURE_FILES=$(make_files_fixture '[{"filename":"src/big.ts","additions":250,"deletions":120}]')
-FIXTURE_COMMENTS=$(make_comments_fixture "$(jq -n --arg h "$HEAD_SHA" '
-  [{user:{login:"nathanjohnpayne"}, body:("<!-- mergepath-propagation-lane verified-head=" + $h + " --> nice try")}]')")
+FIXTURE_COMMENTS=$(make_comments_fixture "$(jq -n --arg h "$HEAD_SHA" --arg b "$BASE_SHA" '
+  [{user:{login:"nathanjohnpayne"}, body:("<!-- mergepath-propagation-lane:v2 verified-head=" + $h + " verified-base=" + $b + " --> nice try")}]')")
 set +e
 OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_FILES="$FIXTURE_FILES" FIXTURE_COMMENTS="$FIXTURE_COMMENTS" \
       MERGE_CLEARANCE_CODEX_CHECK_BIN="$STUB_DIR/codex-check-stub" \
@@ -1973,8 +2299,8 @@ echo; echo "--- Query 5: verified lane marker for HEAD, label absent → false"
 SCRATCH=$(make_scratch false true)
 FIXTURE_PR=$(make_pr_fixture "$HEAD_SHA" "someone")
 FIXTURE_FILES=$(make_files_fixture '[{"filename":".github/workflows/x.yml","additions":500,"deletions":0}]')
-FIXTURE_COMMENTS=$(make_comments_fixture "$(jq -n --arg sha "$HEAD_SHA" '
-  [{ user:{login:"github-actions[bot]"}, body:("<!-- mergepath-propagation-lane verified-head=" + $sha + " -->") }]
+FIXTURE_COMMENTS=$(make_comments_fixture "$(jq -n --arg sha "$HEAD_SHA" --arg base "$BASE_SHA" '
+  [{ user:{login:"github-actions[bot]"}, body:("<!-- mergepath-propagation-lane:v2 verified-head=" + $sha + " verified-base=" + $base + " -->") }]
 ')")
 set +e
 OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_FILES="$FIXTURE_FILES" FIXTURE_COMMENTS="$FIXTURE_COMMENTS" \
@@ -2004,6 +2330,31 @@ if [ "$RC" != 0 ] && [ "$OUT" != "true" ]; then
 else
   fail "query: indeterminate marker read expected nonzero and not 'true'; got rc=$RC out='$OUT'"
 fi
+
+echo; echo "--- Query 5c: malformed live marker pair → nonzero, NOT 'true'"
+for malformed_part in head base; do
+  malformed_head=$HEAD_SHA
+  malformed_base=$BASE_SHA
+  case "$malformed_part" in
+    head) malformed_head=not-a-sha ;;
+    base) malformed_base=not-a-sha ;;
+  esac
+  SCRATCH=$(make_scratch false true)
+  FIXTURE_PR=$(make_pr_fixture "$malformed_head" "someone" '[]' main main "$malformed_base")
+  FIXTURE_FILES=$(make_files_fixture '[{"filename":".github/workflows/x.yml","additions":500,"deletions":0}]')
+  FIXTURE_COMMENTS=$(make_comments_fixture "$(jq -n --arg h "$malformed_head" --arg b "$malformed_base" '
+    [{user:{login:"github-actions[bot]"}, body:("<!-- mergepath-propagation-lane:v2 verified-head=" + $h + " verified-base=" + $b + " -->")}]')")
+  set +e
+  OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_FILES="$FIXTURE_FILES" FIXTURE_COMMENTS="$FIXTURE_COMMENTS" \
+    run_gate "$SCRATCH" --derive-external-requiredness 99 owner/repo 2>/dev/null)
+  RC=$?
+  set -e
+  if [ "$RC" != 0 ] && [ "$OUT" != "true" ]; then
+    pass "query: malformed live $malformed_part cannot grant propagation authority"
+  else
+    fail "query: malformed live $malformed_part expected nonzero/no true; got rc=$RC out='$OUT'"
+  fi
+done
 
 echo; echo "--- Query 6: external gate disabled → false"
 SCRATCH=$(make_scratch false false)
@@ -2041,6 +2392,30 @@ else
   fail "query: dependabot expected false/0 both ways; got rc=$RC out='$OUT' rc2=$RC2 out2='$OUT2'"
 fi
 
+echo; echo "--- Query 7b: Dependabot-opened PR with a foreign commit → derived like any PR"
+# The query modes must not grant the Dependabot `false` to a PR whose commits
+# are not all Dependabot's: over threshold, the external arm applies → true.
+SCRATCH=$(make_scratch true true)
+FIXTURE_PR=$(make_pr_fixture "$HEAD_SHA" "$DEPENDABOT")
+MIXED_COMMITS=$(make_commits_fixture "[$(dep_commit "$OLD_SHA"),$(dep_commit "$HEAD_SHA" someone-with-push someone-with-push false)]")
+set +e
+OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_COMMITS="$MIXED_COMMITS" FIXTURE_FILES="$OVER_THRESHOLD_FILES" \
+      run_gate "$SCRATCH" --derive-external-requiredness 99 owner/repo 2>/dev/null)
+RC=$?
+OUT_P4=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_COMMITS="$MIXED_COMMITS" FIXTURE_FILES="$OVER_THRESHOLD_FILES" \
+      run_gate "$SCRATCH" --derive-phase-4-requiredness 99 owner/repo 2>/dev/null)
+RC_P4=$?
+OUT_FAIL=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_COMMITS_FAIL=1 FIXTURE_FILES="$OVER_THRESHOLD_FILES" \
+      run_gate "$SCRATCH" --derive-external-requiredness 99 owner/repo 2>/dev/null)
+RC_FAIL=$?
+set -e
+if [ "$RC" = 0 ] && [ "$OUT" = "true" ] && [ "$RC_P4" = 0 ] && [ "$OUT_P4" = "true" ] \
+   && [ "$RC_FAIL" = 2 ] && [ "$OUT_FAIL" != "true" ] && [ "$OUT_FAIL" != "false" ]; then
+  pass "query: mixed-commit Dependabot PR derives true (external + Phase 4); unreadable commits → exit 2"
+else
+  fail "query: mixed-commit Dependabot PR expected true/true and rc=2 on read failure; got rc=$RC out='$OUT' p4rc=$RC_P4 p4='$OUT_P4' failrc=$RC_FAIL fail='$OUT_FAIL'"
+fi
+
 echo; echo "--- Query 8: PR fetch failure → nonzero (caller fails closed)"
 SCRATCH=$(make_scratch false true)
 set +e
@@ -2075,12 +2450,12 @@ else
   fail "Phase 4 query: disabled-gate over-threshold expected true/0; got rc=$RC out='$OUT'"
 fi
 
-echo; echo "--- Phase 4 Query 2: exact-head verified propagation lane → false"
+echo; echo "--- Phase 4 Query 2: exact-pair verified propagation lane → false"
 SCRATCH=$(make_scratch false false)
 FIXTURE_PR=$(make_pr_fixture "$HEAD_SHA" "someone")
 FIXTURE_FILES=$(make_files_fixture '[{"filename":".github/workflows/x.yml","additions":500,"deletions":0}]')
-FIXTURE_COMMENTS=$(make_comments_fixture "$(jq -n --arg sha "$HEAD_SHA" '
-  [{ user:{login:"github-actions[bot]"}, body:("<!-- mergepath-propagation-lane verified-head=" + $sha + " -->") }]
+FIXTURE_COMMENTS=$(make_comments_fixture "$(jq -n --arg sha "$HEAD_SHA" --arg base "$BASE_SHA" '
+  [{ user:{login:"github-actions[bot]"}, body:("<!-- mergepath-propagation-lane:v2 verified-head=" + $sha + " verified-base=" + $base + " -->") }]
 ')")
 set +e
 OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_FILES="$FIXTURE_FILES" FIXTURE_COMMENTS="$FIXTURE_COMMENTS" \
@@ -2088,17 +2463,17 @@ OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_FILES="$FIXTURE_FILES" FIXTURE_COMMENTS="
 RC=$?
 set -e
 if [ "$RC" = 0 ] && [ "$OUT" = "false" ]; then
-  pass "Phase 4 query: exact-head verified propagation keeps under-threshold-equivalent standing"
+  pass "Phase 4 query: exact-pair verified propagation keeps under-threshold-equivalent standing"
 else
   fail "Phase 4 query: verified propagation expected false/0; got rc=$RC out='$OUT'"
 fi
 
-echo; echo "--- Phase 4 Query 2b: force-on label outranks exact-head propagation lane"
+echo; echo "--- Phase 4 Query 2b: force-on label outranks exact-pair propagation lane"
 SCRATCH=$(make_scratch false false)
 FIXTURE_PR=$(make_pr_fixture "$HEAD_SHA" "someone" "$EXT_LABEL")
 FIXTURE_FILES=$(make_files_fixture '[{"filename":"small.txt","additions":1,"deletions":0}]')
-FIXTURE_COMMENTS=$(make_comments_fixture "$(jq -n --arg sha "$HEAD_SHA" '
-  [{ user:{login:"github-actions[bot]"}, body:("<!-- mergepath-propagation-lane verified-head=" + $sha + " -->") }]
+FIXTURE_COMMENTS=$(make_comments_fixture "$(jq -n --arg sha "$HEAD_SHA" --arg base "$BASE_SHA" '
+  [{ user:{login:"github-actions[bot]"}, body:("<!-- mergepath-propagation-lane:v2 verified-head=" + $sha + " verified-base=" + $base + " -->") }]
 ')")
 set +e
 OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_FILES="$FIXTURE_FILES" FIXTURE_COMMENTS="$FIXTURE_COMMENTS" \
@@ -2134,7 +2509,7 @@ FIXTURE_COMMENTS=$(make_comments_fixture '[]')
 set +e
 OUT=$(MERGE_CLEARANCE_EXPECTED_HEAD_SHA="$HEAD_SHA" \
   MERGE_CLEARANCE_EXPECTED_BASE_REF=main \
-  MERGE_CLEARANCE_EXPECTED_BASE_SHA=base000aaa \
+  MERGE_CLEARANCE_EXPECTED_BASE_SHA="$BASE_SHA" \
   MERGE_CLEARANCE_MATERIALIZE_DEFAULT_POLICY=true \
   FIXTURE_BASE_POLICY="$SCRATCH/.github/review-policy.yml" \
   FIXTURE_PR="$FIXTURE_PR" FIXTURE_FILES="$FIXTURE_FILES" FIXTURE_COMMENTS="$FIXTURE_COMMENTS" \
@@ -2150,7 +2525,7 @@ fi
 for pin_case in head base-ref base-sha; do
   expected_head=$HEAD_SHA
   expected_base_ref=main
-  expected_base_sha=base000aaa
+  expected_base_sha="$BASE_SHA"
   case "$pin_case" in
     head) expected_head=unexpected-head ;;
     base-ref) expected_base_ref=release ;;
@@ -2172,6 +2547,50 @@ for pin_case in head base-ref base-sha; do
     fail "Phase 4 query: mismatched expected $pin_case unexpectedly passed with '$OUT'"
   fi
 done
+
+# GitHub caps the PR files listing at 3000 entries. AT the cap the inventory may
+# be truncated, so both the lines total and the protected-path match below are
+# reading an incomplete list. scripts/workflow/external_review_fingerprint.sh has
+# forced requires_review at this bound since #427; this derivation did not, so
+# two implementations of the same question disagreed FAIL-OPEN on exactly the
+# largest PRs. Both directions are pinned: at the cap the answer must be true
+# even when every entry is tiny and excluded, and one entry below the cap the
+# ordinary rules must still apply so the guard cannot mask a genuine `false`.
+lockfile_inventory() {  # <count>  excluded, zero-line entries: ordinary rules say false
+  jq -nc --argjson n "$1" '[range($n) | {filename:"p\(.)/yarn.lock", additions:0, deletions:0}]'
+}
+
+echo; echo "--- Phase 4 Query 9: files listing AT the 3000-entry cap → true (fail closed)"
+SCRATCH=$(make_scratch false false)
+FIXTURE_PR=$(make_pr_fixture "$HEAD_SHA" "someone")
+FIXTURE_FILES=$(make_files_fixture "$(lockfile_inventory 3000)")
+FIXTURE_COMMENTS=$(make_comments_fixture '[]')
+set +e
+OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_FILES="$FIXTURE_FILES" FIXTURE_COMMENTS="$FIXTURE_COMMENTS" \
+  run_gate "$SCRATCH" --derive-phase-4-requiredness 99 owner/repo 2>/dev/null)
+RC=$?
+set -e
+if [ "$RC" = 0 ] && [ "$OUT" = "true" ]; then
+  pass "Phase 4 query: a possibly-capped files inventory fails closed to true"
+else
+  fail "Phase 4 query: at the 3000-entry cap expected true/0; got rc=$RC out='$OUT'"
+fi
+
+echo; echo "--- Phase 4 Query 10: one entry BELOW the cap → false (the guard must not over-fire)"
+SCRATCH=$(make_scratch false false)
+FIXTURE_PR=$(make_pr_fixture "$HEAD_SHA" "someone")
+FIXTURE_FILES=$(make_files_fixture "$(lockfile_inventory 2999)")
+FIXTURE_COMMENTS=$(make_comments_fixture '[]')
+set +e
+OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_FILES="$FIXTURE_FILES" FIXTURE_COMMENTS="$FIXTURE_COMMENTS" \
+  run_gate "$SCRATCH" --derive-phase-4-requiredness 99 owner/repo 2>/dev/null)
+RC=$?
+set -e
+if [ "$RC" = 0 ] && [ "$OUT" = "false" ]; then
+  pass "Phase 4 query: 2999 excluded zero-line entries stay false — the cap guard does not over-fire"
+else
+  fail "Phase 4 query: one entry below the cap expected false/0; got rc=$RC out='$OUT'"
+fi
 
 # ---------------------------------------------------------------------------
 # --derive-rate-limit-protection query mode (#713, tightened by #772): prints
@@ -2237,6 +2656,7 @@ FIXTURE_PROTECTION=$(make_protection_fixture '["Label Gate","Self-Review Require
 set +e
 OUT=$(FIXTURE_PR="$FIXTURE_PR" FIXTURE_FILES="$FIXTURE_FILES" FIXTURE_COMMENTS="$FIXTURE_COMMENTS" \
       FIXTURE_PROTECTION="$FIXTURE_PROTECTION" \
+      CODEX_REVIEW_CHECK_REPORT_REQUEST_EVIDENCE=1 CODEX_STUB_EXPECT_EVIDENCE=0 \
       MERGE_CLEARANCE_CODEX_CHECK_BIN="$STUB_DIR/codex-check-stub" CODEX_STUB_REQUIRE_HEAD_PIN=1 CODEX_STUB_RC=1 \
   run_gate "$SCRATCH" --derive-rate-limit-protection 99 owner/repo 2>"$WORKDIR/protection-1c-stderr.log")
 RC=$?
@@ -2304,8 +2724,8 @@ echo; echo "--- Protection 1f (#772): propagation-lane-exempt head short-circuit
 SCRATCH=$(make_scratch false true)
 FIXTURE_PR=$(make_pr_fixture "$HEAD_SHA" "someone")
 FIXTURE_FILES=$(make_files_fixture '[{"filename":".github/workflows/x.yml","additions":500,"deletions":0}]')
-FIXTURE_COMMENTS=$(make_comments_fixture "$(jq -n --arg sha "$HEAD_SHA" '
-  [{ user:{login:"github-actions[bot]"}, body:("<!-- mergepath-propagation-lane verified-head=" + $sha + " -->") }]
+FIXTURE_COMMENTS=$(make_comments_fixture "$(jq -n --arg sha "$HEAD_SHA" --arg base "$BASE_SHA" '
+  [{ user:{login:"github-actions[bot]"}, body:("<!-- mergepath-propagation-lane:v2 verified-head=" + $sha + " verified-base=" + $base + " -->") }]
 ')")
 # Enforced-gate fixture on purpose: if the lane exemption did NOT short-circuit,
 # arm 1 would find the context and wrongly print true.
@@ -3662,8 +4082,9 @@ rcp_dir_case native-producer-needs-drift \
 # reddening nine consumers' lint. The mergepath direction is the other half:
 # there, the same absence is a deleted single writer and must be loud.
 RCP_CONSUMER="$RCP_DIR/consumer"
-mkdir -p "$RCP_CONSUMER/scripts/ci" "$RCP_CONSUMER/.github/workflows"
+mkdir -p "$RCP_CONSUMER/scripts/ci" "$RCP_CONSUMER/scripts/lib" "$RCP_CONSUMER/.github/workflows"
 cp "$RCP_CHECK" "$RCP_CONSUMER/scripts/ci/check_required_check_publisher"
+cp "$ROOT/scripts/lib/ci-check-modes.sh" "$RCP_CONSUMER/scripts/lib/ci-check-modes.sh"
 set +e
 OUT=$(cd "$RCP_CONSUMER" && ./scripts/ci/check_required_check_publisher 2>&1)
 RC=$?
@@ -3676,8 +4097,9 @@ else
 fi
 
 RCP_HUB="$RCP_DIR/hub-missing"
-mkdir -p "$RCP_HUB/scripts/ci" "$RCP_HUB/.github/workflows"
+mkdir -p "$RCP_HUB/scripts/ci" "$RCP_HUB/scripts/lib" "$RCP_HUB/.github/workflows"
 cp "$RCP_CHECK" "$RCP_HUB/scripts/ci/check_required_check_publisher"
+cp "$ROOT/scripts/lib/ci-check-modes.sh" "$RCP_HUB/scripts/lib/ci-check-modes.sh"
 printf '#!/usr/bin/env bash\n' > "$RCP_HUB/scripts/sync-to-downstream.sh"
 set +e
 OUT=$(cd "$RCP_HUB" && ./scripts/ci/check_required_check_publisher 2>&1)

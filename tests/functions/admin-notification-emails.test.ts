@@ -1054,6 +1054,12 @@ describe('alertsForWrite', () => {
     expect(kinds(undefined, { status: 'active' })).toEqual([]);
   });
 
+  it('keeps new reports admin-visible on a restored incarnation (#1405)', () => {
+    const before = { ...ITEM({ status: 'active', reportCount: 5 }), reportHideSuppressed: true };
+    const after = { ...before, reportCount: 6 };
+    expect(alertsForWrite('items', 'i1', before, after).map((a) => a.kind)).toEqual(['content-reported']);
+  });
+
   it('queues both alerts for a single hide-plus-report write', () => {
     const kinds = alertsForWrite(
       'items',
@@ -1252,6 +1258,17 @@ describe('currentThemeDay', () => {
 });
 
 describe('reviewDetail', () => {
+  it('hydrates current suppression into an older queued report and preserves the new alert', () => {
+    const row = currentRowFor(ALERT(), ITEM({ status: 'active', reportCount: 1, reportHideSuppressed: true }), false);
+    expect(row?.reportHideSuppressed).toBe(true);
+    expect(row && reviewDetail(row, 4)).toBe('reported · 1 report');
+    const drafts = alertsForWrite('items', 'restored', ITEM({ reportCount: 0, reportHideSuppressed: true }), ITEM({ reportCount: 1, reportHideSuppressed: true }));
+    expect(drafts.find((draft) => draft.kind === 'content-reported')?.reportHideSuppressed).toBe(true);
+  });
+  it('keeps new suppressed reports visible without promising automatic hiding', () => {
+    expect(reviewDetail(ALERT({ reportCount: 1, reportHideSuppressed: true }), 4)).toBe('reported · 1 report');
+    expect(reviewDetail(ALERT({ kind: 'moderation', status: 'hidden', reportCount: 8, reportHideSuppressed: true }), 4)).toBe('hidden (by an admin) · 8 reports');
+  });
   it('derives the cause from stored facts and never fabricates a threshold', () => {
     const mod = (over: Partial<AdminAlertRecord>) => ALERT({ kind: 'moderation', ...over });
     expect(reviewDetail(mod({ status: 'hidden', reportCount: 4 }), 4)).toBe('hidden (reports >= threshold) · 4 reports');

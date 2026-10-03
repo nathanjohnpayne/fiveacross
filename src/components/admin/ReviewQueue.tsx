@@ -103,9 +103,10 @@ function restoreTitle(visionFlag: string | null | undefined, claimUndecided: boo
 
 /**
  * One reported-Proof row in the Reports group. `Clear reports` lifts the ADR
- * 0004 Phase 0 community auto-hide by zeroing reportCount — rendered ONLY when the
- * row is actually auto-hidden (the only state with a hide to lift; Codex P2, PR
- * #107 finding 3). It is distinct from Restore, which lifts the `status` hard-hide,
+ * 0004 community auto-hide by zeroing reportCount and suppressing further
+ * automatic hides for this incarnation. It also dismisses new reports on
+ * suppressed restored content; ordinary below-threshold rows retain their controls.
+ * It is distinct from Restore, which lifts the `status` hard-hide,
  * so a doubly-hidden row (status hidden AND over threshold) shows both. `Ban author`
  * mutes the Proof's owner across the event (#108); the row stays reachable after.
  *
@@ -151,7 +152,7 @@ function ProofQueueRow({
   // rather than falling back to the ceremonial-Day derivation.
   standingsFreezeAt?: number;
 }) {
-  const autoHidden = isReportHidden(p.reportCount, threshold);
+  const autoHidden = isReportHidden(p.reportCount, threshold, p.reportHideSuppressed);
   // #133: the AI screen's verdict, and whether the Proof is currently hidden —
   // two independent facts, so the pill never claims the AI screen caused a hide
   // that the report threshold or an admin actually made.
@@ -178,7 +179,7 @@ function ProofQueueRow({
           </div>
         )}
       </div>
-      {autoHidden && (
+      {(autoHidden || (p.reportHideSuppressed === true && p.reportCount > 0)) && (
         <AsyncButton onAction={() => clearProofReports(p.id)}>
           Clear reports
         </AsyncButton>
@@ -266,7 +267,7 @@ function ItemQueueRow({
   bannedUids: string[];
   admins: string[];
 }) {
-  const autoHidden = isReportHidden(it.reportCount, threshold);
+  const autoHidden = isReportHidden(it.reportCount, threshold, it.reportHideSuppressed);
   return (
     <div className="row">
       <div className="grow">
@@ -277,7 +278,7 @@ function ItemQueueRow({
         </div>
         <div className="sub">prompt · {it.status}</div>
       </div>
-      {autoHidden && (
+      {(autoHidden || (it.reportHideSuppressed === true && it.reportCount > 0)) && (
         <AsyncButton onAction={() => clearItemReports(it.id)}>
           Clear reports
         </AsyncButton>

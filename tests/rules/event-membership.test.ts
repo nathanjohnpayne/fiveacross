@@ -1,3 +1,4 @@
+import { submitReportForTest } from './reportTestHelpers';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest';
@@ -231,6 +232,7 @@ async function seedEventContent(
     );
     await setDoc(doc(database, at(`items/existing-${uid}`)), {
       text: `Existing prompt for ${uid}`,
+      createdAt: NOW,
       createdBy: uid,
       status: 'active',
       reportCount: 0,
@@ -311,9 +313,7 @@ function clientWriteInventory(
     [
       'item report update',
       () =>
-        updateDoc(doc(database, at(`items/existing-${uid}`)), {
-          reportCount: 1,
-        }),
+        submitReportForTest(database, eventId, uid, 'items', `existing-${uid}`),
     ],
     [
       'player update',
@@ -358,9 +358,7 @@ function clientWriteInventory(
     [
       'proof report update',
       () =>
-        updateDoc(doc(database, at(`proofs/existing-${uid}`)), {
-          reportCount: 1,
-        }),
+        submitReportForTest(database, eventId, uid, 'proofs', `existing-${uid}`),
     ],
     [
       'claim create',

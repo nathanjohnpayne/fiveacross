@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, act } from '@testing-library/react';
+import { render, screen, act, fireEvent } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -52,6 +52,7 @@ vi.mock('react-router', () => ({ useNavigate: () => vi.fn() }));
 vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: { uid: 'viewer' } }) }));
 
 import ProofFeed from './ProofFeed';
+import { track } from '../analytics';
 
 type SnapCb = (snap: unknown) => void;
 // ProofFeed subscribes to THREE targets via useFeed + its own useEventDoc: the
@@ -145,6 +146,7 @@ const colSnap = (docs: ProofDoc[]) => ({
 });
 
 beforeEach(() => {
+  vi.mocked(track).mockClear();
   H.onSnapshot.mockReset();
   H.onSnapshot.mockReturnValue(() => {});
   H.reportProof.mockReset();
@@ -153,6 +155,26 @@ beforeEach(() => {
 });
 
 describe('ProofFeed — the Proof IS the Feed entry (ADR 0002)', () => {
+  it.each(['accepted', 'denied'])('waits for a report acknowledgment and offers retry on failure: %s', async (outcome) => {
+    const sub = captureOnNext();
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    H.reportProof.mockReturnValueOnce(new Promise<void>((yes, no) => { resolve = yes; reject = no; }));
+    render(<ProofFeed />);
+    sub.fire(colSnap([proof({ id: 'reported', createdAt: 123 })]));
+    const button = screen.getByTitle('Report');
+    fireEvent.click(button);
+    expect(H.reportProof).toHaveBeenCalledWith('reported', 123);
+    expect(button).toBeDisabled();
+    expect(track).not.toHaveBeenCalledWith('report_item');
+    await act(async () => { if (outcome === 'accepted') resolve(); else reject(new Error('offline or rate denied')); });
+    expect(button).not.toBeDisabled();
+    if (outcome === 'accepted') expect(track).toHaveBeenCalledWith('report_item');
+    else {
+      expect(screen.getByRole('alert')).toHaveTextContent('Report not sent');
+      expect(track).not.toHaveBeenCalledWith('report_item');
+    }
+  });
   it('renders proofs newest-first with the Player name and the Prompt text', () => {
     const sub = captureOnNext();
     render(<ProofFeed />);
