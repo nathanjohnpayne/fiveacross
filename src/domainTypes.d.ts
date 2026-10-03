@@ -1114,6 +1114,10 @@ export interface ProofDoc {
   // admin-only readable per firestore.rules until confirming the Claim flips it
   // to 'active'. A rejected Claim leaves its Proof 'pending' rather than exposed.
   status: 'active' | 'pending' | 'hidden' | 'flagged';
+  // This admin-reviewed attachment was added to already-established credit.
+  // Deletion removes content/projection only; absent legacy Proofs retain the
+  // ordinary proof-backed unmark. This grants no publication/Claim authority.
+  contentOnly?: boolean;
   visionFlag?: string | null; // set by the moderation function for illegal/extreme content
   // The SERVER-OWNED record that a safety hide stands on this Proof (#133).
   // `hideProofOnVisionFlag` stamps `true` in the same transactional update that

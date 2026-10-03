@@ -71,7 +71,7 @@ Runner: `npm test` (Vitest, jsdom). Test: `src/data/w2-proof-capture.test.ts` (t
 - Attaching to an ALREADY-marked square preserves the existing marker's `markedAt` and refreshes its attribution; a fresh mark (no marker) stamps `now`. The marker read joins the transaction's other reads—every `tx.get` precedes the first `tx.set`, pinned by spy invocation order (reads-before-writes is the Firestore transaction contract).
 - The attributed name is bounded to the marker rule's ≤100-char cap.
 - The free centre (null `itemId`) writes no marker.
-- `deleteProof` deletes the marker at that same path when it genuinely unmarks the backing cell, and leaves it untouched on the clobbered-cell residual.
+- `deleteProof` deletes the marker at that same path when it genuinely unmarks the backing cell, and leaves it untouched on the clobbered-cell residual or content-only attachment deletion.
 
 ### RTL—`useTally` returns the count + who-list for a Prompt
 

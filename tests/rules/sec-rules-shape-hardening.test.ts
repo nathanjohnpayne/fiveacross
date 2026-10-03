@@ -219,6 +219,15 @@ describe('players/{uid} — identity fields are typed; stats stay self-written (
 });
 
 describe('proofs/{proofId} — the create holds the id, the Callout text and the avatar', () => {
+  it('admits a boolean content-only deletion hint, but denies malformed or owner-mutated hints', async () => {
+    const alice = db(ALICE);
+    const ref = doc(alice, at('proofs/contentOnlyDeletion'));
+    await assertSucceeds(setDoc(ref, textProof(ALICE, 'active', { contentOnly: true })));
+    await assertFails(setDoc(doc(alice, at('proofs/badDeletionHint')), textProof(ALICE, 'active', { contentOnly: 'yes' })));
+    await assertFails(updateDoc(ref, { contentOnly: false }));
+    await assertFails(updateDoc(ref, { status: 'pending' }));
+  });
+
   it('ALLOWS the text Proof attachProof writes under an auto-id', async () => {
     await assertSucceeds(setDoc(doc(db(ALICE), at('proofs/Ab3dEf6hIj9kLm2nOp4q')), textProof(ALICE)));
     await assertSucceeds(

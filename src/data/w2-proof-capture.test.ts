@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Cell } from '../types';
+import { completedLines } from '../game/logic';
 
 // w2-proof-capture, data layer. Drives the REAL attachProof / deleteProof write
 // paths (src/data/proofs.ts) with Firestore stubbed to inspectable spies — no
@@ -341,6 +342,7 @@ describe('attachProof — posts an active Proof to the Feed and marks the cell (
 
     const proof = setPayload('/proofs/')!;
     expect(proof.status).toBe('pending'); // NOT publicly visible until an admin confirms
+    expect(proof).not.toHaveProperty('contentOnly'); // this Proof creates fresh credit
 
     const board = setPayload('/boards/') as { cells: Cell[] };
     expect(board.cells[5].status).toBe('pending');
@@ -358,7 +360,7 @@ describe('attachProof — posts an active Proof to the Feed and marks the cell (
     cells[5] = { ...cells[5], marked: true, markedAt: 999, status: 'confirmed', ...(echo ? { echo: true } : {}) };
     boardState = { cells };
     await attachProof({ ...baseArgs, cells, claimMode: 'admin_confirmed', proof: { type: 'text', text: 'new content needs review' } });
-    expect(setPayload('/proofs/')).toMatchObject({ status: 'pending' });
+    expect(setPayload('/proofs/')).toMatchObject({ status: 'pending', contentOnly: true });
     expect(setPayload('/claims/')).toMatchObject({ status: 'pending', cellIndex: 5, contentOnly: true, proofId: expect.any(String) });
     const board = setPayload('/boards/') as { cells: Cell[] };
     expect(board.cells[5]).toMatchObject({ marked: true, markedAt: 999, status: 'confirmed' });
@@ -967,6 +969,38 @@ describe('per-Prompt Tally marker — every proofed Mark publishes too (ADR 0002
 });
 
 describe('deleteProof — resolves the backing cell by the proof doc cellIndex (PR #75)', () => {
+  it.each(['active', 'flagged'])('deletes %s reviewed content while preserving the established line, timestamp and Tally', async status => {
+    const cells = dealt();
+    for (const index of [0, 1, 2, 3, 4]) cells[index] = { ...cells[index], marked: true, markedAt: 9, status: 'confirmed' };
+    cells[4].proofId = 'P';
+    boardState = { cells };
+    playerState = { bingoCount: 1, squaresMarked: 5, firstBingoAt: 9,
+      dayStats: { 0: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 9 } } };
+    proofState = { uid: 'u1', cellIndex: 4, dayIndex: 0, status, contentOnly: true, storagePath: `proofs/${EVENT_ID}/u1/P.jpg` };
+    await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`, { daily: true, dayIndexes: [0, 1] });
+    const patch = (setPayload('/boards/') as { cells: Record<number, Cell> }).cells;
+    const next = cells.map(cell => patch[cell.index] ?? cell);
+    expect(next[4]).toMatchObject({ marked: true, markedAt: 9, status: 'confirmed', proofId: null });
+    expect(next[4]).not.toHaveProperty('echoOptOut');
+    expect(completedLines(next)).toHaveLength(1);
+    expect(setPayload('/players/')).toBeUndefined();
+    expect(txDelete.mock.calls.some(([ref]) => (ref as Ref).path.includes('/tally/'))).toBe(false);
+    expect(txDelete.mock.calls.some(([ref]) => (ref as Ref).path.endsWith('/proofs/P'))).toBe(true);
+    expect(deleteStorageSpy).toHaveBeenCalledWith(`proofs/${EVENT_ID}/u1/P.jpg`);
+  });
+
+  it('content-only deletion leaves a newer attachment projection and credit intact', async () => {
+    proofState = { uid: 'u1', cellIndex: 5, contentOnly: true, storagePath: null };
+    const cells = dealt();
+    cells[5] = { ...cells[5], marked: true, markedAt: 9, proofId: 'newer', status: 'confirmed' };
+    boardState = { cells };
+    await deleteProof('P');
+    expect(setPayload('/boards/')).toBeUndefined();
+    expect(setPayload('/players/')).toBeUndefined();
+    expect(txDelete.mock.calls.some(([ref]) => (ref as Ref).path.includes('/tally/'))).toBe(false);
+    expect(txDelete.mock.calls.some(([ref]) => (ref as Ref).path.endsWith('/proofs/P'))).toBe(true);
+  });
+
   it('keeps a delete that waits on Event A storage cleanup under Event A', async () => {
     let releaseStorageDelete!: () => void;
     deleteStorageSpy.mockImplementationOnce(

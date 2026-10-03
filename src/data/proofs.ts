@@ -371,6 +371,9 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
       // Admin-confirmed-mode proofs stay 'pending' (admin-only readable) until an admin
       // confirms the claim; otherwise the proof is public immediately.
       status: pendingClaim ? 'pending' : 'active',
+      // Content review can outlive its Claim. Keep the original-credit distinction
+      // on the durable Proof so later owner/admin deletion removes content only.
+      ...(pendingClaim && confirmedMark ? { contentOnly: true } : {}),
       visionFlag: null,
       // #190: stamp which affordance produced a photo so the Feed badges a
       // library pick 🖼️; null for audio/text and camera picks that pass none.
@@ -539,7 +542,7 @@ export async function reportProof(id: string): Promise<void> {
 export class ProofBacksMarkWhileClosingError extends Error {
   constructor(readonly proofId: string) {
     super(
-      'This photo still backs a marked square. Reopen play first, then delete it—while play is closed the square cannot be unmarked.',
+      'This proof is attached to a marked square. Reopen play first, then delete it—while play is closed the square cannot be updated.',
     );
     this.name = 'ProofBacksMarkWhileClosingError';
   }
@@ -565,8 +568,8 @@ export async function deleteProof(
   // the only path available when the Proof document is already gone, which is
   // the re-run of a takedown whose Storage half failed.
   storagePath?: string | null,
-  // Daily-cards mode (#246): unmark the backing cell on the DAY-SCOPED board for
-  // the Proof's OWN `dayIndex` and fold the owner's stats into that Day's bucket,
+  // Daily mode (#246): ordinary proof-backed unmark/stat cleanup belongs to the
+  // Proof's OWN Day; content-only deletion clears the link without a stat fold,
   // mirroring `attachProof`. Absent/false keeps the pre-1.5 flat single-board
   // unmark. `tutorialDayIndexes` scopes the cruise-wide First-to-BINGO exclusion.
   opts?: {
@@ -717,9 +720,9 @@ export async function deleteProof(
     // refusing. Reading the Board while closing costs one `get` on a document
     // no one may write in that state.
     if (proof && !archived) {
-      // A deleted proof must not leave its square marked-but-uncredited (in
-      // proof_required mode a marked cell is backed by this proof). Unmark the
-      // backing cell and recompute the owner's derived stats in the same txn.
+      // Ordinary proof-backed deletion unmarks and folds stats in this txn.
+      // A content-only attachment leaves established credit intact and only
+      // clears its projection; both paths read the live authoritative Proof.
       const daily = opts?.daily === true;
       const proofDayIndex = typeof proof.dayIndex === 'number' ? proof.dayIndex : 0;
       const boardRef = daily
@@ -749,7 +752,19 @@ export async function deleteProof(
       // doc's own `uid`/`cellIndex`, never solely from `cells[i].proofId` — see
       // `ProofFeed`/`useProofFeed`.
       const backing = cells?.find((c) => c.index === proof.cellIndex);
-      if (cells && backing && backing.proofId === id) {
+      if (cells && backing && backing.proofId === id && proof.contentOnly === true) {
+        // This attachment never created the established Mark's credit. Remove
+        // only its projection; leave timestamps, standing wins and Tally intact.
+        // Closing still refuses the Board cleanup, preserving the freeze contract.
+        if (closing) throw new ProofBacksMarkWhileClosingError(id);
+        const next = cells.map((cell) =>
+          cell.index === proof.cellIndex ? { ...cell, proofId: null } : cell,
+        );
+        tx.set(boardRef, ...cellsMergeSet(cellsPatch(changedCells(cells, next)), {
+          ...(typeof boardData?.seed === 'number' ? { markSeed: boardData.seed } : {}),
+        }));
+      }
+      if (cells && backing && backing.proofId === id && proof.contentOnly !== true) {
         // THE REFUSAL, and only for the reversible half of the freeze. Nothing
         // has been written yet — the throw aborts the transaction before the
         // Proof delete below, so the document, the Board and the media are all
@@ -783,7 +798,7 @@ export async function deleteProof(
         );
         const next: Cell[] = cells.map((c) => {
           if (c.index !== proof.cellIndex) return c;
-          // Deleting a proof unmarks the cell — mirror computeMark's manual
+          // Deleting an ordinary credit-backing proof unmarks — mirror computeMark's manual
           // unmark EXACTLY (Phase 4b P1 on #447): strip any echo flag and
           // persist `echoOptOut` on a non-free Prompt cell, so open-time
           // reconciliation cannot restore the Prompt from a standing sibling
@@ -810,7 +825,7 @@ export async function deleteProof(
             ...(typeof boardData?.seed === 'number' ? { markSeed: boardData.seed } : {}),
           }),
         );
-        // The standings freeze (#265): a post-freeze proof deletion unmarks the
+        // The standings freeze (#265): ordinary credit-backing deletion unmarks the
         // cell and updates its PER-DAY bucket only (symmetric with setMark's
         // bucket-only frozen write — Codex P2 on #278); the frozen ROOT
         // aggregates never unfold.
