@@ -92,7 +92,7 @@ describe('ItemPool submission (specs/d15-approvals.md)', () => {
     render(<ItemPool />);
     const button = screen.getByTitle('Report');
     fireEvent.click(button);
-    expect(H.reportItem).toHaveBeenCalledWith('reported', 'ev-1', 123);
+    expect(H.reportItem).toHaveBeenCalledWith('reported', 'ev-1', 123, 'u1');
     expect(button).toBeDisabled();
     expect(track).not.toHaveBeenCalledWith('report_item');
     await act(async () => { if (outcome === 'accepted') resolve(); else reject(new Error('offline or rate denied')); });
@@ -103,6 +103,15 @@ describe('ItemPool submission (specs/d15-approvals.md)', () => {
       expect(track).not.toHaveBeenCalledWith('report_item');
     }
   });
+  it('passes the rendered reporter rather than a newer account before React commits a new render', async () => {
+    H.items = [item('reported', { createdAt: 123 })];
+    render(<ItemPool />);
+    H.user = { uid: 'u2' };
+    fireEvent.click(screen.getByTitle('Report'));
+    await act(async () => {});
+    expect(H.reportItem).toHaveBeenCalledWith('reported', 'ev-1', 123, 'u1');
+  });
+
   it('resets a failed report control when the same target ID has a new incarnation', async () => {
     H.items = [item('reported', { createdAt: 123 })];
     H.reportItem.mockRejectedValueOnce(new Error('rejected'));

@@ -7,14 +7,19 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 type Ref = { __kind: 'doc' | 'collection'; id?: string; path: string };
 
-const { addDocMock, submitMock, getDocsFromCacheMock } = vi.hoisted(() => ({
+const { addDocMock, submitMock, getDocsFromCacheMock, reportContentMock } = vi.hoisted(() => ({
   addDocMock: vi.fn((..._args: unknown[]) => Promise.resolve({ id: 'new-item' })),
   submitMock: vi.fn(async (input: { itemId: string }) => ({ data: { id: input.itemId } })),
   getDocsFromCacheMock: vi.fn(),
+  reportContentMock: vi.fn(async () => undefined),
 }));
 
 vi.mock('../firebase', () => ({ db: {}, functions: {}, EVENT_ID: 'med-2026' }));
 vi.mock('firebase/functions', () => ({ httpsCallable: () => submitMock }));
+vi.mock('./reports', async importOriginal => ({
+  ...await importOriginal<typeof import('./reports')>(),
+  reportContent: reportContentMock,
+}));
 vi.mock('firebase/firestore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('firebase/firestore')>();
   return {
@@ -40,7 +45,7 @@ vi.mock('firebase/firestore', async (importOriginal) => {
   };
 });
 
-import { addItem, hasCachedCard } from './api';
+import { addItem, hasCachedCard, reportItem } from './api';
 
 // A cached board-doc stand-in: hasCachedCard reads `.ref.path` (event scope) and
 // `.data().uid`. EVENT_ID is mocked to 'med-2026' above.
@@ -139,5 +144,12 @@ describe('hasCachedCard — cached-card probe for the #403 deal-failure fallback
   it('is false (fail-closed) when the cache read throws — no local card', async () => {
     getDocsFromCacheMock.mockRejectedValueOnce(new Error('no cache'));
     expect(await hasCachedCard('me')).toBe(false);
+  });
+});
+
+describe('reportItem captured identity wire', () => {
+  it('forwards the displayed reporter and incarnation without substituting live auth', async () => {
+    await reportItem('prompt-id', 'captured-event', 123, 'captured-reporter');
+    expect(reportContentMock).toHaveBeenCalledWith('items', 'prompt-id', 'captured-event', 123, 'captured-reporter');
   });
 });
