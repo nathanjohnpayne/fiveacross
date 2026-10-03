@@ -246,6 +246,46 @@ describe('frozen snapshot hydration through the real deal path (#1406)', () => {
     expect((await getDoc(doc(db(ALICE), at(`reshuffles/${ALICE}-1`)))).exists()).toBe(false);
   });
 
+  it.each(['echo-disabled', 'standings-frozen'] as const)('re-judges reshuffle credit from the native retry Event when %s after preflight', async (change) => {
+    const ids = await seedSnapshot();
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const trusted = ctx.firestore();
+      const eventRef = doc(trusted, `events/${EVENT}`);
+      const event = (await getDoc(eventRef)).data()!;
+      await updateDoc(eventRef, { days: [...event.days, { index: 1, unlockAt: PAST(), pool: 'main' }] });
+      await setDoc(doc(trusted, at(`days/0/boards/${ALICE}`)), { ...dayCard(ALICE, 0), seed: 111 });
+      let cursor = 0;
+      const peerCells = Object.fromEntries(Array.from({ length: 25 }, (_, index) => [String(index), {
+        index, itemId: index === 12 ? null : ids[cursor++], text: 'Peer', free: index === 12,
+        marked: true, markedAt: index === 12 ? null : PAST(), status: 'confirmed',
+      }]));
+      await setDoc(doc(trusted, at(`days/1/boards/${ALICE}`)), { ...dayCard(ALICE, 1), cells: peerCells });
+      await updateDoc(doc(trusted, at(`players/${ALICE}`)), {
+        reshufflesUsed: 0, bingoCount: 0, squaresMarked: 24, firstBingoAt: null,
+        dayStats: { 0: { bingoCount: 0, squaresMarked: 0, firstBingoAt: null }, 1: { bingoCount: 0, squaresMarked: 24, firstBingoAt: null } },
+      });
+    });
+    const beforePlayer = (await getDoc(doc(db(ALICE), at(`players/${ALICE}`)))).data()!;
+    let signalRead!: () => void;
+    let releaseRead!: () => void;
+    const read = new Promise<void>((resolve) => { signalRead = resolve; });
+    const release = new Promise<void>((resolve) => { releaseRead = resolve; });
+    dealSeam.eventRead.mockImplementationOnce(async () => { signalRead(); await release; });
+    const publishing = reshuffleBoard({ uid: ALICE, dayIndex: 0, expectedSeed: 111 });
+    await read;
+    try {
+      await testEnv.withSecurityRulesDisabled(async (ctx) => {
+        await updateDoc(doc(ctx.firestore(), `events/${EVENT}`), change === 'echo-disabled'
+          ? { settings: { echoMarks: false } } : { frozenAt: PAST() });
+      });
+    } finally { releaseRead(); }
+    await expect(publishing).resolves.toBe(1);
+    expect(dealSeam.eventRead.mock.calls.length).toBeGreaterThan(1);
+    const board = (await getDoc(doc(db(ALICE), at(`days/0/boards/${ALICE}`)))).data()!;
+    if (change === 'echo-disabled') expect(Object.values(board.cells).some((cell: unknown) => (cell as { echo?: boolean }).echo)).toBe(false);
+    else expect((await getDoc(doc(db(ALICE), at(`players/${ALICE}`)))).data()).toEqual({ ...beforePlayer, reshufflesUsed: 1 });
+  });
+
   it('retries the real transaction when re-snapshot changes Event after the deal read', async () => {
     const ids = await seedSnapshot();
     let signalRead!: () => void;

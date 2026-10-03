@@ -1172,16 +1172,13 @@ export function reshuffleSeed(
  * Trade a PRISTINE Day Card for a fresh deal from the SAME Day Snapshot (#378,
  * specs/reshuffle.md). Returns the resulting spend (1..3).
  *
- * The whole transaction is two writes: replace the Day's Board doc with a fresh
- * stratified deal, and increment the Player's cruise-wide `reshufflesUsed`.
- * Nothing else — and that is the point of the pristine constraint, not an
- * omission. A card with zero Marks has produced nothing: no Tally entries to
- * retract, no Proofs to pull from the Feed, no Doubts to dissolve, no stats to
- * re-fold, no Moments at risk. So there is deliberately NO cascade code here. A
- * Player who wants out of a card they HAVE marked unmarks it themselves through
- * the existing, tested Mark path (which already removes its Tally entries), which
- * returns the card to pristine — the cascade performed by the player, visibly,
- * through mechanics that already exist.
+ * The baseline transaction replaces the Day's Board, merges the Player's
+ * cruise-wide `reshufflesUsed`, and creates its per-spend marker. Artifact-free
+ * confirmed Echoes are also pristine: the replacement re-echoes from the
+ * transaction's peer/Event reads, re-derives its eligible Day stats and removes
+ * orphaned Echo markers under the existing Echo contract. There is no manual
+ * Mark cascade here. A Player who wants out of a card they HAVE marked unmarks
+ * it themselves through the existing Mark path, returning it to pristine.
  *
  * ONLINE-ONLY, unlike every other write in this file — and enforced by
  * `runTransaction`, NOT by the `online` gate on the chip and NOT by awaiting a
@@ -1422,10 +1419,13 @@ export async function reshuffleBoard(params: {
     // Marks), so its stat bucket may be non-zero; the replacement's bucket is
     // re-derived from the re-echoed cells so a traded-away echo bingo never
     // survives as a phantom stat. A no-echo reshuffle (empty achieved set,
-    // zeroed prior bucket) keeps the exact two-write shape of today.
+    // zeroed prior bucket) keeps a bare Player counter write alongside the
+    // Board and spend marker.
     const now = Date.now();
-    // Echo switched off (#1360): the replacement card re-echoes nothing.
-    const achieved = echoMarksEnabled(eventData?.settings)
+    // Credit decisions use this attempt’s authoritative Event and schedule;
+    // deterministic draw inputs above remain preflight-scoped. Echo switched
+    // off (#1360): the replacement card re-echoes nothing.
+    const achieved = echoMarksEnabled(latestEventData?.settings)
       ? achievedItemIds(
           peerSnaps.filter((s) => s.exists()).map((s) => cellsFromData((s.data() as { cells?: unknown }).cells)),
         )
@@ -1443,10 +1443,10 @@ export async function reshuffleBoard(params: {
     const rawEchoRes = applyEchoes(cells, achieved, now);
     const statsAllowed =
       !standingsFrozen({
-        frozenAt: eventData?.frozenAt,
-        standingsFreezeAt: eventData?.standingsFreezeAt,
-        days,
-      }) || ceremonialDayIndexSet(days).has(dayIndex);
+        frozenAt: latestEventData?.frozenAt,
+        standingsFreezeAt: latestEventData?.standingsFreezeAt,
+        days: latestDays,
+      }) || ceremonialDayIndexSet(latestDays).has(dayIndex);
     const savedName = typeof player?.displayName === 'string' ? player.displayName : undefined;
     // Net-new echo count (#721, Codex round 1 finding 4): `echoRes` is derived
     // against the freshly-dealt REPLACEMENT card, so `echoedItemIds` is every
@@ -1517,8 +1517,8 @@ export async function reshuffleBoard(params: {
     const bucketDirty =
       priorBucket != null &&
       (priorBucket.bingoCount > 0 || priorBucket.squaresMarked > 0 || priorBucket.firstBingoAt != null);
-    const tutorialSet = tutorialDayIndexSet(days);
-    const ceremonialSet = ceremonialDayIndexSet(days);
+    const tutorialSet = tutorialDayIndexSet(latestDays);
+    const ceremonialSet = ceremonialDayIndexSet(latestDays);
     const statWrite =
       (echoRes.changed || bucketDirty) && statsAllowed
         ? foldEchoStats({
@@ -1576,9 +1576,9 @@ export async function reshuffleBoard(params: {
     const frozenNarrowed =
       statWrite &&
       standingsFrozen({
-        frozenAt: eventData?.frozenAt,
-        standingsFreezeAt: eventData?.standingsFreezeAt,
-        days,
+        frozenAt: latestEventData?.frozenAt,
+        standingsFreezeAt: latestEventData?.standingsFreezeAt,
+        days: latestDays,
       })
         ? { dayStats: { [dayIndex]: statWrite.dayStats[dayIndex] } }
         : statWrite;
