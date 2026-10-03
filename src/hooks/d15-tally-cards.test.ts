@@ -22,7 +22,7 @@ vi.mock('firebase/firestore', () => ({
   onSnapshot: vi.fn(() => () => {}),
 }));
 
-import { deriveTallyCards, mergeFeed, scrubTallyCards, type TallyMarkerRow } from './useData';
+import { deriveTallyCards as foldTallyCards, mergeFeed, scrubTallyCards, type TallyMarkerRow } from './useData';
 import { BUMP_DEBOUNCE_MS } from '../game/logic';
 
 // specs/d15-tally-cards.md — the Feed's third stream (#216). Two pure pieces:
@@ -41,7 +41,38 @@ const row = (over: Partial<TallyMarkerRow> & Pick<TallyMarkerRow, 'uid' | 'itemI
   ...over,
 });
 
+const prompts = new Map([['p1', 'Balcony or porthole photo'], ['p2', 'Balcony or porthole photo']]);
+const deriveTallyCards = (rows: TallyMarkerRow[], previous: Record<string, number> = {}, window?: number) =>
+  foldTallyCards(rows, prompts, T0 + BUMP_DEBOUNCE_MS * 3, previous, window);
+
 describe('deriveTallyCards — per-(itemId, dayIndex) aggregation (specs/d15-tally-cards.md)', () => {
+  it('rejects persisted object text, impossible Days and future ordering stamps before rendering', () => {
+    const bad = [{ itemText: { boom: true } }, { itemText: ['boom'] }, { dayIndex: -1 },
+      { dayIndex: 0.5 }, { dayIndex: 20 }, { markedAt: 1e15 }, { markedAt: NaN },
+      { markedAt: -1 }, { displayName: { boom: true } }];
+    for (const over of bad) {
+      const rows = [row({ uid: 'attacker', itemId: 'p1', ...over } as never)];
+      expect(() => foldTallyCards(rows, prompts, T0 + BUMP_DEBOUNCE_MS * 3)).not.toThrow();
+      expect(foldTallyCards(rows, prompts, T0 + BUMP_DEBOUNCE_MS * 3).cards).toEqual([]);
+    }
+  });
+
+  it('uses trusted Prompt labels, drops phantom targets, and never carries a forged label', () => {
+    const rows = [row({ uid: 'alice', itemId: 'p1', itemText: 'Forged prompt' }),
+      row({ uid: 'attacker', itemId: 'phantom' })];
+    const cards = foldTallyCards(rows, new Map([['p1', 'Trusted prompt']]), T0).cards;
+    expect(cards).toHaveLength(1);
+    expect(cards[0].itemText).toBe('Trusted prompt');
+    expect(foldTallyCards(rows, new Map(), T0).cards).toEqual([]);
+  });
+
+  it('bounds legacy names and retains old queued stamps without a lower age limit', () => {
+    const cards = foldTallyCards([row({ uid: 'alice', itemId: 'p1',
+      displayName: 'x'.repeat(99) + '😀', markedAt: 1 })], prompts, T0).cards;
+    expect(cards[0].markers[0].displayName).toBe('x'.repeat(99));
+    expect(cards[0].lastMarkedAt).toBe(1);
+  });
+
   it('groups markers of the same Prompt+Day into one live card, count = marker set', () => {
     const { cards } = deriveTallyCards([
       row({ uid: 'alice', itemId: 'p1', markedAt: T0 }),
