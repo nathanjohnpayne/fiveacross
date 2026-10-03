@@ -973,6 +973,77 @@ describe('open-time reconcile churn gate (#492)', () => {
     }
   });
 
+  it('#1424: a count-consistent winning bucket without a stamp re-arms one heal episode', async () => {
+    const { reconcileEchoes } = await import('../data/api');
+    const mocked = vi.mocked(reconcileEchoes);
+    mocked.mockResolvedValue({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true });
+    H.event = { claimMode: 'honor', timezone: 'UTC', days: reconcileDays(Date.now()) } as unknown as EventDoc;
+    H.player = { uid: 'u1', bingoCount: 0, squaresMarked: 0,
+      dayStats: { 0: { bingoCount: 0, squaresMarked: 0, firstBingoAt: null } },
+    } as unknown as PlayerDoc;
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1, createdAt: 0, cells: dealt() };
+    const view = render(<Board />);
+    await act(async () => {});
+    expect(mocked).toHaveBeenCalledTimes(1);
+    H.player = { uid: 'u1', bingoCount: 1, squaresMarked: 5, firstBingoAt: null,
+      dayStats: { 0: { bingoCount: 1, squaresMarked: 5, firstBingoAt: null } },
+    } as unknown as PlayerDoc;
+    view.rerender(<Board />);
+    await act(async () => {});
+    expect(mocked).toHaveBeenCalledTimes(2);
+    view.rerender(<Board />);
+    await act(async () => {});
+    expect(mocked).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([false, true])('#1424: another opened Day cannot consume a settled winning Day missing-stamp episode (frozen=%s)', async (frozen) => {
+    const store = new MemoryStorage();
+    store.setItem('gcb.coachOverlay.test-event.dismissedAt', '1');
+    store.setItem('gcb.seen.reshuffleIntro', '1');
+    vi.stubGlobal('localStorage', store);
+    const { reconcileEchoes } = await import('../data/api');
+    const mocked = vi.mocked(reconcileEchoes);
+    mocked.mockResolvedValue({ changed: false, bingoTransition: false, blackoutTransition: false, complete: true });
+    H.event = { claimMode: 'honor', timezone: 'UTC', frozenAt: frozen ? Date.now() : undefined,
+      days: reconcileDays(Date.now()).map((d) => ({ ...d,
+        unlockAt: Date.now() - (2 - d.index) * DAY_MS,
+        ...(frozen && d.index === 1 ? { scoring: 'ceremonial' as const } : {}),
+      })),
+    } as unknown as EventDoc;
+    H.player = {
+      uid: 'u1', bingoCount: 1, squaresMarked: 5, firstBingoAt: 7,
+      dayStats: {
+        0: { bingoCount: 0, squaresMarked: 0, firstBingoAt: null },
+        1: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 7 },
+      },
+    } as unknown as PlayerDoc;
+    H.board = { uid: 'u1', dayIndex: 1, seed: 1, createdAt: 0, cells: dealt() };
+    const view = render(<Board />);
+    await act(async () => {});
+    H.board = { ...H.board, dayIndex: 0 };
+    fireEvent.click(screen.getAllByRole('tab')[0]);
+    view.rerender(<Board />);
+    await act(async () => {});
+    expect(mocked).toHaveBeenCalledTimes(2);
+    H.player = { ...H.player, dayStats: {
+      ...H.player!.dayStats, 1: { bingoCount: 1, squaresMarked: 5, firstBingoAt: null },
+    } } as PlayerDoc;
+    view.rerender(<Board />);
+    await act(async () => {});
+    // Day0 is consistent; the repair is owed only when Day1 is reopened.
+    expect(mocked).toHaveBeenCalledTimes(2);
+    H.board = { ...H.board, dayIndex: 1 };
+    fireEvent.click(screen.getAllByRole('tab')[1]);
+    view.rerender(<Board />);
+    await act(async () => {});
+    expect(mocked).toHaveBeenCalledTimes(3);
+    expect(mocked).toHaveBeenLastCalledWith(expect.objectContaining({ dayIndex: 1 }));
+    H.player = { ...H.player } as PlayerDoc;
+    view.rerender(<Board />);
+    await act(async () => {});
+    expect(mocked).toHaveBeenCalledTimes(3);
+  });
+
   it('a player row that turns root-lagged AFTER the board settled re-arms the reconcile without a reload — once per episode, and never on a consistent row (#506)', async () => {
     const { reconcileEchoes } = await import('../data/api');
     const mocked = vi.mocked(reconcileEchoes);

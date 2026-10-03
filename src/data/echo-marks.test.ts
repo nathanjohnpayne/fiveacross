@@ -1932,6 +1932,36 @@ describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
     expectNoClientEchoTrack();
   });
 
+  it.each([null, 2])('#1424: a count-consistent missing Day stamp heals from live cells while retaining earlier root %s', async (earlierRoot) => {
+    seedReconcile();
+    H.dayBoards.set(2, {
+      uid: 'u1', seed: 222, dayIndex: 2,
+      cells: card((i) => `d${i}`, {
+        10: { marked: true, markedAt: 3, status: 'confirmed' },
+        11: { marked: true, markedAt: 4, status: 'confirmed' },
+        13: { marked: true, markedAt: 5, status: 'confirmed' },
+        14: { marked: true, markedAt: 7, status: 'confirmed' },
+      }),
+    });
+    H.player = {
+      uid: 'u1', displayName: 'Alice', bingoCount: 1, squaresMarked: 5,
+      firstBingoAt: earlierRoot,
+      dayStats: {
+        1: { bingoCount: 0, squaresMarked: 1, firstBingoAt: null },
+        2: { bingoCount: 1, squaresMarked: 4, firstBingoAt: null },
+      },
+    };
+    const result = await reconcileEchoes({ uid: 'u1', dayIndex: 2, dayIndexes: [2], echoMarks: false });
+    expect(result.complete).toBe(true);
+    const call = H.txSet.mock.calls.find((call) => segs(call as unknown[])[2] === 'players');
+    expect(call).toBeDefined();
+    const write = call![1] as { dayStats: Record<number, { firstBingoAt: number }>; firstBingoAt?: number };
+    expect(write.dayStats[2].firstBingoAt).toBe(7);
+    if (earlierRoot === null) expect(write.firstBingoAt).toBe(7);
+    else expect(write).not.toHaveProperty('firstBingoAt');
+    expect(H.batchCommit).not.toHaveBeenCalled();
+  });
+
   it('#491: a FAILED stats-lag heal reports the pass incomplete so a later open retries (Codex P2 #495)', async () => {
     seedReconcile();
     H.dayBoards.set(2, {

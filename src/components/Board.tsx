@@ -37,7 +37,7 @@ import {
 // the proofed-mark completion verdict ProofSheet reports back (PR #110 round 2
 // finding 1), same shape as setMark's return.
 import type { AttachProofResult } from '../data/proofs';
-import { hasBingo, isBlackout, winningCells, completedLines, countMarked, isPristine, MIN_POOL, bingoLineEdge, boardFirstBingoAt, dayDealState, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, standingsFreezeAtFor, resolvedStandingsFreezeAt, earlierEligibleHeadlineBingoExists, playerRowRootLag, echoMarksEnabled } from '../game/logic';
+import { hasBingo, isBlackout, winningCells, completedLines, countMarked, isPristine, MIN_POOL, bingoLineEdge, boardFirstBingoAt, boardBingoStampMissing, dayDealState, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, standingsFreezeAtFor, resolvedStandingsFreezeAt, earlierEligibleHeadlineBingoExists, playerRowRootLag, echoMarksEnabled } from '../game/logic';
 import { dealDelayMs, winOrder } from '../game/motion';
 
 // Board identities whose deal-in cascade has already played this session
@@ -1068,6 +1068,10 @@ export default function Board() {
   // Cleared exactly when a pass LAUNCHES with the lag in view (that pass
   // reads the row), or when the row reads consistent again.
   const reconcileRowLagOwedRef = useRef(false);
+  // #1424: missing-stamp repair reads only the opened Day. Keep its episode
+  // debt per Day so opening a different card cannot consume that repair.
+  const reconcileStampEpisodesRef = useRef<Map<number, { owed: boolean }>>(new Map());
+  const reconcileStampRearmKeysRef = useRef<Set<string>>(new Set());
   // The board key whose IN-FLIGHT pass's settle owes a retry-nonce bump
   // (Codex P2 round 1 on #507): a lag observed while a pass is already
   // running must not re-arm immediately (that would double the pass), but
@@ -1091,7 +1095,9 @@ export default function Board() {
     // subscribed (`player` is in the deps), so track the row-lag EPISODE —
     // latched `active` on the transition into inconsistency, reset when the
     // row reads consistent again — and re-arm the guard for the OPEN board
-    // while the episode still owes its one heal pass.
+    // while the episode still owes its one heal pass. Missing winning-Day
+    // stamps use separate per-Day episodes: a different open card cannot
+    // serve a repair that reads only that Day's committed cells (#1424).
     //
     // The BOOKKEEPING half (uid scoping, the consistent-row reset, the
     // new-episode latch) runs on every pass whose ROW signal is attributable
@@ -1138,8 +1144,25 @@ export default function Board() {
         // Event/account switch: the prior scope's latch (or debt) must never
         // gate — or leak into — this one.
         reconcileRowLagEpisodeRef.current = { eventId, uid: user.uid, active: false };
+        reconcileStampEpisodesRef.current.clear();
+        reconcileStampRearmKeysRef.current.clear();
         reconcileRowLagOwedRef.current = false;
         reconcileRowLagRearmKeyRef.current = null;
+      }
+      const missingStampDays = new Set(
+        schedule.filter((day) =>
+          (!standingsFrozen(event) || ceremonialDayIndexSet(schedule).has(day.index)) &&
+          boardBingoStampMissing(player, day.index),
+        )
+          .map((day) => day.index),
+      );
+      for (const day of reconcileStampEpisodesRef.current.keys()) {
+        if (!missingStampDays.has(day)) reconcileStampEpisodesRef.current.delete(day);
+      }
+      for (const day of missingStampDays) {
+        if (!reconcileStampEpisodesRef.current.has(day)) {
+          reconcileStampEpisodesRef.current.set(day, { owed: true });
+        }
       }
       if (!rowLag) {
         reconcileRowLagEpisodeRef.current.active = false;
@@ -1191,24 +1214,25 @@ export default function Board() {
       );
     }
     const visitGeneration = reconcileVisitRef.current.generation;
-    // The SERVE half of the episode (#506): the owed heal is ROW-scoped and
-    // follows the player to whatever board is OPEN, not the board that first
-    // detected the lag. While a pass is IN FLIGHT the re-arm is deferred,
-    // not dropped — the running pass may have captured the previously
-    // consistent row, so its settle owes the nonce bump that brings the debt
-    // back to this effect (Codex P2 x2 on #507). An episode whose lag was
-    // latched during a no-board interlude serves here on the first
-    // attributable open, exactly like one latched with a board on screen
-    // (#508); a consistent-row pass above has already cleared the debt, so
-    // `owed` here always co-occurs with a still-lagged attributable row.
-    if (rowSignalAttributable && reconcileRowLagOwedRef.current) {
+    // The SERVE half (#506/#1424): root-lag debt follows the player to any
+    // open Board; missing-stamp debt is served only by its own opened Day.
+    // In-flight re-arms defer to settlement: the running pass may have read
+    // the previously consistent row, so a nonce brings the still-owed debt
+    // back to this effect (Codex P2 x2 on #507). Bookkeeping also observes
+    // no-board interludes (#508). A consistent root clears only root debt;
+    // a healed Day stamp clears only that Day's episode.
+    const stampEpisode = reconcileStampEpisodesRef.current.get(board.dayIndex);
+    if (rowSignalAttributable && (reconcileRowLagOwedRef.current || stampEpisode?.owed)) {
       if (reconcileInFlightRef.current.has(key)) {
-        reconcileRowLagRearmKeyRef.current = key;
+        if (reconcileRowLagOwedRef.current) reconcileRowLagRearmKeyRef.current = key;
+        if (stampEpisode?.owed) reconcileStampRearmKeysRef.current.add(key);
       } else {
         // Serve the episode's heal here: drop this key's guard (and any
         // pin) so the pass below launches and evaluates the lagged row.
         reconcileRowLagRearmKeyRef.current = null;
         reconcileRowLagOwedRef.current = false;
+        if (stampEpisode) stampEpisode.owed = false;
+        reconcileStampRearmKeysRef.current.delete(key);
         reconciledBoardsRef.current.delete(key);
         if (incompleteReconcileVisitRef.current?.key === key) {
           incompleteReconcileVisitRef.current = null;
@@ -1237,12 +1261,14 @@ export default function Board() {
     //   • different card → nothing; the old card's next open retries.
     const settle = (complete: boolean) => {
       reconcileInFlightRef.current.delete(key);
-      if (reconcileRowLagRearmKeyRef.current === key) {
-        // A row lag surfaced DURING this pass, and this pass may have raced
-        // past its own predicate on the previously consistent row — the
-        // episode's heal is still OWED (`reconcileRowLagOwedRef` stays true),
-        // so bump the nonce and let the re-armed effect run serve it on
-        // whatever board is open by then. An incomplete pass still drops its
+      const stampRearm = reconcileStampRearmKeysRef.current.delete(key);
+      if (reconcileRowLagRearmKeyRef.current === key || stampRearm) {
+        // A root lag or this Day's missing stamp surfaced DURING this pass;
+        // the pass may have raced
+        // past its predicate on the previously consistent row. The root or
+        // Day episode still owes its heal; a nonce returns that debt to the
+        // effect, where root debt can follow any open card and Day debt waits
+        // for its own card. An incomplete pass still drops its
         // own key (standard later-open retry); a complete one keeps it — the
         // nonce run re-arms the CURRENT key itself. The debt clears exactly
         // when a pass launches with the lag in view, so no loop.

@@ -1369,6 +1369,18 @@ export function sumDayStats(
   return { bingoCount, squaresMarked };
 }
 
+/** A winning Day bucket whose timestamp was conservatively omitted (#1424).
+ * This is a repair signal, never authority to invent a win: the transaction
+ * re-reads the live Board and derives its line-completion time. */
+export function boardBingoStampMissing(
+  row: Pick<Partial<PlayerDoc>, 'dayStats'> | null | undefined,
+  dayIndex: number,
+): boolean {
+  const bucket = row?.dayStats?.[dayIndex];
+  return typeof bucket?.bingoCount === 'number' && bucket.bingoCount > 0 &&
+    !(typeof bucket.firstBingoAt === 'number' && Number.isFinite(bucket.firstBingoAt) && bucket.firstBingoAt > 0);
+}
+
 /** The #496 ROW-INTERNAL root-lag signal, shared by `runReconcileEchoes`'s
  *  heal predicate and Board's re-arm of its once-per-board reconcile guard
  *  (#506) so the two can never drift apart. A Player row whose per-Day buckets

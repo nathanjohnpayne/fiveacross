@@ -348,6 +348,34 @@ describe('w1 offline Mark via setMark (ADR 0006 + ADR 0002)', () => {
     expect(cellsFromData(board.data()?.cells)[4].marked).toBe(true);
   });
 
+  it('fills a genuinely absent first-win stamp after the offline Mark acknowledges (#1424)', async () => {
+    const project = `${PROJECT_ID}-first-fill`;
+    await seedEventDoc(project, EVENT_ID);
+    const observer = await makeClient('gcb-mark-fill-observer', project);
+    const tab = await makeClient('gcb-mark-fill-tab', project);
+    const boardPath = `events/${EVENT_ID}/days/0/boards/${tab.uid}`;
+    const playerPath = `events/${EVENT_ID}/players/${tab.uid}`;
+    const board = unmarkedBoard(tab.uid);
+    for (const index of [0, 1, 2, 3]) {
+      board.cells[index] = { ...board.cells[index], marked: true, status: 'confirmed', markedAt: 100 };
+    }
+    await setDoc(doc(observer.db, boardPath), { ...board, cells: cellsToMap(board.cells) });
+    await setDoc(doc(observer.db, playerPath), freshPlayer(tab.uid));
+    await waitForPendingWrites(observer.db);
+    await getDocFromServer(doc(tab.db, boardPath));
+    await disableNetwork(tab.db);
+    await expect(getDocFromCache(doc(tab.db, playerPath))).rejects.toThrow();
+    const result = await setMark({ uid: tab.uid, cells: board.cells, index: 4,
+      nextMarked: true, claimMode: 'honor', currentFirstBingoAt: undefined,
+      dayIndex: 0, daily: true, boardSeed: 42, database: tab.db });
+    const completionAt = result.cells[4].markedAt;
+    await enableNetwork(tab.db);
+    await result.committed;
+    const healed = await waitForSnapshot(doc(observer.db, playerPath), (snap) =>
+      !snap.metadata.fromCache && snap.data()?.firstBingoAt === completionAt);
+    expect(healed.data()?.dayStats?.[0]?.firstBingoAt).toBe(completionAt);
+  });
+
   // ------------------------------------------------------------- concurrency -
   // Two Marks issued back-to-back off the SAME pre-listener-echo snapshot —
   // exactly what Board.tsx passes on two fast taps, since its `cells` closure
