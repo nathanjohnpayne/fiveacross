@@ -45,7 +45,7 @@ vi.mock('firebase/firestore', () => {
 });
 
 // Real module under test — imported after the mocks are declared.
-import { useItems, useBoard, useDayMetasStatus, useEventDoc, useLeaderboard, useMyUser } from './useData';
+import { useItems, useBoard, useDayMetasStatus, useEventDoc, useLeaderboard, useMyUser, useAllHearts } from './useData';
 import { MAX_ARCHIVE_NUMBER, MAX_DAYS } from '../data/eventLimits';
 // The archive's own roster normaliser and the shared First-to-BINGO selector, so
 // the LIVE path's answer is compared against the frozen one rather than described
@@ -1004,5 +1004,37 @@ describe('useLeaderboard normalises the per-Day buckets the pin ranks by (#1152)
     sub.fire(rosterSnap([healthy]));
 
     expect(result.current.players[0]).toBe(healthy);
+  });
+});
+
+
+describe('target-scoped Heart subscriptions', () => {
+  it('never subscribes to an unrestricted Heart collection and pins kind/id/incarnation', () => {
+    const disabled = renderHook(() => useAllHearts());
+    expect(H.onSnapshot).not.toHaveBeenCalled();
+    disabled.unmount();
+    renderHook(() => useAllHearts('proof', 'p1', 123, 'viewer'));
+    const q = H.onSnapshot.mock.calls[0][0] as { query: Array<{ where?: unknown[] }> };
+    expect(q.query.slice(1).map(x => x.where)).toEqual([
+      ['targetKind', '==', 'proof'], ['targetId', '==', 'p1'], ['targetCreatedAt', '==', 123],
+    ]);
+  });
+  it('clears accepted rows on privacy denial and ignores retired incarnation callbacks', () => {
+    const subs: Array<{ next: (snap: unknown) => void; error: () => void; unsub: ReturnType<typeof vi.fn> }> = [];
+    H.onSnapshot.mockImplementation((_q, _opts, next, error) => {
+      const unsub = vi.fn(); subs.push({ next, error, unsub }); return unsub;
+    });
+    const snap = { docs: [{ data: () => ({ id: 'h1', targetId: 'p1' }) }], metadata: { fromCache: false, hasPendingWrites: false } };
+    const { result, rerender } = renderHook(({ stamp, viewer }) => useAllHearts('proof', 'p1', stamp, viewer), { initialProps: { stamp: 123, viewer: 'a' } });
+    act(() => subs[0].next(snap));
+    expect(result.current.hearts).toHaveLength(1);
+    act(() => subs[0].error());
+    expect(result.current.hearts).toEqual([]);
+    rerender({ stamp: 124, viewer: 'b' });
+    expect(subs[0].unsub).toHaveBeenCalled();
+    act(() => subs[0].next(snap));
+    expect(result.current.hearts).toEqual([]);
+    act(() => subs[1].next(snap));
+    expect(result.current.hearts).toHaveLength(1);
   });
 });

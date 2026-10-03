@@ -186,7 +186,7 @@ function visiblePodium(podium: PodiumMomentPayload | undefined, bannedUids: read
  * js/xss-through-dom #1): mediaURL is resolved from a Firestore doc, so a forged
  * non-media scheme (javascript:, …) is dropped rather than rendered.
  */
-/** A post's heart state + toggle, threaded from the Feed's one flat stream —
+/** A post's heart state + toggle, derived from its target-scoped stream —
  * the shape both card kinds render through `HeartButton`. `onToggle` takes
  * the INTENDED next state (see the pending note below), never re-derives it. */
 export type HeartControl = { count: number; hearted: boolean; onToggle: (next: boolean) => void };
@@ -257,6 +257,19 @@ export function HeartButton({ count, hearted, onToggle }: HeartControl) {
   );
 }
 
+/** Subscribe only for the post the viewer can currently see. Hidden/deleted
+ * target Rules denial clears old rows; per-post local echoes stay optimistic. */
+function PostHeartButton({ targetKind, targetId, targetCreatedAt, viewerUid, excludedUids }: {
+  targetKind: 'proof' | 'moment'; targetId: string; targetCreatedAt: number;
+  viewerUid?: string; excludedUids: readonly string[];
+}) {
+  const { hearts } = useAllHearts(targetKind, targetId, targetCreatedAt, viewerUid);
+  const { count, hearted } = heartState(hearts, targetKind, targetId, targetCreatedAt, viewerUid, excludedUids);
+  return <HeartButton key={JSON.stringify([viewerUid, targetKind, targetId, targetCreatedAt])} count={count} hearted={hearted} onToggle={on => {
+    if (viewerUid) void setHeart({ uid: viewerUid, targetKind, targetId, targetCreatedAt, on });
+  }} />;
+}
+
 function ProofCard({
   proof,
   viewerUid,
@@ -265,7 +278,7 @@ function ProofCard({
   isStandingsFrozen,
   clearedDoubts = 0,
   tallyCount = 0,
-  heart,
+  excludedUids,
 }: {
   proof: ProofDoc;
   viewerUid: string | undefined;
@@ -276,9 +289,7 @@ function ProofCard({
   // and the Prompt's live tally. Zero hides the pill.
   clearedDoubts?: number;
   tallyCount?: number;
-  // The heart state + toggle (specs/feed-hearts.md), derived by the Feed from
-  // its one flat hearts stream.
-  heart: HeartControl;
+  excludedUids: readonly string[];
 }) {
   // #335: `resolveProofMediaUrl` is composed INSIDE `safeMediaUrl`, never around
   // it. It is identity in every real build (and a no-op on any value that is not
@@ -369,7 +380,7 @@ function ProofCard({
           <span aria-hidden="true">✍️</span> “{proof.text}”
         </blockquote>
       )}
-      <HeartButton {...heart} />
+      <PostHeartButton targetKind="proof" targetId={proof.id} targetCreatedAt={proof.createdAt} viewerUid={viewerUid} excludedUids={excludedUids} />
       {(clearedDoubts > 0 || tallyCount > 0 || proof.status === 'flagged') && (
         <div className="proof-foot">
           {clearedDoubts > 0 && (
@@ -471,13 +482,13 @@ function MomentCard({
   days,
   bannedUids,
   hiddenUids,
-  heart,
+  viewerUid,
 }: {
   moment: MomentDoc;
   days: DayDef[] | undefined;
   bannedUids: readonly string[];
   hiddenUids: ReadonlySet<string>;
-  heart: HeartControl;
+  viewerUid?: string;
 }) {
   const copy = MOMENT_COPY[moment.kind] ?? { icon: '🎉', line: 'made a Moment!' };
   // #266: the finale beats carry their real content when the scheduler built
@@ -539,7 +550,7 @@ function MomentCard({
         <span className="moment-icon" aria-hidden="true">{copy.icon}</span>
       </div>
       {/* Moments are posts too (specs/feed-hearts.md) — cheer the beat. */}
-      <HeartButton {...heart} />
+      <PostHeartButton targetKind="moment" targetId={moment.id} targetCreatedAt={moment.createdAt} viewerUid={viewerUid} excludedUids={withBlockExclusions(bannedUids, hiddenUids)} />
     </div>
   );
 }
@@ -1012,12 +1023,6 @@ export default function ProofFeed() {
   // collection is event-flat, so a single unfiltered read powers every proof
   // card's "👀 cleared N doubts" pill. Ban semantics ride useAllDoubts.
   const { doubts } = useAllDoubts(user?.uid);
-  // ONE flat Hearts subscription for the whole Feed (specs/feed-hearts.md),
-  // mirroring the doubts stream above: every Proof/Moment card's count + the
-  // viewer's own hearted state derive from this via the pure `heartState`
-  // (ban semantics applied there, own-content exception included). The
-  // toggle's latency-compensated echo flips the button instantly.
-  const { hearts } = useAllHearts();
   // Player blocking (#689): the ban roster plus the viewer's hidden set, for
   // the render-time gates that already withhold a banned Player without
   // promoting anyone — a blocked counterpart's Hearts leave every count, and
@@ -1025,35 +1030,9 @@ export default function ProofFeed() {
   // Tally Cards and Doubts themselves are filtered in their hooks.
   const { hidden } = useHiddenUids();
   const displayExcluded = withBlockExclusions(event?.bannedUids, hidden);
-  // `targetCreatedAt` is the post's own createdAt — the incarnation stamp
-  // that both scopes the derivation and rides the write (Codex P2 on #425).
-  const heartFor = (
-    targetKind: 'proof' | 'moment',
-    targetId: string,
-    targetCreatedAt: number,
-  ): HeartControl => {
-    const { count, hearted } = heartState(
-      hearts,
-      targetKind,
-      targetId,
-      targetCreatedAt,
-      user?.uid,
-      displayExcluded,
-    );
-    return {
-      count,
-      hearted,
-      onToggle: (next: boolean) => {
-        if (!user) return;
-        void setHeart({ uid: user.uid, targetKind, targetId, targetCreatedAt, on: next });
-      },
-    };
-  };
-  // The viewer's own dealt Day Cards (#261): the per-card button gating —
-  // ＋ Proof on a Prompt they marked, 🙋 Got it too on one sitting unmarked on
-  // one of their unlocked cards, nothing otherwise — reads these Boards
-  // through the pure `tallyActionTarget`.
-  // Canonical DayDef.index values, not array positions (#447 precedent, #474).
+
+  // The viewer's own dealt Day Cards (#261): per-card actions read marked or
+  // unmarked availability through tallyActionTarget, using canonical Day indices.
   const myBoards = useMyDayBoards(user?.uid, event?.days?.map((d) => d.index) ?? []);
   // The viewer's resolved public identity for a Doubt raised from the Feed sheet
   // (#392) — the SAME resolution Board runs for its own who-list sheet: the saved
@@ -1265,7 +1244,7 @@ export default function ProofFeed() {
               days={event?.days}
               bannedUids={event?.bannedUids ?? []}
               hiddenUids={hidden}
-              heart={heartFor('moment', entry.moment.id, entry.moment.createdAt)}
+              viewerUid={user?.uid}
             />
           );
         }
@@ -1298,7 +1277,7 @@ export default function ProofFeed() {
                 ? (tallyByTextDay.get(`${entry.proof.itemText}\u0000${entry.proof.dayIndex}`) ?? 0)
                 : (tallyByText.get(entry.proof.itemText) ?? 0)
             }
-            heart={heartFor('proof', entry.proof.id, entry.proof.createdAt)}
+            excludedUids={displayExcluded}
           />
         );
       })}

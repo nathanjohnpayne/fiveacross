@@ -12,6 +12,8 @@ import type { DoubtDoc, HeartDoc, MomentDoc, ProofDoc, TallyEntry } from '../typ
 
 const H = vi.hoisted(() => ({
   onSnapshot: vi.fn(),
+  setHeart: vi.fn(() => new Promise<void>(() => {})),
+  viewerUid: 'viewer',
   blocks: { hidden: new Set<string>(), ready: true } as { hidden: ReadonlySet<string>; ready: boolean },
 }));
 
@@ -38,10 +40,11 @@ vi.mock('firebase/firestore', () => {
     onSnapshot: H.onSnapshot,
   };
 });
+vi.mock('../data/hearts', async (original) => ({ ...await original<typeof import('../data/hearts')>(), setHeart: H.setHeart }));
 vi.mock('../data/proofs', () => ({ reportProof: vi.fn(), deleteProof: vi.fn() }));
 vi.mock('react-router', () => ({ useNavigate: () => vi.fn() }));
 vi.mock('../analytics', () => ({ track: vi.fn() }));
-vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: { uid: 'viewer' } }) }));
+vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: { uid: H.viewerUid } }) }));
 vi.mock('../hooks/useBlocks', () => ({ useHiddenUids: () => H.blocks }));
 
 import ProofFeed from './ProofFeed';
@@ -70,6 +73,10 @@ function mount(streams: {
     const args = ref.args ?? [];
     const source = ref.kind === 'query' ? (args[0] as { kind?: string; args?: unknown[] }) : undefined;
     if (source?.kind === 'collectionGroup') cbs.byName.markers = onNext;
+    else if (source?.kind === 'collection' && source.args?.[3] === 'hearts') {
+      const constraints = args.slice(1) as { args: [string, string, unknown] }[];
+      onNext(col((streams.hearts ?? []).filter((row) => constraints.every(({ args: [field, , value] }) => (row as Record<string, unknown>)[field] === value)).map(row)));
+    }
     else if (ref.kind === 'query') cbs.byName.proofs = onNext;
     else if (ref.kind === 'doc' && args[3] === 'players') cbs.player = onNext;
     else if (ref.kind === 'doc') cbs.docs.push(onNext);
@@ -98,7 +105,7 @@ function mount(streams: {
     cbs.byName.hearts?.(col((streams.hearts ?? []).map(row)));
     deliverMarkers(streams.markers ?? []);
   });
-  return { view, deliverMarkers };
+  return { view, deliverMarkers, deliverProofs: (proofs: object[]) => act(() => cbs.byName.proofs?.(col(proofs.map(row)))) };
 }
 
 const proof = (id: string, uid: string, displayName: string, createdAt: number) =>
@@ -110,6 +117,8 @@ const heart = (uid: string, targetId: string, targetCreatedAt: number) =>
 
 beforeEach(() => {
   H.onSnapshot.mockReset();
+  H.viewerUid = 'viewer';
+  H.setHeart.mockClear();
   H.onSnapshot.mockReturnValue(() => {});
   H.blocks = { hidden: new Set(['blocked']), ready: true };
 });
@@ -343,5 +352,23 @@ describe('the Feed’s block entry points (#689 part 3)', () => {
       null,
       'Block Friend Fin',
     ]);
+  });
+});
+
+
+describe('target-scoped Heart optimistic identity', () => {
+  it.each(['account', 'incarnation'] as const)('retires a pending optimistic heart when the %s changes', (change) => {
+    const { view, deliverProofs } = mount({ proofs: [proof('same', 'friend', 'Friend Fin', 10)] });
+    const button = () => screen.getByRole('button', { name: /^(?:Unheart|Heart) this post$/ });
+    fireEvent.click(button());
+    expect(button()).toHaveAttribute('aria-pressed', 'true');
+    expect(H.setHeart).toHaveBeenCalledWith(expect.objectContaining({ uid: 'viewer', on: true }));
+    if (change === 'account') {
+      H.viewerUid = 'other-viewer';
+      view.rerender(<ProofFeed />);
+    } else deliverProofs([proof('same', 'friend', 'Friend Fin', 11)]);
+    expect(button()).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(button());
+    expect(H.setHeart).toHaveBeenLastCalledWith(expect.objectContaining({ uid: change === 'account' ? 'other-viewer' : 'viewer', targetCreatedAt: change === 'incarnation' ? 11 : 10, on: true }));
   });
 });

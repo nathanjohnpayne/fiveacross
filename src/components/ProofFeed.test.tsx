@@ -220,6 +220,7 @@ function captureOnNext(): {
     if (kind === 'query' && querySource?.kind === 'collectionGroup' && querySource.args?.[1] === 'markers') {
       captured.tally = onNext;
     }
+    else if (kind === 'query' && (args[0] as { args?: unknown[] })?.args?.[3] === 'hearts') onNext(emptyColSnap);
     else if (kind === 'query') captured.proofs = onNext;
     else if (kind === 'doc' && args[3] === 'days') captured.boards[Number(args[4])] = onNext;
     // #392: the viewer's own player row — events/{eid}/players/{uid} — routed by
@@ -229,7 +230,7 @@ function captureOnNext(): {
     // #262: the Feed also opens the flat doubts subscription; route it by its
     // own path segment so it can't clobber the moments capture.
     else if (kind === 'collection' && args[3] === 'doubts') captured.doubtsAll = onNext;
-    // specs/feed-hearts.md: the flat hearts stream — routed by segment for the
+    // specs/feed-hearts.md: target-scoped Hearts queries are routed above for the
     // same clobber-proofing; this suite never fixtures hearts, so fire() feeds
     // it the empty snapshot.
     else if (kind === 'collection' && args[3] === 'hearts') captured.heartsAll = onNext;

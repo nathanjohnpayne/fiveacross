@@ -203,7 +203,7 @@ const emptyCollectionState = <T,>(key: string, loading: boolean): CollectionSubs
   hasPendingWrites: false,
 });
 
-function useColSub<T>(q: Query<T> | null, key: string) {
+function useColSub<T>(q: Query<T> | null, key: string, clearOnError = false) {
   const [state, setState] = useState<CollectionSubscriptionState<T>>(() =>
     emptyCollectionState(key, q !== null),
   );
@@ -250,7 +250,7 @@ function useColSub<T>(q: Query<T> | null, key: string) {
       () => {
         if (!active) return;
         setState((previous) =>
-          previous.key === key ? { ...previous, loading: false } : emptyCollectionState(key, false),
+          previous.key === key && !clearOnError ? { ...previous, loading: false } : emptyCollectionState(key, false),
         );
       },
     );
@@ -1672,15 +1672,21 @@ export function useReportedProofs() {
  * a banned accuser's Doubts vanish for everyone; Doubts against a banned
  * target hide except from the target themselves.
  */
-// The Feed's flat Hearts stream (specs/feed-hearts.md): one subscription
-// feeding every card's count + the viewer's own hearted state, mirroring
-// useAllDoubts. NO ban filter here — heartState (src/data/hearts.ts) applies
-// it per post, because the own-content exception needs the viewer's uid at
-// derivation time and the raw stream is shared across all cards.
-export function useAllHearts(enabled = true) {
+// All Hearts for one currently displayed target. There is deliberately no
+// unrestricted collection subscription: stale/private references are denied.
+// The viewer key retires account-switched callbacks; denial clears old rows.
+export function useAllHearts(
+  targetKind?: 'proof' | 'moment', targetId?: string, targetCreatedAt?: number,
+  viewerUid?: string,
+) {
+  const valid = (targetKind === 'proof' || targetKind === 'moment') &&
+    typeof targetId === 'string' && targetId.length > 0 && Number.isFinite(targetCreatedAt);
   const { data, loading, hasServerData } = useColSub<HeartDoc>(
-    enabled ? heartsCol() : null,
-    eventSubscriptionKey(enabled ? 'hearts:all' : 'hearts:none'),
+    valid ? query(heartsCol(), where('targetKind', '==', targetKind),
+      where('targetId', '==', targetId), where('targetCreatedAt', '==', targetCreatedAt)) : null,
+    eventSubscriptionKey('hearts:target', targetKind ?? 'none', targetId ?? 'none',
+      targetCreatedAt ?? 'none', viewerUid ?? 'none'),
+    true,
   );
   return { hearts: data, loading, hasServerData };
 }
