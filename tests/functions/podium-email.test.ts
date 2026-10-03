@@ -2556,6 +2556,14 @@ describe('round-5 findings (Codex P2, CodeRabbit)', () => {
     expect(got.input.mostLoved?.winners[0].uid).toBe('sam');
   });
 
+  it('keeps a restored suppressed winner despite new over-threshold reports', async () => {
+    const docs = seedDue({ mostLovedPhoto: award(), settings: { dailyEmailEnabled: true, reportHideThreshold: 3 } });
+    Object.assign(docs['events/med-2026/proofs/p1'], { reportCount: 8, reportHideSuppressed: true });
+    const got = await podiumEmailInputFor(makeDb(docs), 'med-2026');
+    if (!got.due) throw new Error('expected due');
+    expect(got.input.mostLoved?.winners[0].proofId).toBe('p1');
+  });
+
   it('omits the module when NO winner survives the visibility join', async () => {
     const docs = seedDue({ mostLovedPhoto: award() });
     delete docs['events/med-2026/proofs/p1'];
