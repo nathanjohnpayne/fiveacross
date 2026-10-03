@@ -1,3 +1,4 @@
+import { seedItemDocs } from './seedEvent';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { initializeApp, deleteApp, type FirebaseApp } from 'firebase/app';
 
@@ -136,6 +137,7 @@ async function seedEventDoc(): Promise<void> {
     },
   );
   if (!res.ok) throw new Error(`event seed failed: ${res.status} ${await res.text()}`);
+  await seedItemDocs(PROJECT_ID, EVENT_ID, [SHARED]);
 }
 
 /** A dealt Day Card whose cell at `sharedIndex` carries the SHARED Prompt. */

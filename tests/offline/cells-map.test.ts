@@ -89,7 +89,7 @@ afterAll(async () => {
 
 describe('cells-map — cross-device Marks merge instead of clobbering (specs/cells-map.md)', () => {
   it('two devices mark DIFFERENT cells from mutually stale caches; both Marks survive both drains', async () => {
-    await seedEventDoc(PROJECT_ID, EVENT_ID);
+    await seedEventDoc(PROJECT_ID, EVENT_ID, 1, Array.from({ length: 25 }, (_, index) => `item-${index}`));
     const a = await makeDevice('cells-map-device-a');
     const b = await makeDevice('cells-map-device-b');
     const boardPath = `events/${EVENT_ID}/days/0/boards/${a.uid}`;
