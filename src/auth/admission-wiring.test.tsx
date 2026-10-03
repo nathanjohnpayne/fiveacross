@@ -212,7 +212,7 @@ describe('signing in with an Invitation that only memory holds', () => {
       authDomain: window.location.hostname,
     };
     mocks.readPendingEventInvitation.mockReturnValue({ record: record(), durable: false });
-    mocks.signInWithPopup.mockResolvedValue({});
+    mocks.signInWithPopup.mockResolvedValue({ user: USER_A });
 
     mount();
     await userEvent.click(screen.getByRole('button', { name: 'sign in' }));

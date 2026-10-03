@@ -109,7 +109,7 @@ beforeEach(() => {
   mocks.readAdultAttestation.mockResolvedValue(1);
   mocks.attestAdult.mockResolvedValue(undefined);
   mocks.joinAndDeal.mockResolvedValue(undefined);
-  mocks.signInWithPopup.mockResolvedValue({});
+  mocks.signInWithPopup.mockResolvedValue({ user: FAKE_USER });
   mocks.signOut.mockResolvedValue(undefined);
 });
 
