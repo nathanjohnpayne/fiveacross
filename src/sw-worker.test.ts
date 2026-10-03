@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import 'fake-indexeddb/auto';
+import { openDB } from 'idb';
 import { UNREGISTERED_CLIENT_CONFIRM_MS } from './sw-rescue';
 
 // Drives the ACTUAL install/activate handlers in src/sw.ts (#514), not just the
@@ -13,12 +15,17 @@ const cleanupOutdatedCaches = vi.hoisted(() => vi.fn());
 const createHandlerBoundToURL = vi.hoisted(() => vi.fn(() => 'handler'));
 const registerRoute = vi.hoisted(() => vi.fn());
 const NavigationRoute = vi.hoisted(() => vi.fn());
+const NetworkOnly = vi.hoisted(() => vi.fn());
 
 vi.mock('workbox-precaching', () => ({ precacheAndRoute, cleanupOutdatedCaches, createHandlerBoundToURL }));
 vi.mock('workbox-routing', () => ({ registerRoute, NavigationRoute }));
-vi.mock('workbox-strategies', () => ({ CacheFirst: vi.fn() }));
-vi.mock('workbox-expiration', () => ({ ExpirationPlugin: vi.fn() }));
-vi.mock('workbox-cacheable-response', () => ({ CacheableResponsePlugin: vi.fn() }));
+vi.mock('workbox-strategies', async () => {
+  const actual = await vi.importActual<typeof import('workbox-strategies')>('workbox-strategies');
+  NetworkOnly.mockImplementation(function (options: ConstructorParameters<typeof actual.NetworkOnly>[0]) {
+    return new actual.NetworkOnly(options);
+  });
+  return { NetworkOnly };
+});
 
 // An armed floor must sit BETWEEN the shell being condemned and this build:
 // newer than the active shell (unrecorded, so `UNKNOWN_ACTIVE_STAMP` at epoch+1ms)
@@ -149,6 +156,77 @@ describe('the worker wires up its ported responsibilities', () => {
     expect(createHandlerBoundToURL).toHaveBeenCalledWith('index.html');
     // The navigation route plus the proof-media route.
     expect(registerRoute).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses network-only proof fetches with HTTP cache bypass (#1410)', async () => {
+    installFakeWorker();
+    await import('./sw');
+    expect(NetworkOnly).toHaveBeenCalledWith({ fetchOptions: { cache: 'no-store' } });
+  });
+
+  it('removes only the legacy proof cache on ordinary activation, preserving shell and offline data', async () => {
+    const w = installFakeWorker();
+    await import('./sw');
+    await fire(w.handlers, 'activate');
+    expect(w.deletedCaches).toEqual(['proof-media']);
+    expect(w.self.clients.claim).not.toHaveBeenCalled();
+    expect(w.navigated).toEqual([]);
+  });
+
+  it('removes token-bearing legacy Workbox metadata while preserving another cache metadata', async () => {
+    const w = installFakeWorker();
+    const { CacheExpiration } = await import('workbox-expiration');
+    const proof = new CacheExpiration('proof-media', { maxEntries: 1 });
+    const unrelated = new CacheExpiration('other-media', { maxEntries: 1 });
+    const proofUrl = 'https://firebasestorage.googleapis.com/v0/b/demo/o/proofs%2Fprivate.jpg?alt=media&token=retired-bearer';
+    const otherUrl = 'https://example.test/unrelated';
+    await proof.updateTimestamp(proofUrl);
+    await unrelated.updateTimestamp(otherUrl);
+    const db = await openDB('workbox-expiration');
+    expect((await db.getAll('cache-entries')).some(entry => entry.url === proofUrl)).toBe(true);
+    await import('./sw');
+    await fire(w.handlers, 'activate');
+    const remaining = await db.getAll('cache-entries');
+    expect(remaining.some(entry => entry.cacheName === 'proof-media')).toBe(false);
+    expect(remaining.some(entry => entry.url === otherUrl)).toBe(true);
+    db.close();
+  });
+
+  it.each(['responses', 'metadata'])('activates even when legacy %s removal fails', async failure => {
+    const w = installFakeWorker();
+    const { CacheExpiration } = await import('workbox-expiration');
+    const cleanup = vi.spyOn(CacheExpiration.prototype, 'delete');
+    if (failure === 'responses') vi.mocked(caches.delete).mockRejectedValueOnce(new Error('storage unavailable'));
+    else cleanup.mockRejectedValueOnce(new Error('metadata unavailable'));
+
+    await import('./sw');
+    await expect(fire(w.handlers, 'activate')).resolves.toBeUndefined();
+    expect(NetworkOnly).toHaveBeenCalledOnce();
+    expect(cleanup).toHaveBeenCalled();
+    cleanup.mockRestore();
+  });
+
+  it.each(['deleted', 'hidden', 'offline'])('never returns a previously cached proof for %s media', async state => {
+    const w = installFakeWorker();
+    const url = 'https://firebasestorage.googleapis.com/v0/b/b/o/proofs%2Fe%2Fu%2Fp.jpg?alt=media&token=old';
+    w.cacheStore.set(new URL(url).pathname, new Response('retained photo'));
+    class TestFetchEvent extends Event {
+      waitUntil = vi.fn();
+    }
+    vi.stubGlobal('ExtendableEvent', TestFetchEvent);
+    vi.stubGlobal('FetchEvent', TestFetchEvent);
+    await import('./sw');
+    const strategy: import('workbox-strategies').NetworkOnly = registerRoute.mock.calls[1][1];
+    const network = vi.fn();
+    if (state === 'offline') network.mockRejectedValue(new Error('offline'));
+    else network.mockResolvedValue(new Response('unavailable', { status: state === 'deleted' ? 404 : 403 }));
+    vi.stubGlobal('fetch', network);
+    const [response, done] = strategy.handleAll({ request: new Request(url, { mode: 'no-cors' }), event: new TestFetchEvent('fetch') as unknown as FetchEvent });
+    if (state === 'offline') await expect(response).rejects.toThrow();
+    else expect((await response).status).toBe(state === 'deleted' ? 404 : 403);
+    await done;
+    expect(network).toHaveBeenCalledWith(expect.objectContaining({ url }), { cache: 'no-store' });
+    expect(caches.open).not.toHaveBeenCalled();
   });
 });
 
