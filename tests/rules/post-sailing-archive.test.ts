@@ -1522,13 +1522,13 @@ describe.each([
     await assertFails(spend(2));
   });
 
-  it('DENIES a Prompt submission and a Prompt report', async () => {
+  it('DENIES curated Admin Prompt creation and a Prompt report', async () => {
     const submit = (id: string) =>
-      setDoc(doc(db(ALICE), `${eventPath()}/items/${id}`), {
+      setDoc(doc(db(ADMIN), `${eventPath()}/items/${id}`), {
         text: 'A new prompt',
-        createdBy: ALICE,
+        createdBy: ADMIN,
         pool: 'main',
-        status: 'pending',
+        status: 'active',
         reportCount: 0,
         spicy: false,
       });

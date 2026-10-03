@@ -205,11 +205,11 @@ The center square keeps "Complain about circuit music" on the eight party Days. 
 
 ## Item pools and the approval flow
 
-- The three pools live in the same `items` collection, separated by the `pool` field. Main-pool submissions continue through the existing ItemPool UI but now write `status: 'pending'`.
+- The three pools live in the same `items` collection, separated by the `pool` field. Main-pool submissions use the ItemPool UI and submitPrompt callable, which creates `status: 'pending'` rows under server admission.
 - **Pending items**: invisible everywhere except the Admin queue and (as "pending review") to their submitter. Never dealt, never in tallies.
 - **Admin queue** (new Admin console tab): list of pending items with submitter attribution, spicy toggle, approve / reject actions. Approve → `active` (+ `approvedBy/At`); reject → `rejected` (kept for audit, hidden from all non-admins). Bulk approve for taste.
 - **Grandfathering**: every existing `active` item stays `active`. The approval gate applies only to submissions after this ships.
-- **Curated pools**: easy-pool and closing-pool items are seeded from the lists below with `pool` set accordingly. Admins can add/edit/hide them through the Admin console; the player submission form only ever writes to `main`.
+- **Curated pools**: easy-pool and closing-pool items are seeded from the lists below with `pool` set accordingly. Admins can add/edit/hide them through the Admin console; submitPrompt creates player suggestions only in `main`; the player form has no direct pending-write authority.
 
 ## Scoring and social surfaces
 

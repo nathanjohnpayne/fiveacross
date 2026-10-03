@@ -246,12 +246,12 @@ const MODERATION_STATES = ['flagged', 'hidden'];
  * than one (an admin who hides an already-reported Prompt in one update):
  *
  *   - `item-created` — a Prompt is CURRENTLY `pending` and was not before. That
- *     is exactly the community-submission signal: `addItem` (the player path)
- *     writes `status: 'pending'`, while `adminAddItem` and every seed write
- *     `'active'`, so an admin adding their own Prompt correctly notifies
- *     nobody. It is also #533-proof — community Prompts will land in the same
+ *     is exactly the community-submission signal: `addItem` calls `submitPrompt`,
+ *     whose server creates `status: 'pending'` for player-form suggestions,
+ *     including Admin suggestions. Curated `adminAddItem` and seed writes are
+ *     `'active'` and earn no item-created alert. Community Prompts land in the same
  *     `pending` state, so this predicate does not change when they ship. Items
- *     only; a Proof has no approval queue.
+ *     only; Proof Claim/content review follows its separate route.
  *   - `content-reported` — `reportCount` strictly ROSE. `reportItem`/
  *     `reportProof` increment it, so this is the explicit report action.
  *     Deliberately not a bare `reportCount > 0`: an admin Clear-reports (to 0)
