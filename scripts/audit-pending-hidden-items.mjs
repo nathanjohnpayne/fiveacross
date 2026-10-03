@@ -16,10 +16,11 @@
 // WHAT COUNTS. Every `hidden` item not created by the seed (`createdBy:
 // 'seed'`, which no client can write: `firestore.rules` binds `createdBy` to
 // `request.auth.uid` on create). Nothing else rules a row out. `approvedAt` and
-// `approvedBy` are client-writable at create and `rejectItem` stamps them too,
+// `approvedBy` were client-writable on legacy player creates, and `rejectItem` stamps them too,
 // and Admin authorship proves nothing either, because an Admin can submit
-// through the ordinary player flow (`addItem` writes `pending` for anyone) and
-// could then hide that pending row under the old rules. Those fields, and
+// through the ordinary player flow (the old `addItem` wrote `pending`, and
+// current `addItem` delegates pending creation to `submitPrompt`) and could
+// then hide that pending row under the old rules. Those fields, and
 // whether the author is on the current roster, are printed for the operator's
 // judgement only. The list therefore also includes rows that are legitimately
 // restorable, such as an approved player Prompt the community hid or an

@@ -1,3 +1,4 @@
+import { submitReportForTest } from './reportTestHelpers';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -228,6 +229,7 @@ beforeEach(async () => {
     await setDoc(doc(fs, `${eventPath()}/items/${ITEM}`), {
       text: 'Something happens',
       createdBy: 'seed',
+      createdAt: NOW(),
       pool: 'main',
       status: 'active',
       reportCount: 0,
@@ -1522,18 +1524,18 @@ describe.each([
     await assertFails(spend(2));
   });
 
-  it('DENIES a Prompt submission and a Prompt report', async () => {
+  it('DENIES curated Admin Prompt creation and a Prompt report', async () => {
     const submit = (id: string) =>
-      setDoc(doc(db(ALICE), `${eventPath()}/items/${id}`), {
+      setDoc(doc(db(ADMIN), `${eventPath()}/items/${id}`), {
         text: 'A new prompt',
-        createdBy: ALICE,
+        createdBy: ADMIN,
         pool: 'main',
-        status: 'pending',
+        status: 'active',
         reportCount: 0,
         spicy: false,
       });
     const report = (count: number) =>
-      updateDoc(doc(db(BOB), `${eventPath()}/items/${ITEM}`), { reportCount: count });
+      submitReportForTest(db(count === 1 ? BOB : ALICE), EVENT, count === 1 ? BOB : ALICE, 'items', ITEM);
     await assertSucceeds(submit('new-prompt'));
     await assertSucceeds(report(1));
     await close();
@@ -1562,7 +1564,7 @@ describe.each([
         dayIndex: 0,
       });
     const report = (count: number) =>
-      updateDoc(doc(db(BOB), `${eventPath()}/proofs/${PROOF}`), { reportCount: count });
+      submitReportForTest(db(count === 1 ? BOB : ALICE), EVENT, count === 1 ? BOB : ALICE, 'proofs', PROOF);
     const ownerDelete = (id: string) => deleteDoc(doc(db(ALICE), `${eventPath()}/proofs/${id}`));
     // Live controls for all three writes (CodeRabbit on PR #1157): the report
     // bump and the owner delete each succeed before the shut, on a separately

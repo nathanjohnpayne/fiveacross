@@ -24,6 +24,7 @@ const ts = require("typescript");
 
 export const CALLABLE_INVOKER_FAMILIES = Object.freeze([
   { wrapper: "scripts/set-bug-report-invoker.sh", exports: ["submitBugReport"] },
+  { wrapper: "scripts/set-submit-prompt-invoker.sh", exports: ["submitPrompt"] },
   { wrapper: "scripts/set-email-unsubscribe-invoker.sh", exports: ["emailUnsubscribe"] },
   {
     wrapper: "scripts/set-auth-handoff-invoker.sh",

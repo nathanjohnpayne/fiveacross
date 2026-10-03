@@ -39,12 +39,12 @@ const marker = (itemId: string, uid: string, eventId = EVENT_ID) =>
   doc(db, 'events', eventId, 'tally', itemId, 'markers', uid);
 
 export const hideItem = (id: string) => updateDoc(item(id), { status: 'hidden' });
-export const restoreItem = (id: string) => updateDoc(item(id), { status: 'active' });
+export const restoreItem = (id: string) => updateDoc(item(id), { status: 'active', reportHideSuppressed: true });
 export const deleteItem = (id: string) => deleteDoc(item(id));
 
 // Phase 1.5 approval flow (#210, daily-cards-spec § "Item pools and the approval
 // flow"): the Admin Approvals-queue write path. A main-pool submission lands
-// `pending` (src/data/api.ts addItem); only an admin's decision can move it out
+// `pending` through submitPrompt (addItem's callable); only an admin's decision can move it out
 // of that state. Since #1275 (ADR 0015) APPROVAL is the `approvePrompts`
 // callable: `approveItems` below is a thin wrapper that sends the queue rows to
 // the server, which routes each Prompt to its Day on the SERVER clock, stamps
@@ -593,24 +593,18 @@ async function restoreProofOnce(id: string, eventId: string): Promise<boolean> {
     tx.update(proof(id, eventId), {
       status: claimUndecided ? 'pending' : 'active',
       safetyHide: false,
+      reportHideSuppressed: true,
     });
     return true;
   });
 }
 
-// Lift the ADR 0004 Phase 0 community auto-hide by resetting reportCount to 0 —
-// the explicit admin action the console lacked (Codex P2, PR #107 finding 3).
-// Restoring `status` alone reactivates a hard-hidden row but leaves reportCount
-// over the threshold, so it stays hidden on every Player's Feed/pool
-// (useItems / useProofFeed via isReportHidden); an auto-hidden-but-active row has
-// no `status` to restore at all. Clearing the counter is the one write that makes
-// community-hidden content reappear in the player surfaces. An admin update is
-// rules-unconstrained (firestore.rules `items`/`proofs`: `allow update: if
-// isAdmin(eventId) || ...`), so writing reportCount is permitted — pinned by
-// tests/rules/w2-admin-console.test.ts. This is the Phase 0 console affordance;
-// the server-authoritative hide/lift is #43.
-export const clearItemReports = (id: string) => updateDoc(item(id), { reportCount: 0 });
-export const clearProofReports = (id: string) => updateDoc(proof(id), { reportCount: 0 });
+// Existing Clear reports affordance: resets the visible count, suppresses future
+// automatic report hiding for this incarnation, and retains distinct-reporter
+// receipts. Further new reporters remain reviewable; prior reporters do not
+// regain admission by clearing the counter (#1405, owner decision #1355).
+export const clearItemReports = (id: string) => updateDoc(item(id), { reportCount: 0, reportHideSuppressed: true });
+export const clearProofReports = (id: string) => updateDoc(proof(id), { reportCount: 0, reportHideSuppressed: true });
 export const setClaimMode = (mode: ClaimMode) => updateDoc(evt(), { claimMode: mode });
 export const setEventTheme = (theme: ThemeId) => updateDoc(evt(), { defaultTheme: theme });
 
@@ -1675,8 +1669,9 @@ function persistedPool(pool: 'main' | 'easy' | 'closing'): 'main' | 'embark' | '
  * approval flow": "Curated pools: … Admins can add/edit/hide them through the
  * Admin console"): lands ACTIVE directly — the approval gate exists for
  * player submissions; an admin adding a prompt IS the approval — with the
- * chosen pool (easy/closing curation, or main). Same payload shape as the
- * player path (src/data/api.ts addItem), same 80-char clamp the rules pin.
+ * chosen pool (easy/closing curation, or main). Creates the stamped active
+ * Firestore row directly; player addItem instead sends submitPrompt a callable
+ * request for a server-owned pending row. Both paths clamp text to 80 chars.
  */
 export async function adminAddItem(
   uid: string,

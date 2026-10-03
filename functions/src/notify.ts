@@ -29,6 +29,7 @@ export interface ModeratedDoc {
   status?: string;
   visionFlag?: string | null;
   reportCount?: number;
+  reportHideSuppressed?: boolean;
 }
 
 const MODERATION_STATES = ['flagged', 'hidden'];
@@ -113,7 +114,7 @@ export async function resolveAdminEmails(eventId: string, deps: ResolveDeps = {}
 /**
  * Derive the moderation cause from the ACTUAL doc state — never fabricate one
  * (#101 Codex R2 F1). A Vision flag names itself. A hide is a threshold hide
- * ONLY when reportCount and the event threshold are both known and the count is
+ * ONLY when report hiding is unsuppressed, count and threshold are known, and the count is
  * at/over it; when both are known and the count is UNDER, the hide is an admin
  * action; when either is unknown, make no causal claim (neutral). Previously
  * every Vision-less hide was mislabelled "reports >= threshold", which lied
@@ -125,6 +126,7 @@ export async function resolveAdminEmails(eventId: string, deps: ResolveDeps = {}
 export function deriveReason(after: ModeratedDoc, reportHideThreshold: number | null): string {
   if (after.visionFlag) return after.visionFlag;
   if (after.status !== 'hidden') return '';
+  if (after.reportHideSuppressed === true) return 'by an admin';
   if (typeof after.reportCount === 'number' && typeof reportHideThreshold === 'number') {
     return after.reportCount >= reportHideThreshold ? 'reports >= threshold' : 'by an admin';
   }

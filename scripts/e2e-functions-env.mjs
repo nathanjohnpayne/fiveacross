@@ -935,6 +935,9 @@ export function e2eParamValues(projectId) {
     // callable on the Functions emulator, so enforcing attestation here would
     // fail the one approval the e2e run makes.
     APPROVE_PROMPTS_APP_CHECK: 'false',
+    // Local Prompt submission also uses a callable (#1311). The emulator
+    // supplies no App Check tokens; production dotenv readiness is separate.
+    SUBMIT_PROMPT_APP_CHECK: 'false',
     EMAIL_UNSUBSCRIBE_URL: `http://127.0.0.1:${FUNCTIONS_EMULATOR_PORT}/${projectId}/us-central1/emailUnsubscribe`,
   };
 }
