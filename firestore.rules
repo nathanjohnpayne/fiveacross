@@ -639,6 +639,124 @@ service cloud.firestore {
         || (resource.data.eventId is string
             && resource.data.eventId == eventId);
     }
+
+    // Pool moderation must not invalidate a frozen Square or its queued Mark.
+    // New writers identify their slot; older queued payloads use the bounded
+    // 25-slot fallback on the same owner-private dealt Board.
+    function tallyCellMatches(cells, index, itemId) {
+      return (cells is map && cells.get(string(index), {}).get('itemId', null) == itemId)
+        || (cells is list && index < cells.size() && cells[index].get('itemId', null) == itemId);
+    }
+    function tallyTargetOnBoard(board, itemId) {
+      let marker = request.resource.data;
+      let cells = board.get('cells', {});
+      return board.uid == request.auth.uid
+        && ((('cellIndex' in marker) && tallyCellMatches(cells, marker.cellIndex, itemId))
+          || (!('cellIndex' in marker) && ((cells is map && [
+            cells.get('0', {}).get('itemId', null),
+            cells.get('1', {}).get('itemId', null),
+            cells.get('2', {}).get('itemId', null),
+            cells.get('3', {}).get('itemId', null),
+            cells.get('4', {}).get('itemId', null),
+            cells.get('5', {}).get('itemId', null),
+            cells.get('6', {}).get('itemId', null),
+            cells.get('7', {}).get('itemId', null),
+            cells.get('8', {}).get('itemId', null),
+            cells.get('9', {}).get('itemId', null),
+            cells.get('10', {}).get('itemId', null),
+            cells.get('11', {}).get('itemId', null),
+            cells.get('12', {}).get('itemId', null),
+            cells.get('13', {}).get('itemId', null),
+            cells.get('14', {}).get('itemId', null),
+            cells.get('15', {}).get('itemId', null),
+            cells.get('16', {}).get('itemId', null),
+            cells.get('17', {}).get('itemId', null),
+            cells.get('18', {}).get('itemId', null),
+            cells.get('19', {}).get('itemId', null),
+            cells.get('20', {}).get('itemId', null),
+            cells.get('21', {}).get('itemId', null),
+            cells.get('22', {}).get('itemId', null),
+            cells.get('23', {}).get('itemId', null),
+            cells.get('24', {}).get('itemId', null)
+          ].hasAny([itemId])) || (cells is list && cells.size() == 25 && [
+            cells[0].get('itemId', null),
+            cells[1].get('itemId', null),
+            cells[2].get('itemId', null),
+            cells[3].get('itemId', null),
+            cells[4].get('itemId', null),
+            cells[5].get('itemId', null),
+            cells[6].get('itemId', null),
+            cells[7].get('itemId', null),
+            cells[8].get('itemId', null),
+            cells[9].get('itemId', null),
+            cells[10].get('itemId', null),
+            cells[11].get('itemId', null),
+            cells[12].get('itemId', null),
+            cells[13].get('itemId', null),
+            cells[14].get('itemId', null),
+            cells[15].get('itemId', null),
+            cells[16].get('itemId', null),
+            cells[17].get('itemId', null),
+            cells[18].get('itemId', null),
+            cells[19].get('itemId', null),
+            cells[20].get('itemId', null),
+            cells[21].get('itemId', null),
+            cells[22].get('itemId', null),
+            cells[23].get('itemId', null),
+            cells[24].get('itemId', null)
+          ].hasAny([itemId])))));
+    }
+    function tallyTargetDealt(eventId, itemId) {
+      let day = request.resource.data.get('dayIndex', -1);
+      let dayPath = /databases/$(database)/documents/events/$(eventId)/days/$(string(day))/boards/$(request.auth.uid);
+      let legacyPath = /databases/$(database)/documents/events/$(eventId)/boards/$(request.auth.uid);
+      return (day >= 0 && exists(dayPath) && tallyTargetOnBoard(get(dayPath).data, itemId))
+        || (day < 0 && exists(legacyPath) && tallyTargetOnBoard(get(legacyPath).data, itemId));
+    }
+    function tallyDayScheduled(days, dayIndex) {
+      // Pad once so bounded projection needs no per-entry offset branch.
+      let padded = days.concat([{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}]);
+      return [
+        padded[0].get('index', -1),
+        padded[1].get('index', -1),
+        padded[2].get('index', -1),
+        padded[3].get('index', -1),
+        padded[4].get('index', -1),
+        padded[5].get('index', -1),
+        padded[6].get('index', -1),
+        padded[7].get('index', -1),
+        padded[8].get('index', -1),
+        padded[9].get('index', -1),
+        padded[10].get('index', -1),
+        padded[11].get('index', -1),
+        padded[12].get('index', -1),
+        padded[13].get('index', -1),
+        padded[14].get('index', -1),
+        padded[15].get('index', -1),
+        padded[16].get('index', -1),
+        padded[17].get('index', -1),
+        padded[18].get('index', -1),
+        padded[19].get('index', -1)
+      ].hasAny([dayIndex]);
+    }
+    // Structural bounds only: the owner's Mark remains an honor attestation.
+    // No age floor: a queued offline Mark keeps its original positive timestamp.
+    function validTallyMarker(eventId, itemId) {
+      let marker = request.resource.data;
+      let days = eventData(eventId).get('days', []);
+      return marker.keys().hasOnly(['uid', 'eventId', 'displayName', 'markedAt', 'dayIndex', 'itemText', 'cellIndex'])
+        && marker.markedAt is int
+        && marker.markedAt > 0
+        && marker.markedAt <= request.time.toMillis() + 60000
+        && (!('cellIndex' in marker) || (marker.cellIndex is int && marker.cellIndex >= 0 && marker.cellIndex <= 24))
+        && (!('itemText' in marker)
+            || (marker.itemText is string && marker.itemText.size() > 0 && marker.itemText.size() <= 80))
+        && (!('dayIndex' in marker)
+            || (marker.dayIndex is int && marker.dayIndex >= 0 && marker.dayIndex < 20
+                && days is list && tallyDayScheduled(days, marker.dayIndex)))
+        && (exists(/databases/$(database)/documents/events/$(eventId)/items/$(itemId))
+            || tallyTargetDealt(eventId, itemId));
+    }
     // The three Prompt pools (CONTEXT.md § Pool). Canonical values are
     // 'main' / 'easy' / 'closing'; 'embark' (= easy) and 'farewell'
     // (= closing) are the pre-#565 persisted spellings, which BOTH live
@@ -2987,7 +3105,7 @@ service cloud.firestore {
             && request.resource.data.displayName is string
             && request.resource.data.displayName.size() > 0
             && request.resource.data.displayName.size() <= 100
-            && request.resource.data.markedAt is number
+            && validTallyMarker(eventId, itemId)
             && markerWriteHasCompatibleEventId(eventId);
           // Unmarking removes exactly that Player's entry; admins can moderate.
           // #134: unmarking is a Mark in reverse, so it stops at the freeze too.

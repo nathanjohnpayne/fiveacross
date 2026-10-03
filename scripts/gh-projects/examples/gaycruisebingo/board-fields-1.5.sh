@@ -39,16 +39,43 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MAP="${GCB_MAP:-$SCRIPT_DIR/slug-num-1.5.map}"
 README_ADD="$SCRIPT_DIR/additions/readme-phase-1.5.md"
 : "${GH_TOKEN:?GH_TOKEN must be the author PAT (nathanjohnpayne) with repo + project scopes}"
+
+# This driver mutates the real Project #7. Require the fixed author identity
+# at startup and before every gh call; it has no test or identity bypass.
+CHECKER="$SCRIPT_DIR/../../../identity-check.sh"
+AUTHOR_WRAPPER="$SCRIPT_DIR/../../../gh-as-author.sh"
+require_author() {
+  if [ ! -x "$CHECKER" ]; then
+    echo "Error: identity-check helper missing or non-executable: $CHECKER" >&2
+    return 2
+  fi
+  GH_TOKEN="$GH_TOKEN" "$CHECKER" --expect-token-identity nathanjohnpayne \
+    || { echo "Error: GH_TOKEN must resolve to nathanjohnpayne for project mutations." >&2; return 2; }
+}
+ghp_gh() {
+  # A rejected identity must stop this driver even when a caller handles a gh failure.
+  ( unset GITHUB_TOKEN; require_author ) || exit 2
+  if [[ "$1" == project && ( "$2" == item-add || "$2" == item-edit || "$2" == edit ) ]]; then
+    [[ -x "$AUTHOR_WRAPPER" ]] || { echo "Error: author wrapper missing or non-executable." >&2; exit 2; }
+    # Exit codes alone cannot distinguish wrapper refusal from gh failure.
+    # The canonical wrapper creates this marker only after credential checks,
+    # immediately before running gh; handled item-add/edit failures must never
+    # swallow a refusal to run the write under the verified author credential.
+    local marker="$WORK/author-write-started" write_rc=0
+    rm -f "$marker" || { echo "Error: cannot reset the author-write trace marker." >&2; exit 2; }
+    ( unset GITHUB_TOKEN; GH_AS_AUTHOR_TRACE_MARKER="$marker" "$AUTHOR_WRAPPER" -- gh "$@"; ) || write_rc=$?
+    if [ ! -f "$marker" ]; then
+      echo "Error: author wrapper refused the project mutation before gh ran." >&2
+      exit 2
+    fi
+    rm -f "$marker"
+    return "$write_rc"
+  else
+    ( unset GITHUB_TOKEN; gh "$@"; )
+  fi
+}
+require_author
 WORK="$(mktemp -d)"
-
-ghp_gh() ( unset GITHUB_TOKEN; gh "$@"; )
-
-# ---- identity guard (same contract as lib.sh / set-fields.sh) ---------------
-CHECKER="$SCRIPT_DIR/../../identity-check.sh"
-if [ "${GHP_SKIP_TOKEN_IDENTITY_CHECK:-0}" != "1" ] && [ -x "$CHECKER" ]; then
-  GH_TOKEN="$GH_TOKEN" "$CHECKER" --expect-token-identity "${GHP_EXPECTED_IDENTITY:-nathanjohnpayne}" \
-    || { echo "Error: GH_TOKEN must resolve to nathanjohnpayne for project mutations." >&2; exit 2; }
-fi
 
 # ---- fields table: slug|Track|Phase|Wave|Size|Status  ('-' = leave unset) ----
 # Track values are existing project Track-*field* options (coarser than the
