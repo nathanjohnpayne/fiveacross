@@ -159,9 +159,10 @@ A rejection that happens *before* the transaction commits—wrong origin, wrong 
 ## Acceptance criteria
 
 - **Given** a signed-in caller and a registered active target origin, **when** it mints, **then** it receives a `handoffUrl` whose fragment carries the code and whose query carries nothing. (Test: mint-happy, fragment-only.)
-- **Given** a minted code, **when** it is exchanged once with the matching verifier at the matching origin, **then** a custom token is returned and `consumedAt` is set. (Test: exchange-happy.)
-- **Given** an already-exchanged code, **when** it is exchanged again, **then** it is rejected. (Test: replay.)
-- **Given** two or more exchanges of one code issued concurrently, **then** exactly one succeeds and the rest are rejected as replays. (Test: concurrent-exchange, against the real emulator.)
+- **Given** a valid minted code and available exchange admission, **when** an admitted request exchanges it with the matching verifier at the matching origin, **then** a custom token is returned and `consumedAt` is set. (Test: exchange-happy.)
+- **Given** an already-exchanged code, **when** an admitted request exchanges it again, **then** it is rejected as a replay. (Test: replay.)
+- **Given** two or more otherwise-valid exchanges of one code issued concurrently with all contenders admitted, **then** exactly one succeeds and the rest are rejected as replays. Admission refusal can instead reject some or all contenders before Firestore; across admitted contenders, at most one succeeds. (Test: concurrent-exchange, against the real emulator.)
+- **Given** exhausted exchange admission, **when** a valid code is exchanged, **then** the caller receives the existing opaque refusal, no Firestore reference or transaction is created, and the server code remains unconsumed. Admission can replenish later; the client retires the failed attempt and requires a fresh handoff. (Tests: pre-reference rejection, valid-code preservation/refill.)
 - **Given** a code past `expiresAt`, **when** it is exchanged, **then** it is rejected and left unconsumed. (Test: expiry.)
 - **Given** a code minted for one origin, **when** it is exchanged from another—or with an `Origin` header disagreeing with the claimed origin—**then** it is rejected and left redeemable by its rightful origin. (Test: origin-mismatch, header-mismatch.)
 - **Given** a code without its transaction verifier, **when** it is exchanged, **then** it is rejected. (Test: transaction-mismatch.)
