@@ -53,6 +53,7 @@
  * The precise reason stays server-side for logs and for tests.
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 
 // --- Contract constants ---------------------------------------------------------
 
@@ -83,6 +84,32 @@ export const HANDOFF_TTL_MS = 120_000;
  * access to the browser rather than to a log.
  */
 export const HANDOFF_FRAGMENT_KEY = 'fa_handoff';
+
+/** Per-process burst and sustained admission, before Firestore work. */
+export const EXCHANGE_BURST_CAPACITY = 60;
+export const EXCHANGE_REFILL_MS = 1_000;
+
+/**
+ * Constant-memory admission shared by every exchange on a warm instance.
+ * Consumption is synchronous, so concurrent calls cannot overspend a token.
+ * No caller-controlled keys or database writes are created. Cold starts have
+ * a fresh burst; this is a per-process work bound, not a global abuse verdict.
+ */
+export function createExchangeAdmission(now: () => number = () => performance.now()): () => boolean {
+  let tokens = EXCHANGE_BURST_CAPACITY;
+  let last: number | undefined;
+  return () => {
+    const current = now();
+    if (!Number.isFinite(current) || current < 0 || (last !== undefined && current < last)) return false;
+    if (last !== undefined) {
+      tokens = Math.min(EXCHANGE_BURST_CAPACITY, tokens + (current - last) / EXCHANGE_REFILL_MS);
+    }
+    last = current;
+    if (tokens < 1) return false;
+    tokens -= 1;
+    return true;
+  };
+}
 
 /**
  * 32 bytes of `randomBytes` in base64url — 43 characters, 256 bits.
@@ -172,6 +199,7 @@ export type HandoffMintReason =
 
 /** Why an exchange was refused. */
 export type HandoffExchangeReason =
+  | 'request-limit'
   | 'invalid-code'
   | 'invalid-verifier'
   | 'invalid-origin'
@@ -539,6 +567,8 @@ export interface ExchangeInput {
 }
 
 export interface ExchangeDeps {
+  /** Synchronous process-wide budget; required on every production exchange. */
+  admitRequest: () => boolean;
   db: HandoffFirestore;
   now: () => number;
   timestamp: (ms: number) => unknown;
@@ -549,13 +579,14 @@ export interface ExchangeDeps {
   /**
    * Reject callers without a verified App Check token.
    *
-   * THE abuse control for this endpoint, and the reason it needs one is
+   * Attestation complements the process-wide admission budget. The concern is
    * resource exhaustion rather than compromise: the code space is 2^256, so
-   * guessing is infeasible, but every well-FORMED guess still costs a Firestore
+   * guessing is infeasible, but every admitted well-FORMED guess still costs a Firestore
    * transaction. An unauthenticated flood of syntactically valid codes can
    * therefore consume instances and database capacity and delay real sign-ins,
    * without ever being close to redeeming anything. App Check is what
-   * distinguishes "our app" from "anyone with the URL"; a Firestore-backed
+   * distinguishes "our app" from "anyone with the URL"; admission also bounds
+   * well-formed requests while attestation is off. A Firestore-backed
    * throttle would answer a database-load problem by adding a database write
    * per request.
    *
@@ -604,6 +635,10 @@ export async function exchangeHandoff(
   if (typeof input.headerOrigin === 'string' && input.headerOrigin !== caller.origin) {
     return { ok: false, reason: 'origin-mismatch' };
   }
+
+  // Charge once before hashes, document references, or async transactions.
+  // Shape/header failures above stay free. All admitted outcomes consume work.
+  if (deps.admitRequest() !== true) return { ok: false, reason: 'request-limit' };
 
   const expectedTransactionId = transactionIdFor(verifier);
   const ref = deps.db.doc(handoffPath(code));
