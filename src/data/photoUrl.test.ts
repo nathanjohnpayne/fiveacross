@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { QueryDocumentSnapshot } from 'firebase/firestore';
+import { perDayHonors, sortPlayers } from '../game/logic';
 import { playerConverter, proofConverter } from './converters';
 import { allowedPhotoUrlOrNull, isAllowedPhotoUrl, PHOTO_URL_MAX } from './photoUrl';
 
@@ -86,5 +87,33 @@ describe('playerConverter / proofConverter — rendered fields read as their con
     expect(p.photoURL).toBeNull();
     expect(proofConverter.fromFirestore(snap('p2', { text: 'hi', photoURL: null })).text).toBe('hi');
     expect('text' in proofConverter.fromFirestore(snap('p3', { photoURL: null }))).toBe(false);
+  });
+});
+
+// #1413: prove persisted malformed stats are safe before EVERY public consumer.
+describe('playerConverter — malformed public stats', () => {
+  it('bounds a legacy public name on read without changing stored data', () => {
+    const raw = { displayName: 'x'.repeat(100_000) };
+    expect(playerConverter.fromFirestore(snap('u1', raw)).displayName).toBe('x'.repeat(100));
+    expect(playerConverter.fromFirestore(snap('u1', { displayName: 'x'.repeat(99) + '😀' })).displayName).toBe('x'.repeat(99));
+    expect(raw.displayName).toHaveLength(100_000);
+  });
+  it.each([null, 'bad', [], { 0: null }, { 0: [] }, { 0: 42 }])('drops unreadable dayStats %j', (dayStats) => {
+    const row = playerConverter.fromFirestore(snap('u1', {
+      displayName: 'Ada', bingoCount: 2, squaresMarked: 9, firstBingoAt: 20, dayStats,
+    }));
+    expect(row.dayStats).toBeUndefined();
+    expect(perDayHonors([row])).toEqual([]);
+    expect(sortPlayers([row])[0].bingoCount).toBe(2);
+  });
+
+  it('retains usable honors while normalizing malformed fields and roots', () => {
+    const row = playerConverter.fromFirestore(snap('u1', {
+      displayName: 'Ada', bingoCount: { toString: null }, squaresMarked: Infinity,
+      firstBingoAt: 'bad', dayStats: { 0: null, 1: { bingoCount: 'bad', squaresMarked: {}, firstBingoAt: 10 } },
+    }));
+    expect(row).toMatchObject({ bingoCount: 0, squaresMarked: 0, firstBingoAt: null,
+      dayStats: { 1: { bingoCount: 0, squaresMarked: 0, firstBingoAt: 10 } } });
+    expect(perDayHonors([row])).toEqual([{ dayIndex: 1, uid: 'u1', displayName: 'Ada', firstBingoAt: 10 }]);
   });
 });
