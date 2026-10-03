@@ -234,6 +234,54 @@ beforeEach(() => {
 });
 
 describe('confirmClaim — the pending win materializes: credit + publish the Proof (specs/w3-claim-modes.md)', () => {
+  it.each(['confirmed', 'rejected'] as const)('keeps Player stats unchanged for an unmatched old legacy Claim (%s)', async outcome => {
+    const cells = boardWith([0]);
+    cells[4] = { ...cells[4], proofId: 'newer-proof' };
+    boardState = { cells };
+    playerState = { blackout: true, firstBingoAt: 10, squaresMarked: 24, bingoCount: 12 };
+    if (outcome === 'confirmed') await confirmClaim(pendingClaim(), 'admin-1');
+    else await rejectClaim(pendingClaim(), 'admin-1');
+    expect(setPayload('/players/')).toBeUndefined();
+    expect(setPayload('/claims/')).toMatchObject({ status: outcome });
+    expect(setPayload('/boards/')).toEqual({});
+    // Publication remains its independent owned/pending/safety gate. It grants
+    // neither fresh credit nor deletion classification without a Board binding.
+    expect(setPayload('/proofs/')).toEqual(outcome === 'confirmed' ? { status: 'active' } : undefined);
+  });
+
+  it.each(['confirmed', 'rejected'] as const)('keeps Player stats unchanged for an unmatched old daily Claim (%s)', async outcome => {
+    const current = boardWith([0]);
+    current[4] = { ...current[4], proofId: 'newer-proof' };
+    boardState = { cells: current };
+    playerState = {
+      blackout: true, firstBingoAt: 10, squaresMarked: 25, bingoCount: 12,
+      dayStats: {
+        0: { squaresMarked: 1, bingoCount: 0, firstBingoAt: null },
+        1: { squaresMarked: 24, bingoCount: 12, firstBingoAt: 10 },
+      },
+    };
+    const claimed = pendingClaim({ dayIndex: 0 });
+    claimState = { ...claimed };
+    getDocMock.mockResolvedValue({ data: () => ({ days: [
+      { index: 0, tutorial: false, unlockAt: 0 },
+      { index: 1, tutorial: false, unlockAt: 0 },
+    ] }) } as Awaited<ReturnType<typeof getDoc>>);
+    const priorGet = txGet.getMockImplementation()!;
+    txGet.mockImplementation((ref: Ref): Promise<Snap> => {
+      if (ref.path === 'events/med-2026/days/1/boards/u1') {
+        return Promise.resolve({ exists: () => true, data: () => ({ cells: boardWith(FULL) }) });
+      }
+      return priorGet(ref);
+    });
+    if (outcome === 'confirmed') await confirmClaim(claimed, 'admin-1');
+    else await rejectClaim(claimed, 'admin-1');
+    // No current cell carries old Proof P: resolving its stale Claim has no
+    // credit effect and must not fold the current Day over another Day's win.
+    expect(setPayload('/players/')).toBeUndefined();
+    expect(setPayload('/claims/')).toMatchObject({ status: outcome });
+    expect(setPayload('/boards/')).toEqual({});
+  });
+
   it.each(['confirmed', 'rejected'] as const)('normalizes Proof deletion classification after independently earned Honor credit (%s)', async outcome => {
     const pending = boardWith([0, 1, 2, 3]);
     pending[4] = { ...pending[4], marked: true, status: 'pending', proofId: 'P', markedAt: 9 };

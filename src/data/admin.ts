@@ -388,8 +388,8 @@ export function hideProof(id: string, eventId: string = EVENT_ID): Promise<void>
  * and Cloud Vision scans the uploaded object — so a photo whose claim is still
  * undecided can be flagged, hidden, and then Restored. Publishing it `'active'`
  * there would put it in every Player's Feed BEFORE the claim was judged, and
- * rejecting the claim afterwards leaves it public: `rejectClaim` deliberately
- * writes nothing to the Proof (it leaves a rejected Proof `'pending'` rather than
+ * rejecting the claim afterwards leaves it public: `rejectClaim`
+ * never publishes the Proof (it leaves a rejected Proof `'pending'` rather than
  * exposed), so nothing would ever take it back down. Restoring to `'pending'`
  * hands the Proof back to the claim queue instead, where Confirm publishes it and
  * Reject leaves it unpublished — the decision the console is actually asking for.
@@ -1978,7 +1978,9 @@ async function resolve(
         },
       });
     }
-    if (!contentOnly && daily) {
+    // An old Claim may outlive its Board attachment. Resolve its review without
+    // folding an unrelated current Day over prior wins or root blackout.
+    if (claimCellBefore !== undefined && !contentOnly && daily) {
       const siblingBlackout =
         status === 'rejected' &&
         pSnap.exists() &&
@@ -2036,7 +2038,7 @@ async function resolve(
           });
         }
       }
-    } else if (!contentOnly) {
+    } else if (claimCellBefore !== undefined && !contentOnly) {
       tx.set(
         player(c.uid, eventId),
         { squaresMarked: squares, bingoCount, blackout, firstBingoAt },
@@ -2107,13 +2109,14 @@ async function resolve(
     // the live read shows it is the claimant's own upload (`uid === c.uid`) and
     // is still the admin-only `'pending'` Proof this Claim was filed with — the
     // same owner-first discipline `restoreProof` applies to the claims that
-    // steer it. Anything else is left exactly as it stands: another Player's
+    // steer it. The publication gate leaves every other status as it stands: another Player's
     // Proof (a hidden or pending one must not reach the Feed through somebody
     // else's Claim), an already-active one (publishing it would be a no-op), a
     // report- or admin-hidden one (its lift is `Clear reports` / `Restore`, not
     // a confirm), and a missing one (a merge `set` would CREATE a ghost Proof
-    // carrying nothing but a status). The Claim still resolves and the Mark is
-    // still confirmed in every case.
+    // carrying nothing but a status). The Claim still resolves; matched fresh
+    // credit confirms its Mark, and content-only review preserves established
+    // credit. Bound deletion classification is independent of publication.
     if (claimProofRef) {
       const liveProof = claimProofSnap?.exists()
         ? (claimProofSnap.data() as Partial<ProofDoc> | undefined)
