@@ -1645,6 +1645,36 @@ describe('reshuffleBoard — the post-Reshuffle re-deal echo (spec § Reshuffle 
 });
 
 describe('reconcileEchoes — open-time backfill (spec § Open-time)', () => {
+  it.each([0, 1.5, 1_700_000_060_001, NaN])('normalizes malformed carrier timestamp %s in first and delayed repair chunks', async (badStamp) => {
+    const now = 1_700_000_000_000;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    const ids = (index: number) => `malformed-repair-${index}`;
+    const cells = card(ids, Object.fromEntries(Array.from({ length: 25 }, (_, index) => [index, {
+      marked: true, markedAt: index === 0 || index === 20 ? badStamp : 1, status: 'confirmed' as const,
+    }])));
+    H.dayBoards.set(0, { uid: 'u1', seed: 71, dayIndex: 0, cells });
+    H.player = { uid: 'u1', displayName: 'Alice' };
+    const itemIds = cells.filter((cell) => !cell.free).map((cell) => cell.itemId!);
+    const witnesses = new Map(itemIds.map((id) => [`gcb:echo-marker-repair:${EVENT_ID}:u1:${id}`, '1']));
+    itemIds.forEach((id) => H.markerCache.set(id, false));
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => witnesses.get(key) ?? null,
+      setItem: (key: string, value: string) => witnesses.set(key, value),
+      removeItem: (key: string) => witnesses.delete(key),
+    });
+    try {
+      await reconcileEchoes({ uid: 'u1', dayIndex: 0, dayIndexes: [0], statsFrozen: true });
+      await vi.waitFor(() => expect(H.batchSet.mock.calls.filter(isMarkerWrite)).toHaveLength(24));
+      const writes = H.batchSet.mock.calls.filter(isMarkerWrite);
+      for (const index of [0, 20]) {
+        expect(writes.find((call) => segs(call)[3] === ids(index))![1]).toMatchObject({ markedAt: now });
+      }
+      expect(writes.find((call) => segs(call)[3] === ids(1))![1]).toMatchObject({ markedAt: 1 });
+      expect(cells[0].markedAt).toBe(badStamp); // the persisted Board/credit is untouched
+      expect(H.batchCommit).toHaveBeenCalledTimes(2);
+    } finally { clock.mockRestore(); vi.unstubAllGlobals(); }
+  });
+
   const seedReconcile = () => {
     H.dayBoards.set(1, {
       uid: 'u1',

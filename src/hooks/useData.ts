@@ -893,8 +893,9 @@ export function useTally(itemId: string | null | undefined) {
   // (and so no Doubt button) for them and the badge count matches the names.
   const markers = ready
     ? [...data]
-        .filter((m) => readableTallyEntry(m, m.uid) !== null
-          && (m.eventId === undefined || m.eventId === EVENT_ID)
+        .map((m) => readableTallyEntry(m, m.uid))
+        .filter((m): m is TallyEntry => m !== null)
+        .filter((m) => (m.eventId === undefined || m.eventId === EVENT_ID)
           && !isBanned(m.uid, bannedUids) && !isHiddenFor(m.uid, hidden))
         .sort((a, b) => a.markedAt - b.markedAt)
     : [];
@@ -1294,7 +1295,7 @@ export function useTallyCards() {
   const dayKey = JSON.stringify(days.map((day) => day.index).filter(supportedDayIndex));
   const eventId = EVENT_ID;
   const key = eventScopeKey(eventId, 'tally-cards');
-  const displayedRef = useRef<{ eventId: string; hiddenKey?: string; displayed: Record<string, number> }>({
+  const displayedRef = useRef<{ eventId: string; policyKey?: string; hiddenKey?: string; displayed: Record<string, number> }>({
     eventId,
     displayed: {},
   });
@@ -1307,7 +1308,12 @@ export function useTallyCards() {
   // never returned unscrubbed after it changes: until the new listener answers
   // they are served with the new set's Marks removed (`scrubTallyCards`).
   const { hidden, ready, hiddenKey } = useBlockFilter();
-  const derivedKey = `${key}|${hiddenKey}`;
+  // Withheld Prompt labels must disappear immediately when any visibility
+  // policy changes, before replacement listeners answer. Only a hidden-set
+  // change under the SAME policy may carry scrubbed cards across subscriptions.
+  const policyKey = JSON.stringify([dayKey, threshold, adultRequired, bannedUids]);
+  const policyScope = `${key}|${policyKey}`;
+  const derivedKey = `${policyScope}|${hiddenKey}`;
   // `carried` marks cards scrubbed over from an older hidden set that the new
   // listener has not yet re-answered (see the carry-over below).
   const [state, setState] = useState<{ key: string; cards: TallyCard[]; loading: boolean; carried?: boolean }>(() => ({
@@ -1326,20 +1332,20 @@ export function useTallyCards() {
     const publish = () => {
       if (!active || !markersLoaded || !promptsLoaded) return;
       const { cards, displayed } = deriveTallyCards(rows, prompts, Date.now(), displayedRef.current.displayed);
-      displayedRef.current = { eventId, hiddenKey, displayed };
+      displayedRef.current = { eventId, policyKey, hiddenKey, displayed };
       setState({ key: derivedKey, cards, loading: false });
     };
-    // The bump history is scoped to the hidden set as well as the Event: a bump
+    // Bump history is scoped to the Event, visibility policy and hidden set: a bump
     // never moves backward (`nextDisplayBumpTime`), so a history carried across
-    // a block would keep the Feed position a now-hidden Mark earned. A new set
-    // recomputes every bump from the visible Marks alone.
-    if (displayedRef.current.eventId !== eventId || displayedRef.current.hiddenKey !== hiddenKey) {
-      displayedRef.current = { eventId, hiddenKey, displayed: {} };
+    // block or policy change would keep the position a now-hidden Mark earned.
+    // Each new scope recomputes every bump from the visible Marks alone.
+    if (displayedRef.current.eventId !== eventId || displayedRef.current.policyKey !== policyKey || displayedRef.current.hiddenKey !== hiddenKey) {
+      displayedRef.current = { eventId, policyKey, hiddenKey, displayed: {} };
     }
     setState((previous) =>
       previous.key === derivedKey
         ? { ...previous, loading: true }
-        : carriesAcrossHiddenSet(previous, key)
+        : carriesAcrossHiddenSet(previous, policyScope)
           ? { key: derivedKey, cards: scrubTallyCards(previous.cards, hidden), loading: false, carried: true }
           : { key: derivedKey, cards: [], loading: true },
     );
@@ -1415,16 +1421,16 @@ export function useTallyCards() {
   if (!ready) return { key, cards: [], loading: true, resubscribing: false };
   if (state.key === derivedKey)
     return { key, cards: state.cards, loading: state.loading, resubscribing: state.carried === true };
-  // A hidden-set change within the same Event (#689) keeps serving the cards
+  // A hidden-set change under the same Event/visibility policy (#689) serves cards
   // already in hand, scrubbed against the new set, while the listener
   // resubscribes: blanking them would drop the whole Feed to its loading state
   // and unmount an open who-list sheet for a change that only removes rows.
-  if (carriesAcrossHiddenSet(state, key))
+  if (carriesAcrossHiddenSet(state, policyScope))
     return { key, cards: scrubTallyCards(state.cards, hidden), loading: false, resubscribing: true };
   return { key, cards: [], loading: true, resubscribing: false };
 }
 
-/** True when `state` holds settled cards for this Event under an older hidden set. */
+/** Settled cards from the same Event/visibility policy under an older hidden set. */
 function carriesAcrossHiddenSet(state: { key: string; loading: boolean }, key: string): boolean {
   return !state.loading && state.key.startsWith(`${key}|`);
 }

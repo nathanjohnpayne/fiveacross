@@ -3090,11 +3090,17 @@ async function runReconcileEchoes(
     );
   }
   const writeRepair = (target: ReturnType<typeof writeBatch>, cell: Cell) => {
+    // Legacy Board timestamps were not structurally bounded. Normalize only
+    // the derived marker, using the current enqueue clock even for a delayed
+    // tail; valid old offline timestamps and the Board's Mark stay unchanged.
+    const repairNow = Date.now();
+    const markedAt = typeof cell.markedAt === 'number' && Number.isSafeInteger(cell.markedAt)
+      && cell.markedAt > 0 && cell.markedAt <= repairNow + 60_000 ? cell.markedAt : repairNow;
     target.set(doc(database, 'events', eventId, 'tally', cell.itemId as string, 'markers', uid), {
       uid,
       eventId,
       displayName: markerDisplayName(undefined, cachedPlayerData?.displayName),
-      markedAt: cell.markedAt ?? now,
+      markedAt,
       itemText: cell.text,
       cellIndex: cell.index,
       dayIndex,

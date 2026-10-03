@@ -6,6 +6,8 @@ type ErrorListener = (error: unknown) => void;
 
 const H = vi.hoisted(() => ({
   eventId: 'event-a',
+  adultRequired: true,
+  hidden: new Set<string>(),
   subscriptions: [] as Array<{
     target: { kind?: string; args?: unknown[] };
     listener: Listener;
@@ -24,6 +26,8 @@ vi.mock('../firebase', () => ({
   googleProvider: {},
   analytics: null,
 }));
+vi.mock('./useAdultContent', () => ({ useAdultContent: () => H.adultRequired }));
+vi.mock('./useBlocks', () => ({ useHiddenUids: () => ({ hidden: H.hidden, ready: true }) }));
 
 vi.mock('firebase/firestore', () => {
   const makeRef = (kind: string, args: unknown[]) => {
@@ -88,10 +92,51 @@ const markerSnapshot = (eventId: string, itemId: string, markedAt = 10) => ({
 
 beforeEach(() => {
   H.eventId = 'event-a';
+  H.adultRequired = true;
+  H.hidden = new Set();
   H.subscriptions = [];
 });
 
 describe('manual Event-scoped listener lifecycles (#807)', () => {
+  it.each(['adult', 'threshold', 'days', 'threshold-with-hidden-set', 'ban'] as const)('clears Tally cards across a %s policy change before replacement snapshots', (policy) => {
+    const view = renderHook(() => useTallyCards());
+    const eventSubs = H.subscriptions.filter((s) => s.target.kind === 'doc');
+    const event = { days: [{ index: 0 }], bannedUids: [], settings: { reportHideThreshold: 4 } };
+    act(() => eventSubs.forEach((s) => s.listener(docSnapshot(event))));
+    const current = () => H.subscriptions.filter((s) => !s.unsubscribe.mock.calls.length);
+    const prompts = () => current().find((s) => {
+      const source = s.target.args?.[0] as { kind?: string; args?: unknown[] } | undefined;
+      return source?.kind === 'collection' && source.args?.includes('items');
+    })!;
+    const markers = () => current().find((s) => {
+      const source = s.target.args?.[0] as { kind?: string } | undefined;
+      return source?.kind === 'collectionGroup';
+    })!;
+    const oldPrompts = prompts();
+    const oldMarkers = markers();
+    const prompt = { docs: [{ id: 'same-item', data: () => ({ status: 'active', text: 'Trusted prompt', reportCount: 3, spicy: true }) }], metadata: { fromCache: false, hasPendingWrites: false } };
+    act(() => { oldPrompts.listener(prompt); oldMarkers.listener(markerSnapshot('event-a', 'same-item')); });
+    expect(view.result.current.cards).toHaveLength(1);
+    if (policy === 'adult') { H.adultRequired = false; view.rerender(); }
+    else act(() => {
+      if (policy === 'threshold-with-hidden-set') H.hidden = new Set(['unrelated-blocked']);
+      eventSubs.forEach((s) => s.listener(docSnapshot(policy.startsWith('threshold')
+      ? { ...event, settings: { reportHideThreshold: 3 } }
+      : policy === 'ban' ? { ...event, bannedUids: ['event-a-uid'] }
+      : { ...event, days: [{ index: 1 }] })));
+    });
+    expect(view.result.current.cards).toEqual([]);
+    expect(view.result.current.loading).toBe(true);
+    // Retired policy callbacks cannot restore withheld text.
+    act(() => { oldPrompts.listener(prompt); oldMarkers.listener(markerSnapshot('event-a', 'same-item')); });
+    expect(view.result.current.cards).toEqual([]);
+    act(() => markers().listener(markerSnapshot('event-a', 'same-item')));
+    expect(view.result.current.cards).toEqual([]);
+    act(() => prompts().listener(prompt));
+    expect(view.result.current.cards).toEqual([]);
+    expect(view.result.current.loading).toBe(false);
+  });
+
   it('keeps a restored Prompt in Tally cards while requiring strict suppression and active status', () => {
     const view = renderHook(() => useTallyCards());
     act(() => {
