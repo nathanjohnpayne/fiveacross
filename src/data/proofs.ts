@@ -853,8 +853,8 @@ export async function deleteProof(
     // then fails — offline, a transient 5xx, a revoked token — leaves media
     // that is still reachable through its download URL and may remain in a
     // legacy worker's `proof-media` cache, with nothing left anywhere recording
-    // it was supposed to go. Upgraded workers use NetworkOnly and purge that
-    // legacy bucket; neither change deletes the remote Storage object.
+    // it was supposed to go. Upgraded workers use NetworkOnly and attempt to purge that
+    // legacy bucket on activation; neither change deletes the remote Storage object.
     //
     // So the pending revocation is written IN THE SAME COMMIT as the delete,
     // before the reference disappears. Same transaction, so there is no window
