@@ -258,7 +258,7 @@ beforeEach(() => {
   mocks.hasCachedCard.mockResolvedValue(false);
   mocks.attestAdult.mockResolvedValue(undefined);
   mocks.getRedirectResult.mockResolvedValue(null);
-  mocks.signInWithPopup.mockResolvedValue({});
+  mocks.signInWithPopup.mockResolvedValue({ user: FAKE_USER });
   mocks.signInWithRedirect.mockResolvedValue(undefined);
   mocks.signOut.mockResolvedValue(undefined);
 });
@@ -2315,6 +2315,53 @@ describe('AuthContext deal-error hardening', () => {
     await act(async () => { secondPopup.settle({ user: FAKE_USER }); await second; });
     await act(async () => { await signIn(false); });
     expect(mocks.signInWithPopup).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not adopt a retired popup acknowledgement after another user signs in', async () => {
+    let signIn!: (acknowledged: boolean) => Promise<void>;
+    let logout!: () => Promise<void>;
+    function Controls() {
+      ({ signIn, signOutUser: logout } = useAuth());
+      return null;
+    }
+    const oldPopup = deferred<{ user: typeof FAKE_USER }>();
+    mocks.joinAndDeal.mockResolvedValue(true);
+    const otherUser = { ...FAKE_USER, uid: 'sailor-2' };
+    const authMock = mockedAuth as { currentUser?: typeof FAKE_USER };
+    authMock.currentUser = FAKE_USER;
+    mocks.signInWithPopup.mockReturnValueOnce(oldPopup.promise);
+    render(<AuthProvider><Controls /></AuthProvider>);
+    await act(async () => void (await emitAuth(FAKE_USER)));
+    const retired = signIn(true);
+    mocks.signOut.mockImplementationOnce(async () => {
+      delete authMock.currentUser;
+      await emitAuth(null);
+    });
+    await act(async () => { await logout(); });
+    authMock.currentUser = otherUser;
+    mocks.signInWithPopup.mockResolvedValueOnce({ user: otherUser });
+    await act(async () => { await signIn(false); });
+    await act(async () => { oldPopup.settle({ user: FAKE_USER }); await retired; });
+    expect(mocks.attestAdult).not.toHaveBeenCalled();
+    expect(mocks.track.mock.calls.filter(([event]) => event === 'login')).toHaveLength(1);
+    delete authMock.currentUser;
+  });
+
+  it('does not attest a different current account with a live popup acknowledgement', async () => {
+    let signIn!: (acknowledged: boolean) => Promise<void>;
+    function Controls() {
+      ({ signIn } = useAuth());
+      return null;
+    }
+    const popup = deferred<{ user: typeof FAKE_USER }>();
+    const authMock = mockedAuth as { currentUser?: typeof FAKE_USER };
+    mocks.signInWithPopup.mockReturnValueOnce(popup.promise);
+    render(<AuthProvider><Controls /></AuthProvider>);
+    const attempt = signIn(true);
+    authMock.currentUser = { ...FAKE_USER, uid: 'sailor-2' };
+    await act(async () => { popup.settle({ user: FAKE_USER }); await attempt; });
+    expect(mocks.attestAdult).not.toHaveBeenCalled();
+    delete authMock.currentUser;
   });
 
   it('allows a deliberate sign-in after explicit logout and uses the current route', async () => {

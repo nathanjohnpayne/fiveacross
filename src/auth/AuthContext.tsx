@@ -792,6 +792,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // reconnect, which only happens if `online` flipping true re-runs that effect.
   const [online, setOnline] = useState(isOnline());
   const signInAttemptRef = useRef<Promise<void> | null>(null);
+  const signInAttemptOwnerRef = useRef<symbol | null>(null);
   const explicitLogoutRef = useRef(false);
   // The token of the redirect attempt this tab most recently STARTED and has
   // not yet seen fail — the handle the bfcache recovery below needs to retire
@@ -2446,6 +2447,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (token === null) return;
       redirectAttemptTokenRef.current = null;
       signInAttemptRef.current = null;
+      signInAttemptOwnerRef.current = null;
       clearPendingRedirectAttestationIfToken(token);
       clearCollectedAcknowledgementIfToken(token);
       clearRedirectPendingIfToken(token);
@@ -2470,6 +2472,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // whether a box is needed now; it cannot prove one was shown and ticked on
     // the render whose button the player pressed.
     const acknowledged = acknowledgedAdultContent === true;
+    const owner = Symbol('sign-in attempt');
+    signInAttemptOwnerRef.current = owner;
 
     const attempt = (async () => {
       if (onFallbackAuthOrigin) {
@@ -2557,9 +2561,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // only (above). A redirect against a foreign authDomain is exactly the
       // storage-partition failure the same-origin pin exists to avoid (#161),
       // and the e2e harness drives the emulator's account-chooser popup.
+      let popupUser: User;
       try {
-        await signInWithPopup(auth, googleProvider);
+        const credential = await signInWithPopup(auth, googleProvider);
+        popupUser = credential.user;
       } catch (err) {
+        if (signInAttemptOwnerRef.current !== owner) return;
         // Sign-in failures were invisible in analytics (#163): track('login') only
         // fires on success, and the storage-partition handler error (#161) renders
         // on the OAuth handler's own origin, which PostHog never loads. Emit an
@@ -2572,6 +2579,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         trackSignInFailure(err);
         throw err;
       }
+      // Logout retires this attempt. A late popup must not log or attest a
+      // newer account, even when a new deliberate attempt has already started.
+      if (signInAttemptOwnerRef.current !== owner) return;
       track('login', { method: 'google' });
       // The 18+ checkbox gated this sign-in (SignIn.tsx), so signing in IS the
       // attestation — persist it now that we have a uid, so a first-time User is not
@@ -2586,25 +2596,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // re-read here: a popup can stay open while an admin approves the first
       // explicit Prompt, and the posture that governs what the player agreed to
       // is the one that was on their screen.
-      if (acknowledged) await attest();
+      if (acknowledged && auth.currentUser?.uid === popupUser.uid) {
+        await persistAttestation(popupUser);
+      }
     })();
 
     signInAttemptRef.current = attempt;
     void attempt
       .finally(() => {
-        if (signInAttemptRef.current === attempt) signInAttemptRef.current = null;
+        if (signInAttemptRef.current === attempt) {
+          signInAttemptRef.current = null;
+          signInAttemptOwnerRef.current = null;
+        }
       })
       .catch(() => {});
     return attempt;
-  }, [attest, handoffSignedOutWebApp, onFallbackAuthOrigin]);
+  }, [persistAttestation, handoffSignedOutWebApp, onFallbackAuthOrigin]);
 
   const signOutUser = async () => {
     // Install intent before Firebase publishes null (which may be synchronous).
     explicitLogoutRef.current = true;
     // A popup may have published its User while its attestation write remains
-    // pending. Retire only its coalescing slot so a deliberate new sign-in can
-    // start; the old finally cannot clear the new slot because it compares identity.
+    // pending. Retire its slot and continuation so a deliberate new sign-in
+    // can start without adopting the old acknowledgement. The old finally
+    // cannot clear the new slot because it compares attempt identity.
     signInAttemptRef.current = null;
+    signInAttemptOwnerRef.current = null;
     try {
       localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
     } catch {
