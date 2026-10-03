@@ -385,6 +385,40 @@ describe('dealDayCard — snapshot-gated lazy dealing', () => {
     expect(writtenBoard()!.data.cells).toHaveLength(25);
   });
 
+  it('refuses a frozen member deleted after preflight hydration without card, stats or analytics writes', async () => {
+    const ids = seedPool(30);
+    H.event = { days: daysWith(mkDay({ snapshotItemIds: ids })), settings: {} };
+    H.txGet.mockImplementationOnce(() => { H.itemsById.delete(ids[0]); });
+    await expect(dealDayCard(U, 2)).rejects.toThrow('frozen');
+    expect(H.txSet).not.toHaveBeenCalled();
+    expect(H.trackSpy).not.toHaveBeenCalled();
+  });
+
+  it('refuses a frozen member whose transaction read becomes denied after readable preflight', async () => {
+    const ids = seedPool(30);
+    H.event = { days: daysWith(mkDay({ snapshotItemIds: ids })), settings: {} };
+    H.txGet.mockImplementation((ref: { args?: unknown[] }) => {
+      if (ref.args?.includes(ids[0])) throw new Error('permission-denied');
+    });
+    await expect(dealDayCard(U, 2)).rejects.toThrow('frozen');
+    expect(H.txSet).not.toHaveBeenCalled();
+    expect(H.trackSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { text: 'Changed text' }, { spicy: true }, { isFreeSpace: true },
+    { pool: 'easy' as const }, { targetDayIndex: 1 }, { createdBy: 'different-owner' },
+  ])('refuses changed hydrated Prompt fields %j before card publication', async (change) => {
+    const ids = seedPool(30);
+    H.event = { days: daysWith(mkDay({ snapshotItemIds: ids })), settings: {} };
+    H.txGet.mockImplementationOnce(() => {
+      H.itemsById.set(ids[0], { ...H.itemsById.get(ids[0]), ...change });
+    });
+    await expect(dealDayCard(U, 2)).rejects.toThrow('frozen');
+    expect(H.txSet).not.toHaveBeenCalled();
+    expect(H.trackSpy).not.toHaveBeenCalled();
+  });
+
   it('rejects a complete snapshot below the minimum without writing a partial card', async () => {
     const ids = seedPool(23);
     H.event = { days: daysWith(mkDay({ snapshotItemIds: ids })), settings: {} };

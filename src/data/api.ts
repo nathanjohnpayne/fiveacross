@@ -18,6 +18,8 @@ import {
   where,
   writeBatch,
   type Firestore,
+  type DocumentSnapshot,
+  type Transaction,
 } from 'firebase/firestore';
 import type { User } from 'firebase/auth';
 import { httpsCallable } from 'firebase/functions';
@@ -187,6 +189,30 @@ function sameHydratedDay(current: DayDef | null | undefined, hydrated: DayDef, s
     && current.unlockAt === hydrated.unlockAt
     && current.snapshotEasyMixRatio === hydrated.snapshotEasyMixRatio
     && sameStringArray(current.snapshotItemIds, snapshotIds);
+}
+
+/** Bind every hydrated member to a current transaction read before publishing. */
+async function assertHydratedPromptsCurrent(
+  tx: Transaction,
+  eventId: string,
+  snapshotIds: readonly string[],
+  hydrated: readonly (DocumentSnapshot | null)[],
+): Promise<void> {
+  // A native read-set makes a later hide/delete/edit retry or reject this
+  // transaction. Comparing every consumed field also refuses changes that
+  // already landed after preflight, before these authoritative reads. Rules
+  // remain the read authority; no status exemption or smaller pool is used.
+  const current = await Promise.all(snapshotIds.map((id) => tx.get(rawItem(id, eventId)))).catch(() => null);
+  const fields = ['text', 'spicy', 'isFreeSpace', 'pool', 'targetDayIndex', 'createdBy'] as const;
+  if (!current || current.some((snapshot, index) => {
+    const prior = hydrated[index];
+    if (!snapshot.exists() || !prior?.exists()) return true;
+    const data = snapshot.data() as Partial<ItemDoc>;
+    const original = prior.data() as Partial<ItemDoc>;
+    return fields.some((field) => data[field] !== original[field]);
+  })) {
+    throw new Error("This Day's frozen prompts changed or are unavailable. Try again once they are available.");
+  }
 }
 
 function eventEasyMixRatio(eventData: Partial<EventDoc> | null | undefined): number {
@@ -793,6 +819,9 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
   // needs. An unreadable or missing member rejects the whole attempt: silently
   // dropping it would change the frozen pool for later Players (#1406). The
   // existing Retry surface handles this without granting hidden-content reads.
+  // The transaction also re-reads every member and checks its consumed fields,
+  // so lost read access, deletion, or a consumed-field edit cannot publish
+  // stale hydrated content.
   const itemSnaps = await Promise.all(
     snapshotIds.map((id) => getDoc(rawItem(id, eventId)).catch(() => null)),
   );
@@ -966,6 +995,7 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
     if (!sameHydratedDay(latestDay, day, snapshotIds)) {
       return false;
     }
+    await assertHydratedPromptsCurrent(tx, eventId, snapshotIds, itemSnaps);
 
     const now = Date.now();
     // Echo Marks: pre-mark every dealt Prompt the Player has already achieved
@@ -1192,9 +1222,10 @@ export async function reshuffleBoard(params: {
 }): Promise<number> {
   const { uid, dayIndex, expectedSeed } = params;
   const eventId = EVENT_ID;
-  // Hydrate outside the transaction, then re-read the Event inside each attempt
-  // to fence this draw against a concurrent admin re-snapshot. The Board,
-  // counter, and peer cards are also read inside so retries re-decide.
+  // Hydrate outside, then bind the Event and every Prompt to transaction reads
+  // on each attempt: re-snapshot or unreadable/changed content refuses the
+  // draw. The Board, counter, and peer cards are also read inside so retries
+  // re-decide.
   const eventSnap = await getDoc(rawEvent(eventId));
   const eventData = eventSnap.exists() ? (eventSnap.data() as Partial<EventDoc>) : null;
   const days = Array.isArray(eventData?.days) ? (eventData.days as DayDef[]) : [];
@@ -1313,6 +1344,7 @@ export async function reshuffleBoard(params: {
     if (!sameHydratedDay(latestDay, day, snapshotIds)) {
       throw new Error('This Day changed while reshuffling. Try again.');
     }
+    await assertHydratedPromptsCurrent(tx, eventId, snapshotIds, itemSnaps);
 
     if (!boardSnap.exists()) throw new Error('reshuffleBoard: no Day Card to reshuffle.');
     const board = boardSnap.data() as {

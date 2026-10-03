@@ -24,11 +24,14 @@ const H = vi.hoisted(() => ({
   batchCommit: vi.fn(async () => {}),
   txSet: vi.fn(),
   txGet: vi.fn(),
+  trackSpy: vi.fn(),
   // `runTransaction` REJECTS offline rather than queueing — that failure mode is
   // the whole contract (Codex P1 on #383). `offline: true` makes this double
   // behave like the real SDK does with no connection.
   offline: false,
 }));
+
+vi.mock('../analytics', () => ({ track: H.trackSpy }));
 
 vi.mock('../firebase', () => ({
   db: {},
@@ -185,6 +188,7 @@ const writtenMarker = () => {
 beforeEach(() => {
   resetAdultContentForTests();
   vi.clearAllMocks();
+  H.txGet.mockReset();
   seedItems();
   H.dayBoards = new Map();
   H.event = { days: [day(0), day(1)], settings: { spicyRatio: 0.4 } };
@@ -242,6 +246,34 @@ describe('reshuffleBoard — the happy path', () => {
     });
     await expect(reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 })).rejects.toThrow('frozen');
     expect(H.txSet).not.toHaveBeenCalled();
+  });
+
+  it('refuses a frozen member deleted after preflight without replacing the card or spending', async () => {
+    H.txGet.mockImplementationOnce(() => { H.itemsById.delete(SNAPSHOT_IDS[0]); });
+    await expect(reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 })).rejects.toThrow('frozen');
+    expect(H.txSet).not.toHaveBeenCalled();
+    expect(H.trackSpy).not.toHaveBeenCalled();
+  });
+
+  it('refuses a transaction-denied member after readable preflight without a spend marker', async () => {
+    H.txGet.mockImplementation((ref: { args?: unknown[] }) => {
+      if (ref.args?.includes(SNAPSHOT_IDS[0])) throw new Error('permission-denied');
+    });
+    await expect(reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 })).rejects.toThrow('frozen');
+    expect(H.txSet).not.toHaveBeenCalled();
+    expect(H.trackSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { text: 'Changed text' }, { spicy: false }, { isFreeSpace: true },
+    { pool: 'easy' as const }, { targetDayIndex: 1 }, { createdBy: 'different-owner' },
+  ])('refuses changed hydrated Prompt fields %j before replacing the card', async (change) => {
+    H.txGet.mockImplementationOnce(() => {
+      H.itemsById.set(SNAPSHOT_IDS[0], { ...H.itemsById.get(SNAPSHOT_IDS[0]), ...change });
+    });
+    await expect(reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 })).rejects.toThrow('frozen');
+    expect(H.txSet).not.toHaveBeenCalled();
+    expect(H.trackSpy).not.toHaveBeenCalled();
   });
 
   it('refuses a snapshot changed after hydration without spending an allowance', async () => {
