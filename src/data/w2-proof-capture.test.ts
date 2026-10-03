@@ -24,6 +24,7 @@ type Snap = { data: () => unknown };
 
 const {
   activeEvent,
+  reportContentSpy,
   txGet,
   txSet,
   txDelete,
@@ -42,6 +43,7 @@ const {
   deleteDocSpy,
 } = vi.hoisted(() => ({
   activeEvent: { id: 'med-2026' },
+  reportContentSpy: vi.fn(async () => undefined),
   txGet: vi.fn(),
   txSet: vi.fn(),
   txDelete: vi.fn(),
@@ -73,6 +75,7 @@ vi.mock('./storage', () => ({
 // `caches` bucket (the purge helper itself is unit-tested for real against a
 // stubbed `caches` global in proofMediaCache.test.ts).
 vi.mock('./proofMediaCache', () => ({ purgeProofMediaFromCaches: purgeCacheSpy }));
+vi.mock('./reports', () => ({ reportContent: reportContentSpy }));
 
 let autoSeq = 0;
 vi.mock('firebase/firestore', () => {
@@ -114,6 +117,7 @@ import {
   proofMediaOwnerUid,
   ProofBacksMarkWhileClosingError,
 } from './proofs';
+import { reportProof } from './proofs';
 
 // A dealt board: every non-free Square unmarked, the free center (12) "on".
 function dealt(): Cell[] {
@@ -645,6 +649,18 @@ describe('attachProof — the preserved first-bingo stamp is the DAY’s, not th
     expect(write.dayStats[9].firstBingoAt).toBe(1000);
     expect(write.dayStats[9].firstBingoAt).not.toBe(300);
   });
+
+  it.each([null, 'bad bucket', { bingoCount: 1, squaresMarked: 4, firstBingoAt: { forged: true } }])(
+    'normalizes malformed persisted Day stats before a proof completes a line: %j', async (bucket) => {
+      playerState = { firstBingoAt: { forged: true }, dayStats: { 2: bucket } };
+      boardState = { cells: withMarked([0, 1, 2, 3]) };
+      await attachProof({ ...baseArgs, cellIndex: 4, itemId: 'i4', claimMode: 'proof_required',
+        daily: true, dayIndex: 2, currentFirstBingoAt: 300, proof: { type: 'text', text: 'completed' } });
+      const write = setPayload('/players/') as { dayStats: Record<number, { firstBingoAt: number | null }>; firstBingoAt: number | null };
+      expect(write.dayStats[2].firstBingoAt).toBe(1000);
+      expect(write.firstBingoAt).toBe(1000);
+    },
+  );
 
   it('falls back to the caller prop only when the Player row itself is unreadable', async () => {
     // No Player document at all in the transaction read — the one case the prop
@@ -1619,5 +1635,13 @@ describe('deleteProof — purges the deleting device’s own cached copy after c
     await deleteProof('P');
 
     expect(purgeCacheSpy).toHaveBeenCalledWith(undefined);
+  });
+});
+
+describe('reportProof captured identity wire', () => {
+  it('forwards the displayed reporter and incarnation to paired reporting', async () => {
+    await reportProof('proof-id', 123, 'captured-reporter');
+    expect(reportContentSpy).toHaveBeenCalledWith('proofs', 'proof-id', EVENT_ID, 123, 'captured-reporter');
+    expect(runTx).not.toHaveBeenCalled();
   });
 });

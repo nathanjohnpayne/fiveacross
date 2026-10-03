@@ -1,13 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   assertFails,
   assertSucceeds,
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { disableNetwork, doc, enableNetwork, getDoc, setDoc } from 'firebase/firestore';
 
 // A minimal CANONICAL cells map (#458: the board rule requires exactly the 25
 // decimal keys) — these suites test gates other than cell mechanics, so the
@@ -215,6 +215,73 @@ describe('d15-firestore-rules — day-meta firstBingo write-once', () => {
     // including the original owner and an admin (no update path at all).
     await assertFails(setDoc(doc(db(ALICE), at('days/0/meta/0')), honor(ALICE)));
     await assertFails(setDoc(doc(db(ADMIN), at('days/0/meta/0')), honor(ADMIN)));
+  });
+
+  it.each([
+    ['outer extras', { firstBingo: { uid: ALICE, displayName: 'Alice', at: NOW() }, extra: 'x' }],
+    ['nested extras', { firstBingo: { uid: ALICE, displayName: 'Alice', at: NOW(), proofId: 'p' } }],
+    ['null holder', { firstBingo: null }],
+    ['numeric UID', { firstBingo: { uid: 1, displayName: 'Alice', at: NOW() } }],
+    ['empty UID', { firstBingo: { uid: '', displayName: 'Alice', at: NOW() } }],
+    ['oversized UID', { firstBingo: { uid: 'x'.repeat(129), displayName: 'Alice', at: NOW() } }],
+    ['empty name', { firstBingo: { uid: ALICE, displayName: '', at: NOW() } }],
+    ['oversized name', { firstBingo: { uid: ALICE, displayName: 'x'.repeat(101), at: NOW() } }],
+    ['missing name', { firstBingo: { uid: ALICE, at: NOW() } }],
+    ['string time', { firstBingo: { uid: ALICE, displayName: 'Alice', at: 'now' } }],
+    ['negative time', { firstBingo: { uid: ALICE, displayName: 'Alice', at: -1 } }],
+    ['NaN time', { firstBingo: { uid: ALICE, displayName: 'Alice', at: NaN } }],
+    ['infinite time', { firstBingo: { uid: ALICE, displayName: 'Alice', at: Infinity } }],
+    ['negative infinite time', { firstBingo: { uid: ALICE, displayName: 'Alice', at: -Infinity } }],
+    ['future time', { firstBingo: { uid: ALICE, displayName: 'Alice', at: NOW() + 3600000 } }],
+  ])('DENIES malformed Day honor: %s, including the Admin attribution arm', async (_label, payload) => {
+    // Admin eligibility does not waive payload shape; every denial leaves the singleton free.
+    await assertFails(setDoc(doc(db(ADMIN), at('days/0/meta/0')), payload));
+    expect((await getDoc(doc(db(ALICE), at('days/0/meta/0')))).exists()).toBe(false);
+  });
+
+  it('preserves zero and older-than-24h win timestamps without a Board or Player prerequisite', async () => {
+    await assertSucceeds(setDoc(doc(db(ALICE), at('days/0/meta/0')), {
+      firstBingo: { uid: ALICE, displayName: 'x'.repeat(100), at: 0 },
+    }));
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), `events/${EVENT}`), {
+        status: 'active', admins: [ADMIN], days: [{ index: 0, unlockAt: PAST() }, { index: 1, unlockAt: PAST() }],
+      });
+    });
+    const oldWin = NOW() - 3 * 86400000;
+    await assertSucceeds(setDoc(doc(db(ADMIN), at('days/1/meta/1')), {
+      firstBingo: { uid: ALICE, displayName: 'Alice', at: oldWin },
+    }));
+    expect((await getDoc(doc(db(ALICE), at('days/1/meta/1')))).data()?.firstBingo.at).toBe(oldWin);
+    expect((await getDoc(doc(db(ALICE), at('players/alice')))).exists()).toBe(false);
+    expect((await getDoc(doc(db(ALICE), at('days/0/boards/alice')))).exists()).toBe(false);
+  });
+
+  it('accepts maximum-length UID/name and the existing future clock tolerance', async () => {
+    const uid = 'x'.repeat(128);
+    await assertSucceeds(setDoc(doc(db(uid), at('days/0/meta/0')), {
+      firstBingo: { uid, displayName: 'x'.repeat(100), at: NOW() + 30000 },
+    }));
+  });
+
+  it('drains a queued Day honor with its old original win time', async () => {
+    const alice = db(ALICE);
+    const oldWin = NOW() - 3 * 86400000;
+    await disableNetwork(alice);
+    const queued = setDoc(doc(alice, at('days/0/meta/0')), { firstBingo: { uid: ALICE, displayName: 'Alice', at: oldWin } });
+    await enableNetwork(alice);
+    await assertSucceeds(queued);
+    expect((await getDoc(doc(alice, at('days/0/meta/0')))).data()?.firstBingo.at).toBe(oldWin);
+  });
+
+  it('allows exactly one concurrent canonical first broadcast, independently of achievement', async () => {
+    const results = await Promise.allSettled([
+      setDoc(doc(db(ALICE), at('days/0/meta/0')), honor(ALICE)),
+      setDoc(doc(db(BOB), at('days/0/meta/0')), honor(BOB)),
+    ]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
+    expect([ALICE, BOB]).toContain((await getDoc(doc(db(ALICE), at('days/0/meta/0')))).data()?.firstBingo.uid);
   });
 
   it('DENIES a forged-attribution firstBingo create (uid != caller)', async () => {
