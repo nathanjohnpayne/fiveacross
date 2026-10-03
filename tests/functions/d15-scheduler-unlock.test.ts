@@ -34,6 +34,7 @@ interface StoredItem {
   pool?: string;
   isFreeSpace?: boolean;
   reportCount?: number;
+  reportHideSuppressed?: boolean;
   createdBy?: string;
   createdAt?: number;
   approvedAt?: number;
@@ -298,6 +299,7 @@ describe('stampDaySnapshot — the snapshot at unlock (AC 1)', () => {
         { id: 'keep', status: 'active', pool: 'main', createdBy: 'u1', createdAt: D9_UNLOCK - 1000 },
         { id: 'free', status: 'active', pool: 'main', isFreeSpace: true },
         { id: 'reported', status: 'active', pool: 'main', reportCount: 5, createdBy: 'u2' },
+        { id: 'restored', status: 'active', pool: 'main', reportCount: 5, reportHideSuppressed: true, createdBy: 'u2' },
         { id: 'banned', status: 'active', pool: 'main', createdBy: 'villain' },
         { id: 'late', status: 'active', pool: 'main', createdBy: 'u3', createdAt: D9_UNLOCK + 10_000 },
       ],
@@ -306,7 +308,7 @@ describe('stampDaySnapshot — the snapshot at unlock (AC 1)', () => {
     // must still be excluded because the snapshot freezes the pool AS OF unlockAt.
     const result = await stampDaySnapshot(db, 'e1', 8, { now: () => D9_UNLOCK + 20_000 });
     expect(result).toBe('stamped');
-    expect(db.readEvent().days!.find((d) => d.index === 8)!.snapshotItemIds).toEqual(['keep']);
+    expect(db.readEvent().days!.find((d) => d.index === 8)!.snapshotItemIds).toEqual(['keep', 'restored']);
   });
 
   it('leaves a Day whose unlockAt is still in the future untouched (AC: future Day)', async () => {

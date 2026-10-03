@@ -14,7 +14,7 @@ import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
 // item READ carve-out (tests/rules/d15-firestore-rules.test.ts); this file pins
 // what #201 deliberately left out of its own scope (a rules-only ticket that
 // proves shape over hand-built payloads, not the client write paths): the
-// CREATE side actually letting a non-admin land a `pending` row, and the
+// CREATE side now refusing stale direct pending creation (#1311), and the
 // `update` gate on the status transitions out of `pending`. Since #1275
 // (ADR 0015) APPROVAL is the `approvePrompts` callable on the Admin SDK, so
 // the rules DENY the client `pending → active` flip to everyone, an admin
@@ -79,9 +79,9 @@ beforeEach(async () => {
   });
 });
 
-describe('d15-approvals — create: a non-admin CAN land status: "pending"', () => {
-  it('ALLOWS a non-admin create with status: "pending"', async () => {
-    await assertSucceeds(setDoc(doc(db(ALICE), at('items/p1')), pendingPayload(ALICE)));
+describe('d15-approvals — create: pending intake is callable-only (#1311)', () => {
+  it('DENIES a stale non-admin direct pending create', async () => {
+    await assertFails(setDoc(doc(db(ALICE), at('items/p1')), pendingPayload(ALICE)));
   });
 
   it('DENIES status: "active" on non-admin create — visible prompts require admin approval', async () => {
@@ -136,9 +136,11 @@ describe('d15-approvals — create: a non-admin CAN land status: "pending"', () 
   });
 });
 
-describe('d15-approvals — pending item read carve-out re-pinned against a write-created row', () => {
+describe('d15-approvals — pending item read carve-out re-pinned against a server-created row', () => {
   it('the submitter CAN read their own pending item; another non-admin CANNOT; an admin CAN', async () => {
-    await setDoc(doc(db(ALICE), at('items/p1')), pendingPayload(ALICE));
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await setDoc(doc(ctx.firestore(), at('items/p1')), pendingPayload(ALICE));
+    });
     await assertSucceeds(getDoc(doc(db(ALICE), at('items/p1'))));
     await assertFails(getDoc(doc(db(BOB), at('items/p1'))));
     await assertSucceeds(getDoc(doc(db(ADMIN), at('items/p1'))));
@@ -216,11 +218,11 @@ describe('d15-approvals — update: approval is the approvePrompts callable; onl
     );
   });
 
-  it("a non-admin's ONLY permitted update on their own pending item is the reportCount increment path", async () => {
+  it("a non-admin cannot increment a pending item without an incarnation receipt (#1405)", async () => {
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       await setDoc(doc(ctx.firestore(), at('items/p1')), pendingPayload(ALICE));
     });
-    // The existing report path still works — unrelated to the approval gate.
-    await assertSucceeds(updateDoc(doc(db(BOB), at('items/p1')), { reportCount: 1 }));
+    // Reporting now requires its paired receipt/rate writes (#1405).
+    await assertFails(updateDoc(doc(db(BOB), at('items/p1')), { reportCount: 1 }));
   });
 });
