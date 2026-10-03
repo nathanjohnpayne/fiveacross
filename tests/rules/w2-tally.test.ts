@@ -7,7 +7,7 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { deleteDoc, doc, getDoc, setDoc } from 'firebase/firestore';
+import { deleteDoc, doc, getDoc, setDoc, updateDoc, writeBatch } from 'firebase/firestore';
 
 // specs/w2-tally.md — the per-Prompt Tally rules contract (ADR 0002). The Tally
 // is a subcollection whose marker doc id IS the marker's uid, so a Player may
@@ -70,6 +70,22 @@ beforeEach(async () => {
 });
 
 describe('firestore.rules — per-Prompt Tally (specs/w2-tally.md)', () => {
+  it('already denies legacy root-Board writes independently of marker Day validation', async () => {
+    const legacyBoard = at(`boards/${ALICE}`);
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), legacyBoard), { uid: ALICE, cells: {}, seed: 1 });
+    });
+    // There is no /events/{event}/boards/{uid} allow arm. The supported daily
+    // path is /days/{day}/boards/{uid}; this denial also holds on main before
+    // #1414's marker bounds, so those bounds cannot break a live legacy Mark.
+    await assertFails(updateDoc(doc(db(ALICE), legacyBoard), { cells: {} }));
+    const ownerDb = db(ALICE);
+    const batch = writeBatch(ownerDb);
+    batch.update(doc(ownerDb, legacyBoard), { cells: {} });
+    batch.set(doc(ownerDb, markerPath(ITEM, ALICE)), marker(ALICE, { dayIndex: 0, itemText: 'Saw a drag show' }));
+    await assertFails(batch.commit());
+  });
+
   it('a signed-in Player self-publishes their OWN attributed marker, then unmarks it', async () => {
     const mine = doc(db(ALICE), markerPath(ITEM, ALICE));
     await assertSucceeds(setDoc(mine, marker(ALICE))); // every Mark publishes an attributed entry

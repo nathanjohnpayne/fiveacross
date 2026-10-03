@@ -102,6 +102,7 @@ beforeEach(async () => {
         { index: 2, unlockAt: PAST(), pool: 'main', tutorial: false },
       ],
     });
+    await setDoc(doc(d, `events/${EVENT}/items/i3`), { text: 'Prompt 3', status: 'active' });
     await setDoc(doc(d, `events/${EVENT}/players/${ALICE}`), {
       uid: ALICE,
       displayName: 'Alice',

@@ -5,6 +5,7 @@ import { standingsFreezeAtFor } from '../game/logic';
 import { normalizeEventTheme } from '../theme/themes';
 import { allowedPhotoUrlOrNull } from './photoUrl';
 import { withReadableDayStats } from './eventArchive';
+import { supportedDayIndex } from './eventLimits';
 import type {
   FirestoreDataConverter,
   QueryDocumentSnapshot,
@@ -370,12 +371,31 @@ export const noticeConverter: FirestoreDataConverter<NoticeDoc> = {
 // doc id IS the marker's uid (firestore.rules keys the self-write on it — a
 // forgery-deniable attribution), so pin `uid` to `snap.id` rather than trusting
 // the stored field. This is the read side of the count + tap-to-see-who list.
+/** Persisted markers are untrusted, including rows written before validation. */
+export function readableTallyEntry(value: unknown, uid: string, now = Date.now()): TallyEntry | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !uid) return null;
+  const row = value as Record<string, unknown>;
+  if (typeof row.displayName !== 'string' || !row.displayName
+      || typeof row.markedAt !== 'number' || !Number.isSafeInteger(row.markedAt)
+      || row.markedAt <= 0 || row.markedAt > now + 60_000
+      || (row.dayIndex !== undefined && !supportedDayIndex(row.dayIndex))
+      || (row.itemText !== undefined && (typeof row.itemText !== 'string' || !row.itemText || row.itemText.length > 80))
+      || (row.eventId !== undefined && (typeof row.eventId !== 'string' || !row.eventId))) return null;
+  const name = row.displayName.slice(0, 100);
+  return {
+    uid,
+    displayName: /[\uD800-\uDBFF]$/.test(name) ? name.slice(0, -1) : name,
+    markedAt: row.markedAt,
+    ...(typeof row.eventId === 'string' ? { eventId: row.eventId } : {}),
+    ...(typeof row.dayIndex === 'number' ? { dayIndex: row.dayIndex } : {}),
+    ...(typeof row.itemText === 'string' ? { itemText: row.itemText } : {}),
+  };
+}
+
 export const tallyMarkerConverter: FirestoreDataConverter<TallyEntry> = {
   toFirestore: (data) => data as DocumentData,
-  fromFirestore: (snap: QueryDocumentSnapshot) => ({
-    ...(snap.data() as Omit<TallyEntry, 'uid'>),
-    uid: snap.id,
-  }),
+  fromFirestore: (snap: QueryDocumentSnapshot) =>
+    readableTallyEntry(snap.data(), snap.id) ?? { uid: snap.id, displayName: '', markedAt: 0 },
 };
 
 // A Doubt (ADR 0001): one Player publicly asking another to back up a marked
