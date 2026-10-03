@@ -42,7 +42,7 @@ const db = (uid: string) => testEnv.authenticatedContext(uid).firestore();
 const at = (p: string) => `events/${EVENT}/${p}`;
 const markerPath = (itemId: string, uid: string) => at(`tally/${itemId}/markers/${uid}`);
 // The day-scoped marker shape setMark writes (#216): the per-Prompt entry PLUS
-// the additive dayIndex + itemText the Feed groups/labels on.
+// the additive dayIndex + bounded itemText compatibility fields; the Feed groups by Day and joins trusted Prompt labels.
 const marker = (uid: string, over: Record<string, unknown> = {}) => ({
   eventId: EVENT,
   uid,
@@ -116,6 +116,17 @@ describe('firestore.rules — day-scoped Tally Card markers (specs/d15-tally-car
     await assertFails(setDoc(doc(db(ALICE), markerPath('not-on-card', ALICE)), payload));
     await assertFails(setDoc(doc(db(ALICE), markerPath(deletedId, ALICE)), { ...payload, cellIndex: 0 }));
     await assertFails(setDoc(doc(db(BOB), markerPath(deletedId, BOB)), marker(BOB, { cellIndex: 24 })));
+  });
+
+  it.each([
+    { days: [{ index: 1, unlockAt: 0 }, { index: 0, unlockAt: 0 }], accepted: [0, 1], absent: 2 },
+    { days: [{ index: 4, unlockAt: 0 }], accepted: [4], absent: 0 },
+  ])('validates scheduled Day identities independently of offsets: %j', async schedule => {
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await setDoc(doc(ctx.firestore(), `events/${EVENT}`), { days: schedule.days }, { merge: true });
+    });
+    for (const dayIndex of schedule.accepted) await assertSucceeds(setDoc(doc(db(ALICE), markerPath(ITEM, ALICE)), marker(ALICE, { dayIndex })));
+    await assertFails(setDoc(doc(db(ALICE), markerPath(ITEM, ALICE)), marker(ALICE, { dayIndex: schedule.absent })));
   });
 
   it('keeps long-offline queued marks and legacy square-only markers admissible', async () => {

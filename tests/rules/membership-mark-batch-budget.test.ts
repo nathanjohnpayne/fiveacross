@@ -757,6 +757,8 @@ describe('#1079/#804 membership enforcement — Mark/Echo rule budget', () => {
     const indexes = Array.from({ length: 25 }, (_, i) => i).filter(i => i !== 12);
     await testEnv.withSecurityRulesDisabled(async ctx => {
       const database = ctx.firestore();
+      // Declared Day0 sits last: exercise the worst supported identity lookup.
+      await setDoc(doc(database, eventPath(EVENT)), { days: days().reverse() }, { merge: true });
       await setDoc(doc(database, COMPATIBILITY_PATH), {
         schemaVersion: 1, projectId: 'demo-fa-membership-mark-budget', acceptLegacyUntil: NOW() + 60_000,
       });

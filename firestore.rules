@@ -668,6 +668,32 @@ service cloud.firestore {
       return (day >= 0 && exists(dayPath) && tallyTargetOnBoard(get(dayPath).data, itemId))
         || (day < 0 && exists(legacyPath) && tallyTargetOnBoard(get(legacyPath).data, itemId));
     }
+    function tallyDayScheduled(days, dayIndex) {
+      // Pad once so bounded projection needs no per-entry offset branch.
+      let padded = days.concat([{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}]);
+      return [
+        padded[0].get('index', -1),
+        padded[1].get('index', -1),
+        padded[2].get('index', -1),
+        padded[3].get('index', -1),
+        padded[4].get('index', -1),
+        padded[5].get('index', -1),
+        padded[6].get('index', -1),
+        padded[7].get('index', -1),
+        padded[8].get('index', -1),
+        padded[9].get('index', -1),
+        padded[10].get('index', -1),
+        padded[11].get('index', -1),
+        padded[12].get('index', -1),
+        padded[13].get('index', -1),
+        padded[14].get('index', -1),
+        padded[15].get('index', -1),
+        padded[16].get('index', -1),
+        padded[17].get('index', -1),
+        padded[18].get('index', -1),
+        padded[19].get('index', -1)
+      ].hasAny([dayIndex]);
+    }
     // Structural bounds only: the owner's Mark remains an honor attestation.
     // No age floor: a queued offline Mark keeps its original positive timestamp.
     function validTallyMarker(eventId, itemId) {
@@ -682,8 +708,7 @@ service cloud.firestore {
             || (marker.itemText is string && marker.itemText.size() > 0 && marker.itemText.size() <= 80))
         && (!('dayIndex' in marker)
             || (marker.dayIndex is int && marker.dayIndex >= 0 && marker.dayIndex < 20
-                && days is list && marker.dayIndex < days.size()
-                && days[marker.dayIndex].index == marker.dayIndex))
+                && days is list && tallyDayScheduled(days, marker.dayIndex)))
         && (exists(/databases/$(database)/documents/events/$(eventId)/items/$(itemId))
             || tallyTargetDealt(eventId, itemId));
     }
