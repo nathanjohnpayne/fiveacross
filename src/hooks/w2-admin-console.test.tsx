@@ -64,8 +64,9 @@ function capture() {
   // TWO event-doc subscriptions. fireDoc must deliver the event snapshot to BOTH,
   // not just the last-registered one — otherwise one half keeps its default
   // (threshold undefined → no filtering) and the merged assertion drifts.
-  const cbs: { docs: SnapCb[]; query: SnapCb | null; col: SnapCb | null } = {
+  const cbs: { docs: SnapCb[]; prompts: SnapCb | null; query: SnapCb | null; col: SnapCb | null } = {
     docs: [],
+    prompts: null,
     query: null,
     col: null,
   };
@@ -78,6 +79,7 @@ function capture() {
       if (ref.kind === 'query' && querySource?.kind === 'collectionGroup' && querySource.args?.[1] === 'markers') {
         cbs.col = onNext;
       }
+      else if (ref.kind === 'query' && querySource?.args?.includes('items')) cbs.prompts = onNext;
       else if (ref.kind === 'query') cbs.query = onNext;
       else if (ref.kind === 'doc') cbs.docs.push(onNext);
       else cbs.col = onNext;
@@ -86,7 +88,7 @@ function capture() {
   });
   return {
     fireDoc: (s: unknown) => act(() => cbs.docs.forEach((cb) => cb(s))),
-    fireQuery: (s: unknown) => act(() => cbs.query?.(s)),
+    fireQuery: (s: unknown) => act(() => { cbs.query?.(s); cbs.prompts?.(s); }),
     fireCol: (s: unknown) => act(() => cbs.col?.(s)),
   };
 }
