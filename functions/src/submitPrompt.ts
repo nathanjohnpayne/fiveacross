@@ -10,7 +10,7 @@ import { defaultTargetDayIndex } from './communityPromptRouting.generated';
 import { isActiveMembershipData, membershipPath } from './eventMembership.generated';
 import { isFirestoreDocumentId } from './firestoreIds';
 import { firestoreErrorCodeForLog } from './firestoreErrors';
-import { eventClosedToPlay } from './unlockDay';
+import { eventClosedToPlay, isEventAdmin } from './unlockDay';
 
 export const MAX_PENDING_PROMPTS = 10;
 // Functions rootDir forbids a runtime import from src/data/eventLimits.ts.
@@ -57,7 +57,9 @@ export async function submitPromptCore(
     const eventSnap = await tx.get(eventRef);
     const event = eventSnap.exists ? eventSnap.data() as EventDoc : undefined;
     if (!event) throw new HttpsError('permission-denied', 'This Event is unavailable.');
-    if (event.membershipEnforcement === 'enforced') {
+    // Preserve Decision D-A's transitional rostered-Admin admission bypass.
+    // Remove in lockstep with Rules only after #805's live backfill acceptance.
+    if (event.membershipEnforcement === 'enforced' && !isEventAdmin(event, uid)) {
       const member = await tx.get(deps.db.doc(membershipPath(input.eventId, uid)));
       if (!isActiveMembershipData(member.data())) {
         throw new HttpsError('permission-denied', 'Join this Event before adding a Prompt.');

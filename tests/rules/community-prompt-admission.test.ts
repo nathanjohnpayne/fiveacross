@@ -104,6 +104,24 @@ describe('server Community Prompt intake', () => {
     await expect(submit('new')).rejects.toMatchObject({ code: 'permission-denied' });
     await db.doc(`${base}/memberships/${UID}`).update({ status: 'active' }); await submit('new');
   });
+  it.each(['missing', 'revoked'])('preserves transitional Event-admin admission with %s membership', async status => {
+    await db.doc(base).update({ membershipEnforcement: 'enforced', admins: [UID], bannedUids: [UID] });
+    if (status === 'revoked') await db.doc(`${base}/memberships/${UID}`).set({ status });
+    expect(await submit('admin-prompt')).toEqual({ id: 'admin-prompt', targetDayIndex: 2 });
+    expect((await db.doc(`${base}/items/admin-prompt`).get()).data()?.createdBy).toBe(UID);
+    expect((await db.doc(`${base}/promptQuota/${UID}`).get()).data()?.seq).toBe(1);
+    expect(await submit('admin-prompt')).toEqual({ id: 'admin-prompt', targetDayIndex: 2 });
+    expect((await db.doc(`${base}/promptQuota/${UID}`).get()).data()?.seq).toBe(1);
+    await seedPending(9);
+    await expect(submit('over-cap')).rejects.toMatchObject({ code: 'resource-exhausted' });
+    await db.doc(base).update({ archiving: true });
+    await expect(submit('closed')).rejects.toMatchObject({ code: 'failed-precondition' });
+    for (const id of ['over-cap', 'closed']) expect((await db.doc(`${base}/items/${id}`).get()).exists).toBe(false);
+    expect((await db.doc(`${base}/promptQuota/${UID}`).get()).data()?.seq).toBe(1);
+    // The bypass is the authenticated Event roster; no ordinary member gains it.
+    await expect(submit('not-admin', 'other')).rejects.toMatchObject({ code: 'permission-denied' });
+    expect((await db.doc(`${base}/promptQuota/other`).get()).exists).toBe(false);
+  });
   it('scheduleless Events preserve untargeted legacy behavior', async () => {
     await db.doc(base).set({ status: 'active' }); expect(await submit('new')).toEqual({ id: 'new' });
     expect((await db.doc(`${base}/items/new`).get()).data()).not.toHaveProperty('targetDayIndex');
