@@ -285,7 +285,7 @@ describe('client-side rate limit on Report (Phase 0, presentational only)', () =
     fireEvent.click(reportButtons()[1]);
 
     expect(reportItemMock).toHaveBeenCalledTimes(1);
-    expect(reportItemMock).toHaveBeenCalledWith('i1', 'test-event', undefined);
+    expect(reportItemMock).toHaveBeenCalledWith('i1', 'test-event', undefined, 'report-throttle-uid');
     expect(screen.getByRole('alert')).toHaveTextContent(/slow down/i);
     expect(reportButtons()[0]).toBeDisabled();
     expect(reportButtons()[1]).toBeDisabled();
@@ -298,6 +298,6 @@ describe('client-side rate limit on Report (Phase 0, presentational only)', () =
 
     fireEvent.click(reportButtons()[1]);
     expect(reportItemMock).toHaveBeenCalledTimes(2);
-    expect(reportItemMock).toHaveBeenLastCalledWith('i2', 'test-event', undefined);
+    expect(reportItemMock).toHaveBeenLastCalledWith('i2', 'test-event', undefined, 'report-throttle-uid');
   });
 });

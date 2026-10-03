@@ -17,7 +17,7 @@ import type { ProofDoc } from '../types';
 // of the Feed. Moments are delivered EMPTY here (this is the proof half); the
 // merged Proofs+Moments ordering lives in src/components/w2-feed-moments.test.tsx.
 
-const H = vi.hoisted(() => ({ onSnapshot: vi.fn(), reportProof: vi.fn(), deleteProof: vi.fn() }));
+const H = vi.hoisted(() => ({ onSnapshot: vi.fn(), reportProof: vi.fn(), deleteProof: vi.fn(), viewerUid: 'viewer' as string | undefined }));
 
 vi.mock('../firebase', () => ({
   db: {},
@@ -49,7 +49,7 @@ vi.mock('../analytics', () => ({ track: vi.fn() }));
 // ProofFeed navigates to the Card tab from Tally Card actions (#261); mock
 // the router hook so these router-free renders keep working.
 vi.mock('react-router', () => ({ useNavigate: () => vi.fn() }));
-vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: { uid: 'viewer' } }) }));
+vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: H.viewerUid ? { uid: H.viewerUid } : null }) }));
 
 import ProofFeed from './ProofFeed';
 import { track } from '../analytics';
@@ -149,6 +149,7 @@ const colSnap = (docs: ProofDoc[]) => ({
 });
 
 beforeEach(() => {
+  H.viewerUid = 'viewer';
   vi.mocked(track).mockClear();
   H.onSnapshot.mockReset();
   H.onSnapshot.mockReturnValue(() => {});
@@ -167,7 +168,7 @@ describe('ProofFeed — the Proof IS the Feed entry (ADR 0002)', () => {
     sub.fire(colSnap([proof({ id: 'reported', createdAt: 123 })]));
     const button = screen.getByTitle('Report');
     fireEvent.click(button);
-    expect(H.reportProof).toHaveBeenCalledWith('reported', 123);
+    expect(H.reportProof).toHaveBeenCalledWith('reported', 123, 'viewer');
     expect(button).toBeDisabled();
     expect(track).not.toHaveBeenCalledWith('report_item');
     await act(async () => { if (outcome === 'accepted') resolve(); else reject(new Error('offline or rate denied')); });
@@ -178,6 +179,19 @@ describe('ProofFeed — the Proof IS the Feed entry (ADR 0002)', () => {
       expect(track).not.toHaveBeenCalledWith('report_item');
     }
   });
+  it('does not borrow a newer account for an old signed-out report control', async () => {
+    H.viewerUid = undefined;
+    const sub = captureOnNext();
+    render(<ProofFeed />);
+    sub.fire(colSnap([proof({ id: 'reported', createdAt: 123 })]));
+    H.viewerUid = 'new-viewer';
+    fireEvent.click(screen.getByTitle('Report'));
+    await act(async () => {});
+    expect(H.reportProof).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent('Report not sent');
+    expect(track).not.toHaveBeenCalledWith('report_item');
+  });
+
   it('renders proofs newest-first with the Player name and the Prompt text', () => {
     const sub = captureOnNext();
     render(<ProofFeed />);

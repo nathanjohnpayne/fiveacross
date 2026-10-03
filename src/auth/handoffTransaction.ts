@@ -35,7 +35,8 @@
  * as dropping sessionStorage across a provider round trip while localStorage
  * survives. A lost verifier is not a security failure, it is an unrecoverable
  * dead end for the player: the code they came back with can never be redeemed
- * and no retry helps, because the code is single-use and already spent by then.
+ * because the matching verifier is unavailable, even if the server code has not
+ * yet been consumed. This client requires a fresh handoff.
  *
  * So both, read session-first. The cost is one extra same-origin copy of a value
  * that is useless without a live code, bounded by a TTL, and deleted on the way
@@ -168,9 +169,9 @@ function clearStore(name: 'sessionStorage' | 'localStorage'): void {
  *
  * Returns whether at least one store accepted it. A `false` return must ABORT
  * the sign-in rather than navigate anyway: leaving without a retrievable
- * verifier guarantees the return leg fails, and it fails only after the code has
- * been minted and spent, which is the most confusing possible moment to
- * discover that storage was unavailable.
+ * verifier guarantees the return leg fails after a code has been minted. Minting
+ * alone does not consume the code; this client requires a fresh attempt rather
+ * than trying to redeem a code without its verifier.
  */
 export function rememberHandoffTransaction(record: HandoffTransactionRecord): boolean {
   // Clear FIRST. An abandoned transaction from a previous attempt is readable
