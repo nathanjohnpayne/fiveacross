@@ -145,6 +145,7 @@ function route(ref: { args?: unknown[] }) {
     const board = H.dayBoards.get(Number(a[3]));
     return board ? snap(true, a[5], board) : snap(false);
   }
+  if (a[2] === 'claims') return snap(true, a[3], { status: 'pending' });
   if (a[2] === 'players') return H.player ? snap(true, a[3], H.player) : snap(false);
   if (a[2] === 'tally' && a[4] === 'markers') {
     const m = H.markerServer.get(a[3]);

@@ -1825,6 +1825,13 @@ async function resolve(
     }
   }
   return await runTransaction(db, async (tx): Promise<ResolveResult> => {
+    // ReviewQueue only acts on pending Claims. Read that state in the same
+    // transaction as the Board so an opposite admin decision forces a retry
+    // that observes the winner's terminal status instead of reclassifying its
+    // newly credited Mark as content-only review. A stale/removed Claim is a no-op.
+    const claimRef = claim(c.id, eventId);
+    const claimSnap = await tx.get(claimRef);
+    if (!claimSnap.exists() || claimSnap.data().status !== 'pending') return { transitioned: false };
     // Read board + player inside the txn so a concurrent mark/proof from the same
     // player isn't clobbered by a stale snapshot (mirrors setMark/attachProof).
     const bSnap = await tx.get(boardRef);
@@ -2060,7 +2067,7 @@ async function resolve(
         tx.delete(marker(before.itemId, c.uid, eventId));
       }
     });
-    tx.set(claim(c.id, eventId), { status, resolvedBy: adminUid }, { merge: true });
+    tx.set(claimRef, { status, resolvedBy: adminUid }, { merge: true });
     // Confirming an admin-confirmed claim publishes its proof, which was created 'pending'
     // (admin-only readable) so it stayed hidden from the public feed until now. A
     // rejected proof is left 'pending' (still admin-only) rather than exposed.
@@ -2158,7 +2165,7 @@ export function confirmClaim(c: ClaimDoc, adminUid: string): Promise<void> {
   // board — a reshuffle traded the cell away) resolves without moving the
   // Square from pending to confirmed at all, and two admins racing the SAME
   // claim have their loser's transaction replay against the winner's
-  // already-confirmed cell — a rewrite, not a transition. Firing here
+  // terminal Claim — a no-op, not a transition. Firing here
   // unconditionally would report a credited Square in both cases even though
   // `dayStats[*].squaresMarked` never moved, breaking the reconciliation
   // identity specs/w2-ga4-events.md § Reconciliation documents.

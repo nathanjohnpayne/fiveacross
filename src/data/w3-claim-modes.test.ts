@@ -161,6 +161,7 @@ describe('Claim Mode at the mark fold — Honor instant, admin_confirmed pending
 // --- confirmClaim / rejectClaim resolve (src/data/admin.ts) ------------------
 let boardState: { cells: Cell[] } | undefined;
 let playerState: Record<string, unknown> | undefined;
+let claimState: Record<string, unknown> | undefined;
 const getDocMock = vi.mocked(getDoc);
 
 function setPayload(frag: string): Record<string, unknown> | undefined {
@@ -211,11 +212,13 @@ beforeEach(() => {
   } as Awaited<ReturnType<typeof getDoc>>);
   boardState = undefined;
   playerState = { firstBingoAt: null };
+  claimState = { ...pendingClaim() };
   runTx.mockImplementation((_db: unknown, fn: (tx: unknown) => unknown) =>
     fn({ get: txGet, set: txSet, delete: txDelete }),
   );
   txGet.mockImplementation((ref: Ref): Promise<Snap> => {
     const exists = () => true;
+    if (ref.path.includes('/claims/')) return Promise.resolve({ exists: () => !!claimState, data: () => claimState });
     if (ref.path.includes('/boards/')) return Promise.resolve({ exists, data: () => boardState });
     if (ref.path.includes('/players/')) return Promise.resolve({ exists, data: () => playerState });
     // The claim's own pending Proof: `confirmClaim` publishes it only when the
@@ -245,6 +248,39 @@ describe('confirmClaim — the pending win materializes: credit + publish the Pr
       expect(board.cells).toBeUndefined(); // no Mark fields changed
     }
     expect(setPayload('/claims/')).toMatchObject({ status: outcome });
+  });
+
+  it.each(['confirmed', 'rejected'] as const)('an opposite resolution retry cannot rewrite the winning %s Claim', async (winner) => {
+    const cells = boardWith([0, 1, 2, 3]);
+    cells[4] = { ...cells[4], marked: true, markedAt: 9, proofId: 'P', status: 'pending' };
+    boardState = { cells };
+    runTx.mockImplementationOnce(async (_db: unknown, fn: (tx: unknown) => unknown) => {
+      // Firestore discards this attempt when another admin commits to a row in
+      // its read set. Replay the actual resolver callback against that winner.
+      await fn({ get: txGet, set: txSet, delete: txDelete });
+      expect(txSet).toHaveBeenCalled();
+      claimState = { ...pendingClaim(), status: winner, resolvedBy: 'winning-admin' };
+      boardState = { cells: cells.map((cell) => cell.index === 4
+        ? { ...cell, marked: winner === 'confirmed', status: 'confirmed', markedAt: winner === 'confirmed' ? 111 : null }
+        : cell) };
+      playerState = { firstBingoAt: winner === 'confirmed' ? 111 : null };
+      txSet.mockClear(); txDelete.mockClear(); txGet.mockClear();
+      const result = await fn({ get: txGet, set: txSet, delete: txDelete });
+      expect(txSet).not.toHaveBeenCalled();
+      expect(txDelete).not.toHaveBeenCalled();
+      return result;
+    });
+    if (winner === 'confirmed') await rejectClaim(pendingClaim(), 'losing-admin');
+    else await confirmClaim(pendingClaim(), 'losing-admin');
+    expect(claimState).toMatchObject({ status: winner, resolvedBy: 'winning-admin' });
+  });
+
+  it('a removed Claim cannot be recreated by a stale queue resolution', async () => {
+    claimState = undefined;
+    boardState = { cells: boardWith(ROW0) };
+    await rejectClaim(pendingClaim(), 'admin-1');
+    expect(txSet).not.toHaveBeenCalled();
+    expect(txDelete).not.toHaveBeenCalled();
   });
 
   it('flips the claim cell pending→confirmed, credits the square, and activates the pending Proof', async () => {
@@ -350,6 +386,7 @@ describe('confirmClaim — the pending win materializes: credit + publish the Pr
     primary[4] = { ...primary[4], marked: true, markedAt: 9, proofId: 'P', status: 'pending' };
     const sibling = boardWith([0, 1, 2, 3]);
     txGet.mockImplementation((ref: Ref): Promise<Snap> => {
+      if (ref.path.includes('/claims/')) return Promise.resolve({ exists: () => !!claimState, data: () => claimState });
       if (ref.path.endsWith('/days/0/boards/u1')) {
         return Promise.resolve({ exists: () => true, data: () => ({ cells: primary, seed: 10 }) });
       }
@@ -425,6 +462,7 @@ describe('confirmClaim — the pending win materializes: credit + publish the Pr
     primary[4] = { ...primary[4], marked: true, markedAt: 9, proofId: 'P', status: 'pending' };
     const sibling = dealt();
     txGet.mockImplementation((ref: Ref): Promise<Snap> => {
+      if (ref.path.includes('/claims/')) return Promise.resolve({ exists: () => !!claimState, data: () => claimState });
       if (ref.path.endsWith('/days/0/boards/u1')) {
         return Promise.resolve({ exists: () => true, data: () => ({ cells: primary, seed: 20 }) });
       }

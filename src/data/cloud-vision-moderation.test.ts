@@ -235,7 +235,8 @@ beforeEach(() => {
     }
     if (ref.path.includes('/claims/')) {
       const match = claimsForProof.find((c) => ref.path.endsWith(`/claims/${c.id}`));
-      return Promise.resolve({ exists: () => !!match?.live, data: () => match?.live });
+      const row = match ? match.live : pendingClaim();
+      return Promise.resolve({ exists: () => !!row, data: () => row });
     }
     return Promise.resolve({ exists: () => false, data: () => undefined });
   });
