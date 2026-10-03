@@ -18,7 +18,7 @@ function fixture({ checker = 'author', env = {}, rejectAt = 0, rejectOnly = fals
   mkdirSync(bin);
   if (wrapper) {
     const wrapperPath = join(root, 'scripts', 'gh-as-author.sh');
-    writeFileSync(wrapperPath, '#!/bin/bash\nset -eu\ntest "$1" = --\nshift\nprintf "%s\\n" "$*" >>"$FIXTURE_ROOT/wrapper-calls"\nexec "$@"\n');
+    writeFileSync(wrapperPath, '#!/bin/bash\nset -eu\ntest "$1" = --\nshift\nprintf "%s\\0" "$*" >>"$FIXTURE_ROOT/wrapper-calls"\nexec "$@"\n');
     chmodSync(wrapperPath, 0o755);
   }
   const driver = join(example, 'board-fields-1.5.sh');
@@ -92,7 +92,7 @@ describe('Phase 1.5 board driver requires the fixed author identity', () => {
     expect(calls.filter(c => c === 'project item-add')).toHaveLength(2);
     expect(calls.filter(c => c === 'project item-edit')).toHaveLength(2);
     expect(Number(readFileSync(join(f.root, 'checks'), 'utf8'))).toBe(calls.length + 1);
-    const wrapped = readFileSync(join(f.root, 'wrapper-calls'), 'utf8').trim().split('\n');
+    const wrapped = readFileSync(join(f.root, 'wrapper-calls'), 'utf8').split('\0').filter(Boolean);
     expect(wrapped).toHaveLength(6);
     expect(calls.filter(c => c === 'project edit')).toHaveLength(2);
     expect(wrapped.every(c => /^gh project (item-(add|edit)|edit) /.test(c))).toBe(true);
