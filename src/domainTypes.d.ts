@@ -829,6 +829,8 @@ export interface ItemDoc {
   // ticket only widens the union, it migrates no data.
   status: 'active' | 'hidden' | 'pending' | 'rejected';
   reportCount: number;
+  /** Admin restore suppresses report auto-hide for this target incarnation. */
+  reportHideSuppressed?: boolean;
   // Whether this Prompt is in the 🔞-tagged "spicy" category (vs. "tame") for
   // stratified Board composition (`dealBoard`'s spicyRatio sampling).
   spicy: boolean;
@@ -1110,6 +1112,8 @@ export interface ProofDoc {
   text?: string | null;
   createdAt: number;
   reportCount: number;
+  /** Admin restore suppresses report auto-hide for this target incarnation. */
+  reportHideSuppressed?: boolean;
   // 'pending' = created under admin_confirmed Claim Mode (data/proofs attachProof);
   // admin-only readable per firestore.rules until confirming the Claim flips it
   // to 'active'. A rejected Claim leaves its Proof 'pending' rather than exposed.
@@ -1984,4 +1988,18 @@ export type AdmissionOutcome =
 export interface AdmissionDecision {
   admitted: boolean;
   outcome: AdmissionOutcome;
+}
+
+/** Server-authoritative Community Prompt intake (#1311, ADR 0017). */
+export interface SubmitPromptRequest {
+  /** Captured submitting account; equality guard, never ownership authority. */
+  expectedUid: string;
+  eventId: string;
+  itemId: string;
+  text: string;
+  spicy: boolean;
+}
+export interface SubmitPromptResponse {
+  id: string;
+  targetDayIndex?: number;
 }

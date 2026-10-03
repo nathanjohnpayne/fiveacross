@@ -219,6 +219,16 @@ describe('finaleActions — the computeMostLoved beat decision (#560)', () => {
 });
 
 describe('runFinaleBeats — the Most-Loved award beat through the write path (#560)', () => {
+  it('preserves admin suppression through the live Proof snapshot mapper (#1405)', async () => {
+    const db = makeDb({
+      eventId: 'e1',
+      event: { days: mainDays(), settings: { reportHideThreshold: 3 } },
+      proofs: [proof('restored', { reportCount: 6, reportHideSuppressed: true })],
+      hearts: [heart('fan', 'restored', D9_UNLOCK + 1000)],
+    });
+    await runFinaleBeats(db, 'e1', { now: () => D10_UNLOCK });
+    expect(db.readEvent().mostLovedPhoto?.winners.map((winner) => winner.proofId)).toEqual(['restored']);
+  });
   it('(a) before the farewell unlock it writes nothing', async () => {
     const db = makeDb({
       eventId: 'e1',

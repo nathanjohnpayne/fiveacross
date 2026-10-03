@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { Play, Pause, Heart } from 'lucide-react';
 import { useFeed, useEventDoc, useMyDayBoards, useAllDoubts, useAllHearts, useMyPlayer } from '../hooks/useData';
@@ -10,6 +10,9 @@ import { useAuth } from '../auth/AuthContext';
 import { reportProof, deleteProof } from '../data/proofs';
 import { resolveDisplayName } from '../data/api';
 import { track } from '../analytics';
+import { EVENT_ID } from '../firebase';
+import { trackIfCurrentEvent } from '../eventScopedAnalytics';
+import AsyncButton from './admin/AsyncButton';
 import Avatar from './Avatar';
 import BlockPlayerButton from './BlockPlayerButton';
 import { safeMediaUrl } from './safeMediaUrl';
@@ -280,6 +283,11 @@ function ProofCard({
   // its one flat hearts stream.
   heart: HeartControl;
 }) {
+  const viewerUidRef = useRef(viewerUid);
+  useLayoutEffect(() => {
+    viewerUidRef.current = viewerUid;
+    return () => { viewerUidRef.current = undefined; };
+  }, [viewerUid]);
   // #335: `resolveProofMediaUrl` is composed INSIDE `safeMediaUrl`, never around
   // it. It is identity in every real build (and a no-op on any value that is not
   // a production Storage download URL); under the e2e emulator build ONLY it
@@ -305,9 +313,19 @@ function ProofCard({
             {clockLabel(proof.createdAt, timezone)}
           </div>
         </div>
-        <button className="iconbtn" title="Report" onClick={() => { reportProof(proof.id).catch(console.error); track('report_item'); }}>
+        <AsyncButton
+          key={`${EVENT_ID}:${viewerUid}:${proof.id}:${proof.createdAt}`}
+          className="iconbtn" title="Report"
+          failureLabel="Report not sent. Wait a moment and try again online."
+          onAction={async () => {
+            const eventId = EVENT_ID;
+            const reportingUid = viewerUid;
+            await reportProof(proof.id, proof.createdAt);
+            if (viewerUidRef.current === reportingUid) trackIfCurrentEvent(eventId, 'report_item');
+          }}
+        >
           ⚑
-        </button>
+        </AsyncButton>
         {/* Block (#689): another Player's Proof only, beside Report, which is
             unchanged. Mutually exclusive with Delete, so a card never carries
             more than two icon buttons. */}

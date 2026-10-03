@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -11,7 +12,7 @@ import {
   httpsFunctionExports,
   unfamiliedHttpsExports,
 } from "./callable-invoker-families.mjs";
-import { classifyFirebaseDeployRequest } from "./validate-firebase-deploy-filters.mjs";
+import { classifyFirebaseDeployRequest, classifyInvokerScope } from "./validate-firebase-deploy-filters.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const realIndex = resolve(repoRoot, "functions", "src", "index.ts");
@@ -403,5 +404,114 @@ describe("callable invoker families (#1277)", () => {
       defaultConfigPath: resolve(root, "firebase.json"),
     });
     expect(result.functionsAttempted).toBe(false);
+  });
+});
+
+
+describe("submitPrompt invoker deployment scope (#1311)", () => {
+  const scope = (only, exports = ["submitPrompt"], except) =>
+    classifyInvokerScope(only, except, [], undefined, [], false, [], exports);
+
+  it("selects only the strict prompt family for its proven named export", async () => {
+    const result = await scope("functions:submitPrompt");
+    expect(result).toMatchObject({ submitPromptInvokerSelected: true,
+      submitPromptInvokerConservative: false, bugReportInvokerSelected: false,
+      emailUnsubscribeInvokerSelected: false, authHandoffInvokerSelected: false,
+      eventInvitationsInvokerSelected: false, adminCallablesInvokerSelected: false });
+  });
+
+  it("keeps an unproven named prompt export conservative", async () => {
+    expect(await scope("functions:submitPrompt", [])).toMatchObject({
+      submitPromptInvokerSelected: true, submitPromptInvokerConservative: true,
+      bugReportInvokerSelected: false, authHandoffInvokerSelected: false });
+  });
+
+  it("does not select prompt reconciliation for another named callable or hosting", async () => {
+    for (const only of ["hosting", "functions:submitBugReport"]) {
+      expect(await scope(only, ["submitPrompt", "bugReport"])).toMatchObject({
+        submitPromptInvokerSelected: false, submitPromptInvokerConservative: false });
+    }
+  });
+
+  it("selects prompt conservatively for full releases with no proven export", async () => {
+    for (const only of [undefined, "functions", "functions:default", "functions:unknown.group"]) {
+      expect(await scope(only, [])).toMatchObject({
+        submitPromptInvokerSelected: true, submitPromptInvokerConservative: true });
+    }
+  });
+
+  it("does not reconcile prompt when all Functions are excluded", async () => {
+    expect(await scope(undefined, ["submitPrompt"], "functions")).toMatchObject({
+      functionsAttempted: false, submitPromptInvokerSelected: false });
+  });
+
+  it("keeps codebase precedence and named-codebase export attribution", async () => {
+    const inventory = new Map([["default", []], ["ops", ["submitPrompt"]], ["submitPrompt", []]]);
+    const endpoints = { byCodebase: new Map(), codebaseNames: new Set(inventory.keys()) };
+    const classify = (only) => classifyInvokerScope(only, undefined, [], endpoints, [], false, [], inventory);
+    expect(await classify("functions:ops:submitPrompt")).toMatchObject({
+      submitPromptInvokerSelected: true, submitPromptInvokerConservative: false,
+      bugReportInvokerSelected: false });
+    expect(await classify("functions:default:submitPrompt")).toMatchObject({
+      submitPromptInvokerSelected: true, submitPromptInvokerConservative: true });
+    expect(await classify("functions:submitPrompt")).toMatchObject({
+      submitPromptInvokerSelected: true, submitPromptInvokerConservative: true,
+      bugReportInvokerSelected: true, adminCallablesInvokerSelected: true });
+  });
+
+  async function invokerFixture() {
+    const root = await fixture({});
+    const gcloud = resolve(root, "gcloud");
+    const log = resolve(root, "gcloud.log");
+    await writeFile(gcloud, `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$GCLOUD_LOG"
+if [[ " $* " == *" services describe "* ]]; then
+  case "\${FIXTURE_DESCRIBE:-present}" in
+    missing) echo 'NOT_FOUND: Requested entity was not found.' >&2; exit 1 ;;
+    denied) echo 'PERMISSION_DENIED: fixture denial' >&2; exit 1 ;;
+  esac
+  echo false
+fi
+`);
+    chmodSync(gcloud, 0o755);
+    const run = (args, state) => spawnSync(resolve(repoRoot, "scripts/set-submit-prompt-invoker.sh"), args, {
+      encoding: "utf8", env: { ...process.env, GOOGLE_APPLICATION_CREDENTIALS: "",
+        GCLOUD_REQUIRE_SERVICE_ACCOUNT_KEY_ACTIVATION: "", GCLOUD_IMPERSONATE_SERVICE_ACCOUNT: "",
+        GCLOUD_BIN: gcloud, GCLOUD_LOG: log, FIXTURE_DESCRIBE: state,
+        SUBMIT_PROMPT_PROJECT: "fixture-project", SUBMIT_PROMPT_REGION: "fixture-region",
+        SUBMIT_PROMPT_SERVICE: "fixture-submitprompt" },
+    });
+    return { run, log };
+  }
+
+  it("permits a missing first-deploy service in a read-only precheck", async () => {
+    const { run, log } = await invokerFixture();
+    expect(run(["--dry-run", "--allow-missing"], "missing").status).toBe(0);
+    const calls = readFileSync(log, "utf8");
+    expect(calls).toContain("services describe fixture-submitprompt");
+    expect(calls).toContain("--project fixture-project");
+    expect(calls).not.toContain("services update");
+  });
+
+  it("refuses missing proven post-publish services and denied prechecks", async () => {
+    for (const [args, state] of [[[], "missing"], [["--dry-run", "--allow-missing"], "denied"]]) {
+      const { run, log } = await invokerFixture();
+      expect(run(args, state).status).toBe(1);
+      expect(readFileSync(log, "utf8")).not.toContain("services update");
+    }
+  });
+
+  it("never mutates on dry-run and pins authorized repair to the wrapper target", async () => {
+    const first = await invokerFixture();
+    expect(first.run(["--dry-run"], "present").status).toBe(0);
+    expect(readFileSync(first.log, "utf8")).not.toContain("services update");
+    const repair = await invokerFixture();
+    expect(repair.run([], "present").status).toBe(0);
+    const calls = readFileSync(repair.log, "utf8");
+    expect(calls).toContain("services update fixture-submitprompt");
+    expect(calls).toContain("--no-invoker-iam-check");
+    expect(calls).toContain("--project fixture-project");
+    expect(calls).toContain("--region fixture-region");
   });
 });

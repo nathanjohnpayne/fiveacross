@@ -256,6 +256,7 @@ export interface SnapshotItem {
   pool?: string;
   isFreeSpace?: boolean;
   reportCount?: number;
+  reportHideSuppressed?: boolean;
   createdBy?: string;
   createdAt?: number;
   approvedAt?: number;
@@ -312,11 +313,11 @@ export interface SnapshotFilter {
 /**
  * ADR 0004 Phase 0 community auto-hide — local mirror of `src/data/moderation.ts`'s
  * `isReportHidden` (this module stays decoupled from the app package, like
- * `autohide.ts`). True iff `reportCount` has REACHED a POSITIVE threshold; fails
- * OPEN for a missing/non-positive threshold.
+ * `autohide.ts`). True iff suppression is not true and `reportCount` has REACHED a POSITIVE
+ * threshold; fails OPEN for a missing/non-positive threshold.
  */
-function isReportHidden(reportCount: number, threshold: number | undefined): boolean {
-  return typeof threshold === 'number' && threshold > 0 && reportCount >= threshold;
+function isReportHidden(reportCount: number, threshold: number | undefined, suppressed?: boolean): boolean {
+  return suppressed !== true && typeof threshold === 'number' && threshold > 0 && reportCount >= threshold;
 }
 
 /**
@@ -415,7 +416,7 @@ export function activeSnapshotIds(items: SnapshotItem[], filter: SnapshotFilter)
   return items
     .filter((it) => normalizedPools.includes(normalizePool(it.pool)))
     .filter((it) => !it.isFreeSpace)
-    .filter((it) => !isReportHidden(it.reportCount ?? 0, reportHideThreshold))
+    .filter((it) => !isReportHidden(it.reportCount ?? 0, reportHideThreshold, it.reportHideSuppressed))
     .filter((it) => !isBanned(it.createdBy, bannedUids))
     .filter((it) => targetsDay(it.targetDayIndex, dayIndex))
     // RETAINED Prompts are admitted to no Day, on the strength of the stored
@@ -796,6 +797,7 @@ function snapshotItemsFrom(snap: { docs: DocSnapshot[] }): SnapshotItem[] {
       pool: data.pool as string | undefined,
       isFreeSpace: data.isFreeSpace as boolean | undefined,
       reportCount: data.reportCount as number | undefined,
+      reportHideSuppressed: data.reportHideSuppressed === true,
       createdBy: data.createdBy as string | undefined,
       createdAt: data.createdAt as number | undefined,
       approvedAt: data.approvedAt as number | undefined,
@@ -1183,6 +1185,7 @@ function mostLovedProofsFrom(snap: { docs: DocSnapshot[] }): MostLovedProofLike[
       type: typeof data.type === 'string' ? data.type : '',
       status: typeof data.status === 'string' ? data.status : '',
       reportCount: finiteNumber(data.reportCount, 0),
+      reportHideSuppressed: data.reportHideSuppressed === true,
       createdAt: finiteNumber(data.createdAt, 0),
       itemText: typeof data.itemText === 'string' ? data.itemText : '',
       dayIndex:

@@ -879,6 +879,7 @@ export interface MostLovedProofLike {
   type: string;
   status: string;
   reportCount: number;
+  reportHideSuppressed?: boolean;
   createdAt: number;
   itemText: string;
   dayIndex?: number | null;
@@ -912,10 +913,11 @@ export const MAX_PERSISTED_MOST_LOVED_WINNERS = 100;
 
 /** Local mirror of `src/data/moderation.ts`'s `isReportHidden` (this module
  *  stays decoupled from the app package, like `autohide.ts`/`unlockDay.ts`).
- *  True iff `reportCount` has REACHED a POSITIVE threshold; fails OPEN for a
+ *  True iff suppression is not true and `reportCount` has REACHED a POSITIVE
+ *  threshold; fails OPEN for a
  *  missing/non-positive/NaN threshold. */
-function mostLovedReportHidden(reportCount: number, threshold: number | undefined): boolean {
-  return typeof threshold === 'number' && threshold > 0 && reportCount >= threshold;
+function mostLovedReportHidden(reportCount: number, threshold: number | undefined, suppressed?: boolean): boolean {
+  return suppressed !== true && typeof threshold === 'number' && threshold > 0 && reportCount >= threshold;
 }
 
 /** Local mirror of `src/data/moderation.ts`'s `isBanned`. True iff `uid` is on
@@ -981,7 +983,7 @@ export function buildMostLovedPhotoAward(
       (p.serverCreatedAt ?? p.createdAt) <= opts.cutoff &&
       p.type === 'photo' &&
       p.status === 'active' &&
-      !mostLovedReportHidden(p.reportCount, opts.reportHideThreshold) &&
+      !mostLovedReportHidden(p.reportCount, opts.reportHideThreshold, p.reportHideSuppressed) &&
       !mostLovedBanned(p.uid, opts.bannedUids),
   );
   const byId = new Map<string, MostLovedProofLike>();

@@ -6,25 +6,23 @@ import type { BoardDoc, EventDoc, ItemDoc, MomentDoc } from '../types';
 import { THEMES } from '../theme/themes';
 import { hasCanonicalMomentId } from '../hooks/useData';
 
-// addItem writes through Firestore's addDoc; stub the write so we can assert the
-// document SHAPE it stamps (the required Phase 1.5 `pool` field) without a live
-// backend. Everything else in firebase/firestore stays real (converters and the
-// moment filter never call it at runtime).
-const { addDocMock } = vi.hoisted(() => ({
+// addItem sends content and captured submitting identity; the server SDK suite pins its
+// pending/main stamps. Mock that transport while keeping Firestore converter
+// helpers real for the independent schema and Moment-filter assertions.
+
+const { addDocMock, submitMock } = vi.hoisted(() => ({
   addDocMock: vi.fn(async () => ({ id: 'new-item' })),
+  submitMock: vi.fn(async (input: { itemId: string }) => ({ data: { id: input.itemId } })),
 }));
-vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'd15-test-event' }));
+vi.mock('../firebase', () => ({ db: {}, functions: {}, EVENT_ID: 'd15-test-event' }));
+vi.mock('firebase/functions', () => ({ httpsCallable: () => submitMock }));
 vi.mock('firebase/firestore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('firebase/firestore')>();
   return {
     ...actual,
-    // The stub db ({}) is not a real Firestore, so short-circuit the ref
-    // builders addItem calls before the write — we only assert the payload.
+    // Inert references for module initialization and the unrelated converter
+    // fixtures. Callable intake reads no client schedule and writes no addDoc.
     collection: () => ({ __ref: 'items' }),
-    // `addItem` resolves a default target Day from the Event's schedule (#557),
-    // and a read failure now propagates instead of quietly writing an untargeted
-    // row — so the ref builder and the read both need an answer here. Reporting
-    // no Event doc is the schedule-less case this payload test already assumes.
     doc: () => ({ __ref: 'event', withConverter: () => ({ __ref: 'event' }) }),
     getDoc: () => Promise.resolve({ exists: () => false, data: () => undefined }),
     addDoc: addDocMock,
@@ -258,20 +256,14 @@ describe('hasCanonicalMomentId (Phase 1.5 finale beats render)', () => {
   });
 });
 
-describe('addItem (Phase 1.5 pool stamp)', () => {
-  it('stamps pool: main on the submitted prompt so the required field is honored', async () => {
+describe('addItem (server-owned Phase 1.5 pool stamp)', () => {
+  it('sends content and captured identity; pending/main pool authority belongs to submitPrompt', async () => {
     const { addItem } = await import('./api');
+    submitMock.mockClear();
     addDocMock.mockClear();
-    await addItem('player-uid', 'Cabin karaoke incident', true);
-    expect(addDocMock).toHaveBeenCalledTimes(1);
-    // status: 'pending' (not 'active') as of #210/specs/d15-approvals.md — the
-    // approval-flow write itself is pinned in more depth over there
-    // (src/data/api.test.ts); this suite only re-asserts the pool stamp still
-    // rides along on the SAME write.
-    expect(addDocMock).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ pool: 'main', status: 'pending', spicy: true }),
-    );
+    await addItem('player-uid', 'Cabin karaoke incident', true, undefined, 'd15-test-event', 'stable');
+    expect(submitMock).toHaveBeenCalledWith({ expectedUid: 'player-uid', eventId: 'd15-test-event', itemId: 'stable', text: 'Cabin karaoke incident', spicy: true });
+    expect(addDocMock).not.toHaveBeenCalled();
   });
 });
 
