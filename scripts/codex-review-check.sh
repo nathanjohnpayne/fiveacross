@@ -65,6 +65,10 @@
 #           for repos that genuinely require Codex bot clearance and
 #           not a substitute Phase 4b reviewer. Mirrors gate (b)
 #           branch 1's filter shape, scoped to HEAD via commit_id.
+#           A Codex request by the configured author outside the
+#           request generation an automated approval recorded (or, with
+#           no record, not older than the approval) supersedes it until
+#           Codex answers (#1598).
 #
 #       The merge gate explicitly does NOT require an APPROVED review
 #       state from the Codex bot. The ChatGPT Codex Connector GitHub
@@ -143,6 +147,16 @@ if [ -r "$__CODEX_CHECK_DIR/lib/gh-retry-helpers.sh" ]; then
   . "$__CODEX_CHECK_DIR/lib/gh-retry-helpers.sh"
 else
   with_gh_retry() { "$@"; }
+fi
+
+# --- shared Codex request/summary selectors (#1276, #1550) ------------------
+# Read-only jq selectors shared with codex-review-request.sh, declared as a
+# `requires:` of this script. Sourced existence-guarded so a Codex-disabled
+# run never needs it; crc_select_codex_review_summary fails closed (exit 3)
+# when the gate actually needs the Review Summary selector and it is absent.
+if [ -r "$__CODEX_CHECK_DIR/lib/codex-request-evidence.sh" ]; then
+  # shellcheck source=lib/codex-request-evidence.sh
+  . "$__CODEX_CHECK_DIR/lib/codex-request-evidence.sh"
 fi
 
 # --- Codex failure-marker regexes (#722) ------------------------------------
@@ -2206,43 +2220,21 @@ fi  # end REQUIRE_CI_GREEN
 # BEGIN codex_review_summary_selector
 # Select the newest marker-tagged Codex Review Summary whose Code Review row
 # names the current head, as `{status, commit, observed_at, trigger,
-# comment_id}` or `null` (#1157).
-#
-# Codex creates this issue comment when a review starts and edits it in place
-# as the review advances, so `updated_at` — not `created_at` — is the signal
-# time. The row is exact-head evidence because its Commit cell carries a
-# 7-to-40-character hexadecimal prefix. Status remains explicit: `running`
-# proves liveness only, while `completed` can prove terminal delivery to a
-# diagnostic caller. Neither status is an affirmative merge verdict.
-#
-# Pure: jq over the passed strings only, no globals and no I/O.
+# comment_id}` or `null` (#1157). The selector itself lives in
+# scripts/lib/codex-request-evidence.sh (crqe_select_codex_review_summary) so
+# codex-review-request.sh's resume check (#1550) reads the same row grammar
+# instead of a second copy of it. Without the lib this fails closed rather
+# than reporting `null`: in diagnostic mode a newer Running summary is what
+# keeps a stale same-head review from clearing (#1157), so "no summary" is
+# not a safe default.
 #
 # crc_select_codex_review_summary <issue-comments-json> <bot-login> <head-sha>
 crc_select_codex_review_summary() {
-  echo "${1:-[]}" | jq -c \
-    --arg bot "${2:-}" --arg sha "${3:-}" '
-    ($sha | ascii_downcase) as $head
-    | [ .[]
-      | select((.user.login // "") == $bot)
-      | select((.body // "") | startswith("<!-- codex-pull-request-review-summary -->"))
-      | . as $comment
-      | ((.body // "")
-          | capture("(?m)^\\|[[:space:]]*📝[[:space:]]*\\*\\*Code Review\\*\\*[[:space:]]*\\|[[:space:]]*(?<status>[^|]+)[[:space:]]*\\|[[:space:]]*`(?<commit>[0-9A-Fa-f]{7,40})`[[:space:]]*\\|[[:space:]]*(?<trigger>[^|]+)[[:space:]]*\\|[[:space:]]*$")?
-          // null) as $row
-      | select($row != null)
-      | ($row.commit | ascii_downcase) as $commit
-      | select($head | startswith($commit))
-      | { status:
-            (if ($row.status | test("\\*\\*Completed\\*\\*"; "i")) then "completed"
-             elif ($row.status | test("\\*\\*Running\\*\\*"; "i")) then "running"
-             else "unknown" end),
-          commit: $commit,
-          observed_at: ($comment.updated_at // $comment.created_at // ""),
-          trigger: ($row.trigger | gsub("^[[:space:]]+|[[:space:]]+$"; "")),
-          comment_id: ($comment.id // 0) }
-    ]
-    | max_by([.observed_at, .comment_id]) // null
-  '
+  if ! declare -F crqe_select_codex_review_summary >/dev/null 2>&1; then
+    echo "ERROR: codex-request-evidence helper missing: $__CODEX_CHECK_DIR/lib/codex-request-evidence.sh (Codex Review Summary selector, #1550)" >&2
+    exit 3
+  fi
+  crqe_select_codex_review_summary "$@"
 }
 # END codex_review_summary_selector
 
@@ -2394,27 +2386,104 @@ if [ "$CODEX_ENABLED" = "true" ]; then
     # same-content verdict on an older commit is not that answer.
     log "codex verdict carry-forward: SKIPPED (--diagnostic-signal-only — current-head signal required)"
   elif [ -x "$CARRY_BIN" ]; then
+    # #1092: capture the helper's stderr instead of discarding it. Sending it
+    # to /dev/null is why an rc=126 ("Argument list too long") went unnoticed
+    # for so long: the gate fails closed and only logs, so the one line that
+    # named the defect was thrown away on every run. No EXIT trap here -- this
+    # script already registers one for __POLICY_TMP, and a second would REPLACE
+    # rather than extend it; the explicit rm below mirrors the resolver capture
+    # above.
+    __carry_err=$(mktemp "${TMPDIR:-/tmp}/carryforward-err.XXXXXX")
     set +e
     CARRY_JSON=$(bash "$CARRY_BIN" \
       --repo "$REPO" \
       --pr "$PR_NUMBER" \
       --head "$HEAD_SHA" \
       --config "$CONFIG" \
-      --bot-login "$BOT_LOGIN" 2>/dev/null)
+      --bot-login "$BOT_LOGIN" 2>"$__carry_err")
     carry_rc=$?
     set -e
+    # Collapse to one line and truncate: this stderr can carry a gh error body,
+    # the same handling scripts/lib/gh-api-scalar.sh already applies.
+    __carry_err_msg=$(tr '\n' ' ' < "$__carry_err" 2>/dev/null | cut -c1-500)
+    rm -f "$__carry_err"
     if [ "$carry_rc" -eq 0 ] && [ "$(echo "$CARRY_JSON" | jq -r '.carried // false')" = "true" ]; then
       CODEX_CARRYFORWARD_VERDICT_TIME=$(echo "$CARRY_JSON" | jq -r '.source_time // ""')
       CODEX_CARRYFORWARD_COMMIT=$(echo "$CARRY_JSON" | jq -r '.source_commit // ""')
       CODEX_CARRYFORWARD_FINGERPRINT=$(echo "$CARRY_JSON" | jq -r '.fingerprint // ""')
       log "codex verdict carry-forward: prior affirmative verdict on $CODEX_CARRYFORWARD_COMMIT @ $CODEX_CARRYFORWARD_VERDICT_TIME matches current external-review fingerprint $CODEX_CARRYFORWARD_FINGERPRINT (#705)"
     elif [ "$carry_rc" -ne 0 ]; then
-      log "codex verdict carry-forward: helper failed rc=$carry_rc — ignoring carry-forward and requiring a current-head signal (fail closed)"
+      log "codex verdict carry-forward: helper failed rc=$carry_rc — ignoring carry-forward and requiring a current-head signal (fail closed)${__carry_err_msg:+ — stderr: $__carry_err_msg}"
     fi
   else
     log "codex verdict carry-forward: helper missing at $CARRY_BIN — requiring a current-head signal"
   fi
 fi
+
+# BEGIN codex_request_diagnostics
+crc_select_head_review() { # reviews-json bot head
+  printf '%s\n' "$1" | jq --arg bot "$2" --arg sha "$3" '
+    [.[] | select(.user.login == $bot) | select(.commit_id == $sha)]
+    | max_by(.submitted_at) // null
+  '
+}
+
+# Called only after an ordinary opted-in external gate has already blocked.
+# It reports observations, never clearance or an active waiter's remaining time.
+crc_request_evidence() {
+  [ "${CODEX_REVIEW_CHECK_REPORT_REQUEST_EVIDENCE:-0}" = 1 ] || return 0
+  [ "$DIAGNOSTIC_SIGNAL_ONLY" = 0 ] && [ "$APPROVAL_READINESS_ONLY" = 0 ] || return 0
+  [ "$CODEX_ENABLED" = true ] || return 0
+  if ! ( crc_render_request_evidence ); then
+    log "request evidence: unknown (diagnostic evidence could not be read); BLOCKED is unchanged"
+  fi
+}
+
+crc_render_request_evidence() {
+  # Optional during propagation skew. Failure cannot change the blocked verdict.
+  [ -r "$__CODEX_CHECK_DIR/lib/codex-request-evidence.sh" ] || return 1
+  # shellcheck source=lib/codex-request-evidence.sh
+  . "$__CODEX_CHECK_DIR/lib/codex-request-evidence.sh" || return 1
+  local trigger id posted age reactions ack=unknown review budget ack_budget summary_advice diagnostic_comments
+  # The request helper writes exactly this literal. Prefilter only diagnostic
+  # candidates, then leave author/freshness/order semantics with the shared
+  # selector that requester deduplication also uses.
+  diagnostic_comments=$(printf '%s\n' "$ISSUE_COMMENTS_JSON" | jq -c '[.[] | select((.body // "") == "@codex review")]') || return 1
+  trigger=$(crqe_select_trigger "$diagnostic_comments" "$AUTHOR_IDENTITY" "$REACTION_THRESHOLD") || return 1
+  review=$(crc_select_head_review "$REVIEWS_JSON" "$BOT_LOGIN" "$HEAD_SHA") || return 1
+  log "request evidence (informational; BLOCKED unchanged):"
+  # Independent observations: an older terminal artifact must not hide a newer run.
+  if [ -n "$CODEX_BLOCKED_REASON" ]; then
+    log "request evidence: account block observed: $CODEX_BLOCKED_REASON; inspect the provider block"
+  fi
+  if [ "$review" != null ] || [ -n "$CODEX_HEAD_VERDICT_ANY_TIME" ]; then
+    log "request evidence: current-head terminal artifact observed; inspect the unmet clearance requirement"
+  fi
+  if [ -n "$CODEX_SUMMARY_STATUS" ]; then
+    summary_advice='inspect the unmet clearance requirement'
+    [ "$CODEX_SUMMARY_STATUS" != running ] || summary_advice='monitor provider progress'
+    log "request evidence: current-head $CODEX_SUMMARY_STATUS summary observed at $CODEX_SUMMARY_TIME; $summary_advice"
+  fi
+  if [ "$trigger" = null ]; then
+    log "request evidence: no freshness-qualified author trigger since $REACTION_THRESHOLD (not proof that no review is in flight)"
+    return 0
+  fi
+  id=$(printf '%s' "$trigger" | jq -r '.id // empty') || return 1
+  posted=$(printf '%s' "$trigger" | jq -r '.created_at') || return 1
+  age=$(jq -nr --arg t "$posted" 'now - ($t | fromdateiso8601) | floor | if . < 0 then error("future request") else . end' 2>/dev/null) || age=unknown
+  if [[ "$id" =~ ^[0-9]+$ ]] && reactions=$(gh_api_array "repos/$REPO/issues/comments/$id/reactions" "trigger acknowledgements"); then
+    ack=$(crqe_ack_present "$reactions" "$BOT_LOGIN" "$posted") || ack=unknown
+  fi
+  budget=$(codex_field review_timeout_seconds); ack_budget=$(codex_field ack_wait_seconds)
+  # Optional policy fields have the same defaults as codex-review-request.sh.
+  budget=${budget:-1800}; ack_budget=${ack_budget:-30}
+  [[ "$budget" =~ ^[0-9]+$ ]] || budget=unknown
+  [[ "$ack_budget" =~ ^[0-9]+$ ]] || ack_budget=unknown
+  log "request evidence: freshness-qualified author trigger #${id:-unknown} at $posted (anchor $REACTION_THRESHOLD; not immutable SHA attribution)"
+  log "request evidence: linked eyes acknowledgement=$ack; age=${age}s; configured ack_wait_seconds=$ack_budget; review_timeout_seconds=$budget"
+  log "request evidence: age is not an active waiter or remaining retry budget; inspect the configured timeout/fallback if exhausted"
+}
+# END codex_request_diagnostics
 
 # --- gate (b): reviewer identity approval ----------------------------------
 
@@ -2561,6 +2630,7 @@ if [ -z "$APPROVING_REVIEWER" ]; then
     if [ "$APPROVAL_READINESS_ONLY" = "1" ]; then
       fail_gate "no reviewer identity in available_reviewers has a latest-state APPROVED review on current HEAD $HEAD_SHA"
     fi
+    crc_request_evidence
     fail_gate "no reviewer identity in available_reviewers has a latest-state APPROVED review, and same-agent + Codex 👍 fallback (branch 2) did not apply (codex.enabled=$CODEX_ENABLED; Authoring-Agent: ${AUTHORING_AGENT:-not set}; matched reviewer: ${SAME_AGENT_REVIEWER:-none}; threshold: $REACTION_THRESHOLD)"
   fi
 else
@@ -2591,11 +2661,7 @@ if [ "$CODEX_ENABLED" = "true" ]; then
 
 # Latest Codex review on the current HEAD commit (if any). Codex always
 # uses COMMENTED state regardless of findings — do NOT filter on state.
-CODEX_REVIEW=$(echo "$REVIEWS_JSON" | jq \
-  --arg bot "$BOT_LOGIN" --arg sha "$HEAD_SHA" '
-  [.[] | select(.user.login == $bot) | select(.commit_id == $sha)]
-  | max_by(.submitted_at) // null
-')
+CODEX_REVIEW=$(crc_select_head_review "$REVIEWS_JSON" "$BOT_LOGIN" "$HEAD_SHA")
 
 # If a Codex review on HEAD exists, extract its id for filtering inline
 # comments down to THAT REVIEW ONLY. Older reviews on the same HEAD
@@ -2828,6 +2894,34 @@ case "$LATEST_SIGNAL_KIND" in
     ;;
 esac
 
+# #1598 (Codex round 6 on #1599): a Codex clearance answers only the
+# requests made before it. When the configured author has an exact Codex
+# request in or after the clearance signal's second, Codex has not answered
+# it and the earlier clearance is superseded: gate (c) falls through to the
+# Phase 4b substitute, whose recorded request generation must then cover the
+# request. Otherwise an earlier clean signal plus a stale Phase 4b approval
+# would clear a request that landed during the run's final accounting read.
+# Codex answering the newer request is a newer signal and clears again. The
+# comments are re-read now, and unreadable evidence fails closed. Diagnostic
+# mode asks only whether Codex has spoken on HEAD, so it is unaffected.
+if [ "$CLEARED" = "true" ] && [ "$DIAGNOSTIC_SIGNAL_ONLY" != "1" ]; then
+  CODEX_CLEARANCE_SUPERSEDED=""
+  if ! declare -F crqe_latest_trigger_time >/dev/null 2>&1; then
+    CODEX_CLEARANCE_SUPERSEDED="request evidence helper unavailable"
+  elif ! CLEARANCE_REQUEST_COMMENTS=$(gh_api_array "repos/$REPO/issues/$PR_NUMBER/comments" "issue comments (Codex clearance request freshness)" 2>/dev/null); then
+    CODEX_CLEARANCE_SUPERSEDED="Codex request evidence could not be re-read"
+  elif ! CLEARANCE_LATEST_REQUEST=$(crqe_latest_trigger_time "$CLEARANCE_REQUEST_COMMENTS" "$AUTHOR_IDENTITY" 2>/dev/null); then
+    CODEX_CLEARANCE_SUPERSEDED="Codex request evidence unreadable"
+  elif [ -n "$CLEARANCE_LATEST_REQUEST" ] && ! [[ "$LATEST_SIGNAL_TIME" > "$CLEARANCE_LATEST_REQUEST" ]]; then
+    CODEX_CLEARANCE_SUPERSEDED="a Codex request by $AUTHOR_IDENTITY @ $CLEARANCE_LATEST_REQUEST is not older than it"
+  fi
+  if [ -n "$CODEX_CLEARANCE_SUPERSEDED" ]; then
+    log "gate (c): Codex clearance @ $LATEST_SIGNAL_TIME is superseded: $CODEX_CLEARANCE_SUPERSEDED (#1598)"
+    CLEARED=false
+    CLEARANCE_REASON=""
+  fi
+fi
+
 else
   log "gate (c): codex.enabled=false — ignoring Codex bot review/reaction signals; requiring Phase 4b substitute clearance when allowed"
 fi
@@ -2918,7 +3012,59 @@ if [ "$CLEARED" != "true" ] && [ "$ALLOW_PHASE_4B_SUBSTITUTE" = "true" ]; then
     if [ -n "$CODEX_HEAD_VERDICT_ANY_TIME" ] && { [ -z "$LATEST_CODEX_SIGNAL_TIME" ] || [[ "$CODEX_HEAD_VERDICT_ANY_TIME" > "$LATEST_CODEX_SIGNAL_TIME" ]]; }; then
       LATEST_CODEX_SIGNAL_TIME="$CODEX_HEAD_VERDICT_ANY_TIME"
     fi
-    if [ -z "$LATEST_CODEX_SIGNAL_TIME" ] || [[ "$PHASE_4B_TIME" > "$LATEST_CODEX_SIGNAL_TIME" ]]; then
+    # #1598: a Phase 4b approval covers only the Codex requests it was
+    # authorized under. An automated approval records that request generation
+    # (`<!-- mergepath-p4b-request-generation: [ids] -->`); once the configured
+    # author's live generation holds a request outside it, the approval does
+    # not clear until Codex answers (its newer signal then decides under
+    # latest-signal-wins above) or a Phase 4b rerun posts a newer approval.
+    # This catches a request that lands during the run's final accounting read,
+    # which PREDATES the approval, so no timestamp comparison can. An approval
+    # without the record (a manual Phase 4b reviewer) falls back to time: a
+    # request in or after the approval's second supersedes it. Unreadable
+    # evidence fails closed; with Codex disabled a request supersedes nothing.
+    PHASE_4B_SUPERSEDED=""
+    if [ "$CODEX_ENABLED" = "true" ]; then
+      # Re-read the comments now, after the reviews: the earlier read predates
+      # the reviews read, so a request posted between the two would be missed.
+      # A failed re-read rejects the candidate.
+      if ! REQUEST_COMMENTS_JSON=$(gh_api_array "repos/$REPO/issues/$PR_NUMBER/comments" "issue comments (Phase 4b request freshness)" 2>/dev/null); then
+        REQUEST_COMMENTS_JSON=""
+      fi
+      PHASE_4B_RECORD=$(echo "$REVIEWS_JSON" | jq -r \
+        --arg login "$PHASE_4B_LOGIN" --arg at "$PHASE_4B_TIME" --arg sha "$HEAD_SHA" '
+          [ .[] | select(.user.login == $login and .submitted_at == $at and .commit_id == $sha) ]
+          | last
+          | [ (.body // "") | scan("<!-- mergepath-p4b-request-generation: ([^>]*) -->") | .[0] ]
+          | if length == 0 then "none"
+            elif length > 1 then "invalid"
+            else (last | try (fromjson | select(type == "array" and all(.[]; type == "number")) | tojson) catch "invalid")
+                 // "invalid"
+            end' 2>/dev/null || printf invalid)
+      if ! declare -F crqe_trigger_generation >/dev/null 2>&1 || ! declare -F crqe_latest_trigger_time >/dev/null 2>&1; then
+        PHASE_4B_SUPERSEDED="request evidence helper unavailable"
+      elif [ -z "$REQUEST_COMMENTS_JSON" ]; then
+        PHASE_4B_SUPERSEDED="Codex request evidence could not be re-read"
+      elif [ "$PHASE_4B_RECORD" = invalid ]; then
+        PHASE_4B_SUPERSEDED="its recorded request generation is unreadable or not exactly one record"
+      elif [ "$PHASE_4B_RECORD" != none ]; then
+        if ! LIVE_REQUEST_GENERATION=$(crqe_trigger_generation "$REQUEST_COMMENTS_JSON" "$AUTHOR_IDENTITY" 2>/dev/null); then
+          PHASE_4B_SUPERSEDED="Codex request evidence unreadable"
+        else
+          UNREVIEWED_REQUESTS=$(jq -nc --argjson live "$LIVE_REQUEST_GENERATION" --argjson rec "$PHASE_4B_RECORD" '$live - $rec')
+          if [ "$UNREVIEWED_REQUESTS" != "[]" ]; then
+            PHASE_4B_SUPERSEDED="Codex request(s) $UNREVIEWED_REQUESTS by $AUTHOR_IDENTITY are outside the request generation the approval reviewed ($PHASE_4B_RECORD)"
+          fi
+        fi
+      elif ! LATEST_AUTHOR_REQUEST_TIME=$(crqe_latest_trigger_time "$REQUEST_COMMENTS_JSON" "$AUTHOR_IDENTITY" 2>/dev/null); then
+        PHASE_4B_SUPERSEDED="Codex request evidence unreadable"
+      elif [ -n "$LATEST_AUTHOR_REQUEST_TIME" ] && ! [[ "$PHASE_4B_TIME" > "$LATEST_AUTHOR_REQUEST_TIME" ]]; then
+        PHASE_4B_SUPERSEDED="a Codex request by $AUTHOR_IDENTITY @ $LATEST_AUTHOR_REQUEST_TIME is not older than it (no recorded request generation)"
+      fi
+    fi
+    if [ -n "$PHASE_4B_SUPERSEDED" ]; then
+      log "gate (c): Phase 4b substitute candidate $PHASE_4B_LOGIN @ $PHASE_4B_TIME is not accepted: $PHASE_4B_SUPERSEDED (#1598)"
+    elif [ -z "$LATEST_CODEX_SIGNAL_TIME" ] || [[ "$PHASE_4B_TIME" > "$LATEST_CODEX_SIGNAL_TIME" ]]; then
       CLEARED=true
       CLEARANCE_REASON="Phase 4b substitute: latest-state APPROVED on HEAD from $PHASE_4B_LOGIN @ $PHASE_4B_TIME (codex.allow_phase_4b_substitute=true; newer than any Codex bot signal on HEAD: ${LATEST_CODEX_SIGNAL_TIME:-none})"
     else
@@ -2928,6 +3074,7 @@ if [ "$CLEARED" != "true" ] && [ "$ALLOW_PHASE_4B_SUBSTITUTE" = "true" ]; then
 fi
 
 if [ "$CLEARED" != "true" ]; then
+  crc_request_evidence
   # #722: when a fresh account-/connection-level block was detected above,
   # name it in the failure message so the human/agent reads the real cause
   # (quota exhausted / App not connected → a human must act) instead of

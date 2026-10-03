@@ -36,7 +36,7 @@ set -euo pipefail
 #     than allowed to abort at `set -e`, because Firebase reports the
 #     org-policy rejection of the `allUsers` invoker binding as a partial
 #     FAILURE — the exact case the reconciliation below exists to repair.
-#   - Reconciles the Cloud Run invoker config for submitBugReport,
+#   - Reconciles the Cloud Run invoker config for submitBugReport, submitPrompt,
 #     emailUnsubscribe, the two auth-handoff callables, the three
 #     event-invitation callables, and the admin callables (unlockDayNow,
 #     approvePrompts) (#768, #548, #803, #1277;
@@ -183,11 +183,13 @@ FUNCTIONS_ATTEMPTED=true
 HOSTING_ATTEMPTED=true
 FIREBASE_DRY_RUN=false
 BUG_REPORT_INVOKER_SELECTED=true
+SUBMIT_PROMPT_INVOKER_SELECTED=true
 EMAIL_UNSUBSCRIBE_INVOKER_SELECTED=true
 AUTH_HANDOFF_INVOKER_SELECTED=true
 EVENT_INVITATIONS_INVOKER_SELECTED=true
 ADMIN_CALLABLES_INVOKER_SELECTED=true
 BUG_REPORT_INVOKER_CONSERVATIVE=false
+SUBMIT_PROMPT_INVOKER_CONSERVATIVE=false
 EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE=false
 AUTH_HANDOFF_INVOKER_CONSERVATIVE=false
 AUTH_HANDOFF_STRICT_HALF=""
@@ -376,10 +378,12 @@ while IFS='=' read -r classification_key classification_value; do
     HOSTING_ATTEMPTED) HOSTING_ATTEMPTED="$classification_value" ;;
     FIREBASE_DRY_RUN) FIREBASE_DRY_RUN="$classification_value" ;;
     BUG_REPORT_INVOKER_SELECTED) BUG_REPORT_INVOKER_SELECTED="$classification_value" ;;
+    SUBMIT_PROMPT_INVOKER_SELECTED) SUBMIT_PROMPT_INVOKER_SELECTED="$classification_value" ;;
     EMAIL_UNSUBSCRIBE_INVOKER_SELECTED) EMAIL_UNSUBSCRIBE_INVOKER_SELECTED="$classification_value" ;;
     AUTH_HANDOFF_INVOKER_SELECTED) AUTH_HANDOFF_INVOKER_SELECTED="$classification_value" ;;
     EVENT_INVITATIONS_INVOKER_SELECTED) EVENT_INVITATIONS_INVOKER_SELECTED="$classification_value" ;;
     BUG_REPORT_INVOKER_CONSERVATIVE) BUG_REPORT_INVOKER_CONSERVATIVE="$classification_value" ;;
+    SUBMIT_PROMPT_INVOKER_CONSERVATIVE) SUBMIT_PROMPT_INVOKER_CONSERVATIVE="$classification_value" ;;
     EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE) EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE="$classification_value" ;;
     AUTH_HANDOFF_INVOKER_CONSERVATIVE) AUTH_HANDOFF_INVOKER_CONSERVATIVE="$classification_value" ;;
     AUTH_HANDOFF_STRICT_HALF) AUTH_HANDOFF_STRICT_HALF="$classification_value" ;;
@@ -397,7 +401,7 @@ while IFS='=' read -r classification_key classification_value; do
 done <<EOF
 $FIREBASE_REQUEST_CLASSIFICATION
 EOF
-if [[ "$CLASSIFICATION_FIELDS" -ne 17 ]]; then
+if [[ "$CLASSIFICATION_FIELDS" -ne 19 ]]; then
   echo "✗ Firebase deploy classification was incomplete. NOTHING HAS BEEN BUILT OR PUBLISHED." >&2
   exit 1
 fi
@@ -441,6 +445,7 @@ guard_deploy_main_checkout "scripts/deploy.sh" "$FORCE"
 INVOKER_ENV=(env
   -u GCLOUD_IMPERSONATE_SERVICE_ACCOUNT -u GCLOUD_REQUIRE_SERVICE_ACCOUNT_KEY_ACTIVATION
   -u BUG_REPORT_PROJECT -u BUG_REPORT_REGION -u BUG_REPORT_SERVICE
+  -u SUBMIT_PROMPT_PROJECT -u SUBMIT_PROMPT_REGION -u SUBMIT_PROMPT_SERVICE
   -u EMAIL_UNSUBSCRIBE_PROJECT -u EMAIL_UNSUBSCRIBE_REGION -u EMAIL_UNSUBSCRIBE_SERVICE
   -u AUTH_HANDOFF_PROJECT -u AUTH_HANDOFF_REGION
   -u AUTH_HANDOFF_MINT_SERVICE -u AUTH_HANDOFF_EXCHANGE_SERVICE
@@ -469,6 +474,7 @@ INVOKER_PIN_PROJECT="${DEPLOY_TARGET_PROJECT:-${DEPLOY_PROJECT:-}}"
 if [[ -n "$INVOKER_PIN_PROJECT" ]]; then
   INVOKER_ENV+=(
     BUG_REPORT_PROJECT="$INVOKER_PIN_PROJECT"
+    SUBMIT_PROMPT_PROJECT="$INVOKER_PIN_PROJECT"
     EMAIL_UNSUBSCRIBE_PROJECT="$INVOKER_PIN_PROJECT"
     AUTH_HANDOFF_PROJECT="$INVOKER_PIN_PROJECT"
     EVENT_INVITATIONS_PROJECT="$INVOKER_PIN_PROJECT"
@@ -644,6 +650,9 @@ admin_callables_repair_flags() {
 INVOKER_SCRIPTS=()
 if [[ "$BUG_REPORT_INVOKER_SELECTED" == "true" ]]; then
   INVOKER_SCRIPTS+=("$SCRIPT_DIR/set-bug-report-invoker.sh")
+fi
+if [[ "$SUBMIT_PROMPT_INVOKER_SELECTED" == "true" ]]; then
+  INVOKER_SCRIPTS+=("$SCRIPT_DIR/set-submit-prompt-invoker.sh")
 fi
 if [[ "$EMAIL_UNSUBSCRIBE_INVOKER_SELECTED" == "true" ]]; then
   INVOKER_SCRIPTS+=("$SCRIPT_DIR/set-email-unsubscribe-invoker.sh")
@@ -965,7 +974,7 @@ set -e
 # docs/app/bug-reports.md § Repeat-deploy hardening and
 # docs/app/phase-1-deploy.md § 1a-i. A `firebase deploy --only functions` can
 # reset that annotation and re-try the rejected `allUsers` binding, silently
-# 403ing submitBugReport, emailUnsubscribe, auth handoff, event invitations, or
+# 403ing submitBugReport, submitPrompt, emailUnsubscribe, auth handoff, event invitations, or
 # the admin callables until someone notices and re-runs the fix by hand.
 #
 # This used to be a manual post-deploy step an operator had to remember for
@@ -1121,6 +1130,10 @@ EOF
     run_postdeploy_invoker "$SCRIPT_DIR/set-bug-report-invoker.sh" \
       "$BUG_REPORT_INVOKER_CONSERVATIVE" || RECONCILE_STATUS=$?
   fi
+  if [[ "$SUBMIT_PROMPT_INVOKER_SELECTED" == "true" ]]; then
+    run_postdeploy_invoker "$SCRIPT_DIR/set-submit-prompt-invoker.sh" \
+      "$SUBMIT_PROMPT_INVOKER_CONSERVATIVE" || RECONCILE_STATUS=$?
+  fi
   if [[ "$EMAIL_UNSUBSCRIBE_INVOKER_SELECTED" == "true" ]]; then
     run_postdeploy_invoker "$SCRIPT_DIR/set-email-unsubscribe-invoker.sh" \
       "$EMAIL_UNSUBSCRIBE_INVOKER_CONSERVATIVE" || RECONCILE_STATUS=$?
@@ -1159,6 +1172,7 @@ EOF
   403ing stay broken:
 
     BUG_REPORT_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-bug-report-invoker.sh
+    SUBMIT_PROMPT_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-submit-prompt-invoker.sh
     EMAIL_UNSUBSCRIBE_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-email-unsubscribe-invoker.sh
     AUTH_HANDOFF_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-auth-handoff-invoker.sh
     EVENT_INVITATIONS_PROJECT=$INVOKER_REPAIR_PROJECT scripts/set-event-invitations-invoker.sh

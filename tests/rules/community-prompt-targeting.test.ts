@@ -95,20 +95,20 @@ beforeEach(async () => {
 });
 
 describe('create — targetDayIndex shape', () => {
-  it('ALLOWS a pending submission carrying a valid target Day', async () => {
-    await assertSucceeds(
+  it('DENIES a stale direct pending submission carrying a target Day', async () => {
+    await assertFails(
       setDoc(doc(db(ALICE), at('items/p1')), pendingPayload(ALICE, { targetDayIndex: 3 })),
     );
   });
 
-  it('ALLOWS Day 0 as a target — index 0 is a real Day, not a falsy blank', async () => {
-    await assertSucceeds(
+  it('DENIES a stale direct pending submission targeting Day 0', async () => {
+    await assertFails(
       setDoc(doc(db(ALICE), at('items/p2')), pendingPayload(ALICE, { targetDayIndex: 0 })),
     );
   });
 
-  it('ALLOWS a submission with NO target — the untargeted every-Day contract', async () => {
-    await assertSucceeds(setDoc(doc(db(ALICE), at('items/p3')), pendingPayload(ALICE)));
+  it('DENIES a stale direct pending submission with no target', async () => {
+    await assertFails(setDoc(doc(db(ALICE), at('items/p3')), pendingPayload(ALICE)));
   });
 
   it('DENIES a negative target', async () => {
@@ -169,6 +169,10 @@ describe('create — targetDayIndex shape', () => {
     await assertFails(
       setDoc(doc(db(ALICE), at('items/p11')), pendingPayload(ALICE, { retainedAt: NOW() })),
     );
+  });
+  it('DENIES a submitter forging admin report-hide suppression (#1405)', async () => {
+    await assertFails(setDoc(doc(db(ALICE), at('items/forged-suppression')),
+      pendingPayload(ALICE, { reportHideSuppressed: true })));
   });
 });
 
@@ -294,8 +298,8 @@ describe('update — only an admin re-targets; nobody approves from a client', (
     );
   });
 
-  it('still ALLOWS the one non-admin update there has ever been: the report increment', async () => {
-    await assertSucceeds(updateDoc(doc(db(BOB), at('items/p1')), { reportCount: 1 }));
+  it('denies bare report increments without an incarnation receipt (#1405)', async () => {
+    await assertFails(updateDoc(doc(db(BOB), at('items/p1')), { reportCount: 1 }));
   });
 });
 

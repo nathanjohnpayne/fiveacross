@@ -125,11 +125,10 @@ function AdminConsole({
   const openSection = (s: AdminSection) =>
     navigate(`/more/admin/${s}`, adminPops != null ? { state: { adminPops: adminPops + 1 } } : { replace: true });
 
-  // The community auto-hide threshold (ADR 0004 Phase 0). Content whose
-  // reportCount has REACHED it is already gone from every Player's Feed/pool
-  // (useProofFeed / useItems), yet stays reachable in the Review queue so an
-  // Admin can restore or delete it — the whole reason the Admin views skip the
-  // filter.
+  // The community auto-hide threshold (ADR 0004). Unsuppressed content whose
+  // reportCount has REACHED it is filtered from Player Feed/pool surfaces
+  // (useProofFeed / useItems), while restored/cleared incarnations retain their
+  // report-hide override. Admin queues keep either posture reachable for review.
   const threshold = event?.settings?.reportHideThreshold;
   const bannedUids = event?.bannedUids ?? [];
   // Prompts awaiting approval (#200 schema, #210 write path) — the SAME count

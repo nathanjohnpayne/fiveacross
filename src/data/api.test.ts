@@ -1,21 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// specs/d15-approvals.md, data layer. The one write-side claim this file pins:
-// `addItem` now lands a main-pool submission `status: 'pending'` (was
-// `'active'`) — the gate the rest of the approval flow (the Admin Approvals
-// queue, the submitter's own "pending review" row in ItemPool) hangs off. No
-// emulator needed — this is a pure "what payload did addDoc receive" check,
-// mirroring the mocking shape src/data/w3-claim-modes.test.ts already uses for
-// this module's sibling writes.
+// specs/d15-approvals.md, data layer: addItem sends content and captured identity in a callable
+// payload and never queues a pending Firestore create. These mocked wire checks
+// also pin captured account/Event/retry identity. Actual server pending/main stamps and
+// admission are covered by tests/rules/community-prompt-admission.test.ts.
 
 type Ref = { __kind: 'doc' | 'collection'; id?: string; path: string };
 
-const { addDocMock, getDocsFromCacheMock } = vi.hoisted(() => ({
+const { addDocMock, submitMock, getDocsFromCacheMock } = vi.hoisted(() => ({
   addDocMock: vi.fn((..._args: unknown[]) => Promise.resolve({ id: 'new-item' })),
+  submitMock: vi.fn(async (input: { itemId: string }) => ({ data: { id: input.itemId } })),
   getDocsFromCacheMock: vi.fn(),
 }));
 
-vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'med-2026' }));
+vi.mock('../firebase', () => ({ db: {}, functions: {}, EVENT_ID: 'med-2026' }));
+vi.mock('firebase/functions', () => ({ httpsCallable: () => submitMock }));
 vi.mock('firebase/firestore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('firebase/firestore')>();
   return {
@@ -33,10 +32,8 @@ vi.mock('firebase/firestore', async (importOriginal) => {
       };
       return { ...ref, withConverter: () => ref } as Ref;
     },
-    // `addItem` reads the Event's schedule to resolve a default target Day
-    // (#557). A read FAILURE now propagates rather than falling back to an
-    // untargeted write, so this stand-in has to answer — reporting no Event doc,
-    // which is the schedule-less case these tests already assume.
+    // Other helpers use document reads; addItem never reads a client schedule
+    // or queues a pending create because callable admission owns both.
     getDoc: () => Promise.resolve({ exists: () => false, data: () => undefined }),
     addDoc: (...args: unknown[]) => addDocMock(...args),
     getDocsFromCache: (...args: unknown[]) => getDocsFromCacheMock(...args),
@@ -57,37 +54,46 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-describe('addItem — main-pool submissions land pending (specs/d15-approvals.md)', () => {
-  it('writes status: "pending" (not "active") alongside pool: "main"', async () => {
-    await addItem('u1', 'Wore Crocs to dinner', false);
-
-    expect(addDocMock).toHaveBeenCalledTimes(1);
-    const [, payload] = addDocMock.mock.calls[0] as [Ref, Record<string, unknown>];
-    expect(payload).toMatchObject({
-      text: 'Wore Crocs to dinner',
-      createdBy: 'u1',
-      status: 'pending',
-      pool: 'main',
-      reportCount: 0,
-      spicy: false,
-    });
-  });
-
-  it('preserves the spicy flag the submitter checked', async () => {
-    await addItem('u1', 'A spicy one', true);
-    const [, payload] = addDocMock.mock.calls[0] as [Ref, Record<string, unknown>];
-    expect(payload).toMatchObject({ status: 'pending', spicy: true });
-  });
-
-  it('a blank/whitespace-only submission never calls addDoc', async () => {
-    await addItem('u1', '   ');
+describe('addItem — server admission wire (#1311)', () => {
+  it('submits content and request identity without client authority stamps', async () => {
+    await addItem('u1', 'Wore Crocs to dinner', false, undefined, 'med-2026', 'stable-id');
+    expect(submitMock).toHaveBeenCalledWith({ expectedUid: 'u1', eventId: 'med-2026', itemId: 'stable-id', text: 'Wore Crocs to dinner', spicy: false });
     expect(addDocMock).not.toHaveBeenCalled();
   });
-
-  it('writes through the Event scope captured by the caller', async () => {
-    await addItem('u1', 'Event A prompt', false, undefined, 'event-a');
-    const [ref] = addDocMock.mock.calls[0] as [Ref, Record<string, unknown>];
-    expect(ref.path).toBe('events/event-a/items');
+  it('keeps the captured UID when callable auth headers resolve after an account switch', async () => {
+    let authUid = 'u1';
+    let release!: () => void;
+    const headersReady = new Promise<void>(resolve => { release = resolve; });
+    const mismatch = Object.assign(new Error('sign-in changed'), { code: 'functions/unauthenticated' });
+    submitMock.mockImplementationOnce(async input => {
+      await headersReady;
+      if ((input as { expectedUid?: string }).expectedUid !== authUid) throw mismatch;
+      return { data: { id: input.itemId } };
+    });
+    const response = addItem('u1', 'Keep this draft', false, undefined, 'event-a', 'retry-a');
+    authUid = 'u2'; release();
+    await expect(response).rejects.toBe(mismatch);
+    expect(submitMock).toHaveBeenCalledWith(expect.objectContaining({ expectedUid: 'u1', itemId: 'retry-a' }));
+    expect(addDocMock).not.toHaveBeenCalled();
+  });
+  it('preserves the spicy flag', async () => {
+    await addItem('u1', 'A spicy one', true);
+    expect(submitMock).toHaveBeenCalledWith(expect.objectContaining({ spicy: true }));
+  });
+  it('a blank submission calls neither callable nor Firestore', async () => {
+    await addItem('u1', '   ');
+    expect(submitMock).not.toHaveBeenCalled();
+    expect(addDocMock).not.toHaveBeenCalled();
+  });
+  it('uses the captured Event and stable retry identity', async () => {
+    await addItem('u1', 'Event A prompt', false, undefined, 'event-a', 'retry-a');
+    expect(submitMock).toHaveBeenCalledWith(expect.objectContaining({ eventId: 'event-a', itemId: 'retry-a' }));
+  });
+  it('preserves server precondition refusal for host guidance without a pending-write fallback', async () => {
+    const error = Object.assign(new Error('safe server refusal'), { code: 'functions/failed-precondition' });
+    submitMock.mockRejectedValueOnce(error);
+    await expect(addItem('u1', 'Keep this draft', false, undefined, 'event-a', 'retry-a')).rejects.toBe(error);
+    expect(addDocMock).not.toHaveBeenCalled();
   });
 });
 

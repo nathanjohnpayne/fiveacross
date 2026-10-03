@@ -291,6 +291,16 @@ describe('Report queue (specs/w2-admin-console.md)', () => {
     expect(H.clearItemReports).toHaveBeenCalledWith('hot');
   });
 
+  it.each(['proof', 'item'])('offers Clear reports for new reports on a suppressed restored %s', (kind) => {
+    if (kind === 'proof') H.flagged = [proof('restored', 1, { status: 'active', reportHideSuppressed: true })];
+    else H.items = [item('restored', 1, { status: 'active', reportHideSuppressed: true })];
+    renderAdmin();
+    const q = within(queue());
+    expect(q.queryByText(/auto-hidden/i)).toBeNull();
+    fireEvent.click(q.getByRole('button', { name: /clear reports/i }));
+    expect(kind === 'proof' ? H.clearProofReports : H.clearItemReports).toHaveBeenCalledWith('restored');
+  });
+
   it('offers NO Clear reports control on a below-threshold row — nothing to lift', () => {
     // reportCount 2 is below the threshold of 4: the row is reported (so it queues)
     // but not auto-hidden, so there is no community hide to lift.
