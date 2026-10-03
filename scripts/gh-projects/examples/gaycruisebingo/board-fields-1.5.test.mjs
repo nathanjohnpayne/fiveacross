@@ -9,7 +9,7 @@ const script = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'board
 const fixtures = [];
 afterEach(() => fixtures.splice(0).forEach(path => rmSync(path, { recursive: true, force: true })));
 
-function fixture({ checker = 'author', env = {}, rejectAt = 0, rejectOnly = false, wrapper = true } = {}) {
+function fixture({ checker = 'author', env = {}, rejectAt = 0, rejectOnly = false, wrapper = true, wrapperRejectAt = 0, addFailure = false, emptyBoard = false, resetFailure = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'board-author-'));
   fixtures.push(root);
   const example = join(root, 'scripts', 'gh-projects', 'examples', 'gaycruisebingo');
@@ -18,7 +18,7 @@ function fixture({ checker = 'author', env = {}, rejectAt = 0, rejectOnly = fals
   mkdirSync(bin);
   if (wrapper) {
     const wrapperPath = join(root, 'scripts', 'gh-as-author.sh');
-    writeFileSync(wrapperPath, '#!/bin/bash\nset -eu\ntest "$1" = --\nshift\nprintf "%s\\0" "$*" >>"$FIXTURE_ROOT/wrapper-calls"\nexec "$@"\n');
+    writeFileSync(wrapperPath, '#!/bin/bash\nset -eu\ntest "$1" = --\nshift\nprintf "%s\\0" "$*" >>"$FIXTURE_ROOT/wrapper-calls"\nn=$(( $(cat "$FIXTURE_ROOT/wrapper-checks" 2>/dev/null || echo 0) + 1 ))\nprintf "%s\\n" "$n" >"$FIXTURE_ROOT/wrapper-checks"\nif [ "$n" = "$WRAPPER_REJECT_AT" ]; then exit 2; fi\nif [ -n "${GH_AS_AUTHOR_TRACE_MARKER:-}" ]; then : >"$GH_AS_AUTHOR_TRACE_MARKER"; fi\nexec "$@"\n');
     chmodSync(wrapperPath, 0o755);
   }
   const driver = join(example, 'board-fields-1.5.sh');
@@ -27,8 +27,8 @@ function fixture({ checker = 'author', env = {}, rejectAt = 0, rejectOnly = fals
   mkdirSync(join(example, 'additions'), { recursive: true });
   writeFileSync(join(example, 'additions', 'readme-phase-1.5.md'), 'Phase 1.5 — Daily Cards\n');
   writeFileSync(join(root, 'project.json'), JSON.stringify({ id: 'project', readme: '', shortDescription: 'board' }));
-  writeFileSync(join(root, 'fields.json'), JSON.stringify({ fields: [{ id: 'status', name: 'Status', options: [{ id: 'backlog', name: 'Backlog' }, { id: 'ready', name: 'Ready' }] }] }));
-  writeFileSync(join(root, 'items.json'), JSON.stringify({ items: [1, 2].map(n => ({ id: `item-${n}`, content: { url: `https://github.com/nathanjohnpayne/fiveacross/issues/${n}` } })) }));
+  writeFileSync(join(root, 'fields.json'), JSON.stringify({ fields: emptyBoard ? [] : [{ id: 'status', name: 'Status', options: [{ id: 'backlog', name: 'Backlog' }, { id: 'ready', name: 'Ready' }] }] }));
+  writeFileSync(join(root, 'items.json'), JSON.stringify({ items: (emptyBoard ? [] : [1, 2]).map(n => ({ id: `item-${n}`, content: { url: `https://github.com/nathanjohnpayne/fiveacross/issues/${n}` } })) }));
   const helper = join(root, 'scripts', 'identity-check.sh');
   if (checker !== 'missing') {
     writeFileSync(helper, `#!/bin/bash
@@ -51,12 +51,23 @@ case "$1 $2" in
   'project view') cat "$FIXTURE_ROOT/project.json" ;;
   'project field-list') cat "$FIXTURE_ROOT/fields.json" ;;
   'project item-list') cat "$FIXTURE_ROOT/items.json" ;;
-  'project item-add'|'project item-edit'|'project edit') ;;
+  'project item-add') if [ "$ADD_FAILURE" = 1 ]; then exit 2; fi ;;
+  'project item-edit'|'project edit') ;;
   *) exit 99 ;;
 esac
 `);
+  writeFileSync(join(bin, 'rm'), `#!/bin/bash
+set -eu
+if [ "$MARKER_RESET_FAILURE" = 1 ] && [[ "\${2:-}" == */author-write-started ]]; then
+  # Model a stale success marker whose unlink is refused.
+  : >"$2"
+  exit 1
+fi
+exec /bin/rm "$@"
+`);
+  chmodSync(join(bin, 'rm'), 0o755);
   chmodSync(join(bin, 'gh'), 0o755);
-  return { root, driver, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: root, GH_TOKEN: 'fixture-token', GITHUB_TOKEN: 'fixture-ambient', FIXTURE_ROOT: root, MOCK_LOGIN: checker === 'wrong' ? 'nathanpayne-codex' : 'nathanjohnpayne', REJECT_AT: String(rejectAt), REJECT_ONLY: rejectOnly ? '1' : '0', ...env } };
+  return { root, driver, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: root, GH_TOKEN: 'fixture-token', GITHUB_TOKEN: 'fixture-ambient', FIXTURE_ROOT: root, MOCK_LOGIN: checker === 'wrong' ? 'nathanpayne-codex' : 'nathanjohnpayne', MARKER_RESET_FAILURE: resetFailure ? '1' : '0', WRAPPER_REJECT_AT: String(wrapperRejectAt), ADD_FAILURE: addFailure ? '1' : '0', REJECT_AT: String(rejectAt), REJECT_ONLY: rejectOnly ? '1' : '0', ...env } };
 }
 
 function run(f) {
@@ -102,6 +113,32 @@ describe('Phase 1.5 board driver requires the fixed author identity', () => {
     const { result, calls } = run(fixture({ wrapper: false }));
     expect(result.status).toBe(2);
     expect(calls.filter(c => /project item-(add|edit)/.test(c))).toEqual([]);
+  });
+
+  it.each([1, 3])('stops when wrapper verification refuses mutation %i before gh runs', wrapperRejectAt => {
+    const { result, calls } = run(fixture({ wrapperRejectAt, emptyBoard: true }));
+    expect(result.status).toBe(2);
+    expect(result.stdout).not.toContain('board-fields-1.5 done');
+    expect(calls.filter(c => /project (item-add|edit)/.test(c))).toHaveLength(wrapperRejectAt - 1);
+    expect(result.stderr).not.toContain('fixture-token');
+  });
+
+  it('stops before the wrapper when a stale trace marker cannot be reset', () => {
+    const f = fixture({ resetFailure: true, wrapperRejectAt: 1, emptyBoard: true });
+    const { result, calls } = run(f);
+    expect(result.status).toBe(2);
+    expect(calls).toEqual([]);
+    expect(existsSync(join(f.root, 'wrapper-calls'))).toBe(false);
+    expect(result.stderr).toContain('cannot reset the author-write trace marker');
+    expect(result.stdout).not.toContain('board-fields-1.5 done');
+  });
+
+  it('still handles an ordinary gh item-add failure after wrapper verification', () => {
+    const { result, calls } = run(fixture({ addFailure: true }));
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('! add failed');
+    expect(result.stdout).toContain('board-fields-1.5 done');
+    expect(calls.filter(c => c === 'project item-edit')).toHaveLength(2);
   });
 
   it('blocks a later field mutation when identity verification stops succeeding', () => {

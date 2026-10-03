@@ -57,7 +57,19 @@ ghp_gh() {
   ( unset GITHUB_TOKEN; require_author ) || exit 2
   if [[ "$1" == project && ( "$2" == item-add || "$2" == item-edit || "$2" == edit ) ]]; then
     [[ -x "$AUTHOR_WRAPPER" ]] || { echo "Error: author wrapper missing or non-executable." >&2; exit 2; }
-    ( unset GITHUB_TOKEN; "$AUTHOR_WRAPPER" -- gh "$@"; )
+    # Exit codes alone cannot distinguish wrapper refusal from gh failure.
+    # The canonical wrapper creates this marker only after credential checks,
+    # immediately before running gh; handled item-add/edit failures must never
+    # swallow a refusal to run the write under the verified author credential.
+    local marker="$WORK/author-write-started" write_rc=0
+    rm -f "$marker" || { echo "Error: cannot reset the author-write trace marker." >&2; exit 2; }
+    ( unset GITHUB_TOKEN; GH_AS_AUTHOR_TRACE_MARKER="$marker" "$AUTHOR_WRAPPER" -- gh "$@"; ) || write_rc=$?
+    if [ ! -f "$marker" ]; then
+      echo "Error: author wrapper refused the project mutation before gh ran." >&2
+      exit 2
+    fi
+    rm -f "$marker"
+    return "$write_rc"
   else
     ( unset GITHUB_TOKEN; gh "$@"; )
   fi
