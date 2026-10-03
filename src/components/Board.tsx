@@ -2986,10 +2986,11 @@ export default function Board() {
           // The proofed-mark completion verdict (PR #110 round 2 finding 1): a
           // successful attachProof reports the SAME win-transition shape setMark
           // returns, and it rides the SAME broadcast pipeline — a proof_required
-          // win posts its Moment exactly like an honor win. (In admin_confirmed
-          // the attached cell is pending and excluded from the win mask, so the
-          // verdict is structurally transition-free — the confirm-path Moment
-          // stays #41's.) Fire-and-forget: the sheet closes without waiting on
+          // win posts its Moment exactly like an honor win. Admin-confirmed
+          // fresh credit stays pending; content-only review keeps existing credit.
+          // Neither creates a new attach-time win. Fresh-credit ceremonies wait
+          // for confirmation; content-only resolution adds none. Fire-and-forget:
+          // the sheet closes without waiting on
           // the witness read.
           onAttached={(res: AttachProofResult) => void broadcastWinVerdict(res)}
           // The 🎖️ Cross My Heart pledge (issue #181), offered only on a CLAIM
