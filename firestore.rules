@@ -2550,8 +2550,8 @@ service cloud.firestore {
         // `update` path at all. A second write to the SAME day-meta doc is therefore
         // a doc-exists update, denied for EVERYONE including admins — the per-day
         // honor cannot be reassigned once claimed, exactly like the deny-all update
-        // on a Moment. Public read (the honor is pinned on that day's view); delete
-        // stays admin-only for moderation.
+        // on a Moment. Reads require Event admission (the honor is pinned on that
+        // day's view); delete stays admin-only for moderation.
         //
         // The honor doc id is BOUND to its Day: `metaId == dayIndex` (Codex P2).
         // The type contract (src/types.ts) fixes the single canonical doc at
@@ -3369,8 +3369,8 @@ service cloud.firestore {
 
       // Moments (ADR 0002): a broadcast of a big social beat (BINGO / Blackout /
       // First to BINGO) posted to the Feed. A bare Mark broadcasts nothing here.
-      // Own-beat create only (a forged uid is denied); public read; fully immutable
-      // (no update path); deletable by owner or admin.
+      // Own-beat create only (a forged uid is denied); reads require Event admission.
+      // Fully immutable (no update path); deletable by owner or admin.
       match /moments/{momentId} {
         allow read: if admitted(eventId);
         allow create: if admitted(eventId)
@@ -3416,7 +3416,7 @@ service cloud.firestore {
                         && request.resource.data.dayIndex is int
                         // Bound the Day to the Event's real schedule (Codex P2 on
                         // #277): without it an owner could mint unbounded
-                        // publicly-readable junk docs (…-blackout-d999999). A
+                        // Event-readable junk docs (…-blackout-d999999). A
                         // legacy Event with no `days` errors the get() access —
                         // which DENIES (the safe default): no schedule, no
                         // day-scoped ids.
@@ -3576,8 +3576,8 @@ service cloud.firestore {
       // admin-only — the moderation escape hatch for a genuine mis-retraction,
       // mirroring the write-once honor doc at days/{dayIndex}/meta/{dayIndex}.
       //
-      // Read is public like the Feed it describes: nothing renders it today, but a
-      // signed-in client may want to know a win is spent before optimistically
+      // Reads require Event admission like the Feed: nothing renders it today, but an
+      // admitted client may want to know a win is spent before optimistically
       // re-posting it (src/data/moments.ts consults its LOCAL cache copy for
       // exactly that), and it carries no information a Moment did not already
       // publish.
@@ -3595,7 +3595,7 @@ service cloud.firestore {
           // DOES mint this (the legacy tombstone of a daily-Event retraction
           // records WHICH Day spent the legacy slot; pure provenance, nothing
           // reads it back). When present it must still be a real scheduled Day —
-          // hasOnly alone would otherwise admit junk into a publicly-readable doc.
+          // hasOnly alone would otherwise admit junk into an Event-readable doc.
           && (momentId == request.resource.data.uid + '-' + request.resource.data.kind
                 ? (!request.resource.data.keys().hasAny(['dayIndex'])
                     || (request.resource.data.dayIndex is int
@@ -3607,7 +3607,7 @@ service cloud.firestore {
                     && momentId == request.resource.data.uid + '-' + request.resource.data.kind + '-d' + string(request.resource.data.dayIndex)))
           // Same near-now window as moments/proofs/hearts. The stamp is provenance
           // only (nothing sorts by it), but an unbounded client-set number in a
-          // publicly-readable doc buys nothing, so it carries the house bound.
+          // Event-readable doc buys nothing, so it carries the house bound.
           && request.resource.data.createdAt is number
           && request.resource.data.createdAt <= request.time.toMillis() + 60000
           && request.resource.data.createdAt >= request.time.toMillis() - 86400000;

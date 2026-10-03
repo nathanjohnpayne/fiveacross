@@ -16,7 +16,7 @@ import { deleteDoc, disableNetwork, doc, enableNetwork, getDoc, setDoc, writeBat
 // to bind the doc id to the payload kind. A Moment is an own-beat, self-published
 // broadcast: a Player may create ONLY a Moment carrying their own uid (a forged uid is
 // denied), at the deterministic id its kind implies (issue #103), with a valid kind +
-// non-empty ≤100 displayName + a numeric, near-now createdAt; reads are public; a
+// non-empty ≤100 displayName + a numeric, near-now createdAt; reads require Event admission; a
 // Moment is fully immutable (no update path); deletable by its owner or an admin.
 //
 // Two design-critical facts this suite PINS honestly (see the spec):
@@ -66,7 +66,7 @@ afterAll(async () => {
 });
 
 // Each test starts clean with a canonical Event and a foreign Moment (Carol's) so
-// the public-read + owner/admin-delete invariants have something to read against.
+// the admitted-read + owner/admin-delete invariants have something to read against.
 beforeEach(async () => {
   await testEnv.clearFirestore();
   await testEnv.withSecurityRulesDisabled(async (ctx) => {
@@ -304,7 +304,7 @@ describe('firestore.rules — Feed Moments (specs/w2-feed-moments.md)', () => {
     expect([ALICE, BOB]).toContain((await getDoc(doc(db(ALICE), momentPath('first_bingo')))).data()?.uid);
   });
 
-  it('Moment reads are public — the Feed everyone watches (ADR 0002)', async () => {
+  it('Event admission permits reading another Player’s Moment (ADR 0002)', async () => {
     await assertSucceeds(getDoc(doc(db(BOB), momentPath(`${CAROL}-bingo`)))); // Bob reads Carol's beat
   });
 
@@ -556,7 +556,7 @@ describe('firestore.rules — retraction tombstones (#377, specs/w2-feed-moments
     await assertFails(loser.commit());
     // Nothing half-landed: the Day-5 Moment survived, its tombstone was not
     // minted, and the retry's fresh-probe batch lands. Assert EXISTENCE, not
-    // just read permission — Moment reads are public, so a bare assertSucceeds
+    // just read permission — Event admission permits this read, so a bare assertSucceeds
     // would pass either way (CodeRabbit on PR #494).
     const survivor = await assertSucceeds(getDoc(doc(alice, momentPath(`${ALICE}-bingo-d5`))));
     expect(survivor.exists()).toBe(true);
@@ -641,7 +641,7 @@ describe('firestore.rules — retraction tombstones (#377, specs/w2-feed-moments
     // daily-Event retraction records WHICH Day spent the legacy slot.
     await assertSucceeds(setDoc(t(`${ALICE}-bingo`), tombstone(ALICE, { dayIndex: 2 })));
     // ... but when present it must still be a real scheduled Day — hasOnly alone
-    // would otherwise admit junk into a publicly-readable doc.
+    // would otherwise admit junk into an Event-readable doc.
     await assertFails(setDoc(t(`${ALICE}-blackout`), tombstone(ALICE, { kind: 'blackout', dayIndex: '2' })));
     await assertFails(setDoc(t(`${ALICE}-blackout`), tombstone(ALICE, { kind: 'blackout', dayIndex: 99 })));
     await assertFails(setDoc(t(`${ALICE}-blackout`), tombstone(ALICE, { kind: 'blackout', dayIndex: -1 })));
@@ -674,7 +674,7 @@ describe('firestore.rules — retraction tombstones (#377, specs/w2-feed-moments
     await assertSucceeds(setDoc(doc(db(ALICE), momentPath(id)), moment(ALICE, { dayIndex: 3 })));
   });
 
-  it('tombstone reads are public, like the Feed they describe', async () => {
+  it('Event admission permits reading another Player’s tombstone', async () => {
     await assertSucceeds(setDoc(doc(db(ALICE), tombstonePath(`${ALICE}-bingo-d3`)), tombstone(ALICE, { dayIndex: 3 })));
     await assertSucceeds(getDoc(doc(db(BOB), tombstonePath(`${ALICE}-bingo-d3`))));
   });
