@@ -24,7 +24,26 @@ jobs:
   app-ci:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Checkout v7 can put auth in RUNNER_TEMP rather than .git/config.
+      # Assert both storage surfaces are clean before PR-controlled npm runs.
+      - name: Verify checkout credentials removed
+        run: |
+          set -euo pipefail
+          config_names=$(git config --local --includes --name-only --list)
+          if printf '%s\n' "$config_names" | grep -Ei '(^http\..*\.extraheader$|^core\.sshcommand$)' >/dev/null; then
+            echo "ERROR: checkout left Git authentication configured" >&2
+            exit 1
+          fi
+          test -d "$RUNNER_TEMP"
+          leftovers=$(find "$RUNNER_TEMP" -type f -name 'git-credentials-*.config' -print -quit)
+          if [ -n "$leftovers" ]; then
+            echo "ERROR: checkout left a temporary credentials config" >&2
+            exit 1
+          fi
 
       - uses: actions/setup-node@v7
         with:
