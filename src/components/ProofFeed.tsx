@@ -189,7 +189,7 @@ function visiblePodium(podium: PodiumMomentPayload | undefined, bannedUids: read
 /** A post's heart state + toggle, derived from its target-scoped stream —
  * the shape both card kinds render through `HeartButton`. `onToggle` takes
  * the INTENDED next state (see the pending note below), never re-derives it. */
-export type HeartControl = { count: number; hearted: boolean; onToggle: (next: boolean) => void };
+export type HeartControl = { count: number; hearted: boolean; onToggle: (next: boolean) => void; disabled?: boolean };
 
 /**
  * The Instagram-style heart (specs/feed-hearts.md): a Lucide heart that fills
@@ -218,7 +218,7 @@ export type HeartControl = { count: number; hearted: boolean; onToggle: (next: b
  * `aria-pressed` carries the shown toggle state; the count is its own
  * labeled text so screen readers hear "N hearts" once, not per-digit.
  */
-export function HeartButton({ count, hearted, onToggle }: HeartControl) {
+export function HeartButton({ count, hearted, onToggle, disabled = false }: HeartControl) {
   const [burst, setBurst] = useState(false);
   const [pending, setPending] = useState<boolean | null>(null);
   useEffect(() => {
@@ -231,6 +231,7 @@ export function HeartButton({ count, hearted, onToggle }: HeartControl) {
     <div className="heart-row">
       <button
         type="button"
+        disabled={disabled}
         className={'heartbtn' + (shown ? ' hearted' : '') + (burst ? ' heart-burst' : '')}
         aria-pressed={shown}
         aria-label={shown ? 'Unheart this post' : 'Heart this post'}
@@ -263,9 +264,9 @@ function PostHeartButton({ targetKind, targetId, targetCreatedAt, viewerUid, exc
   targetKind: 'proof' | 'moment'; targetId: string; targetCreatedAt: number;
   viewerUid?: string; excludedUids: readonly string[];
 }) {
-  const { hearts } = useAllHearts(targetKind, targetId, targetCreatedAt, viewerUid);
+  const { hearts, failed } = useAllHearts(targetKind, targetId, targetCreatedAt, viewerUid);
   const { count, hearted } = heartState(hearts, targetKind, targetId, targetCreatedAt, viewerUid, excludedUids);
-  return <HeartButton key={JSON.stringify([viewerUid, targetKind, targetId, targetCreatedAt])} count={count} hearted={hearted} onToggle={on => {
+  return <HeartButton key={JSON.stringify([viewerUid, targetKind, targetId, targetCreatedAt, failed])} disabled={failed} count={count} hearted={hearted} onToggle={on => {
     if (viewerUid) void setHeart({ uid: viewerUid, targetKind, targetId, targetCreatedAt, on });
   }} />;
 }

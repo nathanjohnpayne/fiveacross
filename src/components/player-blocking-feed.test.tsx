@@ -62,18 +62,20 @@ function mount(streams: {
   doubts?: object[];
   hearts?: object[];
 }) {
-  const cbs: { docs: SnapCb[]; player: SnapCb | null; byName: Record<string, SnapCb> } = {
+  const cbs: { docs: SnapCb[]; player: SnapCb | null; byName: Record<string, SnapCb>; heartErrors: (() => void)[] } = {
     docs: [],
     player: null,
     byName: {},
+    heartErrors: [],
   };
-  H.onSnapshot.mockImplementation((target: unknown, optionsOrNext: unknown, maybeNext?: SnapCb) => {
+  H.onSnapshot.mockImplementation((target: unknown, optionsOrNext: unknown, maybeNext?: SnapCb, onError?: () => void) => {
     const onNext = (typeof optionsOrNext === 'function' ? optionsOrNext : maybeNext) as SnapCb;
     const ref = target as { kind?: string; args?: unknown[] };
     const args = ref.args ?? [];
     const source = ref.kind === 'query' ? (args[0] as { kind?: string; args?: unknown[] }) : undefined;
     if (source?.kind === 'collectionGroup') cbs.byName.markers = onNext;
     else if (source?.kind === 'collection' && source.args?.[3] === 'hearts') {
+      if (onError) cbs.heartErrors.push(onError);
       const constraints = args.slice(1) as { args: [string, string, unknown] }[];
       onNext(col((streams.hearts ?? []).filter((row) => constraints.every(({ args: [field, , value] }) => (row as Record<string, unknown>)[field] === value)).map(row)));
     }
@@ -105,7 +107,7 @@ function mount(streams: {
     cbs.byName.hearts?.(col((streams.hearts ?? []).map(row)));
     deliverMarkers(streams.markers ?? []);
   });
-  return { view, deliverMarkers, deliverProofs: (proofs: object[]) => act(() => cbs.byName.proofs?.(col(proofs.map(row)))) };
+  return { view, deliverMarkers, denyHearts: () => act(() => cbs.heartErrors.forEach(cb => cb())), deliverProofs: (proofs: object[]) => act(() => cbs.byName.proofs?.(col(proofs.map(row)))) };
 }
 
 const proof = (id: string, uid: string, displayName: string, createdAt: number) =>
@@ -371,4 +373,17 @@ describe('target-scoped Heart optimistic identity', () => {
     fireEvent.click(button());
     expect(H.setHeart).toHaveBeenLastCalledWith(expect.objectContaining({ uid: change === 'account' ? 'other-viewer' : 'viewer', targetCreatedAt: change === 'incarnation' ? 11 : 10, on: true }));
   });
+});
+
+
+it('retires pending optimistic intent when the target Heart listener is denied', () => {
+  const { denyHearts } = mount({ proofs: [proof('same', 'friend', 'Friend Fin', 10)] });
+  const button = () => screen.getByRole('button', { name: /^(?:Unheart|Heart) this post$/ });
+  fireEvent.click(button());
+  expect(button()).toHaveAttribute('aria-pressed', 'true');
+  denyHearts();
+  expect(button()).toHaveAttribute('aria-pressed', 'false');
+  expect(button()).toBeDisabled();
+  fireEvent.click(button());
+  expect(H.setHeart).toHaveBeenCalledTimes(1);
 });

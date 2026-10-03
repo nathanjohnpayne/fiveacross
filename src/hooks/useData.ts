@@ -186,6 +186,8 @@ function useDocSub<T>(
 }
 
 type CollectionSubscriptionState<T> = {
+  /** The listener terminated; private consumers can retire optimistic state. */
+  failed: boolean;
   key: string;
   data: T[];
   loading: boolean;
@@ -195,6 +197,7 @@ type CollectionSubscriptionState<T> = {
 };
 
 const emptyCollectionState = <T,>(key: string, loading: boolean): CollectionSubscriptionState<T> => ({
+  failed: false,
   key,
   data: [],
   loading,
@@ -238,6 +241,7 @@ function useColSub<T>(q: Query<T> | null, key: string, clearOnError = false) {
         if (!active) return;
         setState((previous) => ({
           key,
+          failed: false,
           data: snap.docs.map((d) => d.data() as T),
           loading: false,
           hasServerData: previous.key === key && previous.hasServerData
@@ -250,7 +254,9 @@ function useColSub<T>(q: Query<T> | null, key: string, clearOnError = false) {
       () => {
         if (!active) return;
         setState((previous) =>
-          previous.key === key && !clearOnError ? { ...previous, loading: false } : emptyCollectionState(key, false),
+          previous.key === key && !clearOnError
+            ? { ...previous, loading: false, failed: true }
+            : { ...emptyCollectionState<T>(key, false), failed: true },
         );
       },
     );
@@ -1681,14 +1687,14 @@ export function useAllHearts(
 ) {
   const valid = (targetKind === 'proof' || targetKind === 'moment') &&
     typeof targetId === 'string' && targetId.length > 0 && Number.isFinite(targetCreatedAt);
-  const { data, loading, hasServerData } = useColSub<HeartDoc>(
+  const { data, loading, hasServerData, failed } = useColSub<HeartDoc>(
     valid ? query(heartsCol(), where('targetKind', '==', targetKind),
       where('targetId', '==', targetId), where('targetCreatedAt', '==', targetCreatedAt)) : null,
     eventSubscriptionKey('hearts:target', targetKind ?? 'none', targetId ?? 'none',
       targetCreatedAt ?? 'none', viewerUid ?? 'none'),
     true,
   );
-  return { hearts: data, loading, hasServerData };
+  return { hearts: data, loading, hasServerData, failed };
 }
 
 export function useAllDoubts(viewerUid?: string | null) {
