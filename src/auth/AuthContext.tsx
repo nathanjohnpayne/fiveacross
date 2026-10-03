@@ -793,7 +793,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [online, setOnline] = useState(isOnline());
   const signInAttemptRef = useRef<Promise<void> | null>(null);
   const signInAttemptOwnerRef = useRef<symbol | null>(null);
-  const explicitLogoutRef = useRef(false);
+  // null follows persisted intent; false grants this mount's deliberate sign-in
+  // even when storage cannot clear an older marker; true records a new logout.
+  const explicitLogoutRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    const onLogoutStorage = (event: StorageEvent) => {
+      if (event.key === EXPLICIT_LOGOUT_KEY) {
+        // A new same-origin tab logout supersedes our local sign-in choice.
+        explicitLogoutRef.current = event.newValue === '1' ? true : null;
+      }
+    };
+    window.addEventListener('storage', onLogoutStorage);
+    return () => window.removeEventListener('storage', onLogoutStorage);
+  }, []);
   // The token of the redirect attempt this tab most recently STARTED and has
   // not yet seen fail — the handle the bfcache recovery below needs to retire
   // that attempt's records without touching any other tab's (#1123).
@@ -1447,7 +1459,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [bootstrapUser, eventId, profileBootstrapOk, user]);
 
   useEffect(() => {
-    return onAuthStateChanged(auth, (u) => {
+    return onAuthStateChanged(auth, (incomingUser) => {
+      // Firebase can publish a pending popup's User after signOut completed.
+      // Logout intent rejects that session until a deliberate new sign-in
+      // permits it; a reloaded mount follows persisted intent again.
+      let logoutRequested = explicitLogoutRef.current === true;
+      try {
+        if (explicitLogoutRef.current === null) {
+          logoutRequested = localStorage.getItem(EXPLICIT_LOGOUT_KEY) === '1';
+        }
+      } catch {
+        // This mount's recorded intent still applies when persistence is unreadable.
+      }
+      const u = logoutRequested ? null : incomingUser;
+      if (incomingUser && logoutRequested) {
+        // Keep the provider signed out even when SDK cleanup fails; the next
+        // late callback retries without bootstrapping or attesting this User.
+        void signOut(auth).catch(() => {});
+      }
       const ownedEventId = activeEventIdRef.current;
       // Whether THIS is the very first auth-state callback this mount has
       // ever seen — checked and cleared unconditionally, before any other
