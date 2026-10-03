@@ -3116,6 +3116,7 @@ async function runReconcileEchoes(
           ceremonialDayIndexes: params.ceremonialDayIndexes,
           statsFrozen: params.statsFrozen,
           database,
+          preservePriorRootStamp: boardBingoStampMissing(cachedPlayerData, dayIndex),
         }),
       )
       .catch(() => undefined);
