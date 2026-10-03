@@ -213,8 +213,9 @@ describe('hideVisionFlaggedIfQualifies — transactional conditional hide', () =
 // instantaneous nor guaranteed (its write is best-effort and a failure is
 // swallowed). An admin who clicks it there agrees WITH the AI screen, but the
 // resulting doc is 'hidden' with no marker, which is exactly the shape
-// `safetyHideStands` reads as a PLAIN hide — so a later Confirm on the same Proof
-// publishes the media the admin had just taken down, and the trigger's hide arm
+// `safetyHideStands` reads as a PLAIN hide — so a later Restore to 'pending'
+// followed by a Confirm publishes the media the admin had just taken down (a
+// Confirm never publishes a 'hidden' Proof directly), and the trigger's hide arm
 // (flagged-only) can never fire on it again. The backfill arm supplies the
 // missing record instead.
 
@@ -250,8 +251,9 @@ describe('the backfill arm — a marker-less hidden extreme Proof is stamped (#1
 
   it('never re-applies the marker over an admin lift, whatever the doc then does', async () => {
     // restoreProof writes `false`; an admin who then hand-Hides the Proof keeps
-    // it, so the result is a plain hide — liftable by Restore, publishable by a
-    // confirm — because the admin has already seen the verdict and overridden it.
+    // it, so the result is a plain hide — liftable by Restore (and publishable by
+    // a Confirm only after a Restore to 'pending') — because the admin has
+    // already seen the verdict and overridden it.
     const lifted = fakeDb({ [PROOF]: { status: 'hidden', safetyHide: false, visionFlag: 'violence' } });
     expect(await hideVisionFlaggedIfQualifies(lifted.db, 'e', 'p1')).toBe(false);
     expect(lifted.updates).toEqual([]);
@@ -1396,7 +1398,9 @@ describe('the confirm-time gate reads the SERVER marker, not the verdict (#133)'
     expect(qualifiesForVisionHide(flagged)).toBe(true);
     expect(safetyHideStands(flagged)).toBe(true);
     // 'hidden' + the marker: the doc the trigger already produced and now stands
-    // down on (its loop guard) — precisely the one a confirm would re-expose, so
+    // down on (its loop guard) — precisely the one an older, unconditional
+    // confirm would have re-exposed (Confirm now publishes only a still-'pending'
+    // Proof), so
     // the client gate holds exactly where the trigger cannot.
     const hidden = { status: 'hidden', safetyHide: true, visionFlag: 'violence' };
     expect(qualifiesForVisionHide(hidden)).toBe(false);

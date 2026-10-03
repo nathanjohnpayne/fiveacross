@@ -413,7 +413,7 @@ describe('Pending claims — a Vision-held photo is named on the row (specs/clou
 
   it('leaves a merely-racy verdict unannotated — nothing withholds the photo for raciness', () => {
     // ADR 0004 again, on the claim side: raciness never earns the marker, so the
-    // confirm publishes exactly as it always did and the row says nothing.
+    // confirm withholds nothing for it and the row says nothing.
     adminConfirmedEvent();
     H.flagged = [proof('P', 0, { displayName: 'Racy Photo', status: 'active', visionFlag: 'racy' })];
     H.claims = [claim()];

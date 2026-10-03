@@ -309,8 +309,9 @@ export function qualifiesForVisionHide(doc: VisionFlaggedDoc | undefined): boole
  * writes it beside the status), and re-stamping `true` over it would let the
  * server silently overrule the one decision ADR 0004 reserves for a human. A
  * Proof an admin Restored and then hand-Hid keeps that `false` and stays a plain
- * hide — liftable by Restore, publishable by a confirm — because the admin has
- * already seen the verdict and overridden it. The same `false` is what makes the
+ * hide — liftable by Restore (and publishable by a Confirm only after a Restore
+ * to `'pending'`) — because the admin has already seen the verdict and
+ * overridden it. The same `false` is what makes the
  * re-hide arm safe to state as broadly as it is: it fires on the marker alone,
  * with no verdict test, because an override records itself in the same write it
  * overrides with, and a Restore that has already happened is never contested.
