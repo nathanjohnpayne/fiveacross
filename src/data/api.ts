@@ -35,6 +35,7 @@ import {
   dealBoard,
   dayDealState,
   boardFirstBingoAt,
+  boardBingoStampMissing,
   completedLines,
   countMarked,
   isBlackout,
@@ -1643,22 +1644,13 @@ export function computeMark(params: {
     blackout: boolean;
     firstBingoAt?: number | null;
   } = { squaresMarked, bingoCount, blackout };
-  // firstBingoAt is the one denormalized field that depends on prior SERVER
-  // state, not purely on `next` — but only in the "bingo was already standing"
-  // direction. Clearing is prior-independent: whenever the new state holds NO
-  // bingo, firstBingoAt must be null no matter what the server had, so a mark
-  // that removes the last bingo always writes the clear — even when the prior
-  // value is UNKNOWN (`undefined`: the caller's player row has not loaded and
-  // nothing is cached), or a stale stamp would keep crediting a non-winner.
-  // A transition from NO bingo to a standing bingo is also prior-independent:
-  // the folded board itself proves this is the first current line, so stamp
-  // `now` even if the player row is unknown. The only unknown-state write we
-  // omit is a further mark while a bingo already stood, where stamping `now`
-  // could clobber the server's earlier first-bingo timestamp.
+  // An unknown Player timestamp cannot be inferred from the local Board:
+  // even a local no-bingo -> bingo transition may follow an earlier server win
+  // that this stale cache has never seen. Omit the stamp whenever a bingo stands
+  // and the prior value is UNKNOWN so the merge preserves the server value.
+  // Clearing remains prior-independent: no standing bingo writes explicit null.
   if (bingoCount === 0) {
     player.firstBingoAt = null;
-  } else if (currentFirstBingoAt === undefined && previousBingoCount === 0) {
-    player.firstBingoAt = now;
   } else if (currentFirstBingoAt !== undefined) {
     player.firstBingoAt = currentFirstBingoAt ?? now;
   }
@@ -2538,8 +2530,16 @@ async function runSetMark(
   // Fire-and-forget like every post-ack continuation here; a reload that loses
   // it is healed by the stats-lag check in `runReconcileEchoes` on that
   // board's next open.
-  if (echoBoards.length > 0) {
-    const echoedDayIndexes = echoBoards.map((b) => b.dayIndex);
+  // The offline merge deliberately omits an unknown stamp. Once acknowledged,
+  // reuse the server-derived transaction to fill a genuinely absent Day stamp
+  // from committed cells, while preserving any earlier server value. Open-time
+  // missing-stamp repair recovers this continuation after a reload or failure.
+  const repairUnknownStamp = params.daily === true && player.bingoCount > 0 && player.firstBingoAt === undefined;
+  if (echoBoards.length > 0 || repairUnknownStamp) {
+    const echoedDayIndexes = [...new Set([
+      ...echoBoards.map((b) => b.dayIndex),
+      ...(repairUnknownStamp ? [dayIndex] : []),
+    ])];
     void committed
       .then(() =>
         reconcileEchoStatsFromServer({
@@ -2550,6 +2550,7 @@ async function runSetMark(
           ceremonialDayIndexes: params.ceremonialDayIndexes,
           statsFrozen: params.statsFrozen,
           database,
+          preservePriorRootStamp: repairUnknownStamp,
         }),
       )
       .catch(() => undefined);
@@ -2739,6 +2740,8 @@ async function reconcileEchoStatsFromServer(params: {
   ceremonialDayIndexes?: number[];
   statsFrozen?: boolean;
   database: Firestore;
+  /** Unknown-stamp repair must retain earlier root evidence absent from buckets. */
+  preservePriorRootStamp?: boolean;
 }): Promise<{ dayStats: Record<number, StatWrite> } | null> {
   const { eventId, uid, database } = params;
   const days = params.statsFrozen
@@ -2783,6 +2786,14 @@ async function reconcileEchoStatsFromServer(params: {
         : undefined,
       priorBlackout: playerData?.blackout === true,
     });
+    if (params.preservePriorRootStamp &&
+        typeof playerData?.firstBingoAt === 'number' && Number.isFinite(playerData.firstBingoAt) &&
+        playerData.firstBingoAt > 0 &&
+        (write.firstBingoAt == null || playerData.firstBingoAt < write.firstBingoAt)) {
+      // A legacy earlier root is server evidence whose Day is not knowable.
+      // Fill this Day from its live cells without replacing that earlier root.
+      delete write.firstBingoAt;
+    }
     // Post-freeze: ceremonial buckets only, never roots — `days` was already
     // narrowed to ceremonial above, so `write.dayStats` carries nothing else.
     tx.set(playerRef, params.statsFrozen ? { dayStats: write.dayStats } : write, { merge: true });
@@ -2805,11 +2816,12 @@ async function reconcileEchoStatsFromServer(params: {
  * Board patch + at most 16 marker repairs ride the first offline-queueable
  * batch, carrying this Board's own `markSeed`. After its acknowledgement,
  * remaining repairs re-enter the enqueue chain, refresh cache/witness state,
- * and queue only still-applicable targets. Stats re-derive from server state
- * after every repair acknowledgement. Echo-caused wins are
- * enqueued into the existing pending-Moment queue under this board's own Day;
- * the board's next snapshot (this batch's own latency-compensated echo) runs
- * Board's standard drain, so nothing posts directly from here. Idempotent: an
+ * and queue only still-applicable targets. Player stats re-derive in a detached
+ * server transaction after every repair ACK; eligible missing-stamp debt keeps
+ * a changed pass incomplete for later-open retry without holding the offline
+ * Mark chain. Echo-caused wins are enqueued after all repair ACKs under this
+ * board's own Day, and Board's standard drain publishes them. Nothing posts
+ * directly from here. Idempotent: an
  * already-reconciled board is a no-op with zero writes.
  */
 export async function reconcileEchoes(params: {
@@ -2914,6 +2926,13 @@ async function runReconcileEchoes(
       ? (playerSnap.value.data() as Partial<PlayerDoc>)
       : undefined;
 
+  // A changed pass queues its server-stats repair after ACK without holding
+  // the offline Mark chain. Until eligible missing-stamp debt is observed
+  // repaired, return incomplete so a later open retries if that detached
+  // transaction fails or the tab disappears before it runs (#1424).
+  const healEligible = !params.statsFrozen || params.ceremonialDayIndexes?.includes(dayIndex) === true;
+  const missingStampRepair = healEligible && boardBingoStampMissing(cachedPlayerData, dayIndex);
+
   // Marker self-heal (Codex P2 on #447 round 2): an unmark on a device that
   // could not see a sibling carrier deletes the Prompt's single Tally marker
   // out from under a still-standing echo — and that echo needs its marker back
@@ -2982,8 +3001,9 @@ async function runReconcileEchoes(
   // does not survive a reload), so an offline echo that drained across a
   // reload leaves the cells standing with no bucket update. The board's own
   // open is the heal point: when the cache-derived bucket EXCEEDS the cached
-  // player row's, re-derive `dayStats[d]` and the roots from server state.
-  // Strictly one-directional (exceeds, never merely differs): a derived view
+  // player row's, or a winning bucket lacks its omitted stamp (#1424), re-derive
+  // `dayStats[d]` and the roots from server state. Count lag remains
+  // strictly one-directional (exceeds, never merely differs): a derived view
   // BELOW the row only means this device's cache is behind the server, and a
   // write from that view is exactly the regression #491 removes.
   // #496 widens the predicate with a second, ROW-INTERNAL lag signal (see
@@ -2995,11 +3015,11 @@ async function runReconcileEchoes(
     // Post-freeze a non-ceremonial Day's bucket never writes again, so its lag
     // can never converge — skip the heal entirely rather than re-reading the
     // server on every open (CodeRabbit on #495).
-    const healEligible = !params.statsFrozen || params.ceremonialDayIndexes?.includes(dayIndex) === true;
     const bucketLag =
       healEligible &&
       (res.squaresMarked > (rowBucket?.squaresMarked ?? 0) ||
-        res.bingoCount > (rowBucket?.bingoCount ?? 0));
+        res.bingoCount > (rowBucket?.bingoCount ?? 0) ||
+        missingStampRepair);
     // #496: the ROOT-total half of the same lag, which the per-Day comparison
     // above cannot see. Compound case (Codex on #495): an offline echo
     // overwrote a cell another device had already marked, so every
@@ -3038,6 +3058,7 @@ async function runReconcileEchoes(
           ceremonialDayIndexes: params.ceremonialDayIndexes,
           statsFrozen: params.statsFrozen,
           database,
+          preservePriorRootStamp: boardBingoStampMissing(cachedPlayerData, dayIndex),
         });
         // A heal that had to mint the Day's `firstBingoAt` stamp is the lost
         // continuation of an offline echo win whose tab died before the ack —
@@ -3164,6 +3185,7 @@ async function runReconcileEchoes(
           ceremonialDayIndexes: params.ceremonialDayIndexes,
           statsFrozen: params.statsFrozen,
           database,
+          preservePriorRootStamp: boardBingoStampMissing(cachedPlayerData, dayIndex),
         }),
       )
       .catch(() => undefined);
@@ -3222,7 +3244,7 @@ async function runReconcileEchoes(
     changed: res.changed,
     bingoTransition: res.bingoTransition,
     blackoutTransition: res.blackoutTransition,
-    complete,
+    complete: complete && !(res.changed && missingStampRepair),
   };
 }
 

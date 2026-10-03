@@ -23,6 +23,7 @@ import {
   setDoc,
   getDocs,
   getDocFromServer,
+  getDocFromCache,
   onSnapshot,
   disableNetwork,
   enableNetwork,
@@ -298,6 +299,81 @@ describe('w1 offline Mark via setMark (ADR 0006 + ADR 0002)', () => {
     // 8. A bare Mark posts NOTHING to the Feed (ADR 0002): no Moment was written.
     const moments = await getDocs(collection(observer.db, 'events', EVENT_ID, 'moments'));
     expect(moments.empty).toBe(true);
+  });
+
+  it('an offline stale-board rising edge preserves an unseen earlier server bingo stamp (#1424)', async () => {
+    const project = `${PROJECT_ID}-first-bingo`;
+    await seedEventDoc(project, EVENT_ID);
+    // Independent clients share the owner identity, never their local caches.
+    const observer = await makeClient('gcb-mark-first-observer', project);
+    const tab = await makeClient('gcb-mark-first-tab', project);
+    const boardPath = `events/${EVENT_ID}/days/0/boards/${tab.uid}`;
+    const playerPath = `events/${EVENT_ID}/players/${tab.uid}`;
+    const stale = unmarkedBoard(tab.uid);
+    for (const index of [0, 1, 2, 3]) {
+      stale.cells[index] = { ...stale.cells[index], marked: true, status: 'confirmed', markedAt: 100 };
+    }
+    await setDoc(doc(observer.db, boardPath), { ...stale, cells: cellsToMap(stale.cells) });
+    await setDoc(doc(observer.db, playerPath), freshPlayer(tab.uid));
+    await waitForPendingWrites(observer.db);
+    // Load only the Board; the Player row has genuinely never entered this cache.
+    await getDocFromServer(doc(tab.db, boardPath));
+    await disableNetwork(tab.db);
+    await expect(getDocFromCache(doc(tab.db, playerPath))).rejects.toThrow();
+    const earlier = 111;
+    const serverCells = stale.cells.map((cell) => cell.index === 4
+      ? { ...cell, marked: true, status: 'confirmed' as const, markedAt: earlier }
+      : cell);
+    await setDoc(doc(observer.db, boardPath), { cells: cellsToMap(serverCells) }, { merge: true });
+    await setDoc(doc(observer.db, playerPath), {
+      bingoCount: 1, squaresMarked: 5, firstBingoAt: earlier,
+      dayStats: { 0: { bingoCount: 1, squaresMarked: 5, firstBingoAt: earlier } },
+    }, { merge: true });
+    await waitForPendingWrites(observer.db);
+
+    const result = await setMark({
+      uid: tab.uid, cells: stale.cells, index: 4, nextMarked: true,
+      claimMode: 'honor', currentFirstBingoAt: undefined,
+      dayIndex: 0, daily: true, boardSeed: 42, database: tab.db,
+    });
+    expect(result.bingo).toBe(true);
+    const queued = await waitForSnapshot(doc(tab.db, boardPath), (snap) => snap.metadata.hasPendingWrites);
+    expect(queued.metadata.fromCache).toBe(true);
+    await enableNetwork(tab.db);
+    await result.committed;
+    const player = (await getDocFromServer(doc(observer.db, playerPath))).data() as PlayerDoc;
+    expect(player.firstBingoAt).toBe(earlier);
+    expect(player.dayStats?.[0]?.firstBingoAt).toBe(earlier);
+    const board = await getDocFromServer(doc(observer.db, boardPath));
+    expect(cellsFromData(board.data()?.cells)[4].marked).toBe(true);
+  });
+
+  it('fills a genuinely absent first-win stamp after the offline Mark acknowledges (#1424)', async () => {
+    const project = `${PROJECT_ID}-first-fill`;
+    await seedEventDoc(project, EVENT_ID);
+    const observer = await makeClient('gcb-mark-fill-observer', project);
+    const tab = await makeClient('gcb-mark-fill-tab', project);
+    const boardPath = `events/${EVENT_ID}/days/0/boards/${tab.uid}`;
+    const playerPath = `events/${EVENT_ID}/players/${tab.uid}`;
+    const board = unmarkedBoard(tab.uid);
+    for (const index of [0, 1, 2, 3]) {
+      board.cells[index] = { ...board.cells[index], marked: true, status: 'confirmed', markedAt: 100 };
+    }
+    await setDoc(doc(observer.db, boardPath), { ...board, cells: cellsToMap(board.cells) });
+    await setDoc(doc(observer.db, playerPath), freshPlayer(tab.uid));
+    await waitForPendingWrites(observer.db);
+    await getDocFromServer(doc(tab.db, boardPath));
+    await disableNetwork(tab.db);
+    await expect(getDocFromCache(doc(tab.db, playerPath))).rejects.toThrow();
+    const result = await setMark({ uid: tab.uid, cells: board.cells, index: 4,
+      nextMarked: true, claimMode: 'honor', currentFirstBingoAt: undefined,
+      dayIndex: 0, daily: true, boardSeed: 42, database: tab.db });
+    const completionAt = result.cells[4].markedAt;
+    await enableNetwork(tab.db);
+    await result.committed;
+    const healed = await waitForSnapshot(doc(observer.db, playerPath), (snap) =>
+      !snap.metadata.fromCache && snap.data()?.firstBingoAt === completionAt);
+    expect(healed.data()?.dayStats?.[0]?.firstBingoAt).toBe(completionAt);
   });
 
   // ------------------------------------------------------------- concurrency -
