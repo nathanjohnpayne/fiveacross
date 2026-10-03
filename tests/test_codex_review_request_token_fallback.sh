@@ -25,6 +25,23 @@ export MERGEPATH_REVIEW_FEEDBACK_ACCOUNTING_CMD=true
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/codex-token-fallback.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
+# The requester counts solicited blocking reviews from the Codex review ledger
+# before every new request (#1560 slice 3). This stub reports a ledger with no
+# responses for whatever head the requester expects, so the blocking-review
+# budget never stops these cases; test_codex_review_request_trigger_only.sh
+# covers the budget itself.
+LEDGER_STUB="$WORKDIR/codex-ledger-stub.sh"
+cat >"$LEDGER_STUB" <<'LEDGER_EOF'
+#!/usr/bin/env bash
+head=""
+while [ $# -gt 0 ]; do
+  case "$1" in --expect-head) head=$2; shift 2 ;; --expect-policy) fp=$2; shift 2 ;; *) shift ;; esac
+done
+jq -nc --arg h "$head" --arg fp "${fp:-}" --arg a "${CODEX_LEDGER_STUB_AUTHOR:-nathanjohnpayne}" \
+  '{head_sha: $h, author: $a, max_blocking_reviews: 10, policy_fingerprint: $fp, responses: []}'
+LEDGER_EOF
+chmod +x "$LEDGER_STUB"
+export MERGEPATH_CODEX_LEDGER_CMD="$LEDGER_STUB"
 
 PASS=0
 FAIL=0
@@ -39,11 +56,15 @@ make_case() {
   local name=$1
   local keyring_ok=$2
   local dir="$WORKDIR/$name"
-  mkdir -p "$dir/scripts" "$dir/scripts/lib" "$dir/.github" "$dir/bin" "$dir/state"
+  mkdir -p "$dir/scripts" "$dir/scripts/lib" "$dir/scripts/workflow" "$dir/.github" "$dir/bin" "$dir/state"
   cp "$ROOT/scripts/codex-review-request.sh" "$dir/scripts/codex-review-request.sh"
   chmod +x "$dir/scripts/codex-review-request.sh"
   cp "$ROOT/scripts/lib/gh-api-scalar.sh" "$dir/scripts/lib/gh-api-scalar.sh"   # #799, hard-sourced
   cp "$ROOT/scripts/lib/gh-api-array.sh" "$dir/scripts/lib/gh-api-array.sh"     # #1008, hard-sourced
+  cp "$ROOT/scripts/lib/codex-request-evidence.sh" "$dir/scripts/lib/codex-request-evidence.sh"
+  cp "$ROOT/scripts/lib/feedback-policy-helpers.sh" "$dir/scripts/lib/feedback-policy-helpers.sh"
+  cp "$ROOT/scripts/workflow/resolve_base_policy.sh" "$dir/scripts/workflow/resolve_base_policy.sh"
+  chmod +x "$dir/scripts/workflow/resolve_base_policy.sh"
 
   cat >"$dir/.github/review-policy.yml" <<'EOF'
 author_identity: nathanjohnpayne
@@ -53,6 +74,12 @@ codex:
   reaction_freshness_window_seconds: 999999999
   ack_wait_seconds: 0
   max_ack_retries: 0
+EOF
+  cat >"$dir/state/base-review-policy.yml" <<'EOF'
+author_identity: nathanjohnpayne
+codex:
+  bot_login: "chatgpt-codex-connector[bot]"
+  max_review_rounds: 10
 EOF
 
   # gh-as-author stub: records each @codex trigger post and returns a
@@ -81,7 +108,8 @@ shift
 [ "\${1:-}" = "--paginate" ] && shift
 ep=\${1:-}
 case "\$ep" in
-  repos/owner/repo/pulls/999)                   printf '{"head":{"sha":"head-sha"}}\n' ;;
+  repos/owner/repo/pulls/999)                   printf '{"head":{"sha":"head-sha"},"base":{"ref":"main","sha":"base-sha","repo":{"default_branch":"main"}}}\n' ;;
+  'repos/owner/repo/contents/.github/review-policy.yml?ref=base-sha') cat "$dir/state/base-review-policy.yml" ;;
   repos/owner/repo/commits/head-sha)            printf '%s\n' "\$now" ;;
   repos/owner/repo/issues/999/timeline)         printf '[]\n' ;;
   repos/owner/repo/pulls/999/reviews)           printf '[]\n' ;;

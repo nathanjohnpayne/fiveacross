@@ -168,7 +168,7 @@ function AdminItemRow({
         ) : (
           <div className="name" style={{ fontWeight: 500 }}>
             {it.text}
-            {isReportHidden(it.reportCount, threshold) && (
+            {isReportHidden(it.reportCount, threshold, it.reportHideSuppressed) && (
               <span className="pill pill-hidden">auto-hidden</span>
             )}
           </div>

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { Cell, ProofDoc } from '../types';
 import { safeMediaUrl } from './safeMediaUrl';
@@ -24,6 +24,7 @@ const H = vi.hoisted(() => ({
   deleteProof: vi.fn(),
   track: vi.fn(),
   proofs: [] as ProofDoc[],
+  viewerUid: 'viewer',
 }));
 
 // ProofSheet imports attachProof + track; ProofFeed imports reportProof/
@@ -69,7 +70,7 @@ vi.mock('../hooks/useData', () => ({
   // (identity known, no saved name) suffices.
   useMyPlayer: () => ({ data: null, loading: false, hasServerData: true }),
 }));
-vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: { uid: 'viewer' } }) }));
+vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: { uid: H.viewerUid } }) }));
 // ProofFeed's doubts-cleared pill (#262) imports isDoubtSatisfied, and the #392
 // Feed Doubt affordance imports openDoubts/doubtStatusFor/raiseDoubt — all from a
 // module that initializes the REAL firebase app at import — fatal in CI, where no
@@ -139,6 +140,7 @@ beforeEach(() => {
   H.proofs = [];
   H.attachProof.mockResolvedValue(undefined);
   H.reportProof.mockResolvedValue(undefined);
+  H.viewerUid = 'viewer';
   H.deleteProof.mockResolvedValue(undefined);
 });
 
@@ -250,5 +252,31 @@ describe('ProofFeed — text Proof is inert; media schemes are guarded', () => {
     const audio = document.querySelector('.proof-audio audio') as HTMLAudioElement;
     expect(audio).toBeInTheDocument();
     expect(audio.getAttribute('src')).toBe('https://x/a.webm');
+  });
+});
+
+
+describe('Proof report ownership and incarnation', () => {
+  it('parks a late report acknowledgment after the viewer changes accounts', async () => {
+    H.proofs = [proof({ id: 'reported', createdAt: 123 })];
+    let finish!: () => void;
+    H.reportProof.mockReturnValueOnce(new Promise<void>(resolve => { finish = resolve; }));
+    const { rerender } = render(<ProofFeed />);
+    fireEvent.click(screen.getByTitle('Report'));
+    H.viewerUid = 'next-account';
+    rerender(<ProofFeed />);
+    await act(async () => finish());
+    expect(H.track).not.toHaveBeenCalledWith('report_item');
+  });
+  it('resets a failed report control when a Proof ID is recreated', async () => {
+    H.proofs = [proof({ id: 'reported', createdAt: 123 })];
+    H.reportProof.mockRejectedValueOnce(new Error('rejected'));
+    const { rerender } = render(<ProofFeed />);
+    fireEvent.click(screen.getByTitle('Report'));
+    await act(async () => {});
+    expect(screen.getByRole('alert')).toHaveTextContent('Report not sent');
+    H.proofs = [proof({ id: 'reported', createdAt: 124 })];
+    rerender(<ProofFeed />);
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });
