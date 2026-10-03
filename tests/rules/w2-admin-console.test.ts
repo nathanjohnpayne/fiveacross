@@ -9,17 +9,14 @@ import {
 } from '@firebase/rules-unit-testing';
 import { deleteDoc, doc, setDoc, updateDoc } from 'firebase/firestore';
 
-// specs/w2-admin-console.md — the moderation rules surface the Admin console and
-// the ADR 0004 Phase 0 auto-hide rely on. This ticket adds NO rules (the ban
-// write it once assumed has no surface in firestore.rules — no `banned` field, no
-// `bannedUids`, and users/{uid} is owner-only), so this suite PINS what the rules
-// already enforce, per the #103 pattern that rules changes land in their own
-// reviewed PR:
-//   1. A report is increment-only for non-admins — reportCount may go up by
-//      exactly 1 and nothing else; a jump, a decrement, a bundled field change,
-//      or a status flip is denied. This is the counter the presentational
-//      threshold hide reads (the hide itself is client-side; the rules only
-//      guarantee the counter is honest-ish under the honor system, ADR 0001).
+// specs/w2-admin-console.md — paired report admission and Admin moderation.
+// #1405 requires a private distinct-reporter receipt and server-clock cadence
+// fence atomically paired with each counter increment. This focused suite pins
+// bare-increment denial; report-hide-server.test.ts exercises accepted receipts,
+// duplicate idempotency, reporter bans, rate admission and restore suppression.
+//   1. A bare non-admin counter update is denied, including exactly +1, jumps,
+//      decrements, bundled field changes and status flips. Report admission is
+//      separate from honor-system Mark credit and from presentational filtering.
 //   2. An Admin moderates — hard-hide (status) of an active row, restore of a
 //      hidden one, delete, and a reportCount reset that would lift an auto-hide.
 //      On a Prompt those are the only admin status moves besides
