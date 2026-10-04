@@ -15,10 +15,9 @@
  * The application is therefore reached through a DYNAMIC import, which is
  * evaluated only when this line runs — after the capture. Do not convert it to
  * a static import, and do not add a static import of anything from `src/` other
- * than the boot seam and pure recovery URL selector: other runtime imports
- * would reintroduce the leak this file exists to close.
+ * than the boot seam: other runtime imports would reintroduce the leak this
+ * file exists to close.
  */
-import { isPrivateCacheRecoveryDocument } from './auth/privateCacheRecoveryNavigation';
 import {
   captureUrlCredentialsFromUrl,
   pendingHandoffCode,
@@ -46,6 +45,7 @@ void runApplicationBootstrap({
     return completeHandoffReturn({ code, origin: window.location.origin });
   },
   loadMain: async () => {
+    const { isPrivateCacheRecoveryDocument } = await import('./auth/privateCacheRecoveryNavigation');
     if (isPrivateCacheRecoveryDocument(window.location.href)) {
       const { renderPrivateCacheRecovery } = await import('./auth/privateCacheRecoveryPage');
       renderPrivateCacheRecovery();

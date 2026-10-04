@@ -368,6 +368,7 @@ describe('the entry seam stays free of anything that can read a URL', () => {
     const dynamicImports = imports.filter((entry) => entry.kind === 'dynamic');
     expect(dynamicImports.map((entry) => entry.specifier)).toEqual([
       './auth/handoffReturn',
+      './auth/privateCacheRecoveryNavigation',
       './auth/privateCacheRecoveryPage',
       './main',
     ]);

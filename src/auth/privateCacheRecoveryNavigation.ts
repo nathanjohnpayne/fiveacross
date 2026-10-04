@@ -1,5 +1,5 @@
-// Pure URL routing only: safe for the credential-capture entry graph. The
-// query changes the document URL; a fragment would leave gameplay mounted.
+// Pure URL routing only. Entry defers this module until credentials have been
+// captured. The query changes the document URL; a fragment leaves gameplay mounted.
 const RECOVERY_PARAMETER = 'device-cache-recovery';
 
 export function isPrivateCacheRecoveryDocument(href: string): boolean {
