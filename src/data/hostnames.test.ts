@@ -6,6 +6,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // the read must reach the SERVER.
 
 const mocks = vi.hoisted(() => ({
+  privateDb: { cache: 'memory' },
+  primaryDb: { cache: 'persistent' },
+  privateActive: true,
+  capturePrivateFirestore: vi.fn(),
   getDoc: vi.fn(),
   getDocFromServer: vi.fn(),
   applyResolvedEventId: vi.fn(),
@@ -14,11 +18,12 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('firebase/firestore', () => ({
-  doc: (_db: unknown, ...path: string[]) => ({ path: path.join('/') }),
+  doc: (client: unknown, ...path: string[]) => ({ client, path: path.join('/') }),
   getDoc: mocks.getDoc,
   getDocFromServer: mocks.getDocFromServer,
 }));
-vi.mock('../firebase', () => ({ db: {}, applyResolvedEventId: mocks.applyResolvedEventId }));
+vi.mock('../firebase', () => ({ db: mocks.primaryDb, applyResolvedEventId: mocks.applyResolvedEventId }));
+vi.mock('../privateFirestore', () => ({ capturePrivateFirestore: mocks.capturePrivateFirestore }));
 vi.mock('./cardCache', () => ({ setCardCacheEventId: mocks.setCardCacheEventId }));
 vi.mock('../canonicalHost', () => ({ applyResolvedCanonicalHost: mocks.applyResolvedCanonicalHost }));
 
@@ -42,6 +47,16 @@ const DOC = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.privateActive = true;
+  mocks.capturePrivateFirestore.mockImplementation(() => ({
+    db: mocks.privateDb,
+    guard: async <T,>(operation: () => Promise<T>): Promise<T> => {
+      if (!mocks.privateActive) throw new Error('Private session retired');
+      const result = await operation();
+      if (!mocks.privateActive) throw new Error('Private session retired');
+      return result;
+    },
+  }));
   setActiveEdition(DEFAULT_EDITION);
   // resetAdultContentForTests, not setActiveAdultContent(true): a live read
   // that returned `true` LATCHES the session (the monotone mirror), so
@@ -219,6 +234,40 @@ describe('bootstrapEventResolution — installs everything the shell needs', () 
 });
 
 describe('checkSlugAvailability — the setup wizard address step (#790)', () => {
+  it('reads authenticated canonical occupancy only through the captured memory client', async () => {
+    mocks.getDocFromServer.mockResolvedValue(snap(null));
+    await expect(checkSlugAvailability('h.fiveacross.app')).resolves.toBe('available');
+    expect(mocks.capturePrivateFirestore).toHaveBeenCalledOnce();
+    expect(mocks.getDocFromServer.mock.calls[0][0]).toEqual({
+      client: mocks.privateDb, path: 'hostnames/h.fiveacross.app',
+    });
+  });
+
+  it('withholds occupancy when the private client is unavailable during recovery', async () => {
+    mocks.capturePrivateFirestore.mockImplementationOnce(() => { throw new Error('Recovery required'); });
+    mocks.getDocFromServer.mockResolvedValue(snap(null));
+    await expect(checkSlugAvailability('h.fiveacross.app')).resolves.toBe('check-failed');
+    expect(mocks.getDocFromServer).not.toHaveBeenCalled();
+  });
+
+  it('refuses a free-address result after the captured account session retires', async () => {
+    mocks.getDocFromServer.mockImplementationOnce(async () => {
+      mocks.privateActive = false;
+      return snap(null);
+    });
+    await expect(checkSlugAvailability('h.fiveacross.app')).resolves.toBe('check-failed');
+    expect(mocks.capturePrivateFirestore).toHaveBeenCalledOnce();
+  });
+
+  it('keeps anonymous public routing on the public gameplay client', async () => {
+    mocks.getDocFromServer.mockResolvedValue(snap(DOC));
+    await fetchHostnameDoc('h.fiveacross.app');
+    expect(mocks.capturePrivateFirestore).not.toHaveBeenCalled();
+    expect(mocks.getDocFromServer.mock.calls[0][0]).toEqual({
+      client: mocks.primaryDb, path: 'publicHostnames/h.fiveacross.app',
+    });
+  });
+
   it('reads "available" for a missing document', async () => {
     mocks.getDocFromServer.mockResolvedValue(snap(null));
     expect(await checkSlugAvailability('point-reyes.fiveacross.app')).toBe('available');

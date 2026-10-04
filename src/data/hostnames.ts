@@ -1,6 +1,7 @@
 import { hasOnlyPublicHostnameFields } from '../../functions/src/publicHostnameFields';
 import { doc, getDocFromServer, onSnapshot } from 'firebase/firestore';
 import { db, applyResolvedEventId } from '../firebase';
+import { capturePrivateFirestore } from '../privateFirestore';
 import { dropCache, isServable, readCache, resolveEvent, writeCache, type Resolution } from '../eventResolution';
 import type { HostnameDoc } from '../types';
 import { setCardCacheEventId } from './cardCache';
@@ -241,8 +242,13 @@ export type SlugAvailability = 'available' | 'taken' | 'check-failed';
 export async function checkSlugAvailability(hostname: string): Promise<SlugAvailability> {
   try {
     if (hasTrailingRootDot(hostname)) return 'taken';
-    const snap = await getDocFromServer(doc(db, 'hostnames', hostnameKey(hostname)));
-    return snap.exists() ? 'taken' : 'available';
+    // Canonical metadata requires Auth and must not enter the gameplay cache.
+    // Capture before yielding; a retired subject cannot publish availability.
+    const lease = capturePrivateFirestore();
+    return await lease.guard(async () => {
+      const snap = await getDocFromServer(doc(lease.db, 'hostnames', hostnameKey(hostname)));
+      return snap.exists() ? 'taken' : 'available';
+    });
   } catch {
     return 'check-failed';
   }
