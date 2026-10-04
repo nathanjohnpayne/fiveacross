@@ -263,6 +263,33 @@ describe('Admin — Claim Mode control (specs/w3-claim-modes.md)', () => {
 });
 
 describe('ConfirmWinMoments — the confirm-path Moment emitter (issue #41)', () => {
+  it('emits fresh-credit ceremonies when an Admin corrects a forged pending content-only hint', async () => {
+    H.board = boardDoc(cellsWith([0, 1, 2, 3], [4]));
+    H.claims = [claim({ status: 'pending', resolvedBy: null, contentOnly: true })];
+    const { rerender } = render(<ConfirmWinMoments />);
+    await flushAsync();
+    H.claims = [claim({ status: 'confirmed', contentOnly: false })];
+    H.board = boardDoc(cellsWith(ROW0));
+    rerender(<ConfirmWinMoments />);
+    await flushAsync();
+    expect(H.broadcastBingo).toHaveBeenCalledOnce();
+    expect(H.broadcastFirstBingo).toHaveBeenCalledOnce();
+  });
+
+  it('a content-only confirmation cannot synthesize a new win from established credit', async () => {
+    H.board = boardDoc(cellsWith(ROW0));
+    H.claims = [claim({ status: 'pending', resolvedBy: null, contentOnly: true })];
+    const { rerender } = render(<ConfirmWinMoments />);
+    await flushAsync();
+    H.claims = [claim({ status: 'confirmed', contentOnly: true })];
+    rerender(<ConfirmWinMoments />);
+    await flushAsync();
+    expect(H.broadcastBingo).not.toHaveBeenCalled();
+    expect(H.broadcastFirstBingo).not.toHaveBeenCalled();
+    expect(H.broadcastBlackout).not.toHaveBeenCalled();
+    expect(H.hasPriorBingoWitness).not.toHaveBeenCalled();
+  });
+
   it('emits the winner-attributed bingo + first_bingo when a confirm completes a line off-route', async () => {
     // Baseline: a pending row-0 tap (cell 4 pending) with no confirmed claim yet.
     H.board = boardDoc(cellsWith([0, 1, 2, 3], [4]));

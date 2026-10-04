@@ -850,6 +850,8 @@ export default function Board() {
   // never gates a Mark (ADR 0001) and does not touch the Moments machinery below.
   const { proofs: myProofs } = useMyProofs(uid);
   const claimMode: ClaimMode = event?.claimMode ?? 'honor';
+  const committedClaimMode = useRef(claimMode);
+  useEffect(() => { committedClaimMode.current = claimMode; }, [claimMode]);
 
   const [celebrate, setCelebrate] = useState<null | 'bingo' | 'blackout'>(null);
   const [freePulse, setFreePulse] = useState(0);
@@ -3016,10 +3018,11 @@ export default function Board() {
           // The proofed-mark completion verdict (PR #110 round 2 finding 1): a
           // successful attachProof reports the SAME win-transition shape setMark
           // returns, and it rides the SAME broadcast pipeline — a proof_required
-          // win posts its Moment exactly like an honor win. (In admin_confirmed
-          // the attached cell is pending and excluded from the win mask, so the
-          // verdict is structurally transition-free — the confirm-path Moment
-          // stays #41's.) Fire-and-forget: the sheet closes without waiting on
+          // win posts its Moment exactly like an honor win. Admin-confirmed
+          // fresh credit stays pending; content-only review keeps existing credit.
+          // Neither creates a new attach-time win. Fresh-credit ceremonies wait
+          // for confirmation; content-only resolution adds none. Fire-and-forget:
+          // the sheet closes without waiting on
           // the witness read.
           onAttached={(res: AttachProofResult) => void broadcastWinVerdict(res)}
           // The 🎖️ Cross My Heart pledge (issue #181), offered only on a CLAIM
@@ -3029,10 +3032,12 @@ export default function Board() {
           // (ADR 0006 — a pledge is a setMark, never a transaction). A ＋-button
           // proof-add open (marked cell) omits it: the Square is already
           // claimed, so ProofSheet hides the row entirely.
+          showPledge={!proofTarget.marked}
           onPledge={
-            proofTarget.marked
+            proofTarget.marked || claimMode !== 'honor'
               ? undefined
               : () => {
+                  if (committedClaimMode.current !== 'honor') return;
                   const target = proofTarget;
                   setProofTarget(null);
                   // Write-time twin of the render-time proofSourceLive close

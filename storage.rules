@@ -255,9 +255,9 @@ service firebase.storage {
       // after it, so every upload is a first write to a name nothing has used; a
       // refused transaction DELETES its object and the Player's retry re-uploads
       // under a NEW id. `src/data/storage.ts` has asserted this invariant since
-      // #363 — it is why proof media is served `immutable` while
-      // `avatars/{uid}.jpg`, which IS overwritten in place on a profile edit,
-      // deliberately is not. That avatar arm is a separate `match` above and
+      // #363. Object immutability does not imply cache safety: proof uploads
+      // now use private/no-store (#1410), because visibility can change.
+      // `avatars/{uid}.jpg` IS overwritten in place on a profile edit. That avatar arm is a separate `match` above and
       // keeps its full `write`.
       //
       // NOT a claim that nothing under this prefix is ever rewritten. The Vision
