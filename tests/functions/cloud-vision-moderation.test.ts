@@ -534,7 +534,7 @@ describe('writeVisionVerdict — the scanner records a verdict, never a Proof (#
     // scan, so a second verdict of ANY wording for it is the classifier
     // disagreeing with itself about unchanged bytes, never fresh media.
     const { db, updates, ops, store } = fakeDb({
-      // What a Restore leaves behind, here on a merely-racy flag an admin hand-Hid
+      // What a Restore leaves behind, here on a synthetic racy flag an admin hand-Hid
       // and then lifted: active, the explicit `false`, verdict still standing.
       [PROOF]: { uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: 'racy', safetyHide: false, reportCount: 0 },
       [SCAN]: { visionFlag: 'racy', scannedAt: 5, storagePath: MEDIA },
@@ -679,9 +679,9 @@ describe('applyPendingVisionScan — the parked verdict lands when the Proof app
     const { db, store } = fakeDb({ [PROOF]: created(), [SCAN]: { visionFlag: 'racy', scannedAt: 5, storagePath: MEDIA } });
     expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(true);
     expect(store[PROOF]).toMatchObject({ status: 'flagged', visionFlag: 'racy' });
-    // …and marker-less, because raciness never earns the marker or an automatic
-    // hide (ADR 0004); a current Confirm leaves it unpublished only because it is
-    // not 'pending'.
+    // …and marker-less, because a non-allowlisted verdict never earns the marker
+    // or an automatic hide (ADR 0004). ('racy' is a stand-in: the producer emits
+    // only violence/extreme.)
     expect(store[PROOF]).not.toHaveProperty(SAFETY_HIDE_MARKER);
     expect(visionHideAction(store[PROOF] as VisionFlaggedDoc)).toBe(null);
   });
@@ -841,7 +841,7 @@ describe('visionVerdictWrite — the hold is stamped WITH the verdict (#1143)', 
     expect(safetyHideStands({ safetyHide: flagged.safetyHide })).toBe(true);
   });
 
-  it('leaves a racy flag exactly as it was — flagged for admins, no marker, hidden by nobody', async () => {
+  it('leaves a (synthetic) racy flag exactly as it was — flagged for admins, no marker, hidden by nobody', async () => {
     const { db, store } = fakeDb({ [PROOF]: { uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: null } });
     await writeVisionVerdict(db, 'e', 'p1', 'racy', MEDIA, 5);
     expect(store[PROOF]).toEqual({ uid: 'u1', storagePath: MEDIA, status: 'flagged', visionFlag: 'racy' });
@@ -1342,14 +1342,14 @@ describe('composition with the #43 report-count auto-hide — the two paths neve
   });
 });
 
-// --- the server-owned marker is the client's ONLY input ----------------------
+// --- server-written facts (marker, 'flagged') are the client's only inputs ---
 //
 // The Vision hide is server-authoritative, but ONE client write can undo it.
 // `confirmClaim` (src/data/admin.ts) publishes an admin_confirmed claim's
 // 'pending' Proof by writing `status: 'active'`, and active Proofs sit OUTSIDE
 // `qualifiesForVisionHide` — so confirming a Mark whose photo had already been
-// safety-hidden would re-expose extreme/illegal media and this trigger would
-// never hide it again.
+// safety-hidden would re-expose extreme/illegal media, which the re-hide arm
+// takes back down only while the marker stands, and only after the exposure.
 //
 // That gate used to MIRROR the allowlist above on the client and lean on a parity
 // test to keep the two copies honest. It does not any more (Codex P1 round 2): a

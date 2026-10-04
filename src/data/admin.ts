@@ -382,8 +382,9 @@ export function hideProof(id: string, eventId: string = EVENT_ID): Promise<void>
  * fact, the same reason `visionFlag` itself is left in place: the row keeps its
  * `AI screen: …` pill, and the queue keeps the Proof (`useReportedProofs` queues
  * on the verdict), so the decision stays visible and re-hideable instead of
- * vanishing. A fresh scan that re-flags the Proof takes it back to `'flagged'`,
- * which the trigger owns again — the override is a lift, not immunity.
+ * vanishing. The override is a lift, not immunity: an admin can hide the Proof
+ * again. (No later scan re-flags it — its object is create-only and admits one
+ * recorded scan, and a re-upload creates a separate Proof, scanned on its own.)
  *
  * It restores to the state the Proof came FROM, not unconditionally to `'active'`
  * (#133, Codex P1 round 2). In admin_confirmed claim mode a Proof is created
@@ -2063,11 +2064,11 @@ async function resolve(
     // can be flagged and hidden BEFORE its claim is ever reviewed. Publishing it
     // unconditionally would write `status: 'active'`, and active Proofs are
     // outside `qualifiesForVisionHide` — so extreme/illegal media would go back
-    // in front of every Player and the trigger would never hide it again, lifted
-    // by a control that shows only the submitter and the Prompt. This is NOT the
-    // warned, explicit moderation Restore (ReviewQueue), which is the one place
-    // an admin may override an AI verdict, having been told what they are
-    // lifting. So the claim still resolves and the Mark is still confirmed —
+    // in front of every Player (the re-hide arm takes it back down only while
+    // the marker stands, and only after the exposure), lifted by Confirm — a
+    // claim control, NOT the warned, explicit moderation Restore (ReviewQueue),
+    // which is the one place an admin may override an AI verdict, having been
+    // told what they are lifting. So the claim still resolves and the Mark is still confirmed —
     // only the media stays hidden, and the queue row says so on the claim.
     //
     // `safetyHideStands` reads the SERVER's own record — `hideProofOnVisionFlag`'s

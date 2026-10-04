@@ -5,8 +5,9 @@ import type { Cell, ClaimDoc, ProofDoc } from '../types';
 // The claim-confirm half of the Vision auto-hide: `confirmClaim` publishes an
 // admin_confirmed claim's 'pending' Proof by writing `status: 'active'`, and
 // active Proofs are OUTSIDE `qualifiesForVisionHide` — so an unconditional
-// publish would put extreme/illegal media back in front of every Player and the
-// `hideProofOnVisionFlag` trigger would never hide it again. Cloud Vision scans
+// publish would put extreme/illegal media back in front of every Player; the
+// `hideProofOnVisionFlag` re-hide arm takes it back down only while the marker
+// stands, and only after the exposure, so the gate is what prevents it. Cloud Vision scans
 // the uploaded object, so this is not a corner case: a photo is routinely
 // flagged and hidden BEFORE its claim reaches the queue.
 //
@@ -324,10 +325,11 @@ describe('confirmClaim — a Vision safety hide survives the claim confirm (spec
     expect(setPayload('/claims/')).toMatchObject({ status: 'confirmed' });
   });
 
-  it('publishes a Proof whose verdict is outside the allowlist — nothing withholds for raciness', async () => {
-    // ADR 0004 in the confirm path: a racy verdict is a reason on the queue row,
-    // never a hide, so nothing marks it and the claim's photo publishes exactly
-    // as it always did.
+  it('publishes a still-pending Proof whose verdict is outside the allowlist — raciness earns no marker', async () => {
+    // ADR 0004 in the confirm path: a racy verdict on a still-'pending' Proof is a
+    // reason on the queue row, never a hold, so nothing marks it and the claim's
+    // photo publishes. (The producer never emits 'racy'; it stands in here for any
+    // non-allowlisted verdict.)
     liveProof = { uid: 'u1', status: 'pending', visionFlag: 'racy' };
 
     await confirmClaim(pendingClaim(), 'admin-1');

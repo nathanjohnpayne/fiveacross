@@ -112,8 +112,9 @@ function restoreTitle(visionFlag: string | null | undefined, claimUndecided: boo
  *
  * The Vision treatment (#133) is deliberately a SEPARATE pill from `auto-hidden`,
  * because the two hides are separate mechanisms an admin resolves differently: a
- * report-count hide is lifted with `Clear reports` (zero the counter), a Vision
- * hide with `Restore` (there is no counter to clear). The pill states two facts
+ * report-count presentation hide is lifted with `Clear reports` (zero the
+ * counter) or by `Restore`, which also sets `reportHideSuppressed` (#1443); a
+ * Vision hide only with `Restore` (there is no counter to clear). The pill states two facts
  * the row already carries and never infers a cause — `hidden` from `status`, the
  * verdict from `visionFlag` — so a Proof an admin restored after a Vision hide,
  * and one the community later re-reported over the threshold, each read
