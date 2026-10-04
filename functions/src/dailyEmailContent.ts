@@ -932,10 +932,14 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
   const arrivalPlace = placeName(day);
   // Arrival copy claims the group just got somewhere, so a register that has a
   // `stayLine` uses it when the PREVIOUS Day named the same Place (#1344). The
-  // opening Day, and a previous Day naming no readable Place, still arrive.
-  const previous = days[day.index - 1];
-  const previousPlace =
-    previous !== null && typeof previous === 'object' ? placeName(previous).toLowerCase() : '';
+  // opening Day, and a previous Day naming no readable Place, still arrive. The
+  // previous Day is found by its `index`, never by array position: a schedule
+  // may be declared out of index order, and `days[day.index - 1]` there can be
+  // some other Day, or this Day itself.
+  const previous = days.find(
+    (d) => d !== null && typeof d === 'object' && d.index === day.index - 1,
+  );
+  const previousPlace = previous ? placeName(previous).toLowerCase() : '';
   const staysPut = arrivalPlace !== '' && previousPlace === arrivalPlace.toLowerCase();
   const arrival = !arrivalPlace
     ? register.arrivalLineNoPlace

@@ -1272,6 +1272,19 @@ describe('buildDailyEmailModel', () => {
       expect(at(3).nudgeLine).toContain('The group is still in Porto today');
     });
 
+    it('finds the previous Day by its index, not its array position', () => {
+      // Declared out of index order: `days[0]` is Day 1 itself, so a positional
+      // lookup would compare Porto with Porto and wrongly say "still in".
+      const days: EmailDay[] = [
+        { index: 1, place: 'Porto', unlockAt: 1 },
+        { index: 0, place: 'Lisbon', unlockAt: 0 },
+        { index: 2, place: 'Porto', unlockAt: 2 },
+      ];
+      const at = (i: number) => build({ event: { name: 'Iberia', timezone: 'UTC', days }, day: days[i], edition: 'vacay' });
+      expect(at(0).nudgeLine).toContain('The group lands in Porto today');
+      expect(at(2).nudgeLine).toContain('The group is still in Porto today');
+    });
+
     it('leaves the cruise register alone: the boat docks again even in the same port', () => {
       const days: EmailDay[] = [
         { index: 0, place: 'Valletta', unlockAt: 0 },
