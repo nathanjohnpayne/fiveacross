@@ -59,10 +59,13 @@ export interface StorageLike {
 
 export const CACHE_PREFIX = 'fa:hostname:';
 
-/** Bumped when the cached shape changes. An entry written by an older version
+/** Bumped when the cached shape or trusted source changes. An entry written by an older version
  *  reads as a MISS rather than being coerced — the same discipline
  *  `cardCache.ts` uses for its snapshot version. */
-export const CACHE_VERSION = 1;
+// V1 was populated from canonical hostnames. It cannot supply an anonymous
+// fallback after #1419's public/private split: first obtain a public lookup.
+// Subsequent V2 public caches retain the existing offline routing/TTL contract.
+export const CACHE_VERSION = 2;
 
 /** How long a cached mapping may serve an Event without revalidation.
  *
@@ -246,14 +249,14 @@ const defaultDelay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
  *     and since resolution now blocks first paint, racing a Firestore read it
  *     cannot use would cost that build a round trip — or, on captive Wi-Fi, the
  *     full timeout — while already knowing the answer (Codex on #576).
- *  1. **Fresh cache wins outright.** A hit inside the TTL returns with no
+ *  1. **Fresh public V2 cache wins outright.** A hit inside the TTL returns with no
  *     network at all, which is what makes offline cold boot work (ADR 0006)
  *     and keeps first paint off the network's critical path.
  *  2. **Network, hard-bounded.** A miss, or a STALE hit, does one `get` raced
  *     against `timeoutMs`. This repo has shipped three blank-screen fixes; an
  *     unbounded pre-paint read is that failure class, so the race is
  *     load-bearing rather than defensive.
- *  3. **Stale cache is the offline fallback.** If revalidation fails and a
+ *  3. **Stale public V2 cache is the offline fallback.** If revalidation fails and a
  *     stale entry exists, serve it rather than a not-found — an expired mapping
  *     beats a dead app when the network is simply gone.
  *

@@ -1,3 +1,4 @@
+import { hasOnlyPublicHostnameFields } from '../functions/src/publicHostnameFields.ts';
 import { GoogleAuth } from 'google-auth-library';
 import { writeSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -53,43 +54,58 @@ export async function getApplicationDefaultAccessToken(
 export async function verifyBodegaHostnameDocuments({ projectId, accessToken, fetchImpl = fetch }) {
   assertFiveAcrossProject(projectId);
   for (const host of BODEGA_PREVIEW_HOSTS) {
-    const url =
-      `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}` +
-      `/databases/(default)/documents/hostnames/${encodeURIComponent(host)}${fieldMask}`;
-    let response;
-    try {
-      response = await fetchImpl(url, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-        signal: AbortSignal.timeout(10_000),
-      });
-    } catch {
-      throw new Error(`Hostname document read failed for ${host}.`);
-    }
-    if (response.status === 404) {
-      throw new Error(`Hostname document is missing for ${host}.`);
-    }
-    if (!response.ok) {
-      throw new Error(`Hostname document read failed for ${host} (HTTP ${response.status}).`);
-    }
-    let document;
-    try {
-      document = await response.json();
-    } catch {
-      throw new Error(`Hostname document is malformed for ${host}.`);
-    }
-    const expectedName = `projects/${BODEGA_PROJECT_ID}/databases/(default)/documents/hostnames/${host}`;
-    if (
-      document?.name !== expectedName ||
-      typeof document?.fields?.eventId?.stringValue !== 'string' ||
-      typeof document?.fields?.status?.stringValue !== 'string'
-    ) {
-      throw new Error(`Hostname document is malformed for ${host}.`);
-    }
-    if (document.fields.status.stringValue !== 'active') {
-      throw new Error(`Hostname document is not active for ${host}.`);
-    }
-    if (document.fields.eventId.stringValue !== BODEGA_EVENT_ID) {
-      throw new Error(`Hostname document resolves to the wrong Event for ${host}.`);
+    for (const collection of ['hostnames', 'publicHostnames']) {
+      const label = collection === 'hostnames' ? 'Hostname' : 'Public hostname';
+      const url =
+        `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}` +
+        `/databases/(default)/documents/${collection}/${encodeURIComponent(host)}${collection === 'hostnames' ? fieldMask : ''}`;
+      let response;
+      try {
+        response = await fetchImpl(url, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          signal: AbortSignal.timeout(10_000),
+        });
+      } catch {
+        throw new Error(`${label} document read failed for ${host}.`);
+      }
+      if (response.status === 404) {
+        throw new Error(`${label} document is missing for ${host}.`);
+      }
+      if (!response.ok) {
+        throw new Error(`${label} document read failed for ${host} (HTTP ${response.status}).`);
+      }
+      let document;
+      try {
+        document = await response.json();
+      } catch {
+        throw new Error(`${label} document is malformed for ${host}.`);
+      }
+      const expectedName = `projects/${BODEGA_PROJECT_ID}/databases/(default)/documents/${collection}/${host}`;
+      if (
+        document?.name !== expectedName ||
+        typeof document?.fields?.eventId?.stringValue !== 'string' ||
+        typeof document?.fields?.status?.stringValue !== 'string'
+      ) {
+        throw new Error(`${label} document is malformed for ${host}.`);
+      }
+      if (collection === 'publicHostnames') {
+        // Read the full public document: a REST field mask would hide extras and
+        // approve a copy that whole-document Firestore Rules deny anonymously.
+        const fields = { ...document.fields };
+        if (Object.prototype.hasOwnProperty.call(fields, 'preview')) {
+          const map = fields.preview?.mapValue;
+          fields.preview = map && typeof map === 'object' && !Array.isArray(map)
+            ? (Object.prototype.hasOwnProperty.call(map, 'fields') ? map.fields : {})
+            : null;
+        }
+        if (!hasOnlyPublicHostnameFields(fields)) throw new Error(`${label} document has unapproved fields for ${host}.`);
+      }
+      if (document.fields.status.stringValue !== 'active') {
+        throw new Error(`${label} document is not active for ${host}.`);
+      }
+      if (document.fields.eventId.stringValue !== BODEGA_EVENT_ID) {
+        throw new Error(`${label} document resolves to the wrong Event for ${host}.`);
+      }
     }
   }
   return BODEGA_PREVIEW_HOSTS;
@@ -116,7 +132,7 @@ export async function runBodegaHostnameVerification({
 export async function runBodegaHostnameVerificationCommand(options) {
   try {
     const hosts = await runBodegaHostnameVerification(options);
-    console.log(`Verified ${hosts.length} serving Bodega hostname documents.`);
+    console.log(`Verified ${hosts.length} serving Bodega canonical/public hostname pairs.`);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Five Across hostname verification failed.';
     if (error instanceof ApplicationDefaultAccessTokenTimeoutError) {

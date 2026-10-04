@@ -20,6 +20,13 @@ describe('public hostname projection serialization boundary', () => {
     expect(projectPublicHostname({ eventId: 'event', edition: undefined, preview: [] })).toEqual({ eventId: 'event' });
     expect(projectPublicHostname({ preview: { eventName: undefined, hostedBy: 'Kim' } })).toEqual({ preview: { hostedBy: 'Kim' } });
   });
+  it('preserves the owner-approved days value without introducing a recursive schedule policy', () => {
+    const days = [{ date: '2026-08-07', title: 'Birds', emoji: '🐦', futureDisplayMetadata: { label: 'Sunrise' } }];
+    const projected = projectPublicHostname({ preview: { days } });
+    expect(projected).toEqual({ preview: { days } });
+    expect(hasOnlyPublicHostnameFields(projected)).toBe(true);
+    expect(projected.preview).toEqual({ days });
+  });
   it('denies extra public keys rather than redacting a supplied read', () => {
     expect(hasOnlyPublicHostnameFields({ eventId: 'event', contactEmail: 'secret' })).toBe(false);
     expect(hasOnlyPublicHostnameFields({ preview: { eventName: 'Event', roster: [] } })).toBe(false);

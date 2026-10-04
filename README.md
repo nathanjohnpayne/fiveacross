@@ -84,7 +84,7 @@ Deploys go through `scripts/deploy.sh`, which wraps `op-firebase-deploy` (the 1P
 2. **The Firebase target.** Each deploy command passes its project ID explicitly; `.firebaserc`'s Gay Cruise Bingo default is never used for a Five Across deploy.
 3. **The cache zone.** Gay Cruise Bingo uses its default Cloudflare zone. Five Across is DNS-only, so its deploy command skips a purge rather than touching the Gay Cruise Bingo zone.
 
-Within the build environment, `VITE_ADULT_CONTENT` is a single-Event posture seed, not a permanent switch: only the literal value `false` hides the initial gate, and the deployed origin must also have a `hostnames/{host}` document because the live watcher re-proves that opt-out and observes a later server-side raise. Hostname-resolved builds ignore this seed and use the routing document directly (ADR 0012; app guide § Event id).
+Within the build environment, `VITE_ADULT_CONTENT` is a single-Event posture seed, not a permanent switch: only the literal value `false` hides the initial gate, and the deployed origin must also have a `publicHostnames/{host}` document because the live watcher re-proves that opt-out and observes a later server-side raise. Hostname-resolved builds ignore this seed and use the routing document directly (ADR 0012; app guide § Event id).
 
 ```bash
 # Full project deploys
