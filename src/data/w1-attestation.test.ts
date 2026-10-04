@@ -188,6 +188,58 @@ describe('private profile ownership and minimal offline witness (#1411)', () => 
     expect(await hasOfflineAttestation('test-project', 'sailor-1')).toBe(false);
   });
 
+  it('a delayed pre-commit server absence cannot revoke a subsequently committed attestation witness', async () => {
+    let resolveRead!: (value: ReturnType<typeof snap>) => void;
+    getDocFromServerMock.mockReturnValueOnce(new Promise((resolve) => { resolveRead = resolve; }));
+    const reading = readAdultAttestationFromServer('sailor-1');
+    await vi.waitFor(() => expect(getDocFromServerMock).toHaveBeenCalledTimes(1));
+    driveTransaction(snap(null));
+    await attestAdult(userLike(), 777);
+    expect(await hasOfflineAttestation('test-project', 'sailor-1')).toBe(true);
+    resolveRead(snap(null));
+    await expect(reading).resolves.toBeNull(); // Its authority result is not rewritten.
+    expect(await hasOfflineAttestation('test-project', 'sailor-1')).toBe(true);
+    getDocsFromCacheMock.mockResolvedValue({ docs: [cachedCard('events/test-event/boards/sailor-1', 'sailor-1')] });
+    await expect(readAdultAttestationFromCache('sailor-1')).resolves.toBe(1);
+  });
+
+  it('a delayed older positive read cannot restore a witness revoked by a newer server absence', async () => {
+    await recordOfflineAttestation('test-project', 'sailor-1', true);
+    let resolveRead!: (value: ReturnType<typeof snap>) => void;
+    getDocFromServerMock.mockReturnValueOnce(new Promise((resolve) => { resolveRead = resolve; }));
+    const olderRead = readAdultAttestationFromServer('sailor-1');
+    await vi.waitFor(() => expect(getDocFromServerMock).toHaveBeenCalledTimes(1));
+    getDocFromServerMock.mockResolvedValueOnce(snap(null));
+    await expect(readAdultAttestationFromServer('sailor-1')).resolves.toBeNull();
+    expect(await hasOfflineAttestation('test-project', 'sailor-1')).toBe(false);
+    resolveRead(snap({ attestedAdultAt: 44 }));
+    await expect(olderRead).resolves.toBe(44); // The actual server answer is retained.
+    expect(await hasOfflineAttestation('test-project', 'sailor-1')).toBe(false);
+  });
+
+  it('a server absence requested after committed attestation still revokes the render witness', async () => {
+    driveTransaction(snap(null));
+    await attestAdult(userLike(), 777);
+    expect(await hasOfflineAttestation('test-project', 'sailor-1')).toBe(true);
+    getDocFromServerMock.mockResolvedValueOnce(snap(null));
+    await expect(readAdultAttestationFromServer('sailor-1')).resolves.toBeNull();
+    expect(await hasOfflineAttestation('test-project', 'sailor-1')).toBe(false);
+  });
+
+  it('delayed authority completion still refuses a retired actor without revoking the later committed witness', async () => {
+    let resolveRead!: (value: ReturnType<typeof snap>) => void;
+    getDocFromServerMock.mockReturnValueOnce(new Promise((resolve) => { resolveRead = resolve; }));
+    const reading = readAdultAttestationFromServer('sailor-1');
+    const rejected = expect(reading).rejects.toThrow('Private session expired.');
+    await vi.waitFor(() => expect(getDocFromServerMock).toHaveBeenCalledTimes(1));
+    driveTransaction(snap(null));
+    await attestAdult(userLike(), 777);
+    privateState.generation++;
+    resolveRead(snap(null));
+    await rejected;
+    expect(await hasOfflineAttestation('test-project', 'sailor-1')).toBe(true);
+  });
+
   it('definitive server revocation removes the witness; a failed server read does not', async () => {
     await recordOfflineAttestation('test-project', 'sailor-1', true);
     getDocFromServerMock.mockRejectedValueOnce(new Error('offline'));

@@ -497,9 +497,10 @@ describe('attended private recovery guidance (#1411)', () => {
     privateRecovery.recoveryRequired = true;
     const view = render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>);
     expect(screen.getByTestId('board')).toBeTruthy();
+    expect(screen.getByText(/An admin-confirmed win first seen after recovery will not get a new Feed announcement/)).toBeTruthy();
     const link = screen.getByRole('link', { name: 'Finish device recovery' });
     expect(new URL(link.getAttribute('href')!, window.location.href).searchParams.get('device-cache-recovery')).toBe('1');
-    expect(screen.getByText(/profile, submissions and organizer tools/)).toBeTruthy();
+    expect(screen.getByText(/profile, submissions, own Claims and organizer tools/)).toBeTruthy();
     view.unmount();
     render(<MemoryRouter initialEntries={['/setup/basics']}><App /></MemoryRouter>);
     expect(screen.getByRole('link', { name: 'Finish device recovery' })).toBeTruthy();

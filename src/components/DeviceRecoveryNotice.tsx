@@ -10,7 +10,7 @@ export default function DeviceRecoveryNotice() {
   if (!user || !recoveryRequired) return null;
   return (
     <aside className="center muted" role="status">
-      <p>Finish device recovery to use your profile, submissions and organizer tools. Your Board and queued Marks stay available.</p>
+      <p>Finish device recovery to use your profile, submissions, own Claims and organizer tools. An admin-confirmed win first seen after recovery will not get a new Feed announcement. Your Board and queued Marks stay available.</p>
       <a href={privateCacheRecoveryHref(window.location.href)}>Finish device recovery</a>
     </aside>
   );

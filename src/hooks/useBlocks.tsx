@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { onSnapshot, query, where } from 'firebase/firestore';
 import { EVENT_ID } from '../firebase';
-import { capturePrivateFirestore } from '../privateFirestore';
+import { capturePrivateFirestore, retryPrivateFirestoreSession } from '../privateFirestore';
 import { usePrivateFirestore } from './usePrivateFirestore';
 import { blockPairsCol, blocksCol } from '../data/paths';
 import { computeHiddenSet, hiddenUidsFromPairs, reconcileOrphanPair, repairMissingPairs, subscribePendingBlocks, pendingBlockTargets, observeConfirmedBlockTargets, retirePendingBlocksOutsideScope } from '../data/blocks';
@@ -22,6 +22,9 @@ export interface HiddenUids {
    * Mid-use offline retains that same scope's confirmed set in memory; cold
    * offline starts and unreadable first answers withhold Feed/Tally. */
   ready: boolean;
+  /** A failed bridge is actionable, rather than an indefinite loading state. */
+  failed?: boolean;
+  retry?: () => void;
 }
 
 const EMPTY: ReadonlySet<string> = new Set();
@@ -254,6 +257,7 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
   // sign-in while not yet enabled (null key before and after) return the
   // signed-out `ready: true` for the render before the effect resets it.
   if (key === null) return { hidden: EMPTY, ready: uid === null };
+  if (session.failed) return { hidden: EMPTY, ready: false, failed: true, retry: retryPrivateFirestoreSession };
   const sameSession = session.uid === uid && !session.failed;
   if (!sameSession || (state.generation !== session.generation && !witness)) return { hidden: EMPTY, ready: false };
   if (!session.db && (navigator.onLine || !witness)) return { hidden: EMPTY, ready: false };

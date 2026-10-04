@@ -23,7 +23,8 @@ import { normalizePool } from '../game/pool';
 import type { ApprovalOutcome, ApprovalPlacement, ApprovePromptsRequest, Cell, ClaimMode, ThemeId, ClaimDoc, DayMetaDoc, EventDoc, ItemDoc, DayDef, PlayerDoc, ProofDoc } from '../types';
 
 /** One Admin action owns one memory-only Auth incarnation and Event. Never
- * reselect a private database after an await or a transaction retry. */
+ * reselect a private database after an await or a transaction retry. Public
+ * writers capture inside async functions so refusal rejects their Promise. */
 function captureAdmin(adminUid?: string, eventId: string = EVENT_ID) {
   const lease = capturePrivateFirestore();
   if (adminUid !== undefined && adminUid !== lease.uid) throw new Error('Admin account changed.');
@@ -48,21 +49,21 @@ function captureAdmin(adminUid?: string, eventId: string = EVENT_ID) {
 }
 type AdminAction = ReturnType<typeof captureAdmin>;
 
-export const hideItem = (id: string) => {
+export const hideItem = async (id: string) => {
   const action = captureAdmin(undefined, EVENT_ID);
   const { item } = action;
   return action.guard(async () => {
     return action.guard(() => updateDoc(item(id), { status: 'hidden' }));
   });
 };
-export const restoreItem = (id: string) => {
+export const restoreItem = async (id: string) => {
   const action = captureAdmin(undefined, EVENT_ID);
   const { item } = action;
   return action.guard(async () => {
     return action.guard(() => updateDoc(item(id), { status: 'active', reportHideSuppressed: true }));
   });
 };
-export const deleteItem = (id: string) => {
+export const deleteItem = async (id: string) => {
   const action = captureAdmin(undefined, EVENT_ID);
   const { item } = action;
   return action.guard(async () => {
@@ -229,7 +230,7 @@ export const approveItem = (
   adminUid: string,
   eventId: string = EVENT_ID,
 ) => approveItems([row], adminUid, eventId).then((placements) => placements[0]);
-export const rejectItem = (id: string, adminUid: string) =>
+export const rejectItem = async (id: string, adminUid: string) =>
   {
   const action = captureAdmin(adminUid, EVENT_ID);
   const { item } = action;
@@ -402,7 +403,7 @@ export function bulkApproveItems(
  * compose in the safe direction: the client can be stale, and the server is still
  * authoritative.
  */
-export function hideProof(id: string, eventId: string = EVENT_ID): Promise<void> {
+export async function hideProof(id: string, eventId: string = EVENT_ID): Promise<void> {
   const action = captureAdmin(undefined, eventId);
   const { proof } = action;
   return action.guard(async () => {
@@ -659,28 +660,28 @@ async function restoreProofOnce(id: string, eventId: string, action: AdminAction
 // automatic report hiding for this incarnation, and retains distinct-reporter
 // receipts. Further new reporters remain reviewable; prior reporters do not
 // regain admission by clearing the counter (#1405, owner decision #1355).
-export const clearItemReports = (id: string) => {
+export const clearItemReports = async (id: string) => {
   const action = captureAdmin(undefined, EVENT_ID);
   const { item } = action;
   return action.guard(async () => {
     return action.guard(() => updateDoc(item(id), { reportCount: 0, reportHideSuppressed: true }));
   });
 };
-export const clearProofReports = (id: string) => {
+export const clearProofReports = async (id: string) => {
   const action = captureAdmin(undefined, EVENT_ID);
   const { proof } = action;
   return action.guard(async () => {
     return action.guard(() => updateDoc(proof(id), { reportCount: 0, reportHideSuppressed: true }));
   });
 };
-export const setClaimMode = (mode: ClaimMode) => {
+export const setClaimMode = async (mode: ClaimMode) => {
   const action = captureAdmin(undefined, EVENT_ID);
   const { evt } = action;
   return action.guard(async () => {
     return action.guard(() => updateDoc(evt(), { claimMode: mode }));
   });
 };
-export const setEventTheme = (theme: ThemeId) => {
+export const setEventTheme = async (theme: ThemeId) => {
   const action = captureAdmin(undefined, EVENT_ID);
   const { evt } = action;
   return action.guard(async () => {
@@ -696,7 +697,7 @@ export const setEventTheme = (theme: ThemeId) => {
 // to stay a number, which a partial dot-path update preserves. `visionGate`
 // is presentational-only for now: `functions/src/visionGate.ts` still gates
 // `moderateProof` on its own deploy-time env flag, not this field.
-export const setPhotoProofSource = (source: 'camera_or_library' | 'camera_only'): Promise<void> =>
+export const setPhotoProofSource = async (source: 'camera_or_library' | 'camera_only'): Promise<void> =>
   {
   const action = captureAdmin(undefined, EVENT_ID);
   const { evt } = action;
@@ -704,7 +705,7 @@ export const setPhotoProofSource = (source: 'camera_or_library' | 'camera_only')
     return action.guard(() => updateDoc(evt(), { 'settings.photoProofSource': source }));
   });
 };
-export const setStripPhotoExif = (on: boolean): Promise<void> =>
+export const setStripPhotoExif = async (on: boolean): Promise<void> =>
   {
   const action = captureAdmin(undefined, EVENT_ID);
   const { evt } = action;
@@ -712,7 +713,7 @@ export const setStripPhotoExif = (on: boolean): Promise<void> =>
     return action.guard(() => updateDoc(evt(), { 'settings.stripPhotoExif': on }));
   });
 };
-export const setVisionGate = (on: boolean): Promise<void> =>
+export const setVisionGate = async (on: boolean): Promise<void> =>
   {
   const action = captureAdmin(undefined, EVENT_ID);
   const { evt } = action;
@@ -720,7 +721,7 @@ export const setVisionGate = (on: boolean): Promise<void> =>
     return action.guard(() => updateDoc(evt(), { 'settings.visionGate': on }));
   });
 };
-export const setReportHideThreshold = (n: number): Promise<void> =>
+export const setReportHideThreshold = async (n: number): Promise<void> =>
   {
   const action = captureAdmin(undefined, EVENT_ID);
   const { evt } = action;
@@ -748,7 +749,7 @@ export const setReportHideThreshold = (n: number): Promise<void> =>
  * already-gated Event is an operator action, deliberately not a toggle. The
  * confirm on the way ON (`AdultContentConfirm`) says so.
  */
-export const setForceAdult = (on: boolean): Promise<void> =>
+export const setForceAdult = async (on: boolean): Promise<void> =>
   {
   const action = captureAdmin(undefined, EVENT_ID);
   const { evt } = action;
@@ -762,7 +763,7 @@ export const setForceAdult = (on: boolean): Promise<void> =>
 // merge so it never clobbers a sibling `settings` key. Difficulty becomes a dial, not
 // a deploy — an admin changing it before a Day unlocks changes that Day's mix (the
 // value is read at deal time off the frozen snapshot, which already carries both pools).
-export const setEasyMixRatio = (ratio: number): Promise<void> =>
+export const setEasyMixRatio = async (ratio: number): Promise<void> =>
   {
   const action = captureAdmin(undefined, EVENT_ID);
   const { evt } = action;
@@ -797,7 +798,7 @@ export const setEasyMixRatio = (ratio: number): Promise<void> =>
 // the single `theme` swap onto the CURRENT array, not the caller's copy, keeps
 // this edit surgical under concurrency. The `days` param is retained as the
 // fallback when the doc is somehow missing.
-export const setDayTheme = (days: DayDef[], dayIndex: number, theme: ThemeId): Promise<void> => {
+export const setDayTheme = async (days: DayDef[], dayIndex: number, theme: ThemeId): Promise<void> => {
   const action = captureAdmin(undefined, EVENT_ID);
   const { evt } = action;
   return action.guard(async () => {
@@ -847,7 +848,7 @@ function isValidTonight(tonight: string[]): boolean {
  * already-unlocked Days 1–3 are corrected by the one-time owner migration, not
  * this control.
  */
-export const setDayTonight = (days: DayDef[], dayIndex: number, tonight: string[]): Promise<void> => {
+export const setDayTonight = async (days: DayDef[], dayIndex: number, tonight: string[]): Promise<void> => {
   const action = captureAdmin(undefined, EVENT_ID);
   const { evt } = action;
   return action.guard(async () => {
@@ -977,7 +978,7 @@ export async function resnapshotDayNow(dayIndex: number): Promise<ResnapshotDayR
 // than throwing so any awaiting caller stays happy. unbanUser is DELIBERATELY NOT
 // gated — it removes ANY uid including a sentinel, so an admin who banned 'seed' on
 // a pre-fix build (or by any other means) can always recover the pool.
-export const banUser = (uid: string): Promise<void> =>
+export const banUser = async (uid: string): Promise<void> =>
   {
   const action = captureAdmin(undefined, EVENT_ID);
   const { evt } = action;
@@ -985,7 +986,7 @@ export const banUser = (uid: string): Promise<void> =>
     return isSystemAuthor(uid) ? Promise.resolve() : action.guard(() => updateDoc(evt(), { bannedUids: arrayUnion(uid) }));
   });
 };
-export const unbanUser = (uid: string) => {
+export const unbanUser = async (uid: string) => {
   const action = captureAdmin(undefined, EVENT_ID);
   const { evt } = action;
   return action.guard(async () => {
@@ -1411,10 +1412,12 @@ export async function abandonArchive(
  * treats exactly as it treats the four refusals below. The transaction's own
  * Event re-read is covered the same way, but only AFTER `runTransaction` has
  * exhausted its own retries — the read is re-thrown so the SDK still gets to
- * retry a transient one, and the classification happens outside, where a
- * rejected transaction is known to have written nothing. A COMMIT failure is
- * deliberately NOT swallowed: a failed write is a failed archive and keeps
- * surfacing as one.
+ * retry a transient one. Classification outside preserves a typed refusal only
+ * before any archive update attempt, including unavailable capture or retirement
+ * before staging. A read-only refusal remains known after a retired acknowledgement;
+ * cleanup still belongs only to the current console invocation and quiesce token.
+ * After any update attempt, a COMMIT failure or retired acknowledgement stays
+ * unknown and rejects rather than claiming nothing was frozen.
  *
  * SEVEN THINGS ARE REFUSED AFTER THE CLOSE RATHER THAN WRITTEN THROUGH, and each
  * reports instead of throwing so the console can say what happened and, where
@@ -1481,9 +1484,13 @@ export async function archiveEvent(
     beforeFinale?: boolean;
   } = {},
 ): Promise<ArchiveEventResult> {
-  const action = captureAdmin(undefined, params.eventId ?? EVENT_ID);
+  let action: AdminAction;
+  try { action = captureAdmin(undefined, params.eventId ?? EVENT_ID); }
+  catch { return 'read-failed:event'; } // No archive read or write has started.
   const { evt, claimsRaw, playersCol, dayMetaRef } = action;
-  return action.guard(async () => {
+  // Each IO operation remains actor-bound. A whole-operation post-guard would
+  // turn a known no-write refusal into an unknown outcome after retirement.
+  return (async () => {
     // THE EVENT THIS CALL IS ABOUT, resolved ONCE and used for every read and the
     // write (#1142 item 7). Everything below awaits, and `EVENT_ID` can move.
     const eventId = action.eventId;
@@ -1659,12 +1666,19 @@ export async function archiveEvent(
     // Catching inside the callback would also spend the SDK's own retry, which is
     // the thing that gets a transient read through. So the read is flagged and
     // RE-THROWN — the SDK retries exactly as it did before, the flag is reset at
-    // the top of every attempt so only the LAST one counts — and the classification
-    // happens out here, on a transaction that has already given up and is therefore
-    // known to have written nothing.
+    // the top of every attempt. A read failure can become a refusal only when NO
+    // attempt has reached the archive update; after an earlier write attempt a
+    // later read failure must not turn an unknown outcome into safe cleanup.
     let lastTxFailureWasTheRead = false;
+    let archiveWriteAttempted = false;
+    let lastTxRefusal: ArchiveEventResult | null = null;
+    const refuse = (result: ArchiveEventResult): ArchiveEventResult => {
+      lastTxRefusal = result;
+      return result;
+    };
     return action.transaction(async (tx): Promise<ArchiveEventResult> => {
       lastTxFailureWasTheRead = false;
+      lastTxRefusal = null;
       // FLAGGED AND RE-THROWN, never swallowed here. The ORIGINAL error is what
       // leaves the callback, so the SDK still decides its own retry from it; the
       // flag only records that the last thing to fail in THIS attempt was the read,
@@ -1673,14 +1687,14 @@ export async function archiveEvent(
         lastTxFailureWasTheRead = true;
         throw err;
       });
-      if (!snap.exists()) return 'no-event';
+      if (!snap.exists()) return refuse('no-event');
       const data = snap.data() as Partial<EventDoc>;
-      if (data.status === 'archived') return 'already-archived';
+      if (data.status === 'archived') return refuse('already-archived');
       // Re-checked HERE, inside the transaction that writes: an Admin (or another
       // console) can abandon the archive between the reads above and this commit,
       // and an Event whose gameplay reopened in that window is one whose roster may
       // have moved again. Refuse rather than freeze what may already be stale.
-      if (data.archiving !== true) return 'not-closing';
+      if (data.archiving !== true) return refuse('not-closing');
       // …and the flag alone cannot see the ABA case (Codex P1, PR #1139). Play can
       // be REOPENED and SHUT AGAIN inside the window the reads above occupy:
       // gameplay resumes, Marks land, Claims are created, and a second quiesce
@@ -1690,7 +1704,7 @@ export async function archiveEvent(
       // play, permanently, and the record is what the rules lock. Refused, never
       // repaired, and deliberately WITHOUT reopening play: the closing state in
       // force belongs to whoever took it.
-      if (data.archiveToken !== token) return 'quiesce-changed';
+      if (data.archiveToken !== token) return refuse('quiesce-changed');
       // The snapshot-defining configuration, held across the same window. Every
       // read above describes the Event under `configAtRead`; this record would be
       // built under whatever the transaction found. `bannedUids` is deliberately
@@ -1705,8 +1719,8 @@ export async function archiveEvent(
       // unfingerprintable document would be reported as an archive whose fate this
       // call does not know, when in fact it wrote nothing at all.
       const configNow = archiveSnapshotFingerprintOrNull(data);
-      if (configNow === null) return 'config-unreadable';
-      if (configNow !== configAtRead) return 'config-changed';
+      if (configNow === null) return refuse('config-unreadable');
+      if (configNow !== configAtRead) return refuse('config-changed');
       // THE FINALE GATE (#1151, routed here from #1150's review). The quiesce only
       // DELAYS the finale beats — the freeze stamp, the podium Moment and the
       // Most-Loved award are withheld while play is shut and land at the scheduled
@@ -1716,7 +1730,7 @@ export async function archiveEvent(
       // the TRANSACTIONAL read, which is the state the flip actually lands on; a
       // finale committing between the pre-read and here moves `frozenAt` and is
       // caught by the fingerprint above first.
-      if (!params.beforeFinale && !finaleHasRun(data)) return 'finale-pending';
+      if (!params.beforeFinale && !finaleHasRun(data)) return refuse('finale-pending');
       const archivedAt = params.now ?? Date.now();
       const draft = draftEventArchive({
         players,
@@ -1771,7 +1785,11 @@ export async function archiveEvent(
       // failure that would otherwise arrive as a REJECTED write on an Event this
       // call has already shut. Reported verbatim, because every refusal the draft
       // can name is an `ArchiveEventResult` member.
-      if (draft.refusal !== null) return draft.refusal;
+      if (draft.refusal !== null) return refuse(draft.refusal);
+      action.assertCurrent();
+      // From this point the SDK may have attempted a commit. Its failure or a
+      // retired acknowledgement stays unknown, even if a later retry reads fail.
+      archiveWriteAttempted = true;
       tx.update(eventRef, {
         status: 'archived',
         archivedAt,
@@ -1791,14 +1809,18 @@ export async function archiveEvent(
         archivedUnder: token,
       });
       return 'archived';
-      // Only the READ becomes a refusal. Anything else — the commit, above all —
-      // is the caller's to see, so the console's failure pill still means what it
-      // has always meant.
+      // The outside catch preserves only known no-write refusals or failures.
+      // Anything after an update attempt — the commit, above all — rejects.
     }).catch((err: unknown): ArchiveEventResult => {
-      if (lastTxFailureWasTheRead) return 'read-failed:event';
+      if (!archiveWriteAttempted) {
+        if (lastTxRefusal !== null) return lastTxRefusal;
+        if (lastTxFailureWasTheRead) return 'read-failed:event';
+        try { action.assertCurrent(); }
+        catch { return 'read-failed:event'; }
+      }
       throw err;
     });
-  });
+  })();
 }
 
 /** Recompute a player's stats after an admin resolves one of their claims. */

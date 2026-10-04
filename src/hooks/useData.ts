@@ -1646,7 +1646,9 @@ export function useMyActiveItems(uid: string | null | undefined) {
  * Player is NOT an admin, so an unconstrained collection read would be denied.
  * `ConfirmWinMoments` consumes this to notice when one of the Player's pending
  * Marks is confirmed by an Admin, so it can emit the win's Moment wherever the
- * Player is (the confirm-path edge Board's route-scoped detection misses). The
+ * Player is after attended recovery admits the own-Claim read (the confirm-path
+ * edge Board's route-scoped detection misses). Quarantine cannot seed a pending
+ * witness; a first-seen confirmation after recovery is history, not a new Moment. The
  * `hasServerData` latch gates the baseline: the first server-backed snapshot's
  * already-confirmed Claims are history, not fresh confirms to announce.
  */

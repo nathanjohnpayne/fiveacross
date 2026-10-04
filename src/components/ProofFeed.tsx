@@ -1048,7 +1048,7 @@ export default function ProofFeed() {
   // promoting anyone — a blocked counterpart's Hearts leave every count, and
   // their podium honour or last-call entry is withheld. The Proofs, Moments,
   // Tally Cards and Doubts themselves are filtered in their hooks.
-  const { hidden, ready: blockSetReady } = useHiddenUids();
+  const { hidden, ready: blockSetReady, failed: blockSetFailed, retry: retryBlocks } = useHiddenUids();
   const displayExcluded = withBlockExclusions(event?.bannedUids, hidden);
 
   // The viewer's own dealt Day Cards (#261): per-card actions read marked or
@@ -1190,6 +1190,9 @@ export default function ProofFeed() {
 
   if (!blockSetReady && !navigator.onLine) {
     return <div className="center muted" role="status">Reconnect to see the Feed.</div>;
+  }
+  if (!blockSetReady && blockSetFailed) {
+    return <div className="center muted" role="status">Feed is temporarily unavailable. <button type="button" onClick={retryBlocks}>Retry Feed</button></div>;
   }
   if (loading) return <div className="center muted">Loading…</div>;
   if (!entries.length)

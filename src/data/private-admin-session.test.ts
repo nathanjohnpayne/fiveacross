@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const H = vi.hoisted(() => ({
-  uid: 'alice', generation: 1, recovered: true, eventId: 'event-a', callableEvent: null as string | null,
+  uid: 'alice', generation: 1, recovered: true, online: true, eventId: 'event-a', callableEvent: null as string | null,
   privateDb: { kind: 'private-memory' }, defaultDb: { kind: 'durable-gameplay' },
   privateFunctions: { kind: 'private-functions' }, defaultFunctions: { kind: 'default-functions' },
   get: vi.fn(), update: vi.fn(), set: vi.fn(), delete: vi.fn(),
@@ -33,7 +33,7 @@ vi.mock('firebase/firestore', async (original) => ({
   getDoc: H.getDoc, getDocFromServer: H.getDoc, getDocs: H.getDocs, getDocsFromServer: H.getDocs,
   updateDoc: H.updateDoc, addDoc: H.addDoc, deleteDoc: H.deleteDoc, runTransaction: H.runTransaction,
 }));
-import { approveItems, hideItem, rejectItem, restoreProof, setItemSpicy, setDayTheme, unlockDayNow, resnapshotDayNow } from './admin';
+import { approveItems, archiveEvent, hideItem, restoreItem, deleteItem, rejectItem, restoreProof, hideProof, clearItemReports, clearProofReports, setClaimMode, setEventTheme, setPhotoProofSource, setStripPhotoExif, setVisionGate, setReportHideThreshold, setForceAdult, setEasyMixRatio, setItemSpicy, setDayTheme, setDayTonight, banUser, unbanUser, unlockDayNow, resnapshotDayNow } from './admin';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -50,11 +50,11 @@ beforeEach(() => {
   H.update.mockImplementation(() => undefined);
   H.set.mockImplementation(() => undefined);
   H.delete.mockImplementation(() => undefined);
-  H.uid = 'alice'; H.generation = 1; H.recovered = true; H.eventId = 'event-a'; H.callableEvent = null;
+  H.uid = 'alice'; H.generation = 1; H.recovered = true; H.online = true; H.eventId = 'event-a'; H.callableEvent = null;
   H.capture.mockImplementation(() => {
     const uid = H.uid, generation = H.generation;
     const assertCurrent = () => {
-      if (!H.recovered || uid !== H.uid || generation !== H.generation) throw new Error('Private session expired.');
+      if (!H.recovered || !H.online || uid !== H.uid || generation !== H.generation) throw new Error('Private session expired.');
     };
     assertCurrent();
     return {
@@ -185,5 +185,125 @@ describe('Admin actions own a private Auth incarnation (#1411)', () => {
     H.get.mockResolvedValue(snapshot({ days: [{ index: 0, theme: 'classic' }] }));
     await setDayTheme([], 0, 'welcome-aboard');
     expect(H.update).toHaveBeenCalledWith({ database: H.privateDb, path: 'events/event-a' }, { days: [{ index: 0, theme: 'welcome-aboard' }] });
+  });
+});
+
+
+// Invoke actual exported writers through their public Promise.catch contract,
+// without deferring capture behind Promise.resolve().then in the test.
+const plainWriters = [
+  ['hideItem', () => hideItem('prompt')], ['restoreItem', () => restoreItem('prompt')],
+  ['deleteItem', () => deleteItem('prompt')], ['rejectItem', () => rejectItem('prompt', 'alice')],
+  ['hideProof', () => hideProof('proof')],
+  ['clearItemReports', () => clearItemReports('prompt')], ['clearProofReports', () => clearProofReports('proof')],
+  ['setClaimMode', () => setClaimMode('honor')], ['setEventTheme', () => setEventTheme('welcome-aboard')],
+  ['setPhotoProofSource', () => setPhotoProofSource('camera_only')], ['setStripPhotoExif', () => setStripPhotoExif(true)],
+  ['setVisionGate', () => setVisionGate(true)], ['setReportHideThreshold', () => setReportHideThreshold(3)],
+  ['setForceAdult', () => setForceAdult(true)], ['setEasyMixRatio', () => setEasyMixRatio(0.5)],
+  ['setDayTheme', () => setDayTheme([], 0, 'welcome-aboard')], ['setDayTonight', () => setDayTonight([], 0, [])],
+  ['banUser', () => banUser('other')], ['unbanUser', () => unbanUser('other')],
+] as const;
+
+describe('Admin writer Promise rejection contract (#1411)', () => {
+  it.each(plainWriters)('%s lets a direct catch handler observe unrecovered capture without a synchronous throw', async (_name, call) => {
+    H.recovered = false;
+    const report = vi.fn();
+    let handled!: Promise<void | undefined>;
+    expect(() => { handled = call().catch(report); }).not.toThrow();
+    await handled;
+    expect(report).toHaveBeenCalledOnce();
+    expect(report.mock.calls[0][0]).toEqual(expect.objectContaining({ message: 'Private session expired.' }));
+    expect(H.capture).toHaveBeenCalledOnce();
+    expect(H.updateDoc).not.toHaveBeenCalled(); expect(H.deleteDoc).not.toHaveBeenCalled();
+    expect(H.runTransaction).not.toHaveBeenCalled(); expect(H.callable).not.toHaveBeenCalled();
+  });
+  it('also returns a rejected Promise when an offline settings capture is refused', async () => {
+    H.online = false;
+    const report = vi.fn();
+    let handled!: Promise<void | undefined>;
+    expect(() => { handled = setReportHideThreshold(4).catch(report); }).not.toThrow();
+    await handled;
+    expect(report).toHaveBeenCalledOnce(); expect(H.updateDoc).not.toHaveBeenCalled();
+  });
+});
+
+const closingEvent = () => ({ status: 'active', archiving: true, archiveToken: 1, claimMode: 'honor', days: [], name: 'Test Event', bannedUids: [] });
+describe('archiveEvent preserves known no-write refusals across private retirement (#1411)', () => {
+  beforeEach(() => {
+    H.getDoc.mockResolvedValue(snapshot(closingEvent()));
+    H.get.mockResolvedValue(snapshot(closingEvent()));
+  });
+  it('returns a typed refusal when capture is already unavailable, before any IO', async () => {
+    H.online = false;
+    await expect(archiveEvent(1)).resolves.toBe('read-failed:event');
+    expect(H.getDoc).not.toHaveBeenCalled(); expect(H.runTransaction).not.toHaveBeenCalled();
+    expect(H.capture).toHaveBeenCalledOnce();
+  });
+  it('preserves a pre-read refusal after the read retires its captured actor', async () => {
+    const read = deferred<ReturnType<typeof snapshot>>(); H.getDoc.mockReturnValue(read.promise);
+    const freezing = archiveEvent(1); retire(); read.resolve(snapshot(closingEvent()));
+    await expect(freezing).resolves.toBe('read-failed:event');
+    expect(H.getDocs).not.toHaveBeenCalled(); expect(H.runTransaction).not.toHaveBeenCalled();
+    expect(H.capture).toHaveBeenCalledOnce(); expect(H.update).not.toHaveBeenCalled();
+  });
+  it('preserves the queue-stage refusal without another actor read or cleanup mutation', async () => {
+    const read = deferred<{ docs: [] }>(); H.getDocs.mockReturnValue(read.promise);
+    const freezing = archiveEvent(1);
+    await vi.waitFor(() => expect(H.getDocs).toHaveBeenCalledOnce());
+    retire(); read.resolve({ docs: [] });
+    await expect(freezing).resolves.toBe('read-failed:claims');
+    expect(H.getDoc).toHaveBeenCalledOnce(); expect(H.runTransaction).not.toHaveBeenCalled();
+    expect(H.capture).toHaveBeenCalledOnce(); expect(H.update).not.toHaveBeenCalled();
+  });
+  it('returns a no-write refusal if retirement precedes the SDK transaction callback', async () => {
+    H.runTransaction.mockImplementation(async (_db, callback) => {
+      retire(); return callback({ get: H.get, update: H.update, set: H.set, delete: H.delete });
+    });
+    await expect(archiveEvent(1)).resolves.toBe('read-failed:event');
+    expect(H.get).not.toHaveBeenCalled(); expect(H.update).not.toHaveBeenCalled(); expect(H.capture).toHaveBeenCalledOnce();
+  });
+  it('keeps a known quiesce-changed refusal when its read-only transaction acknowledgement retires', async () => {
+    H.get.mockResolvedValue(snapshot({ ...closingEvent(), archiveToken: 2 }));
+    const ack = deferred<void>(); const completed = deferred<void>();
+    H.runTransaction.mockImplementation(async (_db, callback) => {
+      const result = await callback({ get: H.get, update: H.update, set: H.set, delete: H.delete });
+      completed.resolve(); await ack.promise; return result;
+    });
+    const freezing = archiveEvent(1); await completed.promise; retire(); ack.resolve();
+    await expect(freezing).resolves.toBe('quiesce-changed');
+    expect(H.update).not.toHaveBeenCalled(); expect(H.capture).toHaveBeenCalledOnce();
+  });
+  it('refuses before staging when a transaction data accessor retires the actor', async () => {
+    H.get.mockResolvedValue({ exists: () => true, data: () => { retire(); return closingEvent(); } });
+    await expect(archiveEvent(1)).resolves.toBe('read-failed:event');
+    expect(H.update).not.toHaveBeenCalled(); expect(H.capture).toHaveBeenCalledOnce();
+  });
+  it('still rejects a possibly committed archive after retirement, never reporting a safe refusal', async () => {
+    const ack = deferred<void>(); const staged = deferred<void>();
+    H.runTransaction.mockImplementation(async (_db, callback) => {
+      const result = await callback({ get: H.get, update: H.update, set: H.set, delete: H.delete });
+      staged.resolve(); await ack.promise; return result;
+    });
+    const freezing = archiveEvent(1); await staged.promise;
+    expect(H.update).toHaveBeenCalledOnce(); retire(); ack.resolve();
+    await expect(freezing).rejects.toThrow('Private session');
+    expect(H.capture).toHaveBeenCalledOnce(); expect(H.update).toHaveBeenCalledOnce();
+  });
+  it('keeps a later retry read failure unknown after an earlier archive update attempt', async () => {
+    const failedRead = new Error('retry read unavailable');
+    H.runTransaction.mockImplementation(async (_db, callback) => {
+      const tx = { get: H.get, update: H.update, set: H.set, delete: H.delete };
+      await callback(tx);
+      H.get.mockRejectedValueOnce(failedRead);
+      return callback(tx);
+    });
+    await expect(archiveEvent(1)).rejects.toBe(failedRead);
+    expect(H.update).toHaveBeenCalledOnce(); expect(H.get).toHaveBeenCalledTimes(2);
+    expect(H.capture).toHaveBeenCalledOnce();
+  });
+  it('retains ordinary successful archive with one captured memory transaction', async () => {
+    await expect(archiveEvent(1)).resolves.toBe('archived');
+    expect(H.update).toHaveBeenCalledOnce(); expect(H.runTransaction.mock.calls[0][0]).toBe(H.privateDb);
+    expect(H.capture).toHaveBeenCalledOnce();
   });
 });

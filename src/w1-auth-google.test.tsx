@@ -13,6 +13,14 @@ const authState = vi.hoisted(() => ({
   value: { dealError: null as string | null, dealing: false, retryDeal: vi.fn() },
 }));
 
+// The App's recovery notice consumes this private-session seam. Keep the
+// shell-only fixture out of named Firebase Auth/Firestore initialization too.
+const privateSession = vi.hoisted(() => vi.fn(() => ({
+  uid: 'sailor-1', db: null, generation: 1, authGeneration: 1,
+  recoveryRequired: false, failed: false,
+})));
+vi.mock('./hooks/usePrivateFirestore', () => ({ usePrivateFirestore: privateSession }));
+
 vi.mock('./auth/AuthContext', () => ({
   useAuth: () => ({
     user: { uid: 'sailor-1' },
@@ -80,6 +88,7 @@ describe('App surfaces a failed deal on the Card tab, shell intact', () => {
     // that would hide the tabs (Codex P2: recovery lives on /items).
     expect(container.querySelector('.app')).not.toBeNull();
     expect(container.querySelector('.nav')).not.toBeNull();
+    expect(privateSession).toHaveBeenCalled();
 
     // Retry re-invokes the deal in place (no full reload).
     await userEvent.click(screen.getByRole('button', { name: /retry/i }));

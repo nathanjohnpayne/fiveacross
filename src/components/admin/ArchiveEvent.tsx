@@ -19,6 +19,8 @@ import {
 import { MAX_DAYS } from '../../data/eventLimits';
 import { useDayMetasStatus, useLeaderboard } from '../../hooks/useData';
 import { editionLexicon } from '../../editions';
+import { EVENT_ID } from '../../firebase';
+import { capturePrivateFirestore } from '../../privateFirestore';
 import AsyncButton from './AsyncButton';
 import type { ClaimDoc, EventDoc } from '../../types';
 
@@ -725,6 +727,14 @@ export default function ArchiveEvent({
   // but the newest invocation describes an intent the Admin has already replaced,
   // so it is discarded outright rather than reconciled against a phase.
   const actionSeqRef = useRef(0);
+  // A new mounted lifetime cannot inherit an older invocation's continuation,
+  // including StrictMode effect teardown/setup on the same component instance.
+  const mountedLifetimeRef = useRef<object | null>(null);
+  useLayoutEffect(() => {
+    const lifetime = {};
+    mountedLifetimeRef.current = lifetime;
+    return () => { if (mountedLifetimeRef.current === lifetime) mountedLifetimeRef.current = null; };
+  }, []);
   const report = (
     outcome: ArchiveOutcome,
     startedIn: Phase,
@@ -753,16 +763,26 @@ export default function ArchiveEvent({
     );
   };
   const act = async (
-    run: (isCurrent: () => boolean) => Promise<ArchiveOutcome | ArchiveReport>,
+    run: (isCurrent: () => boolean, eventId: string) => Promise<ArchiveOutcome | ArchiveReport>,
   ) => {
     const startedIn = phase;
     const seq = (actionSeqRef.current += 1);
     const phaseSeqAtStart = phaseSeqRef.current;
     // Handed to the runner so a write that reports a SECOND fact — the reopen
     // that declined — can drop it on the same terms the outcome is dropped on.
-    const isCurrent = () => seq === actionSeqRef.current;
+    const actor = capturePrivateFirestore();
+    const eventId = EVENT_ID;
+    const lifetime = mountedLifetimeRef.current;
+    const isCurrent = () => {
+      if (!lifetime || lifetime !== mountedLifetimeRef.current || seq !== actionSeqRef.current || eventId !== EVENT_ID) return false;
+      try { actor.assertCurrent(); return true; } catch { return false; }
+    };
+    if (!isCurrent()) throw new Error('Archive action expired.');
     setReopenSuperseded(false);
-    const settled = await run(isCurrent);
+    let settled: ArchiveOutcome | ArchiveReport;
+    try { settled = await run(isCurrent, eventId); }
+    catch (error) { if (isCurrent()) throw error; return; }
+    if (!isCurrent()) return;
     if (typeof settled === 'string') report(settled, startedIn, seq, phaseSeqAtStart);
     else report(settled.outcome, startedIn, seq, phaseSeqAtStart, settled.settledAt);
   };
@@ -1017,17 +1037,21 @@ export default function ArchiveEvent({
    *  against the controls the Admin is actually looking at (Codex P2 on PR
    *  #1162).
    *
-   *  `isCurrent` is this invocation's own liveness check, and it gates the
+   *  `isCurrent` binds the original private actor, mounted lifetime, Event and
+   *  action sequence. It gates each chained write and report; a retired refusal
+   *  never reacquires a new Admin for automatic cleanup. It gates the
    *  CLEANUP ITSELF and not only what is reported about it (Codex P2 on PR
    *  #1165): a superseded action's reopen is a write that would clear the quiesce
    *  a newer freeze is committing against, so it is dropped on exactly the terms
    *  its outcome is. */
-  const runArchive = async (isCurrent: () => boolean): Promise<ArchiveReport> => {
+  const runArchive = async (isCurrent: () => boolean, invocationEvent: string): Promise<ArchiveReport> => {
     // The quiesce this handler took, and the Event it took it on (#1142 item 7):
     // `EVENT_ID` is a live binding, so the freeze and the cleanup name the Event
     // the SHUT actually landed on rather than re-resolving it per call.
-    const { result: opened, token, created, eventId } = await beginArchive();
+    const { result: opened, token, created, eventId } = await beginArchive(invocationEvent);
+    if (!isCurrent()) return { outcome: opened };
     if (opened !== 'closing') return { outcome: opened };
+    if (eventId !== invocationEvent) throw new Error('Archive Event changed.');
     const outcome = await archiveEvent(token as number, { eventId, beforeFinale });
     // THIS handler is what shut the Event, so this handler is what puts it back
     // when the second write refuses (Codex P2, PR #1139) — for every refusal in
@@ -1067,7 +1091,7 @@ export default function ArchiveEvent({
         try {
           reopened = await abandonArchive(token ?? undefined, eventId);
         } finally {
-          setCleanupInFlight(false);
+          if (isCurrent()) setCleanupInFlight(false);
         }
         if (isCurrent()) setReopenSuperseded(reopened === 'quiesce-changed');
         // WHERE THE EVENT ACTUALLY ENDS UP (Codex P2 on PR #1162). The reopen
@@ -1125,7 +1149,7 @@ export default function ArchiveEvent({
             // flight is two writes racing for one generation, and the second one
             // reports on a state the first is about to change under it.
             disabled={cleanupInFlight}
-            onAction={() => act(() => abandonArchive())}
+            onAction={() => act((_isCurrent, eventId) => abandonArchive(undefined, eventId))}
           >
             Reopen play
           </AsyncButton>
@@ -1143,9 +1167,11 @@ export default function ArchiveEvent({
             // Admin arrived, and **Reopen play** sits beside the button they
             // pressed.
             onAction={() =>
-              act(async () => {
-                const { result: opened, token, eventId } = await beginArchive();
+              act(async (isCurrent, invocationEvent) => {
+                const { result: opened, token, eventId } = await beginArchive(invocationEvent);
+                if (!isCurrent()) return opened;
                 if (opened !== 'closing') return opened;
+                if (eventId !== invocationEvent) throw new Error('Archive Event changed.');
                 return archiveEvent(token as number, { eventId, beforeFinale });
               })
             }
@@ -1172,7 +1198,7 @@ export default function ArchiveEvent({
               // window — another Admin reopening play swaps it in — and a quiesce
               // taken here would be one the in-flight reopen is about to lift.
               disabled={cleanupInFlight}
-              onAction={() => act(async () => (await beginArchive()).result)}
+              onAction={() => act(async (_isCurrent, eventId) => (await beginArchive(eventId)).result)}
             >
               Close play
             </AsyncButton>
@@ -1243,15 +1269,15 @@ export default function ArchiveEvent({
                 disabled={!ready || cleanupInFlight}
                 // Disarming is this invocation's own housekeeping, so it is held
                 // to the same liveness check its outcome and its cleanup are
-                // (CodeRabbit on PR #1165). A superseded action still runs to
-                // completion, and clearing `arming` unconditionally closed a
+                // (CodeRabbit on PR #1165). An already-dispatched operation may still finish, but
+                // its superseded invocation cannot chain another write. Clearing `arming` unconditionally closed a
                 // confirm row a LATER action had opened — an Event that came back
                 // open while this one was in flight puts the Archive… control
                 // back, and an Admin who armed it again lost the row from under
                 // themselves for a write nobody is waiting on any more.
                 onAction={() =>
-                  act(async (isCurrent) => {
-                    const outcome = await runArchive(isCurrent);
+                  act(async (isCurrent, eventId) => {
+                    const outcome = await runArchive(isCurrent, eventId);
                     if (isCurrent()) setArming(false);
                     return outcome;
                   })

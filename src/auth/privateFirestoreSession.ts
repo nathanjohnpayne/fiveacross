@@ -144,11 +144,20 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
     subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
     refreshRecovery: () => { void synchronize(config.primaryAuth.currentUser, 'recovery'); },
     refreshConnection: () => { void synchronize(config.primaryAuth.currentUser, 'connection'); },
+    // An explicit Retry starts a fresh bounded episode and retires old answers,
+    // even when React did not render an intermediate bridge failure.
+    retry: () => { void synchronize(config.primaryAuth.currentUser, 'auth'); },
     capture: (allowRecovery = false) => {
       const captured = snapshot;
       const assertCurrent = () => {
         if (stopped || !captured.db || captured.generation !== snapshot.generation || captured.uid !== config.primaryAuth.currentUser?.uid || config.online?.() === false || (!allowRecovery && !config.recovered())) {
-          throw new Error("Private session expired or device recovery is required.");
+          const error = new Error("Private session expired or device recovery is required.");
+          // A still-current account may retry a retired/unavailable transport,
+          // but the old lease still refuses every read, write and completion.
+          if (!stopped && captured.uid === config.primaryAuth.currentUser?.uid && (allowRecovery || config.recovered())) {
+            throw Object.assign(error, { code: 'unavailable' });
+          }
+          throw error;
         }
       };
       assertCurrent();

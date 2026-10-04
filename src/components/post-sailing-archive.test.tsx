@@ -89,6 +89,7 @@ const H = vi.hoisted(() => {
     /** `useOnline`. A client the browser says is offline can never BE answered by
      *  the server, so the routing gate stops waiting on one. */
     online: true,
+    actorUid: 'alice', actorGeneration: 1, actorRecovered: true, eventId: 'test-event', capturePrivate: vi.fn(),
     /** The order the writes were issued in, so the quiesce-first contract is
      *  asserted on the SEQUENCE rather than on each spy alone. */
     writes: [] as string[],
@@ -134,7 +135,8 @@ const H = vi.hoisted(() => {
 });
 
 vi.mock('../analytics', () => ({ track: vi.fn() }));
-vi.mock('../firebase', () => ({ EVENT_ID: 'test-event' }));
+vi.mock('../firebase', () => ({ get EVENT_ID() { return H.eventId; } }));
+vi.mock('../privateFirestore', () => ({ capturePrivateFirestore: H.capturePrivate }));
 // The archived surface pre-renders its Share Card on mount, and the real
 // rasteriser walks pseudo-elements jsdom has never implemented. What the CARD
 // contains is pinned in `w2-share-cards.test.tsx` § "ArchivedLeaderboard — share
@@ -341,7 +343,12 @@ beforeEach(() => {
   H.eventPendingWrites = false;
   H.eventFromCache = false;
   H.eventLoading = false;
-  H.online = true;
+  H.online = true; H.actorUid = 'alice'; H.actorGeneration = 1; H.actorRecovered = true; H.eventId = 'test-event';
+  H.capturePrivate.mockImplementation(() => {
+    const uid = H.actorUid, generation = H.actorGeneration;
+    const assertCurrent = () => { if (!H.actorRecovered || !H.online || uid !== H.actorUid || generation !== H.actorGeneration) throw new Error('Private session expired.'); };
+    assertCurrent(); return { uid, generation, assertCurrent };
+  });
   H.writes = [];
   H.beginArchive.mockResolvedValue({
     result: 'closing',
@@ -404,7 +411,7 @@ describe('ArchiveEvent — the two reversible lifecycle actions (#1149)', () => 
     renderConsole();
     await userEvent.click(screen.getByRole('button', { name: 'Reopen play' }));
     await waitFor(() => expect(H.abandonArchive).toHaveBeenCalledTimes(1));
-    expect(H.abandonArchive).toHaveBeenCalledWith();
+    expect(H.abandonArchive).toHaveBeenCalledWith(undefined, 'test-event');
     expect(await screen.findByRole('status')).toHaveTextContent(/Play is open again/);
   });
 
@@ -1968,8 +1975,9 @@ describe('ArchiveEvent — a superseded action keeps its hands off the surface (
     expect(screen.getByRole('group', { name: 'Confirm archive' })).toBeInTheDocument();
 
     settleFirst({ result: 'closing', token: 1, created: true, eventId: 'test-event' });
-    await waitFor(() => expect(H.writes).toEqual(['begin', 'abandon', 'archive']));
     await act(async () => {});
+    expect(H.writes).toEqual(['begin', 'abandon']);
+    expect(H.archiveEvent).not.toHaveBeenCalled();
     expect(screen.getByRole('group', { name: 'Confirm archive' })).toBeInTheDocument();
   });
 
@@ -2829,5 +2837,56 @@ describe('a ban still hides a Player after the freeze (#1152)', () => {
     );
     expect(frozenNames(container)).toEqual(['Early Bird', 'Steady Eddie']);
     expect(container.querySelector('.list .row.leader .name')).toHaveTextContent('Early Bird');
+  });
+});
+
+
+// The service result may be a known no-write refusal; the console must still
+// own its ORIGINAL actor and mounted Event before beginning cleanup as a caller.
+describe('ArchiveEvent caller owns its private actor and mounted Event (#1411)', () => {
+  it.each(['account', 'incarnation', 'offline', 'event', 'unmount'] as const)('does not recapture cleanup after %s retirement during the archive read', async (retirement) => {
+    let resolve!: (result: string) => void;
+    H.archiveEvent.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await waitFor(() => expect(H.archiveEvent).toHaveBeenCalledOnce());
+    if (retirement === 'account') H.actorUid = 'bob';
+    if (retirement === 'incarnation') H.actorGeneration++;
+    if (retirement === 'offline') H.online = false;
+    if (retirement === 'event') H.eventId = 'other-event';
+    if (retirement === 'unmount') view.unmount();
+    await act(async () => { resolve('read-failed:roster'); });
+    expect(H.abandonArchive).not.toHaveBeenCalled();
+    expect(H.writes).toEqual(['begin', 'archive']);
+    expect(H.capturePrivate).toHaveBeenCalledOnce();
+    expect(screen.queryByText(/The final standings could not be read back/)).toBeNull();
+  });
+  it('does not chain a freeze after the opening acknowledgement changes actor', async () => {
+    let resolve!: (value: { result: string; token: number; created: boolean; eventId: string }) => void;
+    H.beginArchive.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await waitFor(() => expect(H.beginArchive).toHaveBeenCalledOnce());
+    H.actorUid = 'bob';
+    await act(async () => { resolve({ result: 'closing', token: 1, created: true, eventId: 'test-event' }); });
+    expect(H.archiveEvent).not.toHaveBeenCalled(); expect(H.abandonArchive).not.toHaveBeenCalled();
+    expect(H.capturePrivate).toHaveBeenCalledOnce();
+  });
+  it('a refused initial capture reports a controlled failure before any action IO', async () => {
+    H.actorRecovered = false;
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Close play' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/failed.*try again/i);
+    expect(H.writes).toEqual([]); expect(H.capturePrivate).toHaveBeenCalledOnce();
+  });
+  it('an unchanged captured actor still performs its normal refusal cleanup', async () => {
+    H.archiveEvent.mockResolvedValueOnce('read-failed:roster');
+    renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await waitFor(() => expect(H.writes).toEqual(['begin', 'archive', 'abandon']));
+    expect(H.abandonArchive).toHaveBeenCalledWith(1, 'test-event');
   });
 });

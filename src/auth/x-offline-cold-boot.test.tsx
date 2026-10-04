@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   signInWithPopup: vi.fn(),
   signOut: vi.fn(),
   ensureUserProfile: vi.fn(),
+  retryPrivateFirestoreSession: vi.fn(),
   attestAdult: vi.fn(),
   // The SERVER-only authority read (#117 r6, getDocFromServer) and the cache-first
   // RENDER probe (project/UID boolean plus cached Board or Day Card) are DISTINCT spies, so a test can prove deal
@@ -57,6 +58,7 @@ vi.mock('../data/api', () => ({
   hasCachedCard: mocks.hasCachedCard,
   joinAndDeal: mocks.joinAndDeal,
 }));
+vi.mock('../privateFirestore', () => ({ retryPrivateFirestoreSession: mocks.retryPrivateFirestoreSession }));
 vi.mock('../analytics', () => ({ track: mocks.track }));
 // AuthProvider renders <ConfirmWinMoments/> for a signed-in User (#116); it reads
 // the Firestore `db` this suite deliberately does not wire, so stub it out — this
@@ -180,6 +182,7 @@ const rePromptShown = () => screen.queryByText(/One quick thing/i) !== null;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.retryPrivateFirestoreSession.mockReset();
   emitAuth = () => {};
   ctxSignIn = async () => {};
   ctxAttest = async () => {};
@@ -1093,5 +1096,47 @@ describe('offline cold boot (#115)', () => {
     });
     expect(dealErrorShown()).toBe(false);
     expect(mayRenderEventContent()).toBe(true);
+  });
+});
+
+
+describe('explicit private bridge retry', () => {
+  it('does not restart the private bridge for offline or permanent-authority Retry', async () => {
+    mocks.ensureUserProfile.mockRejectedValue(permanent());
+    mount();
+    await coldBoot(RETURNING_USER);
+    await waitFor(() => expect(dealErrorShown()).toBe(true));
+    act(() => ctxRetryDeal());
+    await waitFor(() => expect(mocks.ensureUserProfile).toHaveBeenCalledTimes(2));
+    expect(mocks.retryPrivateFirestoreSession).not.toHaveBeenCalled();
+    await goOffline();
+    act(() => ctxRetryDeal());
+    expect(mocks.retryPrivateFirestoreSession).not.toHaveBeenCalled();
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+  });
+
+  it('a healthy manual re-deal retains its private incarnation', async () => {
+    mount();
+    await coldBoot(RETURNING_USER);
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1));
+    act(() => ctxRetryDeal());
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledTimes(2));
+    expect(mocks.retryPrivateFirestoreSession).not.toHaveBeenCalled();
+  });
+
+  it('an online connection Retry restarts an exhausted bridge before authoritative bootstrap', async () => {
+    let exhausted = true;
+    mocks.ensureUserProfile.mockImplementation(async () => {
+      if (exhausted) throw Object.assign(new Error('Private session unavailable.'), { code: 'unavailable' });
+    });
+    mocks.retryPrivateFirestoreSession.mockImplementation(() => { exhausted = false; });
+    mount();
+    await coldBoot(RETURNING_USER);
+    await waitFor(() => expect(dealErrorShown()).toBe(true));
+    expect(mocks.joinAndDeal).not.toHaveBeenCalled();
+    act(() => ctxRetryDeal());
+    await waitFor(() => expect(mocks.retryPrivateFirestoreSession).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mocks.joinAndDeal).toHaveBeenCalledTimes(1));
+    expect(dealErrorShown()).toBe(false);
   });
 });

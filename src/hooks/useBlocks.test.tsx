@@ -27,7 +27,7 @@ const H = vi.hoisted(() => ({
   repaired: [] as string[],
   ownListings: 0,
   ownTargets: [] as string[] | Error,
-  blockCommits: [] as Array<() => Promise<void>>,
+  blockCommits: [] as Array<() => Promise<void>>, retryPrivate: vi.fn(),
 }));
 
 vi.mock('../firebase', () => ({
@@ -44,7 +44,7 @@ vi.mock('../privateFirestore', () => {
     const assertCurrent = () => { if (!db || uid !== H.session.uid || generation !== H.session.generation || (!allowRecovery && H.session.recoveryRequired)) throw new Error('Private session expired.'); };
     return { uid, db, assertCurrent, guard: async <T,>(op: () => Promise<T>) => { assertCurrent(); const value = await op(); assertCurrent(); return value; } };
   };
-  return { capturePrivateFirestore: capture, awaitPrivateFirestore: async (uid: string) => { const lease = capture(); if (lease.uid !== uid) throw new Error('Private account changed.'); lease.assertCurrent(); return lease; } };
+  return { retryPrivateFirestoreSession: H.retryPrivate, capturePrivateFirestore: capture, awaitPrivateFirestore: async (uid: string) => { const lease = capture(); if (lease.uid !== uid) throw new Error('Private account changed.'); lease.assertCurrent(); return lease; } };
 });
 vi.mock('firebase/firestore', () => ({
   collection: (_db: unknown, ...segments: string[]) => ({ database: _db, kind: 'collection', path: segments.join('/'), withConverter() { return this; } }),
@@ -712,6 +712,17 @@ describe('useHiddenUidsSubscription', () => {
     view.rerender();
     expect(view.result.current).toEqual({ hidden: new Set(), ready: false });
     expect(error).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('private bridge failure visibility', () => {
+  it('withholds failed confirmation with an explicit retry instead of loading forever', () => {
+    H.session = { ...H.session, uid: null, db: null, failed: true };
+    const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+    expect(view.result.current).toMatchObject({ hidden: new Set(), ready: false, failed: true });
+    act(() => view.result.current.retry!());
+    expect(H.retryPrivate).toHaveBeenCalledOnce();
+    expect(H.subscriptions).toHaveLength(0);
   });
 });
 

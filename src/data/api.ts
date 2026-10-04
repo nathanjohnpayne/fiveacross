@@ -85,6 +85,10 @@ async function ownProfileLease(uid: string) {
   return lease;
 }
 
+// Only ordering metadata in this process: each named memory database belongs to
+// one private Auth incarnation. No profile, stamp or extra witness is persisted.
+const attestationWitnessRevision = new WeakMap<Firestore, object>();
+
 async function rememberAttestation(uid: string, attested: boolean, assertCurrent: () => void): Promise<void> {
   try { await recordOfflineAttestation(firebaseConfig.projectId, uid, attested, assertCurrent); } catch {
     // Failed storage writes retire a revoked witness in this process, but cannot
@@ -324,6 +328,9 @@ export async function attestAdult(u: User, now: number = Date.now()): Promise<vo
     if (typeof existing === 'number') return; // keep the FIRST attestation, never overwrite
     tx.set(ref, { attestedAdultAt: now }, { merge: true });
   }));
+  // A completed attest is newer than a server read already in flight, even if
+  // that read returns its earlier absence after this boolean is persisted.
+  attestationWitnessRevision.set(lease.db, {});
   await lease.guard(() => rememberAttestation(u.uid, true, lease.assertCurrent));
 }
 
@@ -375,16 +382,27 @@ export async function readAdultAttestationFromCache(uid: string): Promise<number
  * REJECTS when the server cannot be reached — so AuthContext treats a thrown read
  * as "authority NOT established" (no `attestedAuthoritative`, no deal; fall to the
  * deferred/offline path), and only a server-returned stamp (or a same-session
- * optimistic attest) authorizes the deal. The provisional offline RENDER still uses
+ * committed attest) authorizes the deal. The provisional offline RENDER still uses
  * the cache-first `readAdultAttestationFromCache`; only the deal-authority gate is
- * server-only. A definitive server absence removes the render witness; a
+ * server-only. A definitive server absence removes the render witness when
+ * this is the latest-started read in its private incarnation and no attest has
+ * committed since. Superseded results still return their actual server value
+ * but cannot change the witness; a later absence still revokes. A
  * confirmed stamp records only its boolean, never this timestamp/profile.
  */
 export async function readAdultAttestationFromServer(uid: string): Promise<number | null> {
   const lease = await ownProfileLease(uid);
+  const readRevision = {};
+  attestationWitnessRevision.set(lease.db, readRevision);
   const snap = await lease.guard(() => getDocFromServer(rawUser(uid, lease.db)));
   const v = snap.exists() ? (snap.data() as Partial<UserDoc>).attestedAdultAt : undefined;
-  await lease.guard(() => rememberAttestation(uid, typeof v === 'number', lease.assertCurrent));
+  // Each result remains server authority for its caller. Only the latest-started
+  // read or committed attest may update the offline render witness: an older
+  // positive cannot undo a newer absence, nor can a pre-commit absence undo an
+  // attest. Web Locks serialize writes already dispatched before a newer operation.
+  if (attestationWitnessRevision.get(lease.db) === readRevision) {
+    await lease.guard(() => rememberAttestation(uid, typeof v === 'number', lease.assertCurrent));
+  }
   return typeof v === 'number' ? v : null;
 }
 
@@ -650,8 +668,9 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
   // only when it is a deliberate custom avatar (customPhoto) — otherwise the
   // profile photo is just a stale copy of the Google one, so the live auth
   // value wins. One extra read, join-path only (returning Players early-return
-  // above), fetched alongside the pool; best-effort — a missing or unreadable
-  // profile falls back to the auth values rather than blocking the deal.
+  // above), fetched alongside the pool after acquiring a current private lease.
+  // Missing/unreadable saved fields fall back to Auth only while that lease
+  // stays current; bridge failure or retirement still refuses the deal.
   const [profileSnap, snap] = await Promise.all([
     lease.guard(() => getDoc(rawUser(u.uid, lease.db))).catch(() => { lease.assertCurrent(); return null; }),
     lease.guard(() => getDocs(query(rawItems(eventId), where('status', '==', 'active')))),

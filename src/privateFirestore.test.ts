@@ -9,7 +9,7 @@ const H = vi.hoisted(() => ({
   listeners: new Set<() => void>(),
   factory: vi.fn(), captures: vi.fn(), getFunctions: vi.fn(), getStorage: vi.fn(),
   connectFunctions: vi.fn(), connectStorage: vi.fn(),
-  refreshRecovery: vi.fn(), refreshConnection: vi.fn(),
+  refreshRecovery: vi.fn(), refreshConnection: vi.fn(), retry: vi.fn(),
 }));
 vi.mock('./firebase', () => ({
   auth: H.primary, appCheck: null, firebaseConfig: { projectId: 'demo-private' },
@@ -24,7 +24,7 @@ vi.mock('./auth/privateFirestoreSession', () => ({
     return {
       getSnapshot: () => H.snapshot,
       subscribe: (listener: () => void) => { H.listeners.add(listener); return () => H.listeners.delete(listener); },
-      refreshRecovery: H.refreshRecovery, refreshConnection: H.refreshConnection,
+      refreshRecovery: H.refreshRecovery, refreshConnection: H.refreshConnection, retry: H.retry,
       capture: (allowRecovery: boolean) => {
         H.captures(allowRecovery);
         const snapshot = H.snapshot;
@@ -128,11 +128,31 @@ describe('captured private service transport', () => {
   it('failure during an existing readiness wait immediately rejects and removes its timer', async () => {
     H.snapshot = { ...H.snapshot, db: null };
     const wrapper = await import('./privateFirestore'); const waiting = wrapper.awaitPrivateFirestore('alice');
-    const rejection = expect(waiting).rejects.toThrow(/changed/);
+    const rejection = expect(waiting).rejects.toMatchObject({ code: 'unavailable' });
     H.snapshot = { ...H.snapshot, uid: null, failed: true };
     [...H.listeners].forEach((listener) => listener()); await rejection;
     expect(H.listeners.size).toBe(0); expect(vi.getTimerCount()).toBe(0);
     expect(H.getFunctions).not.toHaveBeenCalled(); expect(H.getStorage).not.toHaveBeenCalled();
+  });
+
+  it('failed readiness is transient and explicit retry starts one new episode', async () => {
+    H.snapshot = { ...H.snapshot, uid: null, db: null, failed: true };
+    const wrapper = await import('./privateFirestore');
+    await expect(wrapper.awaitPrivateFirestore('alice')).rejects.toMatchObject({ code: 'unavailable' });
+    wrapper.retryPrivateFirestoreSession();
+    expect(H.retry).toHaveBeenCalledOnce();
+    expect(H.getFunctions).not.toHaveBeenCalled();
+  });
+
+  it('timed-out readiness is transient and keeps the captured actor fence', async () => {
+    H.snapshot = { ...H.snapshot, db: null };
+    const wrapper = await import('./privateFirestore');
+    const waiting = wrapper.awaitPrivateFirestore('alice');
+    const rejected = expect(waiting).rejects.toMatchObject({ code: 'unavailable' });
+    await vi.advanceTimersByTimeAsync(5000); await rejected;
+    H.primary.currentUser = { uid: 'bob' };
+    await expect(wrapper.awaitPrivateFirestore('alice')).rejects.toThrow(/changed/);
+    expect(H.retry).not.toHaveBeenCalled();
   });
 
   it('a changed actor during bootstrap retires the wait without a new-account service lookup', async () => {

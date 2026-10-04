@@ -226,7 +226,7 @@ function TallySheet({
   onClose: () => void;
 }) {
   const { markers, loading } = useTally(itemId);
-  const { ready: blockSetReady } = useHiddenUids();
+  const { ready: blockSetReady, failed: blockSetFailed, retry: retryBlocks } = useHiddenUids();
   // `meUid` is the signed-in viewer — pass it so the ban own-content exception holds
   // in the sheet too (#122 round 2): a banned viewer still sees Doubts against
   // themselves, while Doubts against a banned OTHER marker stay hidden.
@@ -302,6 +302,8 @@ function TallySheet({
         )}
         {!blockSetReady && !navigator.onLine ? (
           <p className="muted tally-empty" role="status">Reconnect to see the Tally.</p>
+        ) : !blockSetReady && blockSetFailed ? (
+          <p className="muted tally-empty" role="status">Tally is temporarily unavailable. <button type="button" onClick={retryBlocks}>Retry Tally</button></p>
         ) : loading && markers.length === 0 ? (
           <p className="muted tally-empty">Loading…</p>
         ) : markers.length === 0 ? (
@@ -877,7 +879,7 @@ export default function Board() {
   // Reshuffle is the one write that must not queue offline (see `reshuffleBoard`),
   // so it is the one control that has to know about connectivity.
   const online = useOnline();
-  const { ready: blockSetReady } = useHiddenUids();
+  const { ready: blockSetReady, failed: blockSetFailed, retry: retryBlocks } = useHiddenUids();
   // Whether the coach overlay is already behind us, so the launch announcement
   // can queue behind it (see the LaunchIntro mount). Seeded from the stored flag
   // at mount and flipped by CoachOverlay's own dismiss — a plain render-time read
@@ -2639,6 +2641,9 @@ export default function Board() {
       )}
       {!blockSetReady && !online && (
         <div className="center muted" role="status">Reconnect to see the Tally.</div>
+      )}
+      {!blockSetReady && online && blockSetFailed && (
+        <div className="center muted" role="status">Tally is temporarily unavailable. <button type="button" onClick={retryBlocks}>Retry Tally</button></div>
       )}
       {/* First-open coach overlay (specs/d15-coach-overlay.md, #214): mounted
           whenever Board has cells — whichever Board is the Player's first

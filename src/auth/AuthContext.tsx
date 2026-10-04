@@ -19,6 +19,7 @@ import {
   type User,
 } from 'firebase/auth';
 import { auth, EVENT_ID, googleProvider } from '../firebase';
+import { retryPrivateFirestoreSession } from '../privateFirestore';
 import {
   attestAdult,
   ensureUserProfile,
@@ -2136,6 +2137,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // effect) only once that confirms.
   const retryDeal = useCallback(() => {
     if (!user) return;
+    // An explicit online connection Retry starts a fresh bounded private bridge
+    // episode before bootstrap/deal. It does not preserve an expired actor lease
+    // or restart the bridge for offline, pool or permanent-authority failures.
+    if (isOnline() && dealErrorReason === 'connection') retryPrivateFirestoreSession();
     if (!isOnline()) {
       // OFFLINE Retry → the CACHE-FIRST path, NEVER the transaction bootstrap
       // (Codex #117 round 4, finding A): retryBootstrap awaits ensureUserProfile —
@@ -2160,7 +2165,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Online but not yet authoritative → re-run the full transaction bootstrap.
       void retryBootstrap(user, eventId);
     }
-  }, [user, mayDeal, runDeal, retryBootstrap, bootstrapUser, eventId, beginAdmissionIfNeeded]);
+  }, [user, mayDeal, runDeal, retryBootstrap, bootstrapUser, eventId, beginAdmissionIfNeeded, dealErrorReason]);
 
   // Persist the current User's honor-system 18+ self-attestation (ADR 0001) and
   // lift the re-prompt gate at once. Optimistic: the local flag flips before the

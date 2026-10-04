@@ -215,6 +215,22 @@ describe('bounded private bridge retries', () => {
     expect(H.apps).toHaveLength(5);
   });
 
+  it('explicit Retry recovers an exhausted bridge with a fresh credential incarnation', async () => {
+    const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
+    const old = sessions.capture(); const priorAuth = sessions.getSnapshot().authGeneration;
+    H.failure = 'auth'; H.idToken!(H.primary.currentUser); await settle();
+    await vi.advanceTimersByTimeAsync(3_250); await settle();
+    expect(sessions.getSnapshot().failed).toBe(true);
+    const attempts = H.apps.length; H.failure = null; sessions.retry(); await settle();
+    expect(H.apps).toHaveLength(attempts + 1);
+    expect(sessions.capture().uid).toBe('alice');
+    expect(sessions.getSnapshot().authGeneration).toBeGreaterThan(priorAuth);
+    expect(() => old.assertCurrent()).toThrow(/expired/);
+    try { old.assertCurrent(); } catch (error) { expect(error).toMatchObject({ code: 'unavailable' }); }
+    H.primary.currentUser = { uid: 'bob', token: 'changed' };
+    try { old.assertCurrent(); } catch (error) { expect(error).not.toHaveProperty('code'); }
+  });
+
   it.each(['account', 'offline', 'stop'] as const)('cancels a pending retry on %s retirement', async (reason) => {
     H.failure = 'auth'; const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
     H.failure = null;
