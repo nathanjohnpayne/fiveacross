@@ -28,6 +28,17 @@ describe('Notice token-bound attribution (specs/admin-messages.md, #1426)', () =
     await postNotice(args);
     expect(H.setDoc).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ displayName: name }));
   });
+  it('accepts 50 astral characters at the measured 100 UTF-16-unit Rules boundary', async () => {
+    const name = '😀'.repeat(50);
+    H.auth.currentUser = user(name);
+    await postNotice(args);
+    expect(H.setDoc).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ displayName: name }));
+  });
+  it('refuses 51 astral characters above the measured Rules boundary before writing', async () => {
+    H.auth.currentUser = user('😀'.repeat(51));
+    await expect(postNotice(args)).rejects.toThrow();
+    expect(H.setDoc).not.toHaveBeenCalled();
+  });
   it.each([undefined, null, 42, '', 'x'.repeat(101)])('refuses unusable token name %j before writing', async name => {
     H.auth.currentUser = user(name);
     await expect(postNotice(args)).rejects.toThrow();

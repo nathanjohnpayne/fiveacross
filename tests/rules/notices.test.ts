@@ -96,6 +96,14 @@ describe('firestore.rules — Notices (specs/admin-messages.md)', () => {
     })));
   });
 
+  it.each([[25, true], [26, true], [50, true], [51, false], [60, false], [100, false]])('measures actual Rules astral name boundary (%i emoji, allowed=%s)', async (count, allowed) => {
+    const name = '😀'.repeat(Number(count));
+    const admin = testEnv.authenticatedContext(ADMIN, { name }).firestore();
+    const write = setDoc(doc(admin, noticePath('unicode-name')), notice(ADMIN, { displayName: name }));
+    if (allowed) await assertSucceeds(write);
+    else await assertFails(write);
+  });
+
   it('accepts the exact bounded token label and keeps attribution fixed after an account rename', async () => {
     const oldName = 'N'.repeat(100);
     const first = testEnv.authenticatedContext(ADMIN, { name: oldName }).firestore();

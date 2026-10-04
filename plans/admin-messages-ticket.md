@@ -27,7 +27,7 @@ events/{eventId}/notices/{noticeId}
   pinned: boolean
 ```
 
-`firestore.rules`: read for any signed-in user; create/update/delete only when `request.auth.uid in events/{eventId}.admins` (the existing `isAdmin` pattern). Validate title/body types + length caps and `pinned: bool` on create. No report counter—Notices are admin-authored.
+`firestore.rules`: read requires `admitted(eventId)`; create/update/delete require `isAdmittedAdmin(eventId)`. Validate title/body types + length caps and `pinned: bool` on create. No report counter—Notices are admin-authored.
 
 ## First Notice (seed content—post via the new surface once it ships)
 
@@ -61,7 +61,7 @@ events/{eventId}/notices/{noticeId}
 
 ## Acceptance criteria
 
-- **Given** an admin, **when** they post the seed Notice with pin on, **then** every signed-in Player sees it at the top of the Feed and once as a Card-tab banner, attributed and day-stamped.
+- **Given** an admin, **when** they post the seed Notice with pin on, **then** every Event-admitted Player sees it at the top of the Feed and once as a Card-tab banner, attributed and day-stamped.
 - **Given** a Player taps ✕, **then** the banner never returns on that device, and the Feed copy remains.
 - **Given** unpin, **then** the Notice drops to its `createdAt` position in the Feed; **given** delete, **then** it disappears from Feed, banner, and history.
 - **Given** a non-admin, **then** every Notice write is rejected server-side.
