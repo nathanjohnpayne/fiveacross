@@ -98,8 +98,11 @@ describe('Vercel Firebase Auth proxy', () => {
     'gaycruisebingo.vercel.app.evil.example',
   ])('gives %s no production auth proxy', (host) => {
     const authRules = rewrites.filter((r) => r.source === '/__/auth/:path*');
+    expect(authRules).toHaveLength(3);
     expect(authRules.every((r) => r.has?.length === 1 && r.has[0].type === 'host' &&
-      typeof r.has[0].value === 'object' && r.has[0].value.eq !== host)).toBe(true);
+      typeof r.has[0].value === 'object' && r.has[0].value !== null &&
+      Object.keys(r.has[0].value).length === 1 &&
+      typeof r.has[0].value.eq === 'string' && r.has[0].value.eq !== host)).toBe(true);
   });
 
   it('serves client-side routes without shadowing the auth proxy', () => {
