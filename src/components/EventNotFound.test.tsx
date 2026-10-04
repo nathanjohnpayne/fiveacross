@@ -7,7 +7,7 @@ import EventNotFound from './EventNotFound';
 // yet" and read as a regression, because the copy named the state without
 // naming the supported path out of it.
 describe('EventNotFound — auth-unconfigured on a preview host (#585)', () => {
-  it('points a developer at the stable preview alias on a *.vercel.app host', () => {
+  it('explains the isolated test configuration blocker on a *.vercel.app host', () => {
     render(
       <EventNotFound
         hostname="gaycruisebingo-iy4xn21x8-nathanjohnpaynes-projects.vercel.app"
@@ -15,11 +15,9 @@ describe('EventNotFound — auth-unconfigured on a preview host (#585)', () => {
       />,
     );
     const hint = screen.getByText(/Developer note/i);
-    // The alias itself, not just a pointer at the docs: this screen is usually
-    // read off a phone screenshot (Codex P3 on #585).
-    expect(hint.textContent).toContain(
-      'gaycruisebingo-git-preview-nathanjohnpaynes-projects.vercel.app',
-    );
+    expect(hint.textContent).toContain('isolated test Firebase Auth/data');
+    expect(hint.textContent).toContain('no production sign-in trust');
+    expect(hint.textContent).not.toContain('git push');
     expect(hint.textContent).toMatch(/docs\/app\/preview-deploys\.md/);
     // The player-facing copy is unchanged; the hint is additive.
     expect(screen.getByRole('heading').textContent).toBe('This address is not open yet');
@@ -32,7 +30,7 @@ describe('EventNotFound — auth-unconfigured on a preview host (#585)', () => {
   });
 
   it('does not show the hint for the other not-found reasons on a preview host', () => {
-    // Only the auth gate has a "use the stable alias" answer. A missing or
+    // Only the auth gate has an isolated-configuration explanation. A missing or
     // finished Event on a preview host is a different problem entirely.
     for (const reason of ['missing', 'inactive', 'unreachable'] as const) {
       const { unmount } = render(

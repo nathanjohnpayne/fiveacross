@@ -1061,7 +1061,7 @@ describe('firestore.rules — Event membership enforcement (#804)', () => {
   });
 
   it('applies Decision D-A to privileged Firestore writes during the transition', async () => {
-    const database = authed(ADMIN_WITHOUT_MEMBERSHIP);
+    const database = testEnv.authenticatedContext(ADMIN_WITHOUT_MEMBERSHIP, { name: 'Transitional Admin' }).firestore();
     await assertSucceeds(
       setDoc(doc(database, `${eventPath(EVENT_A)}/tally/admin-aggregate`), {
         itemId: 'admin-aggregate',
@@ -1071,6 +1071,7 @@ describe('firestore.rules — Event membership enforcement (#804)', () => {
     await assertSucceeds(
       setDoc(doc(database, `${eventPath(EVENT_A)}/notices/transitional`), {
         uid: ADMIN_WITHOUT_MEMBERSHIP,
+        displayName: 'Transitional Admin',
         title: 'Transition',
         body: 'D-A remains live during backfill.',
         pinned: false,

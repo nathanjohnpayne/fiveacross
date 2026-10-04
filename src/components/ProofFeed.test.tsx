@@ -763,6 +763,9 @@ describe('ProofFeed — a corrected Notice is marked "edited" (#455)', () => {
 
     expect(screen.getByText('Final stretch 🏁')).toBeInTheDocument();
     expect(screen.queryByText(/edited/)).toBeNull();
+    // #1426 keeps stable UID attribution in Admin history, with label-only Feed.
+    expect(screen.getByText(/Nathan/)).toBeInTheDocument();
+    expect(screen.queryByText(/admin-uid/)).toBeNull();
   });
 });
 
