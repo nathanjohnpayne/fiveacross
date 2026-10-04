@@ -60,30 +60,12 @@ export default function EventNotFound({
                 ? 'The game is here, but sign-in has not been finished for this address. Whoever set the event up needs to correct one setting—this is not something you can fix from your phone.'
                 : 'Double-check the link you were sent. Addresses are case-insensitive but otherwise exact.';
 
-  // #585: on a `*.vercel.app` host this screen has a different audience. Every
-  // registered Vercel host — `gaycruisebingo.vercel.app`, the stable preview
-  // alias, the Five Across mirror — is in `FIRST_PARTY_AUTH_HOSTS`, so a
-  // `.vercel.app` origin that reaches `auth-unconfigured` is by construction a
-  // per-deployment preview host, and the person looking at it is a developer
-  // who pushed a branch. Naming the supported path here is what stops the
-  // screenshot round trip that filed this ticket. Suffix match, not the exact
-  // matching the auth allowlist demands: this only chooses which sentence to
-  // print, and choosing it for a lookalike host costs nothing.
-  //
-  // The alias is spelled out rather than left to the doc reference (Codex P3 on
-  // #585): this screen is most often met as a phone screenshot, and a URL you
-  // can read off the image is the difference between acting on it and asking
-  // about it. Duplicating the literal costs a stale string if the alias ever
-  // changes — cheap, and `src/auth-domain.ts` is where that change would have
-  // to start anyway.
-    // The #549 arms carry their own developer note for the same reason the
-  // preview one exists: this screen is most often met as a phone screenshot, and
-  // a note you can read off the image is the difference between acting on it and
-  // asking about it. Each names the ONE setting at fault, because that is what
-  // distinguishes them from `auth-unconfigured` in the first place.
+  // Preview hosts have no production Auth trust (#1420). This developer note
+  // names the isolated-project blocker; it never suggests registering a preview
+  // on production or force-pushing code to gain production sign-in.
   const previewHint =
     reason === 'auth-unconfigured' && hostname.endsWith('.vercel.app')
-      ? 'Developer note: per-deployment preview hosts can never sign in—Firebase and Google both match hostnames exactly, and neither accepts a wildcard. Push the branch with `git push --force origin HEAD:preview` and reopen it on the stable alias, gaycruisebingo-git-preview-nathanjohnpaynes-projects.vercel.app (docs/app/preview-deploys.md).'
+      ? 'Developer note: preview hosts have no production sign-in trust. Previews need an approved isolated test Firebase Auth/data configuration before they can be enabled (docs/app/preview-deploys.md, #1420).'
       : reason === 'auth-same-origin-unavailable'
         ? 'Developer note: this build sets VITE_AUTH_MODE=same_origin, which only works where the OAuth helper is already same-origin—this hostname is not in FIRST_PARTY_AUTH_HOSTS (src/auth-domain.ts) and the build does not bake VITE_FIREBASE_AUTH_DOMAIN equal to it. Clear VITE_AUTH_MODE to use the handoff, or register this host (ADR 0010).'
         : reason === 'auth-mode-invalid'

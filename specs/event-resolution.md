@@ -73,7 +73,7 @@ Implements the consuming half of [ADR 0009](../docs/adr/0009-event-resolved-from
 - **Given** an Event that resolves on an origin where `isSignInReachableOnHost` is false—the resolved `authDomain` is a different host, the origin has no documented handoff, and it is not a local/loopback origin—**when** the app boots, **then** it renders the `auth-unconfigured` state rather than mounting sign-in.
 - **Given** the same build served on `gaycruisebingo.web.app` or on a local/emulator origin (`localhost`, `127.0.0.1`), **when** the app boots, **then** it mounts: web.app so the `firebaseapp.com` handoff can run before any auth transaction, local origins so the dev/emulator popup path stays reachable.
 - **Given** an Edition-less resolution (the env short-circuit), **when** it is installed, **then** the Edition seeded from `VITE_EDITION` is left intact rather than reset to the default.
-- **Given** the `auth-unconfigured` state on a `*.vercel.app` hostname—by construction a per-deployment preview host, since every registered Vercel host is in `FIRST_PARTY_AUTH_HOSTS`—**when** it renders, **then** it adds a developer note naming the stable preview alias and `docs/app/preview-deploys.md`, leaving the player-facing copy unchanged; no other hostname and no other reason shows it.
+- **Given** the `auth-unconfigured` state on a `*.vercel.app` hostname **when** it renders, **then** it adds a developer note explaining that previews have no production Auth trust and require an approved isolated test Firebase Auth/data configuration (#1420), pointing to `docs/app/preview-deploys.md` and leaving player copy unchanged; no other hostname or reason shows that note.
 
 ## Test coverage
 

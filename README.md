@@ -106,7 +106,7 @@ The target files are local and ignored because they contain the client configura
 | [`BRAND.md`](BRAND.md) | Brand, Editions, Namespaces, Themes, and the 18+ posture |
 | [`docs/app/README.md`](docs/app/README.md) | App guide + deploy / seed / custom-domain runbook |
 | [`docs/app/phase-1-deploy.md`](docs/app/phase-1-deploy.md) | Backend deploy (Functions, App Check) |
-| [`docs/app/preview-deploys.md`](docs/app/preview-deploys.md) | Previewing a branch on a real device, with working Google sign-in |
+| [`docs/app/preview-deploys.md`](docs/app/preview-deploys.md) | Isolated test-preview prerequisites, current build refusal, and production mirror Auth routing |
 | [`docs/adr/`](docs/adr/) · [`docs/architecture/`](docs/architecture/) | Architecture decision records |
 | [`specs/`](specs/) | Per-feature contracts—this repo's canonical spec source |
 | [`plans/daily-cards-wireframes.html`](plans/daily-cards-wireframes.html) ([rendered](https://raw.githack.com/nathanjohnpayne/fiveacross/main/plans/daily-cards-wireframes.html)) | Tri-brand wireframes of the player, admin, share and email surfaces; prose source of truth is [`plans/daily-cards-spec.md`](plans/daily-cards-spec.md) |
