@@ -78,7 +78,7 @@
     "dotenv": "^18.0.3",
     "esbuild": "0.28.2",
     "fake-indexeddb": "^6.2.5",
-    "firebase-admin": "^12.7.0",
+    "firebase-admin": "^13.10.0",
     "firebase-tools": "^15.31.0",
     "google-auth-library": "^11.1.0",
     "jsdom": "^25.0.1",
@@ -91,6 +91,7 @@
   "overrides": {
     "uuid": "^11.1.1",
     "@opentelemetry/core": "^2.8.0",
-    "@hono/node-server": "^2.0.5"
+    "@hono/node-server": "^2.0.5",
+    "@grpc/grpc-js": "1.14.5"
   }
 }
