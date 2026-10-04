@@ -67,7 +67,7 @@ One update is not early enough, because the hide is the **second** write. `moder
 
 So the hold is recorded **atomically with the verdict that earns it**. `visionVerdictWrite` (`functions/src/visionHide.ts`) is the single payload both producer paths write — `writeVisionVerdict`'s existing-Proof arm and `applyPendingVisionScan` — and it carries `safetyHide: true` whenever the verdict is one `AUTO_HIDE_VISION_FLAGS` covers. There is no longer an interval in which the verdict stands and the server's record of it does not, and a stale-client publish in that same instant now leaves `'active'` **with** the marker, which is exactly the state the re-hide arm claims.
 
-Allowlisted verdicts only, which is the same ADR 0004 line drawn one write earlier: a `racy` or otherwise non-allowlisted verdict is flagged for admins, marker-less, and hidden by nobody, unchanged. The producer still decides what is worth *flagging*; the allowlist, owned by this module, still decides what is worth *holding* and *hiding*.
+Allowlisted verdicts only, which is the same ADR 0004 line drawn one write earlier: a non-allowlisted verdict would be flagged for admins, marker-less, and hidden by nobody, unchanged (today's producer emits only `violence`/`extreme`, so none reaches this path; the tests use `racy` as a stand-in). The producer still decides what is worth *flagging*; the allowlist, owned by this module, still decides what is worth *holding* and *hiding*.
 
 The hide arm keeps writing the marker beside the status rather than moving the status alone. It is normally a re-assertion of a `true` already there, but it is what covers a Proof flagged by a **pre-#1143 Functions build**: that doc carries the verdict and no marker, and re-asserting keeps its hide one update instead of a hide plus a backfill.
 
@@ -196,7 +196,7 @@ Restore keeps its exact label in every state — it is the same `restoreProof` w
 
 - **Given** a Vision-hidden Proof **then** the queue row reads `hidden · AI screen: <verdict>` and offers Restore, whose title names the verdict; **given** a Proof still awaiting its hide, or one an admin restored **then** the row reads `AI screen: <verdict>` and offers Hide. (Tests: `src/components/admin/cloud-vision-moderation.test.tsx`.)
 - **Given** an unsuppressed report-count auto-hidden Proof with no verdict **then** the row shows `auto-hidden` and `Clear reports` and NO AI pill; **given** an unsuppressed Proof that qualifies for both **then** it shows both pills and both affordances. (Tests: the "keeps the report-count hide DISTINCT" and "shows BOTH mechanisms" cases.)
-- **Given** a Proof carrying a non-auto-hide verdict such as `racy` **then** it is queued for review and shown with its reason, and is never marked hidden — nothing auto-hides for raciness. (Tests: the raciness cases in the component and hook suites.)
+- **Given** a Proof carrying a non-auto-hide verdict such as `racy` (a hypothetical or future verdict: today's producer never flags raciness) **then** it is queued for review and shown with its reason, and is never marked hidden — nothing auto-hides for raciness. (Tests: the raciness cases in the component and hook suites.)
 - **Given** a Vision-flagged Proof at any lifecycle stage — flagged, hidden, or restored — **then** `useReportedProofs` queues it, while an active, unreported, never-screened Proof is not queued and the three pre-existing arms are unchanged. (Tests: `src/hooks/cloud-vision-moderation.test.tsx`.)
 
 ### Restore returns the Proof to the state it came from

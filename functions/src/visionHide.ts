@@ -229,8 +229,9 @@ export const SAFETY_HIDE_MARKER = 'safetyHide' as const;
  *
  * ALLOWLISTED VERDICTS ONLY, and that is the same ADR 0004 line drawn one write
  * earlier. The marker means "a safety hide stands", and nothing racy ever earns
- * one: a `racy` or otherwise non-allowlisted verdict is flagged for admins,
- * marker-less, and hidden by nobody, exactly as before. The producer/consumer
+ * one: a non-allowlisted verdict would be flagged for admins, marker-less, and
+ * hidden by nobody, exactly as before (today's producer emits only
+ * `violence`/`extreme`, so none reaches this path; tests use `racy` as one). The producer/consumer
  * split is intact — the producer still decides what is worth FLAGGING, and
  * `AUTO_HIDE_VISION_FLAGS`, owned here, still decides what is worth HOLDING.
  */

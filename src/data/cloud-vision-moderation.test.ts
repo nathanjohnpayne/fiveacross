@@ -328,8 +328,8 @@ describe('confirmClaim — a Vision safety hide survives the claim confirm (spec
   it('publishes a still-pending Proof whose verdict is outside the allowlist — raciness earns no marker', async () => {
     // ADR 0004 in the confirm path: a racy verdict on a still-'pending' Proof is a
     // reason on the queue row, never a hold, so nothing marks it and the claim's
-    // photo publishes. (A racy Proof still 'flagged' is not pending, so a Confirm
-    // leaves it unpublished on status alone.)
+    // photo publishes. (The producer never emits 'racy'; it stands in here for any
+    // non-allowlisted verdict.)
     liveProof = { uid: 'u1', status: 'pending', visionFlag: 'racy' };
 
     await confirmClaim(pendingClaim(), 'admin-1');

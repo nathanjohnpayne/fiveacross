@@ -679,9 +679,9 @@ describe('applyPendingVisionScan — the parked verdict lands when the Proof app
     const { db, store } = fakeDb({ [PROOF]: created(), [SCAN]: { visionFlag: 'racy', scannedAt: 5, storagePath: MEDIA } });
     expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(true);
     expect(store[PROOF]).toMatchObject({ status: 'flagged', visionFlag: 'racy' });
-    // …and marker-less, because raciness never earns the marker or an automatic
-    // hide (ADR 0004); a current Confirm leaves it unpublished only because it is
-    // not 'pending'.
+    // …and marker-less, because a non-allowlisted verdict never earns the marker
+    // or an automatic hide (ADR 0004). ('racy' is a stand-in: the producer emits
+    // only violence/extreme.)
     expect(store[PROOF]).not.toHaveProperty(SAFETY_HIDE_MARKER);
     expect(visionHideAction(store[PROOF] as VisionFlaggedDoc)).toBe(null);
   });

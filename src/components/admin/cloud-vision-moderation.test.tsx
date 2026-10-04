@@ -248,8 +248,8 @@ describe('Review queue — the Vision treatment (specs/cloud-vision-moderation.m
 
   it('shows the reason WITHOUT the hidden marker while a flagged Proof is still awaiting its hide', () => {
     // The window between moderateProof's flag write and hideProofOnVisionFlag's
-    // hide — and the state a merely-racy verdict never leaves (raciness is
-    // flagged but never hidden, ADR 0004), so the row offers Hide, not Restore.
+    // hide, so the row offers Hide, not Restore. (A merely-racy verdict never
+    // reaches this state: the producer flags only violence/extreme, ADR 0004.)
     H.flagged = [proof('fl', 0, { displayName: 'Just Flagged', status: 'flagged', visionFlag: 'violence' })];
     renderQueue();
 
@@ -413,10 +413,9 @@ describe('Pending claims — a Vision-held photo is named on the row (specs/clou
 
   it('leaves an ACTIVE merely-racy Proof unannotated — raciness alone never earns the marker', () => {
     // ADR 0004 again, on the claim side: raciness never earns the marker, so an
-    // already-active racy Proof is not withheld and the row says nothing. (A racy
-    // Proof still 'flagged' is not published by a Confirm either, because Confirm
-    // publishes only a still-'pending' Proof; safetyHideStands' flagged arm drives
-    // the row annotation and the marker an admin Hide carries forward.)
+    // already-active racy Proof is not withheld and the row says nothing. (The
+    // producer never flags raciness — it emits only violence/extreme — so 'racy'
+    // here stands in for a non-allowlisted verdict.)
     adminConfirmedEvent();
     H.flagged = [proof('P', 0, { displayName: 'Racy Photo', status: 'active', visionFlag: 'racy' })];
     H.claims = [claim()];
