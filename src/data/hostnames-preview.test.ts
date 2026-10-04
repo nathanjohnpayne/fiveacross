@@ -196,6 +196,32 @@ describe('watchAdultContent — the live preview channel (the env-pinned product
     expect(activeEventPreview(), 'proven malformed mapping clears the card').toBeNull();
   });
 
+  // #1388 (Codex P2 on #1641): an open Event's host converted to a root marker.
+  // The marker names no Event, so it draws no card, but a PROVEN marker is a
+  // durable routing answer and replaces the Event's envelope — the same entry
+  // `resolveEvent`'s network path writes — so an offline next boot reads the
+  // marker rather than `unreachable`. A cache-served marker proves nothing.
+  it('caches a proven root marker in place of the Event envelope, and draws no card', () => {
+    const MARKER = { root: 'not-found', edition: 'vacay', pathNamespace: 'vacaybingo.com', adultContent: false };
+    applyResolvedEventPreview(PREVIEW);
+    watchAdultContent(HOST, 'bodega-bay-2026');
+    listener().next(snap(DOC));
+    expect(readCache(localStorage, HOST)?.doc).toMatchObject({ eventId: 'bodega-bay-2026' });
+
+    listener().next(snap(MARKER, true));
+    expect(readCache(localStorage, HOST)?.doc, 'a cache-served marker leaves the envelope').toMatchObject({
+      eventId: 'bodega-bay-2026',
+    });
+
+    listener().next(snap(MARKER));
+    expect(activeEventPreview(), 'a marker advertises no Event').toBeNull();
+    expect(readCache(localStorage, HOST)?.doc).toEqual({
+      root: 'not-found',
+      edition: 'vacay',
+      pathNamespace: 'vacaybingo.com',
+    });
+  });
+
   it('keeps the displayed card through a listener error', () => {
     applyResolvedEventPreview(PREVIEW);
     watchAdultContent(HOST);

@@ -381,9 +381,13 @@ export function watchAdultContent(
       // lower a proven adult state.
       // A root marker is never a servable mapping here: it names no Event, so
       // an open Event whose host converts to one reads it like a retired
-      // mapping (no card, cache dropped) and never as a doorway.
+      // mapping (no card) and never as a doorway. Its routing answer is still
+      // durable, though: a proven marker REPLACES the cached envelope below,
+      // exactly as `resolveEvent`'s network path caches one, so an offline
+      // next boot reads the marker rather than `unreachable`.
       const coerced = coerceRoutingDoc(data, hostname);
-      const mapping = coerced === null || isRootMarker(coerced) ? null : coerced;
+      const marker = coerced !== null && isRootMarker(coerced) ? coerced : null;
+      const mapping = coerced === null || marker !== null ? null : coerced;
       const servable = mapping !== null && isServable(mapping);
       // The watcher is a display/update channel, never an Event switch. It must
       // agree with the Event resolved before mount: an env-pinned bundle that
@@ -411,7 +415,8 @@ export function watchAdultContent(
       // Mirror resolveEvent's inactive/missing eviction. Without it, an
       // env-pinned next boot can read the old active envelope before the live
       // watcher has a chance to correct the card.
-      if (proven && !servable) dropCache(safeLocalStorage(), hostname);
+      if (proven && marker !== null) writeCache(safeLocalStorage(), hostname, marker);
+      else if (proven && !servable) dropCache(safeLocalStorage(), hostname);
       const adult = coerceAdultContent(data?.adultContent);
       if (!adult && !proven) return; // a cached `false` proves nothing
       setActiveAdultContent(adult, { proven });
