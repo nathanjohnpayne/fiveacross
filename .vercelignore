@@ -34,3 +34,14 @@
 !/vercel.json
 !/src
 !/public
+
+# One server-side module the client build imports (`src/data/hostnames.ts`,
+# #1655): the shared public-projection field list. Admit exactly that file —
+# `functions/` also holds the gitignored per-project `.env.*` files, so the
+# directory itself stays denied. Each parent is re-admitted and then emptied
+# again, because an ignored directory's children cannot be re-included.
+!/functions
+/functions/*
+!/functions/src
+/functions/src/*
+!/functions/src/publicHostnameFields.ts
