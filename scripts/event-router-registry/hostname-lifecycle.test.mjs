@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { Timestamp } from 'firebase/firestore';
 import { HostnameLifecycleRefusal, applyHostnameMutation } from './hostname-lifecycle.mjs';
 import { ROOT_HOSTS, cloneDocumentValue, deriveCanonicalProjection, projectionDigest } from './hostname-projection.mjs';
+// The application's own record builder, so the parity case below proves the
+// helper accepts exactly what the operator command will hand it (#1256).
+import { buildEventArchive } from '../../src/data/eventArchive.ts';
 
 const HOST = 'bodega-bay.fiveacross.app';
 const MIRROR = 'vacaybingo.vercel.app';
@@ -1163,6 +1166,46 @@ describe('archive', () => {
   // same Event but is not an admissible archive address yet (§ D7).
   const SECOND = 'bodega-bay-2026.fiveacross.app';
 
+  // The application flip this intent composes with (#1256): the quiesce
+  // `beginArchive` installed under generation 3, and the payload prepared
+  // under it. The helper runs as Admin, so the rules' flip arm never sees its
+  // write, and it asks that arm's questions itself.
+  const GENERATION = 3;
+  const ARCHIVED_AT = Date.parse('2026-09-20T11:59:00.000Z');
+  const ROW = {
+    uid: 'p1',
+    displayName: 'Pat',
+    bingoCount: 2,
+    squaresMarked: 14,
+    blackout: false,
+    firstBingoAt: 1_000,
+  };
+  const archiveRecord = (overrides = {}) => ({
+    eventName: 'Bodega Bay',
+    standings: [ROW],
+    playerCount: 1,
+    firstBingo: { uid: 'p1', displayName: 'Pat', at: 1_000 },
+    firstBingoRow: { ...ROW, rank: 1 },
+    dailyHonors: [],
+    freezeAt: null,
+    archivedAt: ARCHIVED_AT,
+    ...overrides,
+  });
+  const flipFor = (archivedUnder, overrides = {}) => ({
+    archivedAt: ARCHIVED_AT,
+    archivedUnder,
+    archive: archiveRecord(),
+    ...overrides,
+  });
+  const composedFlip = (generation = GENERATION) => ({ archiveToken: generation, flip: flipFor(generation) });
+  const quiescedEvent = (overrides = {}) => ({
+    status: 'active',
+    admins: ['nathan'],
+    archiving: true,
+    archiveToken: GENERATION,
+    ...overrides,
+  });
+
   const flagship = () => ({
     ...converged(HOST, '4', hostnameDocument()),
     ...converged(SECOND, '3', hostnameDocument({ canonicalHost: HOST, isCanonical: false, slug: 'bodega-bay-2026' })),
@@ -1184,12 +1227,13 @@ describe('archive', () => {
       // document names no Event, so this one MUST go.
       apexPath: true,
     }),
-    'events/bodega-bay-2026': { status: 'active', admins: ['nathan'] },
+    'events/bodega-bay-2026': quiescedEvent(),
   });
 
   const archiveInput = (overrides = {}) =>
     mutation({
       intent: 'archive',
+      ...composedFlip(),
       eventId: 'bodega-bay-2026',
       mappings: [HOST, SECOND, ALIAS],
       apexPathHost: HOST,
@@ -1227,7 +1271,19 @@ describe('archive', () => {
       edition: 'vacay',
       pathNamespace: 'vacaybingo.com',
     });
-    expect(docs.get('events/bodega-bay-2026').status).toBe('archived');
+    // The Event takes the application flip, not a bare status: all five fields
+    // in the same transaction as the routing moves, with the generation kept
+    // and every other field left as it was.
+    expect(docs.get('events/bodega-bay-2026')).toEqual({
+      admins: ['nathan'],
+      archiveToken: GENERATION,
+      status: 'archived',
+      archivedAt: ARCHIVED_AT,
+      archivedUnder: GENERATION,
+      archive: archiveRecord(),
+      archiving: false,
+    });
+    expect(plan.archivedUnder).toBe(GENERATION);
     // `apexPath` gates the client's apex-path eligibility and is deliberately
     // not copied to the edge.
     expect(docs.get(`routerReplicas/${HOST}`).desired).not.toHaveProperty('apexPath');
@@ -1318,7 +1374,7 @@ describe('archive', () => {
         slug: 'bodega-bay',
         pathNamespace,
       }),
-      'events/bodega-bay-2026': { status: 'active', admins: ['nathan'] },
+      'events/bodega-bay-2026': quiescedEvent(),
     });
     // A doorway conversion is a doorway go-live and carries the deployment
     // barrier (#1296); a not-found one refuses the record. The class refusal
@@ -1326,6 +1382,7 @@ describe('archive', () => {
     const input = (root) =>
       mutation({
         intent: 'archive',
+        ...composedFlip(),
         eventId: 'bodega-bay-2026',
         mappings: [HOST],
         apexPathHost: HOST,
@@ -1355,11 +1412,12 @@ describe('archive', () => {
     const doorwaySeed = (host, edition, pathNamespace) => ({
       ...converged(HOST, '4', hostnameDocument()),
       ...converged(host, '6', { eventId: 'bodega-bay-2026', edition, status: 'active', slug: 'bodega-bay', pathNamespace }),
-      'events/bodega-bay-2026': { status: 'active', admins: ['nathan'] },
+      'events/bodega-bay-2026': quiescedEvent(),
     });
     const doorwayArchive = (host, extra = {}) =>
       mutation({
         intent: 'archive',
+        ...composedFlip(),
         eventId: 'bodega-bay-2026',
         mappings: [HOST],
         apexPathHost: HOST,
@@ -1402,7 +1460,7 @@ describe('archive', () => {
       // An archive with no root conversion at all has no doorway either.
       const plain = store({
         ...converged(HOST, '4', hostnameDocument()),
-        'events/bodega-bay-2026': { status: 'active' },
+        'events/bodega-bay-2026': quiescedEvent(),
       });
       expect(
         await refusal(
@@ -1490,7 +1548,7 @@ describe('archive', () => {
   it('refuses a mapping that belongs to another Event and a missing Event document', async () => {
     expect(await refusal(archiveInput({ eventId: 'other-2026' }), store(flagship()).dependencies)).toBe('event-missing');
     const seed = flagship();
-    seed['events/other-2026'] = { status: 'active' };
+    seed['events/other-2026'] = quiescedEvent();
     expect(await refusal(archiveInput({ eventId: 'other-2026' }), store(seed).dependencies)).toBe(
       'archive-mapping-mismatch',
     );
@@ -1546,6 +1604,203 @@ describe('archive', () => {
     const blind = store(flagship(), { listEventMappings: false });
     expect(await refusal(archiveInput(), blind.dependencies)).toBe('event-mapping-listing-unavailable');
     expect(blind.docs.get('events/bodega-bay-2026').status).toBe('active');
+  });
+
+  // #1256: the archive composes the application flip of
+  // `specs/post-sailing-archive.md` instead of stamping `status` alone. The
+  // helper runs as Admin, so the rules' flip arm never sees its write; the
+  // quiesce, its generation and the record are all checked here, inside the
+  // transaction that moves the mappings, and a refusal writes nothing.
+  describe('the composed application flip', () => {
+    const untouched = (docs, event) => {
+      expect(docs.get(`hostnames/${HOST}`)).toMatchObject({ status: 'active' });
+      expect(docs.get(`hostnames/${HOST}`).apexPath).toBeUndefined();
+      expect(docs.get(`hostnames/${MIRROR}`)).toMatchObject({ status: 'active' });
+      expect(docs.get(`routerReplicas/${HOST}`).revision).toBe('4');
+      expect(docs.get(`routerReplicas/${MIRROR}`).revision).toBe('7');
+      expect(docs.get('events/bodega-bay-2026')).toEqual(event);
+    };
+
+    it.each([
+      ['was never shut', { status: 'active', admins: ['nathan'] }, 'archive-requires-quiesce'],
+      ['was reopened by abandonArchive', quiescedEvent({ archiving: false }), 'archive-requires-quiesce'],
+      [
+        'is already archived',
+        quiescedEvent({
+          status: 'archived',
+          archiving: false,
+          archivedAt: ARCHIVED_AT,
+          archivedUnder: GENERATION,
+          archive: archiveRecord(),
+        }),
+        'event-already-archived',
+      ],
+      ['was reopened and shut again under a later generation', quiescedEvent({ archiveToken: 4 }), 'archive-quiesce-changed'],
+      ['carries a generation no build can bind to', quiescedEvent({ archiveToken: '3' }), 'archive-quiesce-changed'],
+      ['was shut with no generation at all', { status: 'active', admins: ['nathan'], archiving: true }, 'archive-quiesce-changed'],
+      ['already carries the flip-only archivedUnder', quiescedEvent({ archivedUnder: GENERATION }), 'archive-quiesce-changed'],
+    ])('refuses an Event that %s and leaves every document standing', async (_why, event, code) => {
+      const seed = flagship();
+      seed['events/bodega-bay-2026'] = event;
+      const { docs, dependencies } = store(seed);
+      expect(await refusal(archiveInput(), dependencies)).toBe(code);
+      untouched(docs, event);
+    });
+
+    // The staleness the design note names: a payload prepared under one
+    // quiesce, replayed after an abort and a second `beginArchive`. Checking
+    // only the CURRENT generation would pass it with a frozen record taken
+    // against a roster play has since moved, so the payload carries its own.
+    it('refuses a payload prepared under a superseded generation, however the generation is named', async () => {
+      const seed = flagship();
+      seed['events/bodega-bay-2026'] = quiescedEvent({ archiveToken: 4 });
+      const stale = store(seed);
+      expect(await refusal(archiveInput(), stale.dependencies)).toBe('archive-quiesce-changed');
+      untouched(stale.docs, seed['events/bodega-bay-2026']);
+
+      // Naming the generation now in force does not launder the old payload,
+      // and the mismatch is refused before anything is read.
+      const relabelled = store(seed);
+      expect(await refusal(archiveInput({ archiveToken: 4 }), relabelled.dependencies)).toBe(
+        'archive-flip-generation-mismatch',
+      );
+      expect(relabelled.reads).toEqual([]);
+      untouched(relabelled.docs, seed['events/bodega-bay-2026']);
+
+      // A payload prepared under the generation in force is accepted.
+      const fresh = store(seed);
+      await applyHostnameMutation(archiveInput(composedFlip(4)), fresh.dependencies);
+      expect(fresh.docs.get('events/bodega-bay-2026')).toMatchObject({ status: 'archived', archivedUnder: 4 });
+    });
+
+    it.each([
+      ['no flip at all', { flip: undefined }],
+      ['a zero generation', { archiveToken: 0 }],
+      ['a fractional generation', { archiveToken: 2.5 }],
+      ['a generation spelled as text', { archiveToken: '3' }],
+    ])('refuses %s as invalid input before the first read', async (_why, overrides) => {
+      const input = archiveInput(overrides);
+      if (input.flip === undefined) delete input.flip;
+      const { docs, reads, dependencies } = store(flagship());
+      expect(await refusal(input, dependencies)).toBe('invalid-input');
+      expect(reads).toEqual([]);
+      untouched(docs, quiescedEvent());
+    });
+
+    // Every question the rules' flip arm asks, because an Admin write is not
+    // asked them by the boundary: a record the console could never have
+    // written is still irreversible once this transaction commits it.
+    const stamped = (archivedAt) => flipFor(GENERATION, { archivedAt, archive: archiveRecord({ archivedAt }) });
+    const { freezeAt: _dropped, ...recordWithoutFreezeAt } = archiveRecord();
+    it.each([
+      ['a payload missing its record', (() => { const { archive: _a, ...rest } = flipFor(GENERATION); return rest; })()],
+      ['a payload carrying a field the flip does not write', flipFor(GENERATION, { archiving: false })],
+      ['a zero stamp', stamped(0)],
+      ['a stamp past 2100', stamped(4102444800000)],
+      ['a stamp spelled as text', stamped('2026-09-20T11:59:00.000Z')],
+      ['a record stamped at another instant', flipFor(GENERATION, { archive: archiveRecord({ archivedAt: ARCHIVED_AT + 1 }) })],
+      ['a null record', flipFor(GENERATION, { archive: null })],
+      ['a record missing a key', flipFor(GENERATION, { archive: recordWithoutFreezeAt })],
+      ['a record with a key EventArchive does not declare', flipFor(GENERATION, { archive: archiveRecord({ extra: 1 }) })],
+      ['a name that is not text', flipFor(GENERATION, { archive: archiveRecord({ eventName: 7 }) })],
+      ['a fractional playerCount', flipFor(GENERATION, { archive: archiveRecord({ playerCount: 1.5 }) })],
+      ['standings that disagree with playerCount', flipFor(GENERATION, { archive: archiveRecord({ playerCount: 2 }) })],
+      ['standings that are not a list', flipFor(GENERATION, { archive: archiveRecord({ standings: { 0: ROW } }) })],
+      [
+        'more daily honours than an Event has Days',
+        flipFor(GENERATION, {
+          archive: archiveRecord({
+            dailyHonors: Array.from({ length: 21 }, (_, dayIndex) => ({ dayIndex, uid: 'p1', displayName: 'Pat', firstBingoAt: 1_000 })),
+          }),
+        }),
+      ],
+      ['an unbounded freezeAt', flipFor(GENERATION, { archive: archiveRecord({ freezeAt: Infinity }) })],
+      ['a First to BINGO without its row', flipFor(GENERATION, { archive: archiveRecord({ firstBingoRow: null }) })],
+      [
+        'an honour and a row naming different Players',
+        flipFor(GENERATION, { archive: archiveRecord({ firstBingoRow: { ...ROW, uid: 'p2', rank: 1 } }) }),
+      ],
+      ['a held row ranked past the roster', flipFor(GENERATION, { archive: archiveRecord({ firstBingoRow: { ...ROW, rank: 2 } }) })],
+      [
+        'a held row carrying a NaN count',
+        flipFor(GENERATION, { archive: archiveRecord({ firstBingoRow: { ...ROW, bingoCount: Number.NaN, rank: 1 } }) }),
+      ],
+      ['an honour with no instant', flipFor(GENERATION, { archive: archiveRecord({ firstBingo: { uid: 'p1', displayName: 'Pat' } }) })],
+    ])('refuses %s before the first read', async (_why, flip) => {
+      const { docs, reads, dependencies } = store(flagship());
+      expect(await refusal(archiveInput({ flip }), dependencies)).toBe('archive-flip-invalid');
+      expect(reads).toEqual([]);
+      untouched(docs, quiescedEvent());
+    });
+
+    it.each([
+      [
+        'a record nobody bingoed in',
+        archiveRecord({ standings: [], playerCount: 0, firstBingo: null, firstBingoRow: null, eventName: null }),
+      ],
+      [
+        'a bounded prefix of a larger roster',
+        archiveRecord({ standings: Array.from({ length: 200 }, () => ROW), playerCount: 250, freezeAt: 500 }),
+      ],
+    ])('accepts %s', async (_why, archive) => {
+      const { docs, dependencies } = store(flagship());
+      await applyHostnameMutation(archiveInput({ flip: flipFor(GENERATION, { archive }) }), dependencies);
+      expect(docs.get('events/bodega-bay-2026')).toMatchObject({ status: 'archived', archive });
+    });
+
+    // The record the application's own builder produces is one this helper
+    // accepts: the operator command prepares the payload with it.
+    it('accepts the record buildEventArchive produces', async () => {
+      const player = (uid, bingoCount, firstBingoAt) => ({
+        uid,
+        displayName: uid.toUpperCase(),
+        photoURL: null,
+        joinedAt: 0,
+        bingoCount,
+        squaresMarked: 10 + bingoCount,
+        firstBingoAt,
+        reshufflesUsed: 0,
+      });
+      const archive = buildEventArchive({
+        players: [player('ana', 2, 900), player('bo', 1, 800), player('cy', 0, null)],
+        event: { name: 'Bodega Bay', days: [], bannedUids: [] },
+        archivedAt: ARCHIVED_AT,
+      });
+      expect(archive.firstBingo).not.toBeNull();
+      const { docs, dependencies } = store(flagship());
+      await applyHostnameMutation(archiveInput({ flip: flipFor(GENERATION, { archive }) }), dependencies);
+      expect(docs.get('events/bodega-bay-2026').archive).toEqual(archive);
+    });
+
+    it('plans the whole flip in a dry run and writes nothing', async () => {
+      const { docs, dependencies } = store(flagship());
+      const plan = await applyHostnameMutation(archiveInput({ apply: false }), dependencies);
+      expect(plan.dryRun).toBe(true);
+      expect(plan.writes).toContainEqual({
+        op: 'update',
+        path: 'events/bodega-bay-2026',
+        value: {
+          status: 'archived',
+          archivedAt: ARCHIVED_AT,
+          archivedUnder: GENERATION,
+          archive: archiveRecord(),
+          archiving: false,
+        },
+      });
+      untouched(docs, quiescedEvent());
+    });
+
+    // A retry of an archive that already committed — an operator who lost the
+    // answer, or the same payload sent twice — is refused by name and moves
+    // nothing: the routing moved in the same commit as the flip, so there is
+    // nothing left to repair and nothing the retry may restamp.
+    it('answers a retry of a committed archive by name and writes nothing', async () => {
+      const { docs, dependencies } = store(flagship());
+      await applyHostnameMutation(archiveInput(), dependencies);
+      const committed = cloneDocumentValue(Object.fromEntries(docs));
+      expect(await refusal(archiveInput(), dependencies)).toBe('event-already-archived');
+      expect(Object.fromEntries(docs)).toEqual(committed);
+    });
   });
 });
 

@@ -1000,14 +1000,147 @@ function requireCompleteMappingSet(mapped, hosts) {
 }
 
 /**
+ * The application archive flip's bounds, restated from `firestore.rules` (the
+ * flip arm and `completeArchiveRecord`) and `src/data/eventArchive.ts`, whose
+ * writer and rules arm already have to agree on them. The helper runs as
+ * Admin, so that arm never sees its write and every question it asks is asked
+ * here instead (#1256).
+ */
+const ARCHIVE_FLIP_KEYS = ['archivedAt', 'archivedUnder', 'archive'];
+const EVENT_ARCHIVE_KEYS = [
+  'eventName',
+  'standings',
+  'playerCount',
+  'firstBingo',
+  'firstBingoRow',
+  'dailyHonors',
+  'freezeAt',
+  'archivedAt',
+];
+const ARCHIVE_INSTANT_BOUND = 4102444800000;
+const MAX_ARCHIVED_STANDING_ROWS = 200;
+const MAX_ARCHIVED_DAY_HONORS = 20;
+
+/** `usableArchiveToken` on both sides of the rules boundary: a positive integer. */
+function usableArchiveToken(value) {
+  return Number.isInteger(value) && value > 0;
+}
+
+function finiteArchiveNumber(value) {
+  return typeof value === 'number' && value > -ARCHIVE_INSTANT_BOUND && value < ARCHIVE_INSTANT_BOUND;
+}
+
+/** The rules' `firstBingoPairComplete`: both `null`, or both naming one holder. */
+function firstBingoPairComplete(archive) {
+  const { firstBingo: honor, firstBingoRow: row } = archive;
+  if (honor === null && row === null) return true;
+  return (
+    isRecord(honor) &&
+    isRecord(row) &&
+    typeof honor.uid === 'string' &&
+    typeof honor.displayName === 'string' &&
+    finiteArchiveNumber(honor.at) &&
+    typeof row.uid === 'string' &&
+    typeof row.displayName === 'string' &&
+    finiteArchiveNumber(row.bingoCount) &&
+    finiteArchiveNumber(row.squaresMarked) &&
+    typeof row.blackout === 'boolean' &&
+    (row.firstBingoAt === null || finiteArchiveNumber(row.firstBingoAt)) &&
+    Number.isInteger(row.rank) &&
+    row.rank > 0 &&
+    row.uid === honor.uid &&
+    row.rank <= archive.playerCount
+  );
+}
+
+/**
+ * The flip payload the archive commits beside the routing moves: the stamp,
+ * the generation it was prepared under, and the frozen `EventArchive` record.
+ *
+ * Validated as the rules' flip arm validates it, with one tightening: the
+ * record carries exactly the keys `EventArchive` declares, because a record
+ * this transaction writes is as irreversible as one the console writes and no
+ * builder produces another key. Like the rules, it cannot walk the standings
+ * rows or the honours; it bounds their counts.
+ *
+ * `archivedUnder` must equal the generation the caller names. The payload is
+ * thereby bound to the quiesce it was PREPARED under, not only checked against
+ * the one in force: a payload prepared under generation N and replayed after
+ * an abort and a second `beginArchive` cannot be relabelled N+1 and pass the
+ * transaction's token re-check with a record frozen against a roster play has
+ * since moved.
+ */
+function validateArchiveFlip(flip, archiveToken) {
+  if (!isRecord(flip)) refuse('archive-flip-invalid');
+  const keys = Object.keys(flip);
+  if (keys.length !== ARCHIVE_FLIP_KEYS.length || !ARCHIVE_FLIP_KEYS.every((key) => keys.includes(key))) {
+    refuse('archive-flip-invalid');
+  }
+  const { archivedAt, archivedUnder, archive } = flip;
+  if (!usableArchiveToken(archivedUnder)) refuse('archive-flip-invalid');
+  if (archivedUnder !== archiveToken) refuse('archive-flip-generation-mismatch');
+  if (typeof archivedAt !== 'number' || !(archivedAt > 0) || !(archivedAt < ARCHIVE_INSTANT_BOUND)) {
+    refuse('archive-flip-invalid');
+  }
+  if (!isRecord(archive)) refuse('archive-flip-invalid');
+  const recordKeys = Object.keys(archive);
+  if (
+    recordKeys.length !== EVENT_ARCHIVE_KEYS.length ||
+    !EVENT_ARCHIVE_KEYS.every((key) => recordKeys.includes(key))
+  ) {
+    refuse('archive-flip-invalid');
+  }
+  const complete =
+    (archive.eventName === null || typeof archive.eventName === 'string') &&
+    Array.isArray(archive.standings) &&
+    Number.isInteger(archive.playerCount) &&
+    archive.playerCount >= 0 &&
+    archive.standings.length === Math.min(archive.playerCount, MAX_ARCHIVED_STANDING_ROWS) &&
+    Array.isArray(archive.dailyHonors) &&
+    archive.dailyHonors.length <= MAX_ARCHIVED_DAY_HONORS &&
+    firstBingoPairComplete(archive) &&
+    (archive.freezeAt === null || finiteArchiveNumber(archive.freezeAt)) &&
+    archive.archivedAt === archivedAt;
+  if (!complete) refuse('archive-flip-invalid');
+}
+
+/**
+ * The quiesce the flip is bound to, re-read inside the archive's own
+ * transaction: the Event must be closing (`archiving: true`, not yet
+ * archived) under exactly the generation the caller took, and carry no
+ * flip-only `archivedUnder`. This is `archiveEvent`'s re-check and the rules'
+ * `boundToStoredQuiesce`, applied to the transaction that also moves the
+ * routing documents, so the quiesce, the generation, the record and the
+ * routing moves commit together or not at all.
+ */
+function requireBoundQuiesce(event, archiveToken) {
+  if (!isRecord(event)) refuse('event-missing');
+  if (event.status === 'archived') refuse('event-already-archived');
+  if (event.archiving !== true) refuse('archive-requires-quiesce');
+  if (event.archiveToken !== archiveToken || Object.hasOwn(event, 'archivedUnder')) {
+    refuse('archive-quiesce-changed');
+  }
+}
+
+/**
  * The archive interlock from `specs/path-addressing-and-root.md` § D8: every
  * Event mapping, the `apexPath` field on whichever mapping becomes the archive
  * address, each root host's conversion to its class marker (a brand mirror's
  * non-serving `root: 'not-found'`, a canonical apex's `root: 'doorway'`), and
- * `EventDoc.status` all move in ONE transaction. Nothing observes a
- * half-archived Event, and no active Event becomes reachable at an apex path.
- * A doorway conversion is a doorway go-live, so it takes the deployment-barrier
- * record (`pathCapabilityBarrier`) the doorway `convert-to-root` takes.
+ * the Event document's application archive flip all move in ONE transaction.
+ * Nothing observes a half-archived Event, and no active Event becomes
+ * reachable at an apex path. A doorway conversion is a doorway go-live, so it
+ * takes the deployment-barrier record (`pathCapabilityBarrier`) the doorway
+ * `convert-to-root` takes.
+ *
+ * The Event half is the flip of `specs/post-sailing-archive.md`, not a bare
+ * status (#1256): the caller names the generation `beginArchive` minted
+ * (`archiveToken`) and the payload prepared under it (`flip`), the transaction
+ * re-reads the quiesce and the generation, and the five flip fields —
+ * `status`, `archivedAt`, `archivedUnder`, `archive` and `archiving: false` —
+ * are written beside the routing moves. A status-only archive was
+ * irreversible, left the archived surfaces with no record, and made a later
+ * `archiveEvent` answer `already-archived` instead of repairing it.
  *
  * The `apexPath` half is not optional. An archive with no target named would
  * retire the Event without activating the address that replaces it, which
@@ -1027,14 +1160,20 @@ async function planArchive(input, transaction, clock, buffer, revisions, project
       'mappings',
       'apexPathHost',
       'mirrorRootConversions',
+      'archiveToken',
+      'flip',
     ],
     ['pathCapabilityBarrier'],
     'invalid-input',
   );
-  const { eventId, mappings, apexPathHost, mirrorRootConversions } = input;
+  const { eventId, mappings, apexPathHost, mirrorRootConversions, archiveToken, flip } = input;
   if (!isNonempty(eventId) || !Array.isArray(mappings) || !Array.isArray(mirrorRootConversions)) {
     refuse('invalid-input');
   }
+  if (!usableArchiveToken(archiveToken)) refuse('invalid-input');
+  // Before the first read, like every other input refusal: a payload the rules
+  // would refuse is refused whatever the Event's state.
+  validateArchiveFlip(flip, archiveToken);
   const hosts = [...mappings, ...mirrorRootConversions.map((entry) => (isRecord(entry) ? entry.host : entry))];
   if (hosts.length === 0 || new Set(hosts).size !== hosts.length) refuse('invalid-input');
   // EXACTLY ONE mapping must take `apexPath`, and the refusal is here, before
@@ -1080,6 +1219,7 @@ async function planArchive(input, transaction, clock, buffer, revisions, project
 
   const event = (await transaction.get(`events/${eventId}`)) ?? null;
   if (event === null) refuse('event-missing');
+  requireBoundQuiesce(event, archiveToken);
   requireCompleteMappingSet(await listEventMappings(transaction, eventId), hosts);
   const states = new Map();
   for (const host of hosts) {
@@ -1181,8 +1321,17 @@ async function planArchive(input, transaction, clock, buffer, revisions, project
     refuse('invalid-input');
   }
 
-  buffer.update(`events/${eventId}`, { status: 'archived' });
-  return { hosts, eventId, projectedChange: true };
+  // The application flip, whole, in the transaction that read the quiesce
+  // above. `archiveToken` stays as `beginArchive` left it, exactly as the
+  // console's flip leaves it: it is the counter's high-water mark.
+  buffer.update(`events/${eventId}`, {
+    status: 'archived',
+    archivedAt: flip.archivedAt,
+    archivedUnder: flip.archivedUnder,
+    archive: flip.archive,
+    archiving: false,
+  });
+  return { hosts, eventId, archivedUnder: flip.archivedUnder, projectedChange: true };
 }
 
 async function planDelete(input, transaction, clock, buffer, revisions, projections) {
