@@ -210,10 +210,14 @@ export interface SafetyHideState {
  * Restore. The claim still resolves and the Mark is still confirmed; only the
  * media stays hidden, and the queue row says so.
  *
- * A `'hidden'` Proof carrying NO marker is deliberately publishable: it was
+ * A `'hidden'` Proof carrying NO marker is deliberately NOT held here: it was
  * hidden by an admin's own Hide or by the report-count threshold, each of which
- * has its own console lift (`Restore`, `Clear reports`) and neither of which
- * confirm's behaviour has ever withheld. This closes the SAFETY hole ADR 0004
+ * has its own console lift. A Confirm never publishes it, because
+ * `confirmClaim` publishes only the claimant's own still-`'pending'` Proof; it
+ * returns to the Feed only through the console's Restore (directly, or back to
+ * `'pending'` for an owner claim still undecided, which a Confirm then
+ * publishes); Restore also sets `reportHideSuppressed`, so a report-threshold
+ * hide needs no Clear reports. This predicate closes the SAFETY hole ADR 0004
  * exists for, and nothing else.
  */
 export function safetyHideStands(proof: SafetyHideState | undefined): boolean {

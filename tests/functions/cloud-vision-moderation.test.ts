@@ -213,9 +213,10 @@ describe('hideVisionFlaggedIfQualifies — transactional conditional hide', () =
 // instantaneous nor guaranteed (its write is best-effort and a failure is
 // swallowed). An admin who clicks it there agrees WITH the AI screen, but the
 // resulting doc is 'hidden' with no marker, which is exactly the shape
-// `safetyHideStands` reads as a PLAIN hide — so a later Confirm on the same Proof
-// publishes the media the admin had just taken down, and the trigger's hide arm
-// (flagged-only) can never fire on it again. The backfill arm supplies the
+// `safetyHideStands` reads as a PLAIN hide. A cached pre-gate console would
+// publish it directly on Confirm, the 'rehide' arm (marker-keyed) could not take
+// it back down, and the trigger's hide arm (flagged-only) can never fire on it
+// again. The backfill arm supplies the
 // missing record instead.
 
 describe('the backfill arm — a marker-less hidden extreme Proof is stamped (#1143)', () => {
@@ -250,8 +251,9 @@ describe('the backfill arm — a marker-less hidden extreme Proof is stamped (#1
 
   it('never re-applies the marker over an admin lift, whatever the doc then does', async () => {
     // restoreProof writes `false`; an admin who then hand-Hides the Proof keeps
-    // it, so the result is a plain hide — liftable by Restore, publishable by a
-    // confirm — because the admin has already seen the verdict and overridden it.
+    // it, so the result is a plain hide — liftable by Restore (and publishable by
+    // a Confirm only after a Restore to 'pending') — because the admin has
+    // already seen the verdict and overridden it.
     const lifted = fakeDb({ [PROOF]: { status: 'hidden', safetyHide: false, visionFlag: 'violence' } });
     expect(await hideVisionFlaggedIfQualifies(lifted.db, 'e', 'p1')).toBe(false);
     expect(lifted.updates).toEqual([]);
@@ -677,7 +679,9 @@ describe('applyPendingVisionScan — the parked verdict lands when the Proof app
     const { db, store } = fakeDb({ [PROOF]: created(), [SCAN]: { visionFlag: 'racy', scannedAt: 5, storagePath: MEDIA } });
     expect(await applyPendingVisionScan(db, 'e', 'p1')).toBe(true);
     expect(store[PROOF]).toMatchObject({ status: 'flagged', visionFlag: 'racy' });
-    // …and marker-less, because nothing racy ever earns a safety hold (ADR 0004).
+    // …and marker-less, because raciness never earns the marker or an automatic
+    // hide (ADR 0004); a current Confirm leaves it unpublished only because it is
+    // not 'pending'.
     expect(store[PROOF]).not.toHaveProperty(SAFETY_HIDE_MARKER);
     expect(visionHideAction(store[PROOF] as VisionFlaggedDoc)).toBe(null);
   });
@@ -783,7 +787,7 @@ describe('visionVerdictWrite — the hold is stamped WITH the verdict (#1143)', 
     }
   });
 
-  it('leaves every other verdict marker-less — nothing racy ever earns a hold (ADR 0004)', () => {
+  it('leaves every other verdict marker-less — raciness never earns the marker (ADR 0004)', () => {
     for (const flag of ['racy', 'adult', 'spoof', 'medical', 'VIOLENCE', ' violence']) {
       expect(visionVerdictWrite(flag)).toEqual({ status: 'flagged', visionFlag: flag });
       expect(visionVerdictWrite(flag)).not.toHaveProperty(SAFETY_HIDE_MARKER);
@@ -837,7 +841,7 @@ describe('visionVerdictWrite — the hold is stamped WITH the verdict (#1143)', 
     expect(safetyHideStands({ safetyHide: flagged.safetyHide })).toBe(true);
   });
 
-  it('leaves a racy flag exactly as it was — flagged for admins, held by nobody, hidden by nobody', async () => {
+  it('leaves a racy flag exactly as it was — flagged for admins, no marker, hidden by nobody', async () => {
     const { db, store } = fakeDb({ [PROOF]: { uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: null } });
     await writeVisionVerdict(db, 'e', 'p1', 'racy', MEDIA, 5);
     expect(store[PROOF]).toEqual({ uid: 'u1', storagePath: MEDIA, status: 'flagged', visionFlag: 'racy' });
@@ -1380,8 +1384,9 @@ describe('the confirm-time gate reads the SERVER marker, not the verdict (#133)'
 
   it('stands down wherever this trigger never wrote a marker — including a plain hide', () => {
     // A 'hidden' Proof with no marker was hidden by an admin's own Hide or by the
-    // #43 report threshold; each has its own console lift and confirm has never
-    // withheld for either. A restored Proof carries the admin's explicit `false`.
+    // #43 report threshold; each has its own console lift, and confirm (which
+    // publishes only a still-'pending' Proof) never publishes either. A restored
+    // Proof carries the admin's explicit `false`.
     expect(safetyHideStands({ status: 'hidden' })).toBe(false);
     expect(safetyHideStands({ status: 'hidden', safetyHide: false })).toBe(false);
     expect(safetyHideStands({ status: 'active', safetyHide: false })).toBe(false);
@@ -1396,7 +1401,9 @@ describe('the confirm-time gate reads the SERVER marker, not the verdict (#133)'
     expect(qualifiesForVisionHide(flagged)).toBe(true);
     expect(safetyHideStands(flagged)).toBe(true);
     // 'hidden' + the marker: the doc the trigger already produced and now stands
-    // down on (its loop guard) — precisely the one a confirm would re-expose, so
+    // down on (its loop guard) — precisely the one an older, unconditional
+    // confirm would have re-exposed (Confirm now publishes only a still-'pending'
+    // Proof), so
     // the client gate holds exactly where the trigger cannot.
     const hidden = { status: 'hidden', safetyHide: true, visionFlag: 'violence' };
     expect(qualifiesForVisionHide(hidden)).toBe(false);
