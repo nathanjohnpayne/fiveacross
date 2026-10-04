@@ -337,8 +337,11 @@ export function bulkApproveItems(
  * retry). An admin who clicks it there is agreeing with the AI screen, not
  * overriding it — but a bare `status: 'hidden'` moves the doc OUT of the state
  * the trigger's hide arm looks for while leaving no marker behind, and
- * `safetyHideStands` then reads the result as a PLAIN hide: a later Confirm on
- * the same Proof publishes the media the admin had just taken down.
+ * `safetyHideStands` then reads the result as a PLAIN hide. A current console
+ * never publishes a `'hidden'` Proof on Confirm, but a cached pre-gate console
+ * does, directly — and without the marker the server's `'rehide'` arm (which
+ * fires on `safetyHide: true`) cannot take it back down, so the media the admin
+ * had just taken down would stay public.
  *
  * So the hide carries the hold forward. `safetyHideStands` (./moderation) is the
  * same predicate `confirmClaim` gates on, read here against the LIVE doc inside a
@@ -2086,9 +2089,9 @@ async function resolve(
     // steer it. Anything else is left exactly as it stands: another Player's
     // Proof (a hidden or pending one must not reach the Feed through somebody
     // else's Claim), an already-active one (publishing it would be a no-op), a
-    // report- or admin-hidden one (its lift is `Clear reports` / `Restore`, not
-    // a confirm), and a missing one (a merge `set` would CREATE a ghost Proof
-    // carrying nothing but a status). The Claim still resolves and the Mark is
+    // report- or admin-hidden one (its lift is `Restore`, never a confirm), and a
+    // missing one (a merge `set` would CREATE a ghost Proof carrying nothing but
+    // a status). The Claim still resolves and the Mark is
     // still confirmed in every case.
     if (claimProofRef) {
       const liveProof = claimProofSnap?.exists()

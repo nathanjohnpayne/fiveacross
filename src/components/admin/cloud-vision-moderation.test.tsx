@@ -376,9 +376,10 @@ describe('Pending claims — a Vision-held photo is named on the row (specs/clou
     expect(row.getByText(/the photo stays hidden for moderation/)).toBeInTheDocument();
   });
 
-  it('leaves a plain hidden Proof with NO marker unannotated — confirm still publishes it', () => {
-    // A report-count or manual hide. Each has its own console lift and confirm's
-    // behaviour toward them is unchanged, so the claim row says nothing.
+  it('leaves a plain hidden Proof with NO marker unannotated (confirm leaves it hidden; Restore is its lift)', () => {
+    // A manual hide (reportCount 0, so Restore is the only lift the row offers).
+    // confirmClaim publishes only a still-pending Proof (src/data/admin.ts), so a
+    // marker-less hidden Proof stays hidden on confirm. The claim row says nothing.
     adminConfirmedEvent();
     H.flagged = [proof('P', 0, { displayName: 'Report Hidden', status: 'hidden', visionFlag: 'violence' })];
     H.claims = [claim()];
@@ -410,9 +411,12 @@ describe('Pending claims — a Vision-held photo is named on the row (specs/clou
     expect(H.confirmClaim).toHaveBeenCalledWith(expect.objectContaining({ id: 'claim-1' }), 'admin-uid');
   });
 
-  it('leaves a merely-racy verdict unannotated — nothing withholds the photo for raciness', () => {
-    // ADR 0004 again, on the claim side: raciness never earns the marker, so the
-    // confirm publishes exactly as it always did and the row says nothing.
+  it('leaves an ACTIVE merely-racy Proof unannotated — raciness alone never earns the marker', () => {
+    // ADR 0004 again, on the claim side: raciness never earns the marker, so an
+    // already-active racy Proof is not withheld and the row says nothing. (A racy
+    // Proof still 'flagged' is not published by a Confirm either, because Confirm
+    // publishes only a still-'pending' Proof; safetyHideStands' flagged arm drives
+    // the row annotation and the marker an admin Hide carries forward.)
     adminConfirmedEvent();
     H.flagged = [proof('P', 0, { displayName: 'Racy Photo', status: 'active', visionFlag: 'racy' })];
     H.claims = [claim()];
