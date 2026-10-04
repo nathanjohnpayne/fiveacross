@@ -219,6 +219,15 @@ describe('players/{uid} — identity fields are typed; stats stay self-written (
 });
 
 describe('proofs/{proofId} — the create holds the id, the Callout text and the avatar', () => {
+  it('admits a boolean content-only deletion hint, but denies malformed or owner-mutated hints', async () => {
+    const alice = db(ALICE);
+    const ref = doc(alice, at('proofs/contentOnlyDeletion'));
+    await assertSucceeds(setDoc(ref, textProof(ALICE, 'active', { contentOnly: true })));
+    await assertFails(setDoc(doc(alice, at('proofs/badDeletionHint')), textProof(ALICE, 'active', { contentOnly: 'yes' })));
+    await assertFails(updateDoc(ref, { contentOnly: false }));
+    await assertFails(updateDoc(ref, { status: 'pending' }));
+  });
+
   it('ALLOWS the text Proof attachProof writes under an auto-id', async () => {
     await assertSucceeds(setDoc(doc(db(ALICE), at('proofs/Ab3dEf6hIj9kLm2nOp4q')), textProof(ALICE)));
     await assertSucceeds(
@@ -284,6 +293,17 @@ describe('moments/{momentId} — the avatar is pinned like every other', () => {
 });
 
 describe('claims/{claimId} — the create is the attachProof shape, naming the creator’s own Proof', () => {
+  it('admits a boolean content-only hint without widening Proof ownership or resolution authority', async () => {
+    const alice = db(ALICE);
+    const batch = writeBatch(alice);
+    batch.set(doc(alice, at('proofs/contentOnlyProof')), textProof(ALICE, 'pending'));
+    batch.set(doc(alice, at('claims/contentOnlyClaim')), { ...claim(ALICE, 'contentOnlyProof'), contentOnly: true });
+    await assertSucceeds(batch.commit());
+    await assertFails(setDoc(doc(alice, at('claims/invalidContentHint')), { ...claim(ALICE, 'contentOnlyProof'), contentOnly: 'yes' }));
+    await assertFails(setDoc(doc(db(BOB), at('claims/foreignContentHint')), { ...claim(BOB, 'contentOnlyProof'), contentOnly: true }));
+    await assertFails(updateDoc(doc(alice, at('claims/contentOnlyClaim')), { status: 'confirmed' }));
+  });
+
   it('ALLOWS the pending Proof and its Claim written together, as attachProof does', async () => {
     const alice = db(ALICE);
     const batch = writeBatch(alice);

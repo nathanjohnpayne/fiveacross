@@ -72,10 +72,10 @@ describe('clearShell', () => {
     expect(unregister).toHaveBeenCalledTimes(2);
   });
 
-  it('deletes the workbox precache but PRESERVES the proof-media runtime cache', async () => {
-    // The precache is the broken shell; proof media is the player's photos —
-    // immutable Storage objects that are expensive to refetch mid-cruise and
-    // have nothing to do with the shell being stale.
+  it('deletes the workbox precache and leaves legacy proof-media cleanup to upgraded worker activation', async () => {
+    // Shell recovery removes the broken shell only. The upgraded worker's
+    // activation separately retires legacy proof responses and token-bearing
+    // expiration metadata; current fetches never use that cache (#1410).
     const { deleted } = installBrowserMocks({
       cacheKeys: ['workbox-precache-v2-https://gaycruisebingo.com/', PROOF_MEDIA_CACHE_NAME],
     });
