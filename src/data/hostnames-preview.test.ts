@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vites
 
 // Covers the sign-in postcard's LIVE preview channel (#647 follow-up — the
 // production defect): the deployed Bodega build is ENV-PINNED, so
-// `resolveEvent`'s env short-circuit reads no `hostnames/{host}` document and
+// `resolveEvent`'s env short-circuit reads no `publicHostnames/{host}` document and
 // `resolution.preview` never exists there — the card silently failed to render
 // in production with a valid slice seeded. The fix rides the one listener that
 // already streams that document on every build shape (`watchAdultContent`):

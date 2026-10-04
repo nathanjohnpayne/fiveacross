@@ -1,3 +1,5 @@
+import { projectPublicHostname } from './publicHostnameFields';
+import { isDeepStrictEqual } from 'node:util';
 /**
  * Server-side derivation of an Event's 18+ posture (#608).
  *
@@ -6,7 +8,7 @@
  * `signedIn()`; the 18+ acknowledgement is ON the sign-in gate, pre-auth. So the
  * posture is derived HERE, by the admin SDK (which bypasses security rules), and
  * published onto the world-readable routing documents the resolver already
- * fetches before mount — `hostnames/{host}.adultContent` (ADR 0009's shape,
+ * fetches before mount — `publicHostnames/{host}.adultContent` (ADR 0009's shape,
  * reused).
  *
  *     adultContent = settings.forceAdult || (any ACTIVE spicy Prompt in a dealable pool)
@@ -29,11 +31,13 @@
  * rather than "did this write CROSS?". A crossing test would make a swallowed
  * failure permanent: the item stays active-and-spicy, no later write is a fresh
  * crossing, and the Event stays un-gated forever. Answering on the after-state
- * means every subsequent write to that item is another attempt, and the raise
- * itself skips documents already at `true`, so the steady state costs one query
- * and no writes.
+ * means every subsequent write to that item is another attempt. Each matching
+ * hostname is reread transactionally: its canonical stamp changes only when
+ * needed. Its public projection is read in the same transaction and replaced
+ * only for a new stamp or a missing/stale copy; matching stamped pairs incur
+ * no writes.
  *
- * The writes land on `hostnames/*`, never on `events/*` — so neither trigger can
+ * The paired writes land on `hostnames/*` and `publicHostnames/*`, never on `events/*` — so neither trigger can
  * re-fire itself, and no loop guard is needed.
  */
 
@@ -88,15 +92,14 @@ export function eventForcesAdultContent(event: Record<string, unknown> | undefin
 //
 // Declared locally rather than imported from `autohide.ts`: that module's
 // `DocRef` is read-only (`get()` alone), because its writes all go through a
-// transaction. This one needs a plain `update`, and widening the shared
-// interface would hand the auto-hide a write path it deliberately does not have.
+// transaction. This surface owns a paired canonical/public transaction without
+// widening the auto-hide interface.
 
 interface AdultDocSnapshot {
   readonly id: string;
   data(): Record<string, unknown> | undefined;
 }
 interface AdultDocRef {
-  update(data: Record<string, unknown>): Promise<unknown>;
   get(): Promise<{ exists: boolean; data(): Record<string, unknown> | undefined }>;
 }
 interface AdultQueryRef {
@@ -105,6 +108,37 @@ interface AdultQueryRef {
 export interface AdultFirestore {
   doc(path: string): AdultDocRef;
   collection(path: string): { where(field: string, op: string, value: unknown): AdultQueryRef };
+  runTransaction<T>(work: (transaction: {
+    get(ref: AdultDocRef): Promise<{ exists: boolean; data(): Record<string, unknown> | undefined }>;
+    update(ref: AdultDocRef, data: Record<string, unknown>): unknown;
+    set(ref: AdultDocRef, data: Record<string, unknown>): unknown;
+  }) => Promise<T>): Promise<T>;
+}
+
+/** Read both canonical and public state inside the transaction; a repoint or
+ * projection edit retries safely. Matching stamped pairs need no writes; repair
+ * replaces the public document so private extras cannot survive a merge. */
+export type AdultHostnameStampMode = 'raise' | 'repair-stamped';
+
+export async function stampAdultHostname(db: AdultFirestore, host: string, expectedEventId?: string, mode: AdultHostnameStampMode = 'raise'): Promise<boolean> {
+  const canonical = db.doc(`hostnames/${host}`);
+  const projection = db.doc(`publicHostnames/${host}`);
+  return db.runTransaction(async transaction => {
+    const snapshot = await transaction.get(canonical);
+    if (!snapshot.exists) return false;
+    const data = snapshot.data();
+    if (!data || (expectedEventId !== undefined && data.eventId !== expectedEventId)) return false;
+    // Historical already-true trigger snapshots may repair only a live stamp.
+    if (mode === 'repair-stamped' && data.adultContent !== true) return false;
+    const publicSnapshot = await transaction.get(projection);
+    const desired = projectPublicHostname({ ...data, adultContent: true });
+    const changed = data.adultContent !== true;
+    if (changed) transaction.update(canonical, { adultContent: true });
+    if (changed || !publicSnapshot.exists || !isDeepStrictEqual(publicSnapshot.data(), desired)) {
+      transaction.set(projection, desired);
+    }
+    return changed;
+  });
 }
 
 async function adminFirestore(): Promise<AdultFirestore> {
@@ -114,7 +148,7 @@ async function adminFirestore(): Promise<AdultFirestore> {
 
 /**
  * Stamp `adultContent: true` on every routing document that points at this
- * Event, skipping the ones already stamped.
+ * Event, pairing each canonical stamp with its strict public projection.
  *
  * EVERY document, not just the canonical one: an Event's canonical address and
  * each of its aliases are separate `hostnames/{host}` records (ADR 0009), and a
@@ -130,8 +164,9 @@ async function adminFirestore(): Promise<AdultFirestore> {
  * un-gated sign-in shell for an Event that now has active explicit content, with
  * no guaranteed second attempt: the derived flag is a fail-closed security
  * posture, and "logged and forgotten" is not a fail direction it can afford.
- * Retrying is safe because the stamp is idempotent — the already-stamped
- * documents are skipped on the way through.
+ * Retrying is safe: already-stamped canonical rows retain their value, while
+ * their public projection is transactionally compared and replaced only to
+ * repair a missing or stale copy.
  *
  * Returns how many documents it stamped.
  */
@@ -140,10 +175,8 @@ export async function raiseAdultContentForEvent(db: AdultFirestore, eventId: str
   let stamped = 0;
   const failed: string[] = [];
   for (const d of snap.docs) {
-    if (d.data()?.adultContent === true) continue; // already gated — monotone, nothing to do
     try {
-      await db.doc(`hostnames/${d.id}`).update({ adultContent: true });
-      stamped++;
+      if (await stampAdultHostname(db, d.id, eventId)) stamped++;
     } catch (err) {
       console.error('raiseAdultContentForEvent: per-host stamp failed', eventId, d.id, err);
       failed.push(d.id);
@@ -201,7 +234,8 @@ export async function applyItemAdultContent(
  * same retry reason as the item path: a crossing test would otherwise leave an
  * Event an admin explicitly marked adult serving an un-gated shell until the
  * flag was toggled off and on again. Admin config writes are rare, and the raise
- * skips already-stamped documents, so re-checking is nearly free.
+ * skips writes for already-stamped, matching canonical/public pairs. A
+ * re-check still reads both documents transactionally for every queried alias.
  *
  * Throws on a failed stamp, for the platform retry — see `applyItemAdultContent`.
  */
@@ -232,7 +266,8 @@ export async function applyEventAdultContent(
 //     documents it saw; this one was never in the result set.
 //
 // So the invariant is closed from the other side: when a routing document is
-// written and is not already stamped, ask the Event whether it is adult.
+// written, repair an existing stamp's public copy; otherwise ask whether the
+// Event is adult before raising the canonical stamp.
 
 /**
  * Is this Event adults-only RIGHT NOW, derived from source rather than from the
@@ -262,25 +297,26 @@ export interface HostnameReconcileDeps {
   /** Defaults to `eventIsAdult` against the admin SDK. */
   eventIsAdult?: (eventId: string) => Promise<boolean>;
   /** Defaults to stamping the one document. */
-  stampHost?: (host: string) => Promise<void>;
+  stampHost?: (host: string, expectedEventId: string, mode?: AdultHostnameStampMode) => Promise<void | boolean>;
 }
 
 async function defaultEventIsAdult(eventId: string): Promise<boolean> {
   return eventIsAdult(await adminFirestore(), eventId);
 }
 
-async function defaultStampHost(host: string): Promise<void> {
-  await (await adminFirestore()).doc(`hostnames/${host}`).update({ adultContent: true });
+async function defaultStampHost(host: string, expectedEventId: string, mode?: AdultHostnameStampMode): Promise<boolean> {
+  return stampAdultHostname(await adminFirestore(), host, expectedEventId, mode);
 }
 
 /**
- * A routing document was written. If it is not already gated and its Event is
- * adult, stamp it.
+ * A routing document was written. An already-gated snapshot repairs its public
+ * copy only while the live canonical stamp still exists for that same Event.
+ * Other snapshots derive whether the Event is adult before raising the stamp.
  *
- * The cheap checks run first, so the overwhelming majority of writes to this
- * collection — including OUR OWN stamp, which re-fires this trigger — cost
- * nothing: an already-`true` document returns before any read, which is also the
- * loop guard. A document with no `eventId` routes nowhere and is skipped.
+ * Deleted or unrouted snapshots skip reads. Already-gated snapshots skip Event
+ * derivation but transactionally compare the live pair, including OUR OWN stamp's
+ * subsequent trigger. A matching pair stages no writes, which prevents a loop;
+ * a stale snapshot cannot re-raise an operator-lowered or repointed canonical row.
  *
  * THROWS on a failed stamp, like its siblings, so the platform retries an
  * idempotent operation rather than leaving a public fail-closed flag at `false`.
@@ -291,10 +327,13 @@ export async function reconcileHostnameAdultContent(
   deps: HostnameReconcileDeps = {},
 ): Promise<boolean> {
   if (!after) return false; // deleted — nothing routes here any more
-  if (after.adultContent === true) return false; // already gated (and our own write)
   const eventId = typeof after.eventId === 'string' ? after.eventId : '';
   if (!eventId) return false;
+  const stampHost = deps.stampHost ?? defaultStampHost;
+  if (after.adultContent === true) {
+    return (await stampHost(host, eventId, 'repair-stamped')) !== false;
+  }
   if (!(await (deps.eventIsAdult ?? defaultEventIsAdult)(eventId))) return false;
-  await (deps.stampHost ?? defaultStampHost)(host);
-  return true;
+  const changed = await stampHost(host, eventId);
+  return changed !== false;
 }

@@ -15,7 +15,7 @@ import { editionBrand } from '../editions';
 //
 // Reads ONLY resolved pre-auth state. `events/{eventId}` requires `signedIn()`
 // (the same constraint that put the wordmark in `editions.ts`), so everything
-// here comes from the `preview` slice of the world-readable `hostnames/{host}`
+// here comes from the `preview` slice of the field-allowlisted public `publicHostnames/{host}`
 // document. On a hostname-resolved build `bootstrapEventResolution` installs
 // it before mount; on an ENV-PINNED build — the deployed Bodega shape, where
 // resolution's env short-circuit reads no routing document at all — it arrives

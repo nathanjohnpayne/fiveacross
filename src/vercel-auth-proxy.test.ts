@@ -42,11 +42,9 @@ describe('Vercel Firebase Auth proxy', () => {
       expect(Object.keys(patterns())).not.toContain('*');
     });
 
-    // The one exception, and the reason this is not a blanket `false`: the
-    // stable sign-in alias is fed by `git push --force origin HEAD:preview`
-    // (docs/app/preview-deploys.md § Part 2). `preview` matches both rules,
-    // and Vercel deploys when ANY matched rule is true.
-    it('keeps the preview-branch flow alive', () => {
+    // The historical Git preview exemption remains; its build now fails closed
+    // until isolated test configuration is reviewed (#1420).
+    it('retains the historical preview branch exemption', () => {
       expect(patterns().preview).toBe(true);
     });
 
@@ -59,8 +57,8 @@ describe('Vercel Firebase Auth proxy', () => {
   // #585 / #625: one vercel.json serves three Vercel projects (gcb production
   // plus the two Five Across-family mirrors), so the auth proxy picks a Firebase
   // project by request host. Order is load-bearing twice over: every
-  // host-conditional rule must precede the unconditional gcb rule, and all of
-  // them must precede the SPA catch-all.
+  // production host must have an exact conditional rule, and all of them
+  // must precede the SPA catch-all. Previews have no production helper route.
   it.each(FIVEACROSS_MIRROR_HOSTS)('proxies %s to the fiveacross helper namespace', (host) => {
     expect(rewrites).toContainEqual({
       source: '/__/auth/:path*',
@@ -83,29 +81,28 @@ describe('Vercel Firebase Auth proxy', () => {
     expect(rule?.has?.[0]?.type).toBe('host');
   });
 
-  it('keeps exactly one unconditional Gay Cruise Bingo fallthrough', () => {
-    // More than one and a host with no conditional rule would silently take
-    // whichever happened to come first.
-    const unconditional = rewrites.filter(
-      (r) => r.source === '/__/auth/:path*' && r.has === undefined,
-    );
-    expect(unconditional).toEqual([
-      {
-        source: '/__/auth/:path*',
-        destination: 'https://gaycruisebingo.firebaseapp.com/__/auth/:path*',
-      },
-    ]);
+  it('restricts the Gay Cruise Bingo helper to its exact production mirror', () => {
+    expect(rewrites.filter((r) => r.source === '/__/auth/:path*' && r.has === undefined)).toEqual([]);
+    expect(rewrites).toContainEqual({
+      source: '/__/auth/:path*',
+      has: [{ type: 'host', value: { eq: 'gaycruisebingo.vercel.app' } }],
+      destination: 'https://gaycruisebingo.firebaseapp.com/__/auth/:path*',
+    });
   });
 
-  it('orders every host-conditional rule ahead of the unconditional one', () => {
-    const fallthrough = rewrites.findIndex(
-      (r) => r.source === '/__/auth/:path*' && r.has === undefined,
-    );
-    const conditional = rewrites.flatMap((r, i) =>
-      r.source === '/__/auth/:path*' && r.has !== undefined ? [i] : [],
-    );
-    expect(conditional.length).toBe(FIVEACROSS_MIRROR_HOSTS.length);
-    for (const index of conditional) expect(index).toBeLessThan(fallthrough);
+  it.each([
+    'gaycruisebingo-git-preview-nathanjohnpaynes-projects.vercel.app',
+    'gaycruisebingo-feature-nathanjohnpaynes-projects.vercel.app',
+    'fiveacross-git-preview-nathanjohnpaynes-projects.vercel.app',
+    'vacaybingo-git-preview-nathanjohnpaynes-projects.vercel.app',
+    'gaycruisebingo.vercel.app.evil.example',
+  ])('gives %s no production auth proxy', (host) => {
+    const authRules = rewrites.filter((r) => r.source === '/__/auth/:path*');
+    expect(authRules).toHaveLength(3);
+    expect(authRules.every((r) => r.has?.length === 1 && r.has[0].type === 'host' &&
+      typeof r.has[0].value === 'object' && r.has[0].value !== null &&
+      Object.keys(r.has[0].value).length === 1 &&
+      typeof r.has[0].value.eq === 'string' && r.has[0].value.eq !== host)).toBe(true);
   });
 
   it('serves client-side routes without shadowing the auth proxy', () => {

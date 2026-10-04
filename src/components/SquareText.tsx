@@ -1,6 +1,80 @@
 import { useLayoutEffect, useRef, useState } from 'react';
 import { useTextSize } from '../hooks/useTextSize';
-import { fitTextSize } from '../game/fitText';
+import { fitTextSize, shrinkToWholeWords } from '../game/fitText';
+
+type InsetKey =
+  | 'paddingLeft'
+  | 'paddingRight'
+  | 'paddingTop'
+  | 'paddingBottom'
+  | 'borderLeftWidth'
+  | 'borderRightWidth'
+  | 'borderTopWidth'
+  | 'borderBottomWidth';
+
+/**
+ * #1345: verify the estimate against the real rendered glyphs and keep
+ * shrinking while any single word is wider than the Square (which `.cell`'s
+ * `word-break: break-word` would otherwise split mid-word, "Grandparent / s").
+ * Each probe applies the size with mid-word breaking and hyphenation switched
+ * off, so a too-long word makes the span (a flex item) as wide as that word
+ * instead of wrapping; its width then exceeds the host's usable (content-box)
+ * width. Both sides are compared as fractional layout widths
+ * (`getBoundingClientRect` minus the host's computed padding and border), not
+ * the integer-rounded `offsetWidth`/`clientWidth`, so a word only a fraction
+ * of a pixel too wide is still caught.
+ *
+ * When the accepted size keeps every word whole the overrides STAY on the
+ * span: restoring `.cell`'s `hyphens: auto` / `word-break: break-word` would
+ * let the browser hyphenate or split a word that fits on its own line just to
+ * fill a preceding line. They are removed only when even `minSize` cannot hold
+ * the longest word, where `.cell`'s mid-word breaking is the last-resort
+ * fallback.
+ *
+ * Whenever the host has layout, the probe starts from the CSS ceiling
+ * (`baseSize`), not from the estimate: the flat average glyph width can
+ * over-shrink both ways (a word of narrow glyphs it GUESSES is too wide, a
+ * block it guesses needs more lines than it does), and a probe that only
+ * steps down could never win that size back. Each probe checks the rendered
+ * span's width (every word whole) AND height (the real line breaks fit the
+ * host's usable height, so `.cell`'s `overflow: hidden` clips nothing), so
+ * real measurement alone picks the largest fitting size. A host with no
+ * layout yet (width 0, pre-first-paint or jsdom) has nothing to measure
+ * against, so the whole-word `estimated` size stands with the overrides off.
+ */
+function keepWordsWhole(el: HTMLElement, host: HTMLElement, estimated: number, baseSize: number): number {
+  clearWholeWordOverrides(el);
+  const hostStyle = window.getComputedStyle(host);
+  const inset = (keys: readonly InsetKey[]) => keys.reduce((sum, key) => sum + (parseFloat(hostStyle[key]) || 0), 0);
+  const hostRect = host.getBoundingClientRect();
+  const usableWidth = hostRect.width - inset(['paddingLeft', 'paddingRight', 'borderLeftWidth', 'borderRightWidth']);
+  const usableHeight = hostRect.height - inset(['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth']);
+  if (!(usableWidth > 0)) return estimated;
+  el.style.wordBreak = 'normal';
+  el.style.overflowWrap = 'normal';
+  el.style.hyphens = 'manual';
+  // Layout sizes are multiples of 1/64px, so any real overflow clears this
+  // tolerance; it only absorbs float noise in the subtractions above.
+  const EPSILON = 0.005;
+  const rectAt = (size: number) => {
+    el.style.fontSize = `${size}px`;
+    return el.getBoundingClientRect();
+  };
+  const tooWide = (rect: DOMRect) => rect.width > usableWidth + EPSILON;
+  const tooTall = (rect: DOMRect) => usableHeight > 0 && rect.height > usableHeight + EPSILON;
+  const fitted = shrinkToWholeWords(baseSize, (size) => {
+    const rect = rectAt(size);
+    return tooWide(rect) || tooTall(rect);
+  });
+  if (tooWide(rectAt(fitted))) clearWholeWordOverrides(el);
+  return fitted;
+}
+
+function clearWholeWordOverrides(el: HTMLElement) {
+  el.style.wordBreak = '';
+  el.style.overflowWrap = '';
+  el.style.hyphens = '';
+}
 
 /**
  * A non-free Square's prompt text (#215, specs/d15-text-size.md): the S/M/L
@@ -66,12 +140,30 @@ export default function SquareText({ text }: { text: string }) {
         width: Math.max(0, hostRect.width - HOST_PADDING),
         height: Math.max(0, hostRect.height - HOST_PADDING),
       };
-      const fitted = fitTextSize(text, box, { baseSize });
-      if (fitted != null) el.style.fontSize = `${fitted}px`;
+      const estimated = fitTextSize(text, box, { baseSize });
+      const fitted = keepWordsWhole(el, host, estimated, baseSize);
+      el.style.fontSize = `${fitted}px`;
       setFontSize(fitted);
     };
 
     measure();
+
+    // #1345: the probe measures with `getBoundingClientRect`, which includes
+    // CSS transforms, and a fresh card's Squares mount mid-`deal-drop`
+    // (index.css, starting at `scale(0.85)`) — a transform ResizeObserver
+    // never reports. Re-fit once the Square's own animation ends (or is
+    // cancelled), so a size probed against the shrunken, still-animating box
+    // never sticks once the Square lands at its real size.
+    const animated = host.closest('.cell') ?? host;
+    const onAnimationDone = (event: Event) => {
+      if (event.target === animated) measure();
+    };
+    animated.addEventListener('animationend', onAnimationDone);
+    animated.addEventListener('animationcancel', onAnimationDone);
+    const removeAnimationListeners = () => {
+      animated.removeEventListener('animationend', onAnimationDone);
+      animated.removeEventListener('animationcancel', onAnimationDone);
+    };
 
     // Recompute on any cell-size change (phone rotation, split-screen,
     // desktop resize, sidebar toggling the grid's column count, etc.) — PR
@@ -81,10 +173,13 @@ export default function SquareText({ text }: { text: string }) {
     // at a narrower one. ResizeObserver is unavailable in some older/jsdom
     // test environments, so this is a best-effort enhancement, not a hard
     // dependency of the guard (the effect above still fits on mount/change).
-    if (typeof ResizeObserver === 'undefined') return;
+    if (typeof ResizeObserver === 'undefined') return removeAnimationListeners;
     const observer = new ResizeObserver(() => measure());
     observer.observe(host);
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      removeAnimationListeners();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textSize only retriggers the DOM re-read above; see the doc comment.
   }, [text, textSize]);
 

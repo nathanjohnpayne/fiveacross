@@ -4,7 +4,7 @@ import { VitePWA } from 'vite-plugin-pwa';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
-import { assertDeployFirebaseApiKey, resolveAppVersion } from './src/build-config';
+import { assertDeployFirebaseApiKey, assertPreviewFirebaseIsolation, resolveAppVersion } from './src/build-config';
 // The SAME brand table the app renders the sign-in gate from (#580's one-table
 // rule, extended to the browser chrome in #586). Importing it rather than
 // restating four strings here is the whole point: a second copy is how the
@@ -165,6 +165,9 @@ function precacheExclusionGuard(): Plugin {
 
 // https://vitejs.dev/config/
 export default defineConfig(({ command, mode }) => {
+  // Check before loading any Firebase configuration; named production targets
+  // and generic CI cannot exempt a Vercel preview from the isolation boundary.
+  assertPreviewFirebaseIsolation(command, process.env.VERCEL_ENV, process.env.VERCEL);
   const targetBuild = process.env.DEPLOY_TARGET_BUILD === '1';
   // Normal local builds load their development VITE_* values from env files.
   // A named deploy target instead receives its complete VITE_* environment
@@ -281,8 +284,9 @@ export default defineConfig(({ command, mode }) => {
         manifest: false,
         // Under `injectManifest` this block only decides WHAT gets precached;
         // the routing that used to live here (navigation fallback + its /__/*
-        // denylist #182, and the proof-media CacheFirst #363) now lives in
-        // src/sw.ts, which is the file to read and the file to keep in sync.
+        // denylist #182, and the former proof-media CacheFirst #363) lives in
+        // src/sw.ts. #1410 replaced that legacy media route with NetworkOnly
+        // and scoped activation cleanup; read that file for current policy.
         //
         // The glob deliberately still excludes `.json`, which is what keeps
         // `/build-floor.json` OUT of the precache: the floor is the one file a

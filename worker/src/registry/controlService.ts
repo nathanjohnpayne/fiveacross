@@ -517,11 +517,13 @@ function validatePublisherReplacementSchema(value: unknown): void {
         'fullResourceName',
         'policyEtag',
         'tokenCreatorMembers',
+        'inheritedPoliciesComplete',
         'responseDigest',
       ],
       'service-account readback',
     );
     stringArray(readback.tokenCreatorMembers, 'service-account policy members');
+    if (readback.inheritedPoliciesComplete !== true) throw new Error('incomplete service-account policy');
   });
   if (!Array.isArray(control.quarantinedAccessDecisions)) throw new Error('invalid access decisions');
   control.quarantinedAccessDecisions.forEach((decision) =>

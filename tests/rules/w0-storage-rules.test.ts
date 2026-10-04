@@ -202,8 +202,8 @@ describe('storage.rules — proofs/{eventId}/{uid}/{file} (owner create, owner/a
     // So a proof object is IMMUTABLE: create only, and a valid second upload is
     // denied whatever it weighs and whatever type it carries. The app never
     // wanted the update — `attachProof` mints a fresh auto-id per capture — and
-    // `src/data/storage.ts` has served proof media `immutable` on that basis
-    // since #363.
+    // Object immutability remains enforced. The former immutable HTTP cache
+    // header was retired under #1410: proof uploads now use private/no-store.
     const owner = testEnv.authenticatedContext(OWNER);
     await assertSucceeds(put(owner, photoPath, TINY, IMAGE));
     await assertFails(put(owner, photoPath, TINY, IMAGE));

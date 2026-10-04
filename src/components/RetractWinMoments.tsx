@@ -15,8 +15,8 @@ import { EVENT_ID } from '../firebase';
  * #467's retraction detectors live on the Card route: Board's fall observers
  * record an intent when a cell unmark drops a published win, and its cells
  * effect drains that intent from a server-committed snapshot. But a win can stop
- * standing while Board is UNMOUNTED — deleting a proof from the FEED tab unmarks
- * the backing cell, and an ADMIN rejecting a confirmed claim unmarks it on a
+ * standing while Board is UNMOUNTED — deleting an ordinary credit-backing Proof
+ * from the FEED tab unmarks the cell, and an ADMIN rejecting pending credit uses a
  * different write path entirely. When the Player later returns to the Card
  * route, Board BASELINES on the current (already-fallen) state rather than
  * observing a falling edge, so no intent is ever recorded and the published

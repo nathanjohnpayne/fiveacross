@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { projectPublicHostname } from '../functions/src/publicHostnameFields.ts';
 // One-off, dry-run-first production correction for #960.
 //
 // The Bodega hostname migration left two documents claiming to be canonical:
@@ -284,7 +285,9 @@ export async function executeCanonicalHostMigration({
     const snapshots = await Promise.all(refs.map((ref) => transaction.get(ref)));
     const plan = planCanonicalHostMigration(rowsFromSnapshots(snapshots));
     if (!plan.changed) return;
-    transaction.update(refs[BODEGA_HOSTS.indexOf(LEGACY_HOST)], plan.update);
+    const index = BODEGA_HOSTS.indexOf(LEGACY_HOST);
+    transaction.update(refs[index], plan.update);
+    transaction.set(db.doc(`publicHostnames/${LEGACY_HOST}`), projectPublicHostname({ ...snapshots[index].data(), ...plan.update }));
     wrote = true;
   });
 
