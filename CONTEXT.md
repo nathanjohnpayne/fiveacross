@@ -50,7 +50,7 @@ Vocabulary note: this codebase began as one sailing, so nautical words leaked in
 
 **Pool**: Which item set a Prompt belongs to—the **main** pool, the **easy** pool, or the **closing** pool. Only the main pool accepts player submissions. The easy pool is both a Day's own content and the Easy Mix source on main Days; the closing pool belongs to a final Day. _Legacy (transition, #565)_: both live Events' docs still store the easy pool as `embark` and the closing pool as `farewell`—nautical names that predate the platform and mean nothing about arrival or departure. Code speaks only the neutral values: reads coerce (`migratePool` in `src/data/converters.ts`; `normalizePool` in `functions/src/poolVocab.ts`), `firestore.rules` accept both spellings, and persisted writes deliberately keep emitting the legacy values (`persistedPool`, `src/data/admin.ts`; the seed modules) until the post-Event cleanup flips writes, drops the coercions, and narrows the rules.
 
-**Pending**: A submitted Prompt awaiting admin approval—a Prompt-moderation state, distinct from a pending Claim (the Admin-confirmed Mark workflow, see Claim below). Invisible to players; never dealt.
+**Pending**: A submitted Prompt awaiting admin approval—a Prompt-moderation state, distinct from a pending Claim (Admin-confirmed credit or content review, see Claim below). Invisible to players; never dealt.
 
 **Day Snapshot**: The frozen list of approved Prompts captured at a Day's unlock moment; before that moment the Day stays locked and deals nothing, so a card can never draw from an unfrozen pool. All of that Day's deals draw from the snapshot, so everyone's card reflects the same pool regardless of when they first open it. On a main Day the snapshot carries BOTH pools—every active main item and every active easy item—so the [Easy Mix](#days--pools) (a share of each card dealt from the easy pool) rides the one frozen list and every deal and reshuffle inherits it (specs/easy-mix.md). A Day dealt from a single curated pool freezes only that pool.
 
@@ -112,12 +112,12 @@ Vocabulary note: this codebase began as one sailing, so nautical words leaked in
 
 **Proof-to-mark**: A Claim Mode where a Mark requires an attached Proof. Friction that enriches the Feed; it does not make the Mark more trustworthy. _Avoid_: Proof required
 
-**Admin-confirmed**: A Claim Mode where a Mark starts pending and doesn't count until an Admin resolves its Claim. A dispute/ceremony tool, not anti-cheat. _Avoid_: Verified
+**Admin-confirmed**: A Claim Mode where new Mark credit starts pending and doesn't count until an Admin resolves its Claim; a new Proof on established credit enters content review while that credit remains intact. A dispute/ceremony tool, not anti-cheat. _Avoid_: Verified
 
-**Proof**: A playful photo, audio clip, or text callout a Player attaches when marking a Square; it posts to the Feed. Flavour, never enforcement.
+**Proof**: A playful photo, audio clip, or text callout a Player attaches to a Square, including one already marked; it posts to the Feed when eligible for publication, after content approval in Admin-confirmed mode. Flavour, never enforcement.
 
 **Doubt**: One Player publicly asking another to back up a specific marked Prompt—"pics or it didn't happen." The count of doubts shows on the marked square and the Tally entry; attaching a Proof satisfies them. Social pressure, never a gate—it's how the group applies the "the group is the verification" principle in-app. _Avoid_: Callout, demand, challenge
 
 **Heart**: One Player's like on a Feed post—a Proof or a Moment. Many posts per Player, each post only once; tapping again takes it back. Warmth, never score—hearts touch no stats, no Leaderboard, no win logic, and a Tally Card (an aggregate, not a post) takes none. _Avoid_: Like, favorite, reaction
 
-**Claim**: In Admin-confirmed mode, the pending record raised when a Player marks a Square, for an Admin to confirm or reject.
+**Claim**: In Admin-confirmed mode, the pending record for an Admin to confirm or reject new Mark credit or newly attached Proof content. Content review on an already-confirmed Square preserves its established Mark credit.
