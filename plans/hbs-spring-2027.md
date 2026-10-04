@@ -454,7 +454,7 @@ The platform already handles most of this: Days unlock on arbitrary dates with a
 - `FarewellPodium` and `ShareCard` ("Weekly honors")
 - the frozen archive. `draftEventArchive` stores each honor's `dayHonorChipLabel` ("D12") permanently, `ArchivedLeaderboard` renders it, and `ArchiveEvent` calls them "daily honors", so archiving with daily labels freezes the wrong vocabulary into the record. Make the archive-time label cadence-aware ("W12"), update the archived and admin surfaces and `specs/post-sailing-archive.md`, and add an archive regression test.
 - `lastCallCopy`, with its mirror in `functions/src/finaleContent.ts`
-- the signed-out preview's Day line (`src/eventPreview.ts`, "Day N: title"). The preview reads the world-readable hostname `preview` slice, not the Event doc, so cadence has to be added to that payload: to `EventPreview` and its coercion, to the provisioning writer, and to `specs/hostnames-lookup.md`. Otherwise the sign-in postcard keeps saying "Day N".
+- the signed-out preview's Day line (`src/eventPreview.ts`, "Day N: title"). The preview reads the public, field-allowlisted hostname `preview` slice, not the Event doc, so cadence has to be added to that payload: to `EventPreview` and its coercion, to the provisioning writer, and to `specs/hostnames-lookup.md`, with an owner-approved change to the #1419 public-field allowlist before provisioning it. Otherwise the sign-in postcard keeps saying "Day N".
 - Feed chips and Notices (`src/components/ProofFeed.tsx`)
 - the offline saved-card fallback (`src/components/CachedCardFallback.tsx`)
 - the My Suggestions status label (`src/components/ItemPool.tsx`, "scheduled · Day N"), with the matching `specs/community-prompt-targeting.md` contract and component test

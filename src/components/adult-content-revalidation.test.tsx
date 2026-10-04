@@ -10,7 +10,7 @@ import { useAdultContent } from '../hooks/useAdultContent';
 
 // Covers the posture staying CURRENT while a tab is open (Phase 4b).
 //
-// The gap this closes: `hostnames/{host}.adultContent` was resolved once, before
+// The gap this closes: `publicHostnames/{host}.adultContent` was resolved once, before
 // React mounted, into a plain module variable. So a tab already open when an
 // admin approved the first explicit Prompt never re-read the routing document
 // and never re-rendered the gate — and a launch landing inside the derivation's
@@ -69,13 +69,13 @@ describe('watchAdultContent — a document listener, not a poll', () => {
   it('listens to the EXACT routing document, which is a `get`, not a `list`', () => {
     setActiveAdultContent(false, { proven: true });
     watchAdultContent(HOST);
-    expect(mocks.onSnapshot.mock.calls[0][0]).toMatchObject({ path: `hostnames/${HOST}` });
+    expect(mocks.onSnapshot.mock.calls[0][0]).toMatchObject({ path: `publicHostnames/${HOST}` });
   });
 
   it('lowercases the hostname into the document path', () => {
     setActiveAdultContent(false, { proven: true });
     watchAdultContent('Bodega-Bay.FiveAcross.app');
-    expect(mocks.onSnapshot.mock.calls[0][0]).toMatchObject({ path: `hostnames/${HOST}` });
+    expect(mocks.onSnapshot.mock.calls[0][0]).toMatchObject({ path: `publicHostnames/${HOST}` });
   });
 
   it('raises the gate the moment the routing document is stamped', () => {

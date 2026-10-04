@@ -1,3 +1,4 @@
+import { projectPublicHostname } from '../../functions/src/publicHostnameFields';
 /**
  * #971's lifecycle/helper-specific emulator coverage, layered on #970's
  * deny-all `routerReplicas/{host}` and `routerRehearsals/{host}` baseline
@@ -42,7 +43,11 @@ import {
 // The operator module is plain `.mjs` with no build step and no type
 // declarations. `tests/` sits outside every tsconfig program (`tsconfig.json`
 // includes `src` only), so Vitest resolves this import and `tsc` never sees it.
-import { applyHostnameMutation, createTransactionRunner } from '../../scripts/event-router-registry/hostname-lifecycle.mjs';
+import {
+  applyHostnameMutation,
+  archiveSnapshotConfig,
+  createTransactionRunner,
+} from '../../scripts/event-router-registry/hostname-lifecycle.mjs';
 
 const RULES_PATH = fileURLToPath(new URL('../../firestore.rules', import.meta.url));
 const RULES = readFileSync(RULES_PATH, 'utf8');
@@ -75,6 +80,48 @@ const BARRIER = {
   workerVersionId: 'a1b2c3d4-0000-4000-8000-000000000001',
   resolutionCacheSchemaVersion: 4,
   armedAt: '2026-09-19T00:00:00.000Z',
+};
+
+/** The application flip the archive composes (#1256): the quiesce
+ *  `beginArchive` installed under generation 1 and the payload prepared under
+ *  it. The helper writes as Admin, so it asks the rules' flip-arm questions
+ *  itself and the suite seeds exactly the state that arm requires. */
+const GENERATION = 1;
+const ARCHIVED_AT = Date.parse('2026-09-20T11:59:00.000Z');
+const ARCHIVE_ROW = { uid: 'p1', displayName: 'Pat', bingoCount: 2, squaresMarked: 14, blackout: false, firstBingoAt: 1_000 };
+const ARCHIVE_RECORD = {
+  eventName: 'Bodega Bay',
+  standings: [ARCHIVE_ROW],
+  playerCount: 1,
+  firstBingo: { uid: 'p1', displayName: 'Pat', at: 1_000 },
+  firstBingoRow: { ...ARCHIVE_ROW, rank: 1 },
+  dailyHonors: [],
+  freezeAt: null,
+  archivedAt: ARCHIVED_AT,
+};
+const flipFor = (archivedUnder: number): Doc => ({ archivedAt: ARCHIVED_AT, archivedUnder, archive: ARCHIVE_RECORD });
+// The configuration the record is defined by, stored on the Event so the
+// transaction's structural comparison runs over values that went through the
+// real SDK rather than over the fixture's own objects.
+const SNAPSHOT_FIELDS: Doc = {
+  name: 'Bodega Bay',
+  claimMode: 'honor',
+  days: [{ index: 0, theme: 'neon-playground', unlockAt: 1_000, tonight: [] }],
+  standingsFreezeAt: 5_000,
+  bannedUids: ['p9'],
+};
+const quiescedEvent = (overrides: Doc = {}): Doc => ({
+  status: 'active',
+  admins: ['nathan'],
+  ...SNAPSHOT_FIELDS,
+  archiving: true,
+  archiveToken: GENERATION,
+  ...overrides,
+});
+const COMPOSED_FLIP: Doc = {
+  archiveToken: GENERATION,
+  flip: flipFor(GENERATION),
+  snapshotConfig: archiveSnapshotConfig(quiescedEvent()),
 };
 
 let testEnv: RulesTestEnvironment;
@@ -197,7 +244,7 @@ async function refusalCode(work: () => Promise<unknown>): Promise<string | null>
 }
 
 describe('the trusted hostname mutation helper against a real transaction', () => {
-  it('writes the canonical document and its replica ledger in one committed transaction', async () => {
+  it('writes canonical source, strict public projection and replica ledger in one committed transaction', async () => {
     await trusted(async (db) => {
       await applyHostnameMutation(
         mutation({
@@ -207,7 +254,8 @@ describe('the trusted hostname mutation helper against a real transaction', () =
         }),
         dependencies(db),
       );
-      expect(await read(db, `hostnames/${HOST}`)).toMatchObject({ status: 'disabled', eventId: EVENT_ID });
+      expect(await read(db, `hostnames/${HOST}`)).toMatchObject({ status: 'disabled', eventId: EVENT_ID, pathNamespace: null });
+      expect(await read(db, `publicHostnames/${HOST}`)).toEqual({ eventId: EVENT_ID, canonicalHost: HOST, edition: 'fiveacross', status: 'disabled', slug: 'bodega-bay', isCanonical: true });
       expect(await read(db, `routerReplicas/${HOST}`)).toEqual({
         schemaVersion: 1,
         revision: '1',
@@ -231,6 +279,7 @@ describe('the trusted hostname mutation helper against a real transaction', () =
         dependencies(db),
       );
       expect(await read(db, `hostnames/${HOST}`)).toBeNull();
+      expect(await read(db, `publicHostnames/${HOST}`)).toBeNull();
       expect(await read(db, `routerReplicas/${HOST}`)).toBeNull();
     });
   });
@@ -266,6 +315,7 @@ describe('the trusted hostname mutation helper against a real transaction', () =
         ),
       ).toBe('rehearsal-reservation');
       expect(await read(db, `hostnames/${HOST}`)).toBeNull();
+      expect(await read(db, `publicHostnames/${HOST}`)).toBeNull();
       expect(await read(db, `routerReplicas/${HOST}`)).toBeNull();
     });
   });
@@ -339,11 +389,12 @@ describe('the trusted hostname mutation helper against a real transaction', () =
         canonicalHost: HOST,
         isCanonical: false,
       });
-      await setDoc(doc(db, `events/${EVENT_ID}`), { status: 'active', admins: ['nathan'] });
+      await setDoc(doc(db, `events/${EVENT_ID}`), quiescedEvent());
 
       await applyHostnameMutation(
         mutation({
           intent: 'archive',
+          ...COMPOSED_FLIP,
           eventId: EVENT_ID,
           mappings: [HOST, ALIAS],
           apexPathHost: HOST,
@@ -363,7 +414,60 @@ describe('the trusted hostname mutation helper against a real transaction', () =
         isCanonical: false,
       });
       expect(await read(db, `routerReplicas/${MIRROR}`)).toMatchObject({ revision: '2', desired: { kind: 'root', root: 'not-found' } });
-      expect(await read(db, `events/${EVENT_ID}`)).toMatchObject({ status: 'archived' });
+      // The application flip, whole, in the same commit (#1256).
+      expect(await read(db, `events/${EVENT_ID}`)).toEqual({
+        admins: ['nathan'],
+        ...SNAPSHOT_FIELDS,
+        archiveToken: GENERATION,
+        status: 'archived',
+        archivedAt: ARCHIVED_AT,
+        archivedUnder: GENERATION,
+        archive: ARCHIVE_RECORD,
+        archiving: false,
+      });
+    });
+  });
+
+  // The quiesce, its generation and the configuration the record was built
+  // against are re-read INSIDE the real transaction that moves the mappings,
+  // so a refusal there is a rolled-back transaction rather than a pre-check a
+  // concurrent reopen or edit could slip past (#1256).
+  it('refuses an archive outside the quiesce, under a superseded generation or over an edited configuration, and moves nothing', async () => {
+    await trusted(async (db) => {
+      await seedConverged(db, HOST, hostnameDocument());
+      const archive = (extra: Doc = {}) =>
+        mutation({ intent: 'archive', ...COMPOSED_FLIP, eventId: EVENT_ID, mappings: [HOST], apexPathHost: HOST, mirrorRootConversions: [], ...extra });
+
+      for (const [event, input, expected] of [
+        [{ status: 'active', admins: ['nathan'] }, archive(), 'archive-requires-quiesce'],
+        [quiescedEvent({ archiving: false }), archive(), 'archive-requires-quiesce'],
+        // Reopened and shut again: generation 2 is in force, the payload
+        // declares 1, and naming 2 beside it is refused as well.
+        [quiescedEvent({ archiveToken: 2 }), archive(), 'archive-quiesce-changed'],
+        [quiescedEvent({ archiveToken: 2 }), archive({ archiveToken: 2 }), 'archive-flip-generation-mismatch'],
+        // Edited inside the same generation, after the record was prepared:
+        // the quiesce and the token are unchanged, the configuration is not.
+        [quiescedEvent({ name: 'Renamed' }), archive(), 'archive-config-changed'],
+        [quiescedEvent({ days: [{ index: 0, theme: 'disco', unlockAt: 1_000, tonight: [] }] }), archive(), 'archive-config-changed'],
+        [quiescedEvent({ bannedUids: [] }), archive(), 'archive-config-changed'],
+      ] as Array<[Doc, Doc, string]>) {
+        await setDoc(doc(db, `events/${EVENT_ID}`), event);
+        expect(await refusalCode(() => applyHostnameMutation(input, dependencies(db)))).toBe(expected);
+        expect(await read(db, `hostnames/${HOST}`)).toMatchObject({ status: 'active' });
+        expect(await read(db, `routerReplicas/${HOST}`)).toMatchObject({ revision: '1' });
+        expect(await read(db, `events/${EVENT_ID}`)).toEqual(event);
+      }
+
+      // The payload prepared under the generation in force goes through, and
+      // a retry of that archive is refused by name with nothing moved.
+      await setDoc(doc(db, `events/${EVENT_ID}`), quiescedEvent({ archiveToken: 2 }));
+      const current = archive({ archiveToken: 2, flip: flipFor(2) });
+      await applyHostnameMutation(current, dependencies(db));
+      const archived = await read(db, `events/${EVENT_ID}`);
+      expect(archived).toMatchObject({ status: 'archived', archiving: false, archivedUnder: 2, archive: ARCHIVE_RECORD });
+      expect(await refusalCode(() => applyHostnameMutation(current, dependencies(db)))).toBe('event-already-archived');
+      expect(await read(db, `events/${EVENT_ID}`)).toEqual(archived);
+      expect(await read(db, `routerReplicas/${HOST}`)).toMatchObject({ revision: '2' });
     });
   });
 
@@ -376,12 +480,12 @@ describe('the trusted hostname mutation helper against a real transaction', () =
     await trusted(async (db) => {
       await seedConverged(db, HOST, hostnameDocument());
       await seedConverged(db, ALIAS, hostnameDocument({ canonicalHost: HOST, isCanonical: false }));
-      await setDoc(doc(db, `events/${EVENT_ID}`), { status: 'active' });
+      await setDoc(doc(db, `events/${EVENT_ID}`), quiescedEvent());
 
       expect(
         await refusalCode(() =>
           applyHostnameMutation(
-            mutation({ intent: 'archive', eventId: EVENT_ID, mappings: [HOST], apexPathHost: HOST, mirrorRootConversions: [] }),
+            mutation({ intent: 'archive', ...COMPOSED_FLIP, eventId: EVENT_ID, mappings: [HOST], apexPathHost: HOST, mirrorRootConversions: [] }),
             dependencies(db),
           ),
         ),
@@ -394,7 +498,7 @@ describe('the trusted hostname mutation helper against a real transaction', () =
       // Naming both is accepted, so the refusal is about the omission rather
       // than about the listing failing to see either host.
       await applyHostnameMutation(
-        mutation({ intent: 'archive', eventId: EVENT_ID, mappings: [HOST, ALIAS], apexPathHost: HOST, mirrorRootConversions: [] }),
+        mutation({ intent: 'archive', ...COMPOSED_FLIP, eventId: EVENT_ID, mappings: [HOST, ALIAS], apexPathHost: HOST, mirrorRootConversions: [] }),
         dependencies(db),
       );
       expect(await read(db, `hostnames/${ALIAS}`)).toMatchObject({ status: 'archived' });
@@ -405,12 +509,12 @@ describe('the trusted hostname mutation helper against a real transaction', () =
     await trusted(async (db) => {
       await seedConverged(db, HOST, hostnameDocument());
       await seedConverged(db, ALIAS, hostnameDocument({ canonicalHost: HOST, isCanonical: false, status: 'disabled' }));
-      await setDoc(doc(db, `events/${EVENT_ID}`), { status: 'active' });
+      await setDoc(doc(db, `events/${EVENT_ID}`), quiescedEvent());
 
       expect(
         await refusalCode(() =>
           applyHostnameMutation(
-            mutation({ intent: 'archive', eventId: EVENT_ID, mappings: [HOST, ALIAS], apexPathHost: HOST, mirrorRootConversions: [] }),
+            mutation({ intent: 'archive', ...COMPOSED_FLIP, eventId: EVENT_ID, mappings: [HOST, ALIAS], apexPathHost: HOST, mirrorRootConversions: [] }),
             dependencies(db),
           ),
         ),
@@ -431,10 +535,11 @@ describe('the trusted hostname mutation helper against a real transaction', () =
     await trusted(async (db) => {
       await seedConverged(db, HOST, hostnameDocument());
       await seedConverged(db, 'gaycruisebingo.com', hostnameDocument({ edition: 'gcb', pathNamespace: null, canonicalHost: HOST, isCanonical: false }));
-      await setDoc(doc(db, `events/${EVENT_ID}`), { status: 'active' });
+      await setDoc(doc(db, `events/${EVENT_ID}`), quiescedEvent());
       const archive = (extra: Doc = {}) =>
         mutation({
           intent: 'archive',
+          ...COMPOSED_FLIP,
           eventId: EVENT_ID,
           mappings: [HOST],
           apexPathHost: HOST,
@@ -692,18 +797,22 @@ describe('what a Firebase client may see once the helper has written real routin
   beforeEach(async () => {
     await trusted(async (db) => {
       await seedConverged(db, HOST, hostnameDocument());
+      await setDoc(doc(db, `publicHostnames/${HOST}`), projectPublicHostname(hostnameDocument()));
       await setDoc(doc(db, `routerRehearsals/${SYNTHETIC}`), { class: 'route', reservedAt: 1 });
       await setDoc(doc(db, `events/${EVENT_ID}`), { admins: ['admin'] });
     });
   });
 
-  it.each(['anonymous', 'player', 'event admin'])('%s still gets the hostname document and nothing more', async (actor) => {
+  it.each(['anonymous', 'player', 'event admin'])('%s gets the public projection without exposing canonical registry data to anonymous callers', async (actor) => {
     const db = (
       actor === 'anonymous'
         ? testEnv.unauthenticatedContext().firestore()
         : testEnv.authenticatedContext(actor === 'event admin' ? 'admin' : 'player').firestore()
     ) as unknown as Firestore;
-    await assertSucceeds(getDoc(doc(db, `hostnames/${HOST}`)));
+    await assertSucceeds(getDoc(doc(db, `publicHostnames/${HOST}`)));
+    if (actor === 'anonymous') await assertFails(getDoc(doc(db, `hostnames/${HOST}`)));
+    else await assertSucceeds(getDoc(doc(db, `hostnames/${HOST}`)));
+    await assertFails(getDocs(collection(db, 'publicHostnames')));
     await assertFails(getDocs(collection(db, 'hostnames')));
     await assertFails(getDoc(doc(db, `routerReplicas/${HOST}`)));
     await assertFails(getDocs(collection(db, 'routerReplicas')));

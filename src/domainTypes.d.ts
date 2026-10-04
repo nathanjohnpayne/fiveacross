@@ -695,7 +695,7 @@ export interface EventDoc {
     /**
      * Admin override on the Event's 18+ posture (#608): an INPUT the server-side
      * derivation ORs in, never the derived flag itself (that lives on
-     * `hostnames/{host}.adultContent`, which no client may write).
+     * `publicHostnames/{host}.adultContent`, which no client may write).
      *
      * Exists because `spicy` tracks SEXUAL explicitness specifically, so an
      * Event whose only mature content is non-sexual — violence, drugs,
@@ -741,7 +741,7 @@ export interface EventDoc {
 }
 
 /**
- * A `hostnames/{host}` document — the public, pre-auth hostname → Event lookup
+ * A `publicHostnames/{host}` document — the public, pre-auth hostname → Event lookup
  * (ADR 0009, specs/hostnames-lookup.md). One document per public address, keyed
  * by full hostname, so an Event's canonical address and each of its aliases are
  * separate documents pointing at the same Event.
@@ -777,7 +777,7 @@ export interface HostnameDoc {
    * (`coerceEventPreview`) — absent means the gate simply draws no card, which
    * is every hostname document written before #647.
    *
-   * Lives HERE, on the one deliberately world-readable document, because
+   * Lives HERE, on the one deliberately field-allowlisted public document, because
    * `events/{eventId}` requires `signedIn()` and the screen this feeds is the
    * one that gets you signed in. Same reasoning as `edition` and
    * `adultContent`: what it exposes (the Event's name, dates, host first name)
@@ -799,7 +799,7 @@ export interface EventPreviewDay {
   emoji?: string;
 }
 
-/** The world-readable Event slice behind the sign-in postcard (#647). Every
+/** The field-allowlisted public Event slice behind the sign-in postcard (#647). Every
  *  field is display copy, seeded via the Admin SDK; nothing here is an
  *  authorization input. */
 export interface EventPreview {
@@ -1118,6 +1118,12 @@ export interface ProofDoc {
   // admin-only readable per firestore.rules until confirming the Claim flips it
   // to 'active'. A rejected Claim leaves its Proof 'pending' rather than exposed.
   status: 'active' | 'pending' | 'hidden' | 'flagged';
+  // Established credit at attach time or at a live Admin decision for a
+  // bound Claim/Proof/cell. Owner-immutable after create; Admin resolution may
+  // normalize it. Deletion removes content/projection only when true; absent
+  // unclassified legacy Proofs retain ordinary proof-backed unmark behavior.
+  // This grants no publication/Claim authority.
+  contentOnly?: boolean;
   visionFlag?: string | null; // set by the moderation function for illegal/extreme content
   // The SERVER-OWNED record that a safety hide stands on this Proof (#133).
   // `hideProofOnVisionFlag` stamps `true` in the same transactional update that
@@ -1202,6 +1208,10 @@ export interface ClaimDoc {
   cellIndex: number;
   itemText: string;
   proofId?: string | null;
+  // Optional ceremony hint at creation; an Admin terminal decision normalizes
+  // a present boolean to the live Board-derived established-credit classification.
+  // Absent on older credit Claims, whose existing ceremony behavior remains.
+  contentOnly?: boolean;
   status: 'pending' | 'confirmed' | 'rejected';
   createdAt: number;
   resolvedBy?: string | null;
@@ -1932,7 +1942,7 @@ export interface RevokedMembership extends MembershipBase {
  * document and a subcollection under `users/{uid}`.
  *
  * NO CLIENT MAY WRITE THIS. The whole collection is denied to every client
- * credential and written only by the Admin SDK, exactly as `hostnames/{host}`
+ * credential and written only by the Admin SDK, exactly as `publicHostnames/{host}`
  * is (`firestore.rules:624-628`) — the in-tree precedent for a record whose
  * value depends on clients not being able to author it. A membership a client
  * can write is not a membership.

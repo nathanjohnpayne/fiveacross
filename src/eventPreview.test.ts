@@ -13,7 +13,7 @@ import { readCache, resolveEvent, writeCache, type StorageLike } from './eventRe
 import type { HostnameDoc } from './types';
 
 // Covers the sign-in gate's Event-preview slice (#647): the defensive read of
-// `hostnames/{host}.preview`, the LIVE Day-line computation, and the slice's
+// `publicHostnames/{host}.preview`, the LIVE Day-line computation, and the slice's
 // passage through the resolver's network and cache paths. Pure module — no
 // network, no DOM, same discipline as eventResolution.test.ts.
 

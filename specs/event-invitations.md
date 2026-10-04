@@ -233,7 +233,7 @@ The projects' Domain Restricted Sharing policy rejects Firebase's `allUsers` Clo
 - Two-recipient concurrency has exactly one winner against real Firestore.
 - Revoke/redeem concurrency converges according to transaction order with no partial cascade.
 - No client, including an Event Admin, can read or mutate Invitation, rate, or Membership grant state directly.
-- The public `hostnames/{host}` point lookup remains unchanged.
+- The public `publicHostnames/{host}` point lookup remains unchanged.
 - **Given** a signed-in visit whose origin holds a pending Invitation, **when** the deal gate is consulted, **then** `joinAndDeal` is not called until the redemption settles as `admitted`; a transient failure keeps the record and offers Retry, a terminal one compare-deletes it and shares the one message, and a result that settles after a newer visit began neither deletes nor admits; **given** a signed-in visit whose authority or connectivity has not settled, **then** a usable Invitation classifies as `held` and the shell stays withheld, and Retry restarts redemption only under settled authority.
 
 ## Test coverage

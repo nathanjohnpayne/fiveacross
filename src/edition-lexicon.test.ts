@@ -29,7 +29,7 @@ describe('the lexicon resolves through the active Edition', () => {
 
   // #597. `BRANDS` is an object literal, so it inherits Object.prototype; a bare
   // `BRANDS[edition]` answers a TRUTHY non-brand for `constructor`, `toString`,
-  // `valueOf` and friends. `hostnames/{host}.edition` is operator-authored, so
+  // `valueOf` and friends. `publicHostnames/{host}.edition` is operator-authored, so
   // one typo (or one malicious mapping) would install a FUNCTION as the resolved
   // brand and render a blank wordmark on the sign-in gate instead of falling
   // back to the shipped experience.

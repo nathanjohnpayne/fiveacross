@@ -7,6 +7,7 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
+import { PUBLIC_HOSTNAME_FIELDS, hasOnlyPublicHostnameFields, projectPublicHostname } from '../../functions/src/publicHostnameFields.ts';
 import { collection, deleteDoc, doc, getDoc, getDocs, setDoc, updateDoc } from 'firebase/firestore';
 
 // Covers specs/hostnames-lookup.md — the pre-auth Event lookup (ADR 0009).
@@ -66,25 +67,88 @@ beforeEach(async () => {
       slug: 'bodega-bay',
       isCanonical: false,
     });
+    for (const host of [CANONICAL, ALIAS]) {
+      const data = (await getDoc(doc(db, `hostnames/${host}`))).data();
+      await setDoc(doc(db, `publicHostnames/${host}`), projectPublicHostname(data));
+    }
   });
 });
 
-describe('firestore.rules — hostnames/{host} pre-auth lookup (hostnames-lookup)', () => {
+describe('firestore.rules — publicHostnames/{host} pre-auth lookup (hostnames-lookup)', () => {
+  it('Rules field literals match the shared provisioning/read allowlist', () => {
+    const source = readFileSync(RULES_PATH, 'utf8');
+    const helper = source.match(/function publicHostnameData\(data\) \{([\s\S]*?)\n    \}/)?.[1];
+    expect(helper).toBeDefined();
+    const lists = [...helper!.matchAll(/hasOnly\(\[([^\]]*)\]\)/g)]
+      .map(match => [...match[1]!.matchAll(/'([^']+)'/g)].map(entry => entry[1]));
+    expect(lists).toEqual([[...PUBLIC_HOSTNAME_FIELDS.routing, 'preview'], [...PUBLIC_HOSTNAME_FIELDS.preview]]);
+    expect(hasOnlyPublicHostnameFields({ eventId: 'bodega', preview: { eventName: 'Bodega', days: [] } })).toBe(true);
+    expect(hasOnlyPublicHostnameFields({ eventId: 'bodega', preview: { privateEmail: 'private' } })).toBe(false);
+  });
+
+  it('denies canonical data to anonymous callers even when the projection is absent', async () => {
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await deleteDoc(doc(ctx.firestore(), `publicHostnames/${CANONICAL}`));
+    });
+    await assertFails(getDoc(doc(anon(), `hostnames/${CANONICAL}`)));
+    await assertFails(getDoc(doc(anon(), 'hostnames/missing.example.test')));
+    const missing = await assertSucceeds(getDoc(doc(anon(), `publicHostnames/${CANONICAL}`)));
+    expect(missing.exists()).toBe(false);
+  });
+
+  it.each([{ pathNamespace: null }, { root: 'doorway', pathNamespace: 'fiveacross.app' }, { internalEmail: 'private@example.test' }])('never discloses canonical recovery/operator metadata (%j)', async metadata => {
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await updateDoc(doc(ctx.firestore(), `hostnames/${CANONICAL}`), metadata);
+    });
+    await assertFails(getDoc(doc(anon(), `hostnames/${CANONICAL}`)));
+    const visible = await assertSucceeds(getDoc(doc(anon(), `publicHostnames/${CANONICAL}`)));
+    expect(visible.data()).not.toMatchObject(metadata);
+  });
+
   it('an UNAUTHENTICATED client may get a hostname document', async () => {
     // The load-bearing case: resolution happens before sign-in, because the
     // sign-in screen itself needs the Event's Edition to render correctly.
-    const snap = await assertSucceeds(getDoc(doc(anon(), `hostnames/${CANONICAL}`)));
+    const snap = await assertSucceeds(getDoc(doc(anon(), `publicHostnames/${CANONICAL}`)));
     expect(snap.exists()).toBe(true);
     expect(snap.data()?.eventId).toBe('bodega-bay-2026');
   });
 
-  it('a signed-in client may get a hostname document', async () => {
+  it.each([
+    ['root', { contactEmail: 'private@example.test' }],
+    ['preview', { preview: { eventName: 'Public', memberEmails: ['private@example.test'] } }],
+    ['flattened preview', { eventName: 'Public' }],
+  ])('denies the entire anonymous document with unapproved %s fields', async (_label, extra) => {
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await updateDoc(doc(ctx.firestore(), `publicHostnames/${CANONICAL}`), extra);
+    });
+    await assertFails(getDoc(doc(anon(), `publicHostnames/${CANONICAL}`)));
+  });
+
+  it('permits all seven routing and four nested public preview fields', async () => {
+    const preview = { eventName: 'Bodega', dateRange: 'Aug 7–9', hostedBy: 'Kim', days: [{ date: '2026-08-07', title: 'Birds', emoji: '🐦' }] };
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await updateDoc(doc(ctx.firestore(), `publicHostnames/${CANONICAL}`), { adultContent: false, preview });
+    });
+    const snap = await assertSucceeds(getDoc(doc(anon(), `publicHostnames/${CANONICAL}`)));
+    expect(snap.data()?.preview).toEqual(preview);
+    expect(snap.data()?.adultContent).toBe(false);
+  });
+
+  it('preserves authenticated point lookup of a legacy document with extra metadata', async () => {
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await updateDoc(doc(ctx.firestore(), `hostnames/${CANONICAL}`), { internalNote: 'legacy operator metadata' });
+    });
     const snap = await assertSucceeds(getDoc(doc(authed('alice'), `hostnames/${CANONICAL}`)));
+    expect(snap.data()?.eventId).toBe('bodega-bay-2026');
+  });
+
+  it('a signed-in client may get a hostname document', async () => {
+    const snap = await assertSucceeds(getDoc(doc(authed('alice'), `publicHostnames/${CANONICAL}`)));
     expect(snap.data()?.edition).toBe('vacay');
   });
 
   it('an alias document resolves to the same Event and names its canonical', async () => {
-    const snap = await assertSucceeds(getDoc(doc(anon(), `hostnames/${ALIAS}`)));
+    const snap = await assertSucceeds(getDoc(doc(anon(), `publicHostnames/${ALIAS}`)));
     expect(snap.data()?.eventId).toBe('bodega-bay-2026');
     expect(snap.data()?.canonicalHost).toBe(CANONICAL);
     expect(snap.data()?.isCanonical).toBe(false);
@@ -93,17 +157,17 @@ describe('firestore.rules — hostnames/{host} pre-auth lookup (hostnames-lookup
   it('LISTING the collection is denied — unauthenticated', async () => {
     // Enumeration would convert unguessable addresses into a directory of every
     // Event on the platform. This is the whole reason the rule splits get/list.
-    await assertFails(getDocs(collection(anon(), 'hostnames')));
+    await assertFails(getDocs(collection(anon(), 'publicHostnames')));
   });
 
   it('LISTING the collection is denied — signed in', async () => {
-    await assertFails(getDocs(collection(authed('alice'), 'hostnames')));
+    await assertFails(getDocs(collection(authed('alice'), 'publicHostnames')));
   });
 
   it('an unknown host is a MISSING DOCUMENT, not a denial', async () => {
     // A client must be able to tell "no Event here" from "permission problem",
     // so it renders an Event-not-found state rather than a network-ish error.
-    const snap = await assertSucceeds(getDoc(doc(anon(), 'hostnames/nope.vacaybingo.com')));
+    const snap = await assertSucceeds(getDoc(doc(anon(), 'publicHostnames/nope.vacaybingo.com')));
     expect(snap.exists()).toBe(false);
   });
 
@@ -120,14 +184,36 @@ describe('firestore.rules — hostnames/{host} pre-auth lookup (hostnames-lookup
     );
   });
 
+  // Both collections are global operator-owned mappings. Event admin status
+  // grants neither canonical namespace mutation nor public projection mutation.
+  describe.each(['hostnames', 'publicHostnames'] as const)('%s mutation boundary', (collectionName) => {
+    beforeEach(async () => {
+      await testEnv.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), 'events/bodega-bay-2026'), {
+          name: 'Bodega Bay', admins: ['kim'], status: 'active',
+        });
+      });
+    });
+
+    it.each([['alice', 'ordinary client'], ['kim', 'Event admin']] as const)('denies UPDATE by %s (%s)', async (uid) => {
+      await assertFails(updateDoc(doc(authed(uid), `${collectionName}/${CANONICAL}`), {
+        eventId: 'some-other-event',
+      }));
+    });
+
+    it.each([['alice', 'ordinary client'], ['kim', 'Event admin']] as const)('denies DELETE by %s (%s)', async (uid) => {
+      await assertFails(deleteDoc(doc(authed(uid), `${collectionName}/${CANONICAL}`)));
+    });
+  });
+
   it('client UPDATE is denied — a writable mapping could repoint a live address', async () => {
     await assertFails(
-      updateDoc(doc(authed('alice'), `hostnames/${CANONICAL}`), { eventId: 'some-other-event' }),
+      updateDoc(doc(authed('alice'), `publicHostnames/${CANONICAL}`), { eventId: 'some-other-event' }),
     );
   });
 
   it('client DELETE is denied', async () => {
-    await assertFails(deleteDoc(doc(authed('alice'), `hostnames/${CANONICAL}`)));
+    await assertFails(deleteDoc(doc(authed('alice'), `publicHostnames/${CANONICAL}`)));
   });
 
   it('an unauthenticated client cannot write either', async () => {
@@ -148,7 +234,7 @@ describe('firestore.rules — hostnames/{host} pre-auth lookup (hostnames-lookup
       });
     });
     await assertFails(
-      updateDoc(doc(authed('kim'), `hostnames/${CANONICAL}`), { eventId: 'some-other-event' }),
+      updateDoc(doc(authed('kim'), `publicHostnames/${CANONICAL}`), { eventId: 'some-other-event' }),
     );
   });
 });

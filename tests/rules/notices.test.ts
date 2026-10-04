@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   assertFails,
   assertSucceeds,
@@ -10,8 +10,8 @@ import {
 import { deleteDoc, deleteField, doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
 
 // specs/admin-messages.md (#439, #455) — the Notices rules contract. A Notice is an
-// admin-authored broadcast at events/{eventId}/notices/{noticeId}: any signed-in
-// Player READS it (the Feed everyone watches); only an admin creates, updates
+// admin-authored broadcast at events/{eventId}/notices/{noticeId}: reads require
+// Event admission; new names match the bounded ID token. Only an admin creates, updates
 // (pin/unpin and an in-place copy correction), or deletes it, and both create and
 // update validate the title/body caps + boolean `pinned`. On update the diff is
 // pinned to title/body/pinned/editedAt, so attribution (`uid`, `displayName`) and
@@ -24,7 +24,7 @@ const [ADMIN, ALICE, BOB] = ['admin-uid', 'alice', 'bob'];
 const NOW = () => Date.now();
 
 let testEnv: RulesTestEnvironment;
-const db = (uid: string) => testEnv.authenticatedContext(uid).firestore();
+const db = (uid: string) => testEnv.authenticatedContext(uid, { name: uid }).firestore();
 const at = (p: string) => `events/${EVENT}/${p}`;
 const noticePath = (id: string) => at(`notices/${id}`);
 // The Notice shape notices.ts writes: { title, body, uid, displayName, createdAt, pinned }.
@@ -52,7 +52,7 @@ afterAll(async () => {
 });
 
 // Each test starts clean with a canonical Event (ADMIN is the sole admin) and one
-// admin-authored Notice, so the public-read + admin-write invariants have a doc to
+// admin-authored Notice, so the admitted-read + admin-write invariants have a doc to
 // read/mutate against.
 beforeEach(async () => {
   await testEnv.clearFirestore();
@@ -75,7 +75,48 @@ beforeEach(async () => {
 });
 
 describe('firestore.rules — Notices (specs/admin-messages.md)', () => {
-  it('any signed-in Player reads a Notice', async () => {
+  it.each([
+    ['forged', { displayName: 'Another Admin' }],
+    ['missing', { displayName: deleteField() }],
+    ['null', { displayName: null }],
+    ['number', { displayName: 42 }],
+    ['oversized', { displayName: 'x'.repeat(101) }],
+  ])('denies %s Notice attribution rather than trusting an Admin-supplied label', async (_label, fields) => {
+    const payload: Record<string, unknown> = notice(ADMIN, fields);
+    if (_label === 'missing') delete payload.displayName;
+    await assertFails(setDoc(doc(db(ADMIN), noticePath('bad-label')), payload));
+    expect((await getDoc(doc(db(ADMIN), noticePath('bad-label')))).exists()).toBe(false);
+  });
+
+  it.each([undefined, null, 42, '', 'x'.repeat(101)])('denies an unusable authenticated token name %j', async name => {
+    const claims = name === undefined ? {} : { name };
+    const admin = testEnv.authenticatedContext(ADMIN, claims).firestore();
+    await assertFails(setDoc(doc(admin, noticePath('bad-token-name')), notice(ADMIN, {
+      displayName: typeof name === 'string' ? name : ADMIN,
+    })));
+  });
+
+  it.each([[25, true], [26, true], [50, true], [51, false], [60, false], [100, false]])('measures actual Rules astral name boundary (%i emoji, allowed=%s)', async (count, allowed) => {
+    const name = '😀'.repeat(Number(count));
+    const admin = testEnv.authenticatedContext(ADMIN, { name }).firestore();
+    const write = setDoc(doc(admin, noticePath('unicode-name')), notice(ADMIN, { displayName: name }));
+    if (allowed) await assertSucceeds(write);
+    else await assertFails(write);
+  });
+
+  it('accepts the exact bounded token label and keeps attribution fixed after an account rename', async () => {
+    const oldName = 'N'.repeat(100);
+    const first = testEnv.authenticatedContext(ADMIN, { name: oldName }).firestore();
+    await assertSucceeds(setDoc(doc(first, noticePath('original')), notice(ADMIN, { displayName: oldName })));
+    const renamed = testEnv.authenticatedContext(ADMIN, { name: 'Renamed Google account' }).firestore();
+    await assertSucceeds(setDoc(doc(renamed, noticePath('renamed')), notice(ADMIN, { displayName: 'Renamed Google account' })));
+    await assertSucceeds(updateDoc(doc(renamed, noticePath('original')), { pinned: false }));
+    await assertFails(updateDoc(doc(renamed, noticePath('original')), { displayName: 'Renamed Google account' }));
+    expect((await getDoc(doc(renamed, noticePath('original')))).data()?.displayName).toBe(oldName);
+  });
+
+
+  it('the Event admission predicate permits Notice reads', async () => {
     await assertSucceeds(getDoc(doc(db(ALICE), noticePath('seed'))));
     await assertSucceeds(getDoc(doc(db(BOB), noticePath('seed'))));
   });

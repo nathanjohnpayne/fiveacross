@@ -43,12 +43,12 @@
 // because `firestore.rules`' `photoUrlOk` pins every stored avatar URL to the
 // same production Storage host (or Google's photo host), and `Avatar` resolves
 // the stored value back to the emulator to render it (see `./photoUrl.ts`).
-// The service worker's CacheFirst proof-media route
+// The service worker's network-only proof-media route
 // (`PROOF_MEDIA_URL_PATTERN`, ./proofMediaCache.ts) matches the PRODUCTION host,
 // so under the e2e build the resolved emulator request simply misses the route
-// and nothing is cached — which is the correct behaviour for a test run, and the
-// reason `deleteProof`'s cache purge resolves its key the same way the render
-// path does rather than purging a key the browser never wrote.
+// and uses the emulator network directly. `deleteProof`'s legacy cache purge
+// still resolves its key the same way the render path does, preserving the
+// pre-upgrade own-device purge contract.
 //
 // ORDERING NOTE FOR THE RENDER HALF. `resolveProofMediaUrl` must run BEFORE
 // `safeMediaUrl`, never after: `safeMediaUrl` is the CodeQL-recognised sanitizer

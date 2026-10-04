@@ -214,7 +214,7 @@ Shared-module rule for this wave: #790 and #545 both need the slug-normalization
 - **#548** `auth-handoff-functions` · Opus 4.8 · xhigh · Phase 4: mint/exchange callables + `authHandoffs` rules block per the issue's acceptance list (transactional single-use, server-side expiry, origin allowlist, no token in any URL; replay/expiry/mismatch/concurrency tests). Rules edits rebase on #689.
 - **#546** `worker-manifest-injection` · Opus 4.8 · high: per-hostname PWA manifest via the #545 Worker; read the struck-canonicalization note — this is now the *only* source of per-host installed identity.
 - **#791** `setup-step-squares` · Opus 4.8 · high: pack seeding, prompt CRUD, live per-pool ≥ 24 gate; rhyme with `PromptPool.tsx`, draft-only writes.
-- **#544** `hostname-edition-plumbing` · Sonnet 5 · high: `edition` on `hostnames/{host}` + pre-auth surface plumbing with safe fallback.
+- **#544** `hostname-edition-plumbing` · Sonnet 5 · high: historical `edition` on canonical `hostnames/{host}` + pre-auth plumbing; current browser resolution reads its paired `publicHostnames/{host}` projection (#1419).
 - **#549** `auth-handoff-client` · Opus 4.8 · high · Phase 4 (`src/auth/**`): client half + `VITE_AUTH_MODE` escape hatch; target origin = the serving host sign-in began on (no canonicalization step — see the 2026-08-17 amendment).
 - **#792** `setup-step-look` · Opus 4.8 · high: unlock times, themes, place/tonight, free space, Daily mix; extract `EasyMixSlider` shared component without breaking `GameSettings` tests; owns `src/index.css` if needed.
 - **#795** `setup-preview-strip` · Sonnet 5 · high: Edition-skinned preview via a scoped theme island that must not disturb the app-global `ThemeContext`/`data-theme` contract.

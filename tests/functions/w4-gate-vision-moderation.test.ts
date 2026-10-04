@@ -335,3 +335,39 @@ describe('shouldScanProof — the RUNTIME admin toggle (#268)', () => {
     await expect(shouldScanProof(failing, 'e')).resolves.toBe(true);
   });
 });
+
+it('the real thumbnail writer stamps no-store metadata before the disabled scan returns (#1410)', async () => {
+  process.env.ENABLE_VISION_MODERATION = 'true';
+  const mod = await importIndex();
+  const { getStorage } = functionsRequire('firebase-admin/storage') as typeof import('firebase-admin/storage');
+  const { getFirestore } = functionsRequire('firebase-admin/firestore') as typeof import('firebase-admin/firestore');
+  const { ImageAnnotatorClient } = functionsRequire('@google-cloud/vision') as typeof import('@google-cloud/vision');
+  const sharp = functionsRequire('sharp') as typeof import('sharp');
+  const image = await sharp({ create: { width: 1, height: 1, channels: 3, background: '#ffffff' } }).jpeg().toBuffer();
+  const storage = getStorage();
+  const bucket = storage.bucket('gaycruisebingo-test.appspot.com');
+  const source = bucket.file('proofs/e/u/p.jpg');
+  const thumbnail = bucket.file('proofs/e/u/p_thumb.jpg');
+  const eventRef = getFirestore().doc('events/e');
+  // Every data-plane/API method is replaced locally; no Vision or cloud call.
+  const download = vi.spyOn(source, 'download').mockResolvedValue([image]);
+  const save = vi.spyOn(thumbnail, 'save').mockResolvedValue();
+  const files = vi.spyOn(bucket, 'file').mockImplementation(name => name.endsWith('_thumb.jpg') ? thumbnail : source);
+  const buckets = vi.spyOn(storage, 'bucket').mockReturnValue(bucket);
+  const docs = vi.spyOn(getFirestore(), 'doc').mockReturnValue(eventRef);
+  const get = vi.spyOn(eventRef, 'get').mockResolvedValue({ exists: true, get: () => false } as unknown as Awaited<ReturnType<typeof eventRef.get>>);
+  const scan = vi.spyOn(ImageAnnotatorClient.prototype, 'safeSearchDetection').mockImplementation(() => { throw new Error('Vision must not be invoked'); });
+  try {
+    if (!mod.moderateProof) throw new Error('Expected the locally enabled thumbnail handler');
+    await mod.moderateProof.run({ data: { name: source.name, bucket: bucket.name } } as unknown as Parameters<typeof mod.moderateProof.run>[0]);
+    expect(download).toHaveBeenCalledOnce();
+    expect(save).toHaveBeenCalledWith(expect.any(Buffer), {
+      contentType: 'image/jpeg',
+      metadata: { cacheControl: 'private, no-store, max-age=0' },
+    });
+    expect(scan).not.toHaveBeenCalled();
+  } finally {
+    for (const spy of [download, save, files, buckets, docs, get, scan]) spy.mockRestore();
+    delete process.env.ENABLE_VISION_MODERATION;
+  }
+});

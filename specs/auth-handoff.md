@@ -134,7 +134,7 @@ match /authHandoffs/{codeHash} {
 
 **Denied in both directions, and each direction closes a different takeover.** A readable document is the live authorization to become its `uid`—single use and a short TTL do not help if a client can enumerate unconsumed documents and redeem one first. A writable document is worse still: a client that could create one would mint itself a code bound to another player's UID with no Google round trip at all, and a client that could update one could clear `consumedAt` to replay a spent code or push `expiresAt` forward to keep a stolen one alive indefinitely. **Single use and expiry are only real while the document backing them is unwritable.**
 
-Note the deny covers `get` as well as `list`, unlike `hostnames/{host}` ([hostnames-lookup](hostnames-lookup.md)) where a caller can only `get` an address it already knows. Here the document id *is* the secret being guarded.
+Note the deny covers `get` as well as `list`, unlike `publicHostnames/{host}` ([hostnames-lookup](hostnames-lookup.md)) where a caller can only `get` an address it already knows. Here the document id *is* the secret being guarded.
 
 The Admin SDK bypasses rules, so the two functions are the collection's only writers—and the consume is a transaction in code rather than a rules condition, because rules cannot express "read this, then write it, atomically."
 
@@ -175,7 +175,7 @@ A rejection that happens *before* the transaction commits—wrong origin, wrong 
 
 `tests/functions/auth-handoff.test.ts` (`npm run test:functions`, no emulator)—the decision layer. Enumerates every mint and exchange branch against an in-memory Firestore whose `runTransaction` models real optimistic concurrency, plus a table of malformed origins and open-redirect `returnPath` payloads. The suite opens with a **guard on its own harness**: a test proving the fake actually re-runs a callback whose read was invalidated, because a concurrency test against a fake that always commits would pass no matter what the code did.
 
-`tests/rules/auth-handoff.test.ts` (`npm run test:rules`, Firestore emulator)—two halves under its own `projectId` so `clearFirestore()` cannot race the other rules suites. The rules half exercises every deny arm for an unauthenticated caller, the code's own player, another player, and an Event admin, and asserts the deny stays scoped by checking the pre-auth `hostnames` read still succeeds. The consumption half drives the **same** `exchangeHandoff` through a thin web-SDK adapter onto the real emulator, because single-use is a claim about transaction semantics and a fake that implements those semantics can only prove itself. Its fixture is built by the production `buildHandoffRecord`, so it cannot drift from what mint writes.
+`tests/rules/auth-handoff.test.ts` (`npm run test:rules`, Firestore emulator)—two halves under its own `projectId` so `clearFirestore()` cannot race the other rules suites. The rules half exercises every deny arm for an unauthenticated caller, the code's own player, another player, and an Event admin, and asserts the deny stays scoped by checking the pre-auth `publicHostnames` read still succeeds. The consumption half drives the **same** `exchangeHandoff` through a thin web-SDK adapter onto the real emulator, because single-use is a claim about transaction semantics and a fake that implements those semantics can only prove itself. Its fixture is built by the production `buildHandoffRecord`, so it cannot drift from what mint writes.
 
 ## Deployment: both callables need the Cloud Run invoker check disabled
 
