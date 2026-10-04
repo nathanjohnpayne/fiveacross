@@ -1,6 +1,7 @@
 import { privateCacheRecoveryHref } from '../auth/privateCacheRecoveryNavigation';
 import { useLocation, useNavigate } from 'react-router';
 import { usePrivateFirestore } from '../hooks/usePrivateFirestore';
+import { useOnline } from '../hooks/useOnline';
 import { useAuth } from '../auth/AuthContext';
 import {
   useAdminEventDoc,
@@ -44,26 +45,25 @@ const SECTION_TITLES: Record<AdminSection, string> = {
 /**
  * The admin gate shell. Only the current server Event doc through the memory-only private session
  * is subscribed HERE — the admin-only queue/item/proof/claim subscriptions
- * live in `AdminConsole`, which mounts only once `isAdmin` holds. A non-admin
- * deep link therefore gets the dismissible "Admins only." sheet without ever
+ * live in `AdminConsole`, which mounts only once the confirmed roster admits the
+ * current private-session subject. A non-admin
+ * deep link gets a loading/reconnect/unavailable state until the current private
+ * answer establishes eligibility; a confirmed non-admin gets "Admins only."
+ * without ever
  * opening a listener `firestore.rules` would deny (Codex P2, PR #410: the old
  * console relied on More's own gate for this; the route-driven mount cannot).
  */
 export default function Admin() {
   const { user } = useAuth();
-  // The Event's own SERVER-CONFIRMED flag rides along for #1151's archive gate
-  // (Codex P2 on PR #1162). `data` alone cannot answer "has the server spoken
-  // about this Event?": the ADR 0006 persistent cache delivers a document
-  // before any server snapshot, so a non-null `event` is not evidence the
-  // schedule, name or ban list about to be frozen are the current ones. It is
-  // the same fully-server-committed test `src/App.tsx` applies to the Card
-  // redirect — the `hasServerData` LATCH, plus this snapshot's own `fromCache`
-  // and `hasPendingWrites` — because an Admin's own optimistic `archiving: true`
-  // is emitted server-backed but undecided, and a refusal rolls it back.
-  const { data: event, hasServerData, fromCache, hasPendingWrites } = useAdminEventDoc();
+  // Only the memory client's current, fully server-committed Event answer
+  // qualifies the Admin gate and #1151's archive gate. Cache-origin and pending
+  // snapshots remain unknown; the old persistent gameplay-cache gate explains
+  // the same metadata checks historically, not this private listener's storage.
+  const { data: event, loading, serverResolved, hasServerData, fromCache, hasPendingWrites } = useAdminEventDoc();
   const eventConfirmed = hasServerData && !fromCache && !hasPendingWrites;
   const navigate = useNavigate();
   const session = usePrivateFirestore();
+  const online = useOnline();
   if (user && session.recoveryRequired) {
     return <AdminSheet title="Admin" onDone={() => navigate('/more', { replace: true })}>
       <p>Private views require attended device recovery. Recover and verify every account’s queued Marks online first.</p>
@@ -71,11 +71,21 @@ export default function Admin() {
     </AdminSheet>;
   }
 
-  const isAdmin = !!(eventConfirmed && user && session.uid === user.uid && event?.admins?.includes(user.uid));
-  if (!isAdmin || !user) {
+  // Availability never establishes authority. Admin-only subscriptions stay
+  // unmounted until the subject-bound private session has a confirmed roster.
+  const unavailable = 'Admin is unavailable. Reload and try again.';
+  const gateMessage = !user ? 'Sign in to use Admin.'
+    : session.failed ? unavailable
+    : !online ? 'Reconnect to use Admin.'
+    : session.uid !== user.uid || !session.db ? 'Loading Admin…'
+    : !eventConfirmed ? (serverResolved && !loading && !hasServerData ? unavailable : 'Loading Admin…')
+    : !event ? unavailable
+    : !event.admins?.includes(user.uid) ? 'Admins only.'
+    : null;
+  if (gateMessage !== null || !user) {
     return (
       <AdminSheet title="Admin" onDone={() => navigate('/more', { replace: true })}>
-        <div className="center muted">Admins only.</div>
+        <div className="center muted" role="status">{gateMessage}</div>
       </AdminSheet>
     );
   }

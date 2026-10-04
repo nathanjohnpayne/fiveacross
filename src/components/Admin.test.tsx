@@ -56,9 +56,18 @@ const H = vi.hoisted(() => ({
   unlockDayNow: vi.fn(),
   resnapshotDayNow: vi.fn(),
   recoveryRequired: false,
+  privateAvailable: true,
+  privateFailed: false,
+  privateUid: undefined as string | null | undefined,
+  eventLoading: false,
+  eventServerResolved: true,
+  eventServerData: true,
+  eventFromCache: false,
+  eventPending: false,
+  adminOnlySubscriptions: vi.fn(),
 }));
 
-vi.mock('../hooks/usePrivateFirestore', () => ({ usePrivateFirestore: () => ({ uid: H.user?.uid ?? null, db: {}, generation: 1, recoveryRequired: H.recoveryRequired, failed: false }) }));
+vi.mock('../hooks/usePrivateFirestore', () => ({ usePrivateFirestore: () => ({ uid: H.privateUid === undefined ? H.user?.uid ?? null : H.privateUid, db: H.privateAvailable ? {} : null, generation: 1, recoveryRequired: H.recoveryRequired, failed: H.privateFailed }) }));
 
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event', storage: {}, auth: {}, googleProvider: {}, analytics: null }));
 // #559: ReviewQueue now imports `track` (for `prompt_suggestion_approved`),
@@ -87,8 +96,8 @@ vi.mock('../hooks/useData', async (importOriginal) => {
   return {
     ...actual,
     useEventDoc: () => ({ data: H.event, loading: false, hasServerData: true, fromCache: false, hasPendingWrites: false }),
-    useAdminEventDoc: () => ({ data: H.event, loading: false, hasServerData: true, fromCache: false, hasPendingWrites: false }),
-    usePendingClaims: () => ({ claims: H.claims }),
+    useAdminEventDoc: () => ({ data: H.event, loading: H.eventLoading, serverResolved: H.eventServerResolved, hasServerData: H.eventServerData, fromCache: H.eventFromCache, hasPendingWrites: H.eventPending }),
+    usePendingClaims: () => { H.adminOnlySubscriptions('claims'); return { claims: H.claims }; },
     usePendingItems: () => ({ items: H.pendingItems, loading: false }),
     useReportedProofs: () => ({ flagged: H.flagged, loading: false }),
     useAllItems: () => ({ items: H.items, loading: false }),
@@ -179,6 +188,9 @@ const dayDef = (over: Partial<DayDef> = {}): DayDef => ({
 
 beforeEach(() => {
   H.recoveryRequired = false;
+  H.privateAvailable = true; H.privateFailed = false; H.privateUid = undefined;
+  H.eventLoading = false; H.eventServerResolved = true; H.eventServerData = true; H.eventFromCache = false; H.eventPending = false;
+  vi.restoreAllMocks();
   vi.clearAllMocks();
   H.user = { uid: 'admin-uid' };
   H.event = {
@@ -191,6 +203,45 @@ beforeEach(() => {
   H.flagged = [];
   H.items = [];
   H.pendingItems = [];
+});
+
+describe('Admin private gate state', () => {
+  it.each([
+    ['initial answer', () => { H.eventLoading = true; H.eventServerData = false; H.eventServerResolved = false; }, 'Loading Admin…'],
+    ['offline retirement', () => { H.privateAvailable = false; vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false); }, 'Reconnect to use Admin.'],
+    ['session failure', () => { H.privateAvailable = false; H.privateFailed = true; H.privateUid = null; }, 'Admin is unavailable. Reload and try again.'],
+    ['terminal Event read failure', () => { H.eventServerData = false; H.eventServerResolved = true; }, 'Admin is unavailable. Reload and try again.'],
+    ['retired subject', () => { H.privateUid = 'other-account'; }, 'Loading Admin…'],
+    ['missing confirmed Event', () => { H.event = null!; }, 'Admin is unavailable. Reload and try again.'],
+    ['cache-origin answer', () => { H.eventFromCache = true; }, 'Loading Admin…'],
+    ['pending answer', () => { H.eventPending = true; }, 'Loading Admin…'],
+  ] as const)('distinguishes %s from a definitive non-admin answer', (_name, arrange, message) => {
+    arrange();
+    renderAdmin();
+    expect(screen.getByText(message)).toBeInTheDocument();
+    expect(screen.queryByText('Admins only.')).not.toBeInTheDocument();
+    expect(H.adminOnlySubscriptions).not.toHaveBeenCalled();
+    expect(screen.queryByText('Review queue')).not.toBeInTheDocument();
+  });
+
+  it('shows definitive non-admin only after a current confirmed answer', () => {
+    H.event = { ...H.event, admins: ['someone-else'] };
+    renderAdmin();
+    expect(screen.getByText('Admins only.')).toBeInTheDocument();
+    expect(H.adminOnlySubscriptions).not.toHaveBeenCalled();
+  });
+
+  it('opens the console only after the loading answer becomes current and confirmed', () => {
+    H.eventLoading = true; H.eventServerData = false; H.eventServerResolved = false;
+    const view = renderAdmin();
+    expect(screen.getByText('Loading Admin…')).toBeInTheDocument();
+    expect(H.adminOnlySubscriptions).not.toHaveBeenCalled();
+    H.eventLoading = false; H.eventServerData = true; H.eventServerResolved = true;
+    view.rerender(<MemoryRouter initialEntries={['/more/admin']}><Admin /></MemoryRouter>);
+    expect(screen.queryByText('Loading Admin…')).not.toBeInTheDocument();
+    expect(screen.getByText('Review queue')).toBeInTheDocument();
+    expect(H.adminOnlySubscriptions).toHaveBeenCalled();
+  });
 });
 
 describe('Admin Approvals group (specs/d15-approvals.md, re-housed in the Review queue)', () => {
