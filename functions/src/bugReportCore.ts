@@ -6,6 +6,8 @@ const { validateClientReportFields, validatePngBytes } = contract;
 export type { BugReportKind };
 const RATE_WINDOW_MS = 15 * 60 * 1000;
 const RATE_MAX = 3;
+export const REQUEST_RATE_WINDOW_MS = 60_000;
+export const REQUEST_RATE_MAX = 30;
 
 export class BugReportInputError extends Error {
   constructor(
@@ -37,6 +39,10 @@ export interface RateState {
   submissionMs: number[];
 }
 
+export interface RequestRateState {
+  requestMs: number[];
+}
+
 function screenshotFrom(value: unknown): Buffer | null {
   if (value == null) return null;
   if (typeof value !== 'string') throw new BugReportInputError('invalid-argument', 'Screenshot must be a PNG data URL.');
@@ -65,4 +71,18 @@ export function nextRateState(previous: RateState | undefined, nowMs: number): R
   const recent = (previous?.submissionMs ?? []).filter((timestamp) => Number.isFinite(timestamp) && timestamp > cutoff);
   if (recent.length >= RATE_MAX) throw new BugReportInputError('resource-exhausted', 'Too many bug reports. Try again later.');
   return { submissionMs: [...recent, nowMs] };
+}
+
+/** Separate from report creation: invalid payloads and receipt retries also
+ * consume decode/hash work, but must never consume another creation slot. */
+export function nextRequestRateState(previous: RequestRateState | undefined, nowMs: number): RequestRateState {
+  if (previous && (!Array.isArray(previous.requestMs) || previous.requestMs.length > REQUEST_RATE_MAX)) {
+    throw new BugReportInputError('resource-exhausted', 'Report request budget is unavailable. Try again later.');
+  }
+  const recent = (previous?.requestMs ?? []).filter((timestamp) =>
+    Number.isFinite(timestamp) && timestamp > nowMs - REQUEST_RATE_WINDOW_MS);
+  if (recent.length >= REQUEST_RATE_MAX) {
+    throw new BugReportInputError('resource-exhausted', 'Too many report requests. Try again in a minute.');
+  }
+  return { requestMs: [...recent, nowMs] };
 }
