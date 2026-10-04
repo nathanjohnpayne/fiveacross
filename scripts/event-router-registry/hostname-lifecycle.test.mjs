@@ -1180,6 +1180,7 @@ describe('archive', () => {
     blackout: false,
     firstBingoAt: 1_000,
   };
+  const HONOR = (dayIndex) => ({ dayIndex, uid: 'p1', displayName: 'Pat', firstBingoAt: 1_000, dayLabel: `D${dayIndex + 1}` });
   const archiveRecord = (overrides = {}) => ({
     eventName: 'Bodega Bay',
     standings: [ROW],
@@ -1710,10 +1711,32 @@ describe('archive', () => {
         'more daily honours than an Event has Days',
         flipFor(GENERATION, {
           archive: archiveRecord({
-            dailyHonors: Array.from({ length: 21 }, (_, dayIndex) => ({ dayIndex, uid: 'p1', displayName: 'Pat', firstBingoAt: 1_000 })),
+            dailyHonors: Array.from({ length: 21 }, (_, dayIndex) => HONOR(dayIndex)),
           }),
         }),
       ],
+      // Each honour is walked as the console's `writableArchiveRecord` walks
+      // it: the archived surfaces render its fields straight through.
+      ['a daily honour carrying no fields', flipFor(GENERATION, { archive: archiveRecord({ dailyHonors: [{}] }) })],
+      ['a daily honour that is not a map', flipFor(GENERATION, { archive: archiveRecord({ dailyHonors: [null] }) })],
+      [
+        'a daily honour with no label',
+        flipFor(GENERATION, { archive: archiveRecord({ dailyHonors: [{ ...HONOR(0), dayLabel: undefined }] }) }),
+      ],
+      [
+        'a daily honour with an empty uid',
+        flipFor(GENERATION, { archive: archiveRecord({ dailyHonors: [{ ...HONOR(0), uid: '' }] }) }),
+      ],
+      [
+        'a daily honour with a fractional Day index',
+        flipFor(GENERATION, { archive: archiveRecord({ dailyHonors: [{ ...HONOR(0), dayIndex: 0.5 }] }) }),
+      ],
+      [
+        'a daily honour with an unbounded instant',
+        flipFor(GENERATION, { archive: archiveRecord({ dailyHonors: [{ ...HONOR(0), firstBingoAt: Infinity }] }) }),
+      ],
+      ['daily honours out of Day order', flipFor(GENERATION, { archive: archiveRecord({ dailyHonors: [HONOR(2), HONOR(1)] }) })],
+      ['two honours for one Day', flipFor(GENERATION, { archive: archiveRecord({ dailyHonors: [HONOR(1), HONOR(1)] }) })],
       ['an unbounded freezeAt', flipFor(GENERATION, { archive: archiveRecord({ freezeAt: Infinity }) })],
       ['a First to BINGO without its row', flipFor(GENERATION, { archive: archiveRecord({ firstBingoRow: null }) })],
       [
@@ -1742,6 +1765,10 @@ describe('archive', () => {
         'a bounded prefix of a larger roster',
         archiveRecord({ standings: Array.from({ length: 200 }, () => ROW), playerCount: 250, freezeAt: 500 }),
       ],
+      [
+        'one honour for each of the most Days an Event has',
+        archiveRecord({ dailyHonors: Array.from({ length: 20 }, (_, dayIndex) => HONOR(dayIndex)) }),
+      ],
     ])('accepts %s', async (_why, archive) => {
       const { docs, dependencies } = store(flagship());
       await applyHostnameMutation(archiveInput({ flip: flipFor(GENERATION, { archive }) }), dependencies);
@@ -1761,12 +1788,31 @@ describe('archive', () => {
         firstBingoAt,
         reshufflesUsed: 0,
       });
+      const day = (index) => ({
+        index,
+        date: `2026-07-${String(15 + index).padStart(2, '0')}`,
+        place: 'Somewhere',
+        placeEmoji: '🏖️',
+        theme: 'neon-playground',
+        tonight: [],
+        pool: 'main',
+        tutorial: false,
+        unlockAt: 1000 * (index + 1),
+      });
       const archive = buildEventArchive({
         players: [player('ana', 2, 900), player('bo', 1, 800), player('cy', 0, null)],
-        event: { name: 'Bodega Bay', days: [], bannedUids: [] },
+        event: { name: 'Bodega Bay', days: [day(0), day(1)], bannedUids: [] },
+        dayMetas: new Map([
+          [0, { firstBingo: { uid: 'bo', displayName: 'BO', at: 800 } }],
+          [1, { firstBingo: { uid: 'ana', displayName: 'ANA', at: 900 } }],
+        ]),
+        dayMetasLoaded: true,
         archivedAt: ARCHIVED_AT,
       });
       expect(archive.firstBingo).not.toBeNull();
+      // The builder's own honours, so the per-honour walk is exercised on the
+      // shape the operator command will actually hand this intent.
+      expect(archive.dailyHonors.map((honor) => honor.dayIndex)).toEqual([0, 1]);
       const { docs, dependencies } = store(flagship());
       await applyHostnameMutation(archiveInput({ flip: flipFor(GENERATION, { archive }) }), dependencies);
       expect(docs.get('events/bodega-bay-2026').archive).toEqual(archive);

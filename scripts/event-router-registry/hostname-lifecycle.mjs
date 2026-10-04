@@ -1054,14 +1054,40 @@ function firstBingoPairComplete(archive) {
 }
 
 /**
+ * `writableDayHonor` in `src/data/eventArchive.ts`: one frozen Day honour in
+ * the shape `ArchivedDayHonor` declares. The archived surfaces render each
+ * field straight through, so an entry missing one renders blank names and a
+ * `DNaN` label on a record nothing can amend.
+ */
+function writableDayHonor(honor) {
+  return (
+    isRecord(honor) &&
+    Number.isInteger(honor.dayIndex) &&
+    typeof honor.uid === 'string' &&
+    honor.uid.length > 0 &&
+    typeof honor.displayName === 'string' &&
+    typeof honor.dayLabel === 'string' &&
+    finiteArchiveNumber(honor.firstBingoAt)
+  );
+}
+
+/** `ascendingHonorDays` in `src/data/eventArchive.ts`: strictly ascending Day indexes, so no duplicates. */
+function ascendingHonorDays(honors) {
+  return honors.every((honor, index) => index === 0 || honors[index - 1].dayIndex < honor.dayIndex);
+}
+
+/**
  * The flip payload the archive commits beside the routing moves: the stamp,
  * the generation it was prepared under, and the frozen `EventArchive` record.
  *
- * Validated as the rules' flip arm validates it, with one tightening: the
+ * Validated as the rules' flip arm validates it, with two tightenings. The
  * record carries exactly the keys `EventArchive` declares, because a record
  * this transaction writes is as irreversible as one the console writes and no
- * builder produces another key. Like the rules, it cannot walk the standings
- * rows or the honours; it bounds their counts.
+ * builder produces another key. And each Day honour is walked as the
+ * console's `writableArchiveRecord` walks it — every field `ArchivedDayHonor`
+ * declares, in strictly ascending Day order — because that writer asks it
+ * before every flip the console commits and the rules cannot. Like both, it
+ * does not walk the standings rows; it bounds their count.
  *
  * `archivedUnder` must equal the generation the caller names. The payload is
  * thereby bound to the quiesce it was PREPARED under, not only checked against
@@ -1098,6 +1124,8 @@ function validateArchiveFlip(flip, archiveToken) {
     archive.standings.length === Math.min(archive.playerCount, MAX_ARCHIVED_STANDING_ROWS) &&
     Array.isArray(archive.dailyHonors) &&
     archive.dailyHonors.length <= MAX_ARCHIVED_DAY_HONORS &&
+    archive.dailyHonors.every(writableDayHonor) &&
+    ascendingHonorDays(archive.dailyHonors) &&
     firstBingoPairComplete(archive) &&
     (archive.freezeAt === null || finiteArchiveNumber(archive.freezeAt)) &&
     archive.archivedAt === archivedAt;
