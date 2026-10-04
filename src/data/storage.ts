@@ -69,11 +69,8 @@ export async function uploadProofMedia(
     kind === 'photo' ? { ext: 'jpg', contentType: 'image/jpeg' } : audioExtAndContentType(payload.type);
   const path = `proofs/${eventId}/${uid}/${proofId}.${ext}`;
   const r = ref(storage, path);
-  // #363: without an explicit cacheControl, Firebase Storage serves media as
-  // `private, max-age=0` and the Feed refetches every photo on every visit.
-  // Proof objects are immutable (path unique per proofId, never overwritten),
-  // so the long-lived immutable policy is safe. Avatars below deliberately do
-  // NOT get this: avatars/{uid}.jpg is overwritten in place on profile edits.
+  // #1410: new sensitive proof media must not enter shared or browser HTTP
+  // caches. This changes new uploads only, not metadata on existing objects.
   await uploadBytes(r, payload, { contentType, cacheControl: PROOF_MEDIA_CACHE_CONTROL });
   // #335: identity in every real build. Under the Playwright e2e build ONLY, the
   // Storage emulator hands back its own origin (`http://127.0.0.1:9199/v0/b/…`),

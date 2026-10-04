@@ -287,7 +287,11 @@ async function moderateProofHandler(event: StorageEvent): Promise<void> {
 
   try {
     const thumb = await sharp(buf).resize(400, 400, { fit: 'inside' }).jpeg({ quality: 78 }).toBuffer();
-    await bucket.file(path.replace(/\.jpg$/, '_thumb.jpg')).save(thumb, { contentType: 'image/jpeg' });
+    await bucket.file(path.replace(/\.jpg$/, '_thumb.jpg')).save(thumb, {
+      contentType: 'image/jpeg',
+      // Match the client upload policy; Functions is a separate runtime/build.
+      metadata: { cacheControl: 'private, no-store, max-age=0' },
+    });
   } catch {
     /* thumbnail is best-effort */
   }

@@ -284,8 +284,9 @@ export default defineConfig(({ command, mode }) => {
         manifest: false,
         // Under `injectManifest` this block only decides WHAT gets precached;
         // the routing that used to live here (navigation fallback + its /__/*
-        // denylist #182, and the proof-media CacheFirst #363) now lives in
-        // src/sw.ts, which is the file to read and the file to keep in sync.
+        // denylist #182, and the former proof-media CacheFirst #363) lives in
+        // src/sw.ts. #1410 replaced that legacy media route with NetworkOnly
+        // and scoped activation cleanup; read that file for current policy.
         //
         // The glob deliberately still excludes `.json`, which is what keeps
         // `/build-floor.json` OUT of the precache: the floor is the one file a

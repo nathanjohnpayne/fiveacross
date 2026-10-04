@@ -2,16 +2,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   PROOF_MEDIA_CACHE_CONTROL,
   PROOF_MEDIA_URL_PATTERN,
-  PROOF_MEDIA_CACHE_MAX_AGE_SECONDS,
-  PROOF_MEDIA_CACHE_MAX_ENTRIES,
   PROOF_MEDIA_CACHE_NAME,
   purgeProofMediaFromCaches,
 } from './proofMediaCache';
 
 // #363 (specs/w2-proof-capture.md § Feed, specs/w1-pwa.md): the constants the
 // service worker's proof-media route and uploadProofMedia's Cache-Control share.
-// The RegExp is the load-bearing piece — it decides which cross-origin fetches
-// the CacheFirst route captures — so it gets a positive/negative URL matrix.
+// The RegExp decides which cross-origin proof fetches bypass all caches — so it gets a positive/negative URL matrix.
 
 // The shape getDownloadURL actually returns for a proof upload: the object path
 // URL-encoded under /o/, then the token query.
@@ -28,7 +25,7 @@ describe('PROOF_MEDIA_URL_PATTERN — the SW route matches proof media only (#36
     ).toBe(true);
   });
 
-  it('does NOT match avatar URLs — mutable objects must never be pinned by the CacheFirst route', () => {
+  it('does NOT match avatar URLs — avatars keep their existing fetch policy', () => {
     expect(
       PROOF_MEDIA_URL_PATTERN.test(
         'https://firebasestorage.googleapis.com/v0/b/gaycruisebingo.firebasestorage.app/o/avatars%2Fu123.jpg?alt=media&token=t',
@@ -55,21 +52,17 @@ describe('PROOF_MEDIA_URL_PATTERN — the SW route matches proof media only (#36
 });
 
 describe('proof-media cache policy constants (#363)', () => {
-  it('the upload Cache-Control is long-lived and immutable (proof objects are never rewritten)', () => {
-    expect(PROOF_MEDIA_CACHE_CONTROL).toBe('public, max-age=31536000, immutable');
+  it('new proof uploads prohibit shared and browser HTTP retention (#1410)', () => {
+    expect(PROOF_MEDIA_CACHE_CONTROL).toBe('private, no-store, max-age=0');
   });
 
-  it('the runtime cache is bounded (entries and age), so opaque responses cannot grow unchecked', () => {
-    expect(PROOF_MEDIA_CACHE_MAX_ENTRIES).toBeGreaterThan(0);
-    expect(PROOF_MEDIA_CACHE_MAX_AGE_SECONDS).toBeGreaterThan(0);
-    expect(PROOF_MEDIA_CACHE_MAX_AGE_SECONDS).toBeLessThanOrEqual(365 * 24 * 60 * 60);
-  });
+
 });
 
 // #373 (follow-up to #369): deleteProof's Storage delete is the authoritative
 // revocation of a proof's media — this purge only stops the DELETING device's
-// own already-fetched copy from continuing to render out of the CacheFirst
-// `proof-media` cache. It is local-only and best-effort by design, so every
+// own already-fetched copy from continuing to render out of the legacy
+// `proof-media` cache until its worker upgrades. It is local-only and best-effort by design, so every
 // failure mode must be swallowed rather than propagated (a failed purge must
 // never fail the delete it rides alongside).
 describe('purgeProofMediaFromCaches — best-effort local purge of the deleting device’s own cached copy (#373)', () => {
