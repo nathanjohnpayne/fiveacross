@@ -27,17 +27,27 @@ export const EDITIONS = new Set(['gcb', 'vacay', 'fiveacross']);
 export const STATUSES = new Set(['active', 'disabled', 'archived']);
 export const PATH_NAMESPACES = new Set(['fiveacross.app', 'vacaybingo.com']);
 
-// MIRROR of `RESERVED_LABELS` in `src/slug.ts` (see the note in
-// `router-publisher/src/runtime.ts`); pinned by the parity test in
-// `src/slug.test.ts`. `send` carries the Resend return-path MX (#1102).
+// MIRROR of the reserved union in `src/slug.ts`: the hostname-label floor
+// plus the path-segment floor (`specs/path-addressing-and-root.md` § Reserved
+// paths, #1387; see the note in `router-publisher/src/runtime.ts`). Pinned by
+// the parity test in `src/slug.test.ts`. `send` carries the Resend return-path
+// MX (#1102); `setup` is the wizard's own route (#1223).
 export const RESERVED_SLUGS = new Set([
+  '__',
   'admin',
   'api',
+  'assets',
   'auth',
   'd',
+  'feed',
+  'items',
+  'leaderboard',
+  'more',
   'play',
   'send',
+  'setup',
   'status',
+  'unsubscribe',
   'www',
 ]);
 

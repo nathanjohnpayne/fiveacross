@@ -56,7 +56,54 @@ export const RESERVED_LABELS: readonly string[] = [
   'www',
 ];
 
-const RESERVED = new Set(RESERVED_LABELS);
+/**
+ * The PATH-SEGMENT floor (`specs/path-addressing-and-root.md` § Reserved
+ * paths, #1387): first path segments that are real routes, so a slug can never
+ * take them. A slug is simultaneously a subdomain label (regime a) and a path
+ * segment (regimes b and c), so it must clear BOTH floors — and this list
+ * reserves a word as a label too, exactly as `RESERVED_LABELS` reserves a word
+ * as a path segment. Re-derive it from its sources rather than trusting it:
+ *
+ * - `feed`, `leaderboard`, `more` — the frozen tab table
+ *   (`src/components/tabs.ts`); `more` mounts with a splat, so everything
+ *   under it is reserved with it. `/` itself is the root, never a segment.
+ * - `setup` — the Event-setup wizard's own top-level route (`/setup/*` in
+ *   `src/App.tsx`). The owner kept the wizard there rather than moving it
+ *   under `/more` and reserved the word instead (#1223, 2026-10-02).
+ * - `items`, `admin` — no longer top-level routes (#203/#208 moved both inside
+ *   More), but links minted before that move still exist.
+ * - `__` — Firebase Hosting's OAuth-helper namespace (`/__/auth/*`).
+ * - `unsubscribe` — a Hosting rewrite to the `emailUnsubscribe` Function.
+ * - `assets` — Vite's hashed-output directory.
+ *
+ * Plus one structural rule that is not an entry: a segment containing a `.` is
+ * never a slug (`isReservedPathSegment`). That covers every built file without
+ * enumerating a build output that churns.
+ */
+export const RESERVED_PATH_SEGMENTS: readonly string[] = [
+  '__',
+  'admin',
+  'assets',
+  'feed',
+  'items',
+  'leaderboard',
+  'more',
+  'setup',
+  'unsubscribe',
+];
+
+/**
+ * The ONE reserved list: the sorted union of both floors, and the set every
+ * slug consumer reads — the client parse (`parseAddress`), the Worker's
+ * namespace guard (`worker/src/host.ts`), the wizard's availability check and
+ * launch gate (`validateSlug`), and the three mirrors in separately deployed
+ * programs (pinned by `src/slug.test.ts`). Neither floor may shrink the other.
+ */
+export const RESERVED_SLUGS: readonly string[] = [
+  ...new Set([...RESERVED_LABELS, ...RESERVED_PATH_SEGMENTS]),
+].sort();
+
+const RESERVED = new Set(RESERVED_SLUGS);
 
 /**
  * Three, not one. DNS is happy with a single character, so this floor is a
@@ -105,9 +152,12 @@ export function normalizeSlug(input: string): string {
   return input.trim().toLowerCase();
 }
 
-/** Whether a label is reserved infrastructure. Exported separately from
- *  `validateSlug` so the wizard can say "that address is reserved" without
- *  first having to establish that it is otherwise well-formed. */
+/** Whether a label is reserved by EITHER floor (`RESERVED_SLUGS`) — the name
+ *  predates the path-segment floor, and the label question and the slug
+ *  question are the same question. Exported separately from `validateSlug` so
+ *  the wizard can say "that address is reserved" without first having to
+ *  establish that it is otherwise well-formed. Exact bytes, like the rest of
+ *  the validator: a caller holding a wire label has already lowercased it. */
 export function isReservedLabel(label: string): boolean {
   // `r2-*` is the controller-only rehearsal namespace from the registry
   // contract. It is permanently excluded from organizer claims even when the
@@ -179,4 +229,56 @@ export function validateSlug(candidate: string): SlugCheck {
     return { ok: false, reason: 'reserved-tag' };
   }
   return { ok: true, slug: candidate };
+}
+
+/**
+ * Whether a first path segment can never be an Event address: a word from
+ * either floor, or any segment containing a `.` (every built file —
+ * `sw.js`, `manifest.webmanifest`, `og-*.png` — and `/.well-known/*`).
+ *
+ * Case-insensitive on purpose, unlike `isReservedLabel`. The browser's path is
+ * case-preserving and the router matches routes case-insensitively, so `/Feed`
+ * reaches the Feed tab; reserving only the lowercase spelling would hand that
+ * route to the slug parser instead. Lowercasing here only ever widens what is
+ * refused, never what is accepted.
+ */
+export function isReservedPathSegment(segment: string): boolean {
+  return segment.includes('.') || isReservedLabel(segment.toLowerCase());
+}
+
+/** `parseAddress`'s whole answer (`specs/path-addressing-and-root.md` § D3). */
+export interface ParsedAddress {
+  /** The first path segment when it could be an Event slug, else `null`. */
+  slug: string | null;
+  /** `/<slug>` alongside a candidate slug; `''` whenever `slug` is `null`. */
+  basename: string;
+}
+
+const NO_ADDRESS: ParsedAddress = { slug: null, basename: '' };
+
+/**
+ * D3 step 1: split the first path segment off `pathname` as a CANDIDATE slug.
+ * Pure — no I/O, no Firestore, no router.
+ *
+ * The answer is speculative on every host, and `hostname` deliberately does
+ * not change it: whether a host addresses Events by path at all is decided by
+ * its routing document's `pathNamespace` (step 2), which a pure parse cannot
+ * know. So this never says "this host addresses by path"; it says "this
+ * segment could be a slug". Resolution turns that into the EFFECTIVE basename
+ * (step 3) and is the only thing that may hand a basename to the router — on a
+ * live Event subdomain the candidate here is discarded. The parameter stays in
+ * the spec's signature so every caller hands over the whole address.
+ *
+ * Only the reserved list and the dot rule are refused here. A segment that is
+ * otherwise not a valid slug (`/Bodega-Bay`, `/x`) is still a candidate: it
+ * resolves to not-found at step 2, which is the contract (`fiveacross.app/nope`
+ * renders not-found, never the doorway), whereas refusing it here would turn it
+ * into an app route that the catch-all could swallow.
+ */
+export function parseAddress(hostname: string, pathname: string): ParsedAddress {
+  if (!pathname.startsWith('/')) return NO_ADDRESS;
+  const end = pathname.indexOf('/', 1);
+  const segment = end === -1 ? pathname.slice(1) : pathname.slice(1, end);
+  if (segment === '' || isReservedPathSegment(segment)) return NO_ADDRESS;
+  return { slug: segment, basename: `/${segment}` };
 }
