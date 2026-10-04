@@ -248,8 +248,8 @@ describe('Review queue — the Vision treatment (specs/cloud-vision-moderation.m
 
   it('shows the reason WITHOUT the hidden marker while a flagged Proof is still awaiting its hide', () => {
     // The window between moderateProof's flag write and hideProofOnVisionFlag's
-    // hide — and the state a merely-racy verdict would never leave (nothing racy
-    // is ever flagged), so the row offers Hide, not Restore.
+    // hide — and the state a merely-racy verdict never leaves (raciness is
+    // flagged but never hidden, ADR 0004), so the row offers Hide, not Restore.
     H.flagged = [proof('fl', 0, { displayName: 'Just Flagged', status: 'flagged', visionFlag: 'violence' })];
     renderQueue();
 

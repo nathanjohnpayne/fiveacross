@@ -183,9 +183,9 @@ export interface PendingVisionScan {
 }
 
 /**
- * The SERVER-OWNED marker this module stamps beside `status: 'hidden'`, and the
- * one fact the client's confirm-time gate reads (`safetyHideStands`,
- * src/data/moderation.ts).
+ * The SERVER-OWNED marker this module stamps beside `status: 'hidden'`, and one
+ * of the two server-written facts the client's gate reads (`safetyHideStands`,
+ * src/data/moderation.ts; the other is the `'flagged'` status).
  *
  * It exists because a client must never re-derive the verdict. `visionFlag` is a
  * string whose MEANING lives in `AUTO_HIDE_VISION_FLAGS` above, and Functions and
@@ -295,7 +295,8 @@ export function qualifiesForVisionHide(doc: VisionFlaggedDoc | undefined): boole
  *     the `'rehide'` arm could not take it back down — the hole this arm closes
  *     once the marker has landed. Residual: a cached pre-gate publish that wins
  *     before the backfill commits (or reaches a legacy marker-less hidden Proof
- *     before any later write fires the trigger) matches no arm (#1514).
+ *     before any later write fires the trigger) matches no arm — an accepted
+ *     residual, stated in specs/cloud-vision-moderation.md (#1514).
  *   - `'rehide'` — an `'active'` Proof whose marker still says `true`. That
  *     combination is not reachable from any current client: every legitimate lift
  *     writes `safetyHide: false` in the SAME update as the status (`restoreProof`,
@@ -375,7 +376,8 @@ export function visionHideWrite(action: VisionHideAction): Record<string, unknow
  * path (#43 round 2 F1), so a delayed or retried trigger can never act on a stale
  * event snapshot:
  *
- *   - an admin who Restored (`'active'`, marker `false`) since the trigger fired
+ *   - an admin who Restored (to `'active'`, or to `'pending'` while an owner
+ *     claim is undecided; marker `false` either way) since the trigger fired
  *     → no-op, so the admin's decision is not silently reverted; an admin
  *     hand-Hide is a no-op when it already carries the marker (a current
  *     console's `hideProof` writes it) and is backfilled when it does not, unless

@@ -2063,8 +2063,9 @@ async function resolve(
     // can be flagged and hidden BEFORE its claim is ever reviewed. Publishing it
     // unconditionally would write `status: 'active'`, and active Proofs are
     // outside `qualifiesForVisionHide` — so extreme/illegal media would go back
-    // in front of every Player and the trigger would never hide it again, lifted
-    // by a control that shows only the submitter and the Prompt. This is NOT the
+    // in front of every Player (the re-hide arm takes it back down only while
+    // the marker stands, and only after the exposure), lifted by a control that
+    // shows only the submitter and the Prompt. This is NOT the
     // warned, explicit moderation Restore (ReviewQueue), which is the one place
     // an admin may override an AI verdict, having been told what they are
     // lifting. So the claim still resolves and the Mark is still confirmed —

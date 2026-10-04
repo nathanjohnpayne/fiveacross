@@ -1342,14 +1342,14 @@ describe('composition with the #43 report-count auto-hide — the two paths neve
   });
 });
 
-// --- the server-owned marker is the client's ONLY input ----------------------
+// --- server-written facts (marker, 'flagged') are the client's only inputs ---
 //
 // The Vision hide is server-authoritative, but ONE client write can undo it.
 // `confirmClaim` (src/data/admin.ts) publishes an admin_confirmed claim's
 // 'pending' Proof by writing `status: 'active'`, and active Proofs sit OUTSIDE
 // `qualifiesForVisionHide` — so confirming a Mark whose photo had already been
-// safety-hidden would re-expose extreme/illegal media and this trigger would
-// never hide it again.
+// safety-hidden would re-expose extreme/illegal media, which the re-hide arm
+// takes back down only while the marker stands, and only after the exposure.
 //
 // That gate used to MIRROR the allowlist above on the client and lean on a parity
 // test to keep the two copies honest. It does not any more (Codex P1 round 2): a
