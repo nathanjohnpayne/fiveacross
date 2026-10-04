@@ -1601,7 +1601,7 @@ service cloud.firestore {
     // Event-not-found state rather than tripping a permission error it would
     // have to distinguish from a network failure.
     // #1419: publicHostnames contains only the approved public projection.
-    // Canonical hostnames retains private registry/recovery metadata. Firestore
+    // Canonical hostnames retains registry/recovery metadata for authenticated reads. Firestore
     // cannot redact fields: an unexpected projection key denies the whole get.
     // Literals mirror functions/src/publicHostnameFields.ts (Rules parity test).
     function publicHostnameData(data) {
@@ -1613,7 +1613,8 @@ service cloud.firestore {
         && preview.keys().hasOnly(['eventName', 'dateRange', 'days', 'hostedBy']);
     }
     match /hostnames/{host} {
-      // Canonical registry/recovery data is never an anonymous fallback.
+      // Any authenticated user can point-get this full record; never store personal
+      // or operator secrets here. It is never an anonymous fallback.
       allow get: if signedIn();
       allow list, create, update, delete: if false;
     }

@@ -65,6 +65,18 @@ function comparableHostnameFields(fields) {
   return result;
 }
 
+// A supplied preview must retain the required display name the browser's
+// coerceEventPreview accepts (trimmed nonblank text, at most 200 characters).
+// Absence stays compatible; optional fields and existing days values are not
+// recursively reinterpreted at this field-allowlist/value-parity boundary.
+function hasValidSuppliedPreview(fields) {
+  if (!Object.prototype.hasOwnProperty.call(fields, 'preview')) return true;
+  const preview = fields.preview?.mapValue?.fields;
+  if (!preview || typeof preview !== 'object' || Array.isArray(preview)) return false;
+  const name = preview.eventName?.stringValue;
+  return typeof name === 'string' && name.trim().length > 0 && name.trim().length <= 200;
+}
+
 export async function verifyBodegaHostnameDocuments({ projectId, accessToken, fetchImpl = fetch }) {
   assertFiveAcrossProject(projectId);
   for (const host of BODEGA_PREVIEW_HOSTS) {
@@ -102,6 +114,9 @@ export async function verifyBodegaHostnameDocuments({ projectId, accessToken, fe
         typeof document?.fields?.status?.stringValue !== 'string'
       ) {
         throw new Error(`${label} document is malformed for ${host}.`);
+      }
+      if (!hasValidSuppliedPreview(document.fields)) {
+        throw new Error(`${label} preview is malformed for ${host}.`);
       }
       if (collection === 'publicHostnames') {
         // Read the full public document: a REST field mask would hide extras and

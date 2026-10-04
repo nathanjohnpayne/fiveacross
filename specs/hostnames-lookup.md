@@ -15,7 +15,7 @@ The original lookup ticket owned the collection and its Rules. The #1419 amendme
 
 ## Data model
 
-`publicHostnames/{host}` where `{host}` is the full lowercase hostname. The private canonical source remains `hostnames/{host}`; authenticated operator/bootstrap-support consumers can point-get it, while anonymous callers cannot read even a missing canonical path.
+`publicHostnames/{host}` where `{host}` is the full lowercase hostname. The canonical source remains `hostnames/{host}`. **Any authenticated Firebase user may point-read its full document**; this is an authentication boundary, not an Admin-only or Event-membership boundary. Anonymous callers cannot read even a missing canonical path. Canonical hostname records must never contain personal or operator-secret data; routing/registry metadata is omitted from the anonymous projection, while server-only control-plane ledgers have their own stricter Rules.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -125,7 +125,7 @@ Merge the reviewed migration code before applying it. Keep the script afterward 
 
 ## Deployment acceptance for the public projection
 
-The owner [selected a separate strict public projection](https://github.com/nathanjohnpayne/fiveacross/issues/1419#issuecomment-5976577326). Seven routing fields and four nested preview fields remain public; canonical registry/recovery fields including `root`, `pathNamespace` and `apexPath` stay unchanged and private. This accepts a public-design boundary, not a claim that the historical scanner's deliberate-preview observation was a code defect.
+The owner [selected a separate strict public projection](https://github.com/nathanjohnpayne/fiveacross/issues/1419#issuecomment-5976577326). Seven routing fields and four nested preview fields remain public; canonical registry/recovery fields including `root`, `pathNamespace` and `apexPath` stay unchanged and authenticated-only. This accepts a public-design boundary, not a claim that the historical scanner's deliberate-preview observation was a code defect.
 
 All reviewed source writers pair actual canonical mutations with a full public replacement in the same transaction: hostname lifecycle creation/update/repoint/root/route/archive/delete/repair, adult-content Event and per-host stamps, preview provisioning and canonical-host correction. The public copy never feeds source attestation, signed registry recovery, email-origin selection or authenticated wizard occupancy. Legacy Version 1 canonical routing envelopes are invalidated; only a successful public lookup can populate the Version 2 offline routing cache. Anonymous browser bootstrap and the live adult watcher read only `publicHostnames`; there is no canonical fallback, even when the public copy is missing.
 

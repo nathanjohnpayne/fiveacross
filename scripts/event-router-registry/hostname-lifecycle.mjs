@@ -5,7 +5,7 @@ import { projectPublicHostname } from '../../functions/src/publicHostnameFields.
  * mutation, and deletion.
  *
  * Why one helper rather than a mutation per command: `hostnames/{host}` is the
- * private authoritative source, `publicHostnames/{host}` is its strict public
+ * authenticated authoritative source, `publicHostnames/{host}` is its strict public
  * copy, and `routerReplicas/{host}` is the private desired state the publisher
  * converges to the edge. If any command could move one without the
  * other, "the edge is a projection of Firestore" would be a convention rather
@@ -1353,7 +1353,10 @@ function validTombstone(host, ledger) {
  *
  * It may advance the ledger above the DO high-water mark, using the CURRENT
  * canonical hostname projection — never an invented one — and it never lowers a
- * revision and never touches the public document. A new read transaction and a
+ * revision. If source preparation normalizes a legacy canonical pathNamespace,
+ * the paired write also replaces its strict public projection; without that
+ * normalization the repair does not provision or rewrite a public copy. A new
+ * read transaction and a
  * fresh signed audit follow; this call blesses nothing by itself.
  */
 async function planAdvanceLedger(input, transaction, clock, buffer, revisions, projections) {

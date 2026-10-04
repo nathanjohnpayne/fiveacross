@@ -207,6 +207,47 @@ describe('Five Across deploy hostname verification', () => {
     await expect(verifyBodegaHostnameDocuments({ projectId: 'fiveacross', accessToken: 'test-access-token', fetchImpl })).rejects.toThrow(/projection.*match/i);
   });
 
+  it.each([
+    ['map without fields', { mapValue: {} }],
+    ['empty fields map', { mapValue: { fields: {} } }],
+    ['optional fields without name', { mapValue: { fields: { hostedBy: { stringValue: 'Kim' } } } }],
+    ['wrong name type', { mapValue: { fields: { eventName: { integerValue: '7' } } } }],
+    ['blank name', { mapValue: { fields: { eventName: { stringValue: ' \n\t' } } } }],
+    ['oversized name', { mapValue: { fields: { eventName: { stringValue: 'x'.repeat(201) } } } }],
+  ])('refuses matching canonical/public preview with %s', async (_label, preview) => {
+    const fetchImpl = vi.fn(async url => {
+      const host = decodeURIComponent(new URL(url).pathname.split('/').at(-1));
+      const row = routingDocument(host);
+      row.fields.preview = preview;
+      if (url.includes('/publicHostnames/')) row.name = row.name.replace('/hostnames/', '/publicHostnames/');
+      return Response.json(row);
+    });
+    await expect(verifyBodegaHostnameDocuments({ projectId: 'fiveacross', accessToken: 'test-access-token', fetchImpl })).rejects.toThrow(/preview.*malformed/i);
+  });
+
+  it.each(['hostnames', 'publicHostnames'])('refuses malformed preview in the %s document before comparing the pair', async collection => {
+    const fetchImpl = vi.fn(async url => {
+      const host = decodeURIComponent(new URL(url).pathname.split('/').at(-1));
+      const row = routingDocument(host);
+      row.fields.preview = { mapValue: { fields: { eventName: { stringValue: 'Bodega' } } } };
+      if (url.includes(`/${collection}/`)) row.fields.preview = { mapValue: {} };
+      if (url.includes('/publicHostnames/')) row.name = row.name.replace('/hostnames/', '/publicHostnames/');
+      return Response.json(row);
+    });
+    await expect(verifyBodegaHostnameDocuments({ projectId: 'fiveacross', accessToken: 'test-access-token', fetchImpl })).rejects.toThrow(/preview.*malformed/i);
+  });
+
+  it.each(['absent', 'partial', 'maximum-name'])('accepts a matching pair with %s preview', async shape => {
+    const fetchImpl = vi.fn(async url => {
+      const host = decodeURIComponent(new URL(url).pathname.split('/').at(-1));
+      const row = routingDocument(host);
+      if (shape !== 'absent') row.fields.preview = { mapValue: { fields: { eventName: { stringValue: shape === 'maximum-name' ? `  ${'x'.repeat(200)}  ` : '  Bodega  ' } } } };
+      if (url.includes('/publicHostnames/')) row.name = row.name.replace('/hostnames/', '/publicHostnames/');
+      return Response.json(row);
+    });
+    await expect(verifyBodegaHostnameDocuments({ projectId: 'fiveacross', accessToken: 'test-access-token', fetchImpl })).resolves.toEqual(BODEGA_PREVIEW_HOSTS);
+  });
+
   it('accepts exact full projections with reordered map keys and unchanged nested days values', async () => {
     const fetchImpl = vi.fn(async url => {
       const host = decodeURIComponent(new URL(url).pathname.split('/').at(-1));

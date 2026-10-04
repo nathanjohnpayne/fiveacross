@@ -28,7 +28,7 @@ The actors considered are an unauthenticated Internet caller, a modified browser
 ```text
 trusted hostname writer
       │ one Firestore transaction
-      ├── hostnames/{host}             private canonical source
+      ├── hostnames/{host}             authenticated canonical source
       ├── publicHostnames/{host}       strict public browser projection
       └── routerReplicas/{host}        private desired state + revision
                     │ Firestore event, retry enabled
@@ -47,7 +47,7 @@ public request ─► Event router               │
 | Surface | May read | May write | Explicitly may not do |
 |---|---|---|---|
 | Browser/app | anonymous bootstrap/live posture: one named strict `publicHostnames/{host}`; authenticated wizard: canonical point read for slug availability | no hostname/replica writes | list either registry; anonymous canonical read; read `routerReplicas` |
-| Hostname writer | private canonical hostname plus its replica ledger | canonical hostname, strict public copy and desired-state ledger in one transaction | report success before replica convergence |
+| Hostname writer | authenticated canonical hostname plus its replica ledger | canonical hostname, strict public copy and desired-state ledger in one transaction | report success before replica convergence |
 | Publisher Function | its event payload, metadata-server ID token, one KMS signing operation | authenticated signed sync request | call Firestore/Admin SDK; export a key; hold a Cloudflare API token |
 | Registry service/DO | validated request and one named object's storage | one host's transactional state | read Firestore; bind another store; attach routes; select an origin |
 | Public router | one registry `lookup(host)` result after the host guard | nothing | bind/list Durable Objects; call Firestore; accept edge identity as app Resolution |
