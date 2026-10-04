@@ -107,7 +107,16 @@ service cloud.firestore {
     function heartTargetAccepts(eventId, data) {
       let target = heartTargetData(eventId, data);
       return target.createdAt == data.targetCreatedAt
+        && (data.targetKind != 'proof' || target.status == 'active')
         && !exists(blockPairDoc(eventId, request.auth.uid, target.get('uid', '')));
+    }
+    // Match the target's public read boundary. Admins can inspect stale slots;
+    // ordinary readers need an existing active Proof/current incarnation.
+    function heartTargetReadable(eventId, data) {
+      let target = heartTargetData(eventId, data);
+      return data.targetKind in ['proof', 'moment']
+        && target.createdAt == data.targetCreatedAt
+        && (data.targetKind != 'proof' || target.status == 'active');
     }
     // Canonical transitional Decision D-A predicate (#801/#802/#804/#1079).
     // Keeping the Event data threaded makes the enforcement switch and Admin
@@ -3321,7 +3330,8 @@ service cloud.firestore {
       // #425 — Moment ids are deterministic and a deleted Moment can come
       // back at the same id). Toggle-off is the owner's delete.
       match /hearts/{heartId} {
-        allow read: if admitted(eventId);
+        allow read: if admitted(eventId)
+          && (isAdmin(eventId) || heartTargetReadable(eventId, resource.data));
         allow create, update: if admitted(eventId)
           // #134: hearts are Feed activity, and an archived Feed is a record
           // rather than a live surface — the frozen Most-Loved Photo award

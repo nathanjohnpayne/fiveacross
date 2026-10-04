@@ -87,6 +87,7 @@ function captureOnNext(): { fire: (proofs: unknown, moments?: unknown, event?: u
       captured.tally = onNext;
     }
     else if (kind === 'query' && querySource?.args?.includes('items')) captured.prompts = onNext;
+    else if (kind === 'query' && (args[0] as { args?: unknown[] })?.args?.[3] === 'hearts') onNext(colSnap([]));
     else if (kind === 'query') captured.proofs = onNext;
     // #262: useAllDoubts' moderation read opens a SECOND event-doc sub — feed
     // them all so none starves the feed's loading gates.
@@ -95,7 +96,7 @@ function captureOnNext(): { fire: (proofs: unknown, moments?: unknown, event?: u
     // over the markers collection group, routed above so it cannot clobber proofs.
     // #262: the Feed's flat doubts subscription, routed by its path segment.
     else if (args[3] === 'doubts') captured.doubtsAll = onNext;
-    // specs/feed-hearts.md: the flat hearts stream, routed by segment so it
+    // specs/feed-hearts.md: scoped Hearts queries are routed above so they
     // never clobbers the moments slot; fed empty below.
     else if (args[3] === 'hearts') captured.heartsAll = onNext;
     // specs/admin-messages.md: useFeed's fourth stream (useNotices) is a flat
