@@ -7,6 +7,8 @@ status: accepted
 
 Implements `plans/admin-redesign-ticket.md` (issue #404), matching `plans/daily-cards-wireframes.html` frames `#frame-admin-hub` / `#frame-admin-queue` / `#frame-admin-settings` / `#frame-admin-schedule`. The tabbed, six-section Admin scroll (taller than a phone viewport, dismissible only by a CLOSE button at the very bottom) becomes a compact hub of section cards with live badges, each opening a detail surface, under one shared navigation-and-dismissal contract. **UI-only**: every write path stays exactly as built—this is a re-housing, not a rebuild. The hub shipped with five doors; a sixth, **Messages**, was added by `admin-messages` (#439)—the door/route/mapping/coverage additions below are kept in sync there.
 
+Private Event and queue readiness can retain their last fully committed, server-backed answer during the same subscription's own pending write, without displaying that speculative write as server authority. This keeps the console, queue and Prompt pool mounted while its button waits, so rejected actions remain visible. Query membership removals also require the private client’s write queue to settle and a fresh server query answer; an optimistic empty query cannot remove its waiting/error controls. Archive arming still requires the latest Event snapshot to have no pending writes; retaining the console does not establish that stronger preview guarantee. A pending first answer cannot establish readiness; cache-only metadata, failure, recovery quarantine or actor/Event/incarnation retirement still withhold the affected surface.
+
 ## Contract
 
 ### Routes

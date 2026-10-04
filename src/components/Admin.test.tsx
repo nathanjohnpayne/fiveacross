@@ -221,7 +221,7 @@ describe('Admin private gate state', () => {
     ['retired subject', () => { H.privateUid = 'other-account'; }, 'Loading Admin…'],
     ['missing confirmed Event', () => { H.event = null!; }, 'Admin is unavailable. Reload and try again.'],
     ['cache-origin answer', () => { H.eventFromCache = true; }, 'Loading Admin…'],
-    ['pending answer', () => { H.eventPending = true; }, 'Loading Admin…'],
+    ['pending-first answer', () => { H.eventPending = true; H.eventServerData = false; H.eventServerResolved = false; }, 'Loading Admin…'],
   ] as const)('distinguishes %s from a definitive non-admin answer', (_name, arrange, message) => {
     arrange();
     renderAdmin();

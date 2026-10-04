@@ -32,6 +32,8 @@ Mounted in the global `Nav` as the signed-in Player's avatar, so the existing id
 - **Given** the profile sheet is open **when** a keyboard or screen-reader User interacts with it **then** it behaves as a modal dialog: focus moves inside, Tab is contained, Escape closes, and focus returns to the trigger. (Test: "contains focus inside the profile dialog and restores it on close".)
 - **Given** the PWA install prompt is visible **when** a signed-in User needs the profile editor **then** the Nav avatar remains above the fixed tab/install chrome and needs no independent fixed-position lift. (Test: "uses the Nav avatar as the profile editor trigger".)
 
+The private profile listener retains its last fully committed server answer during same-UID/private-incarnation server-backed own pending updates. It never presents speculative writes as server truth and never promotes a pending first answer. Saving a name/avatar therefore keeps the saved profile visible until acknowledgement or rollback; cache-only answers, failure, recovery quarantine and actor retirement still clear it.
+
 ## Out of scope
 
 - A rules-emulator assertion that a non-owner cannot write `avatars/{otherUid}.jpg` is not added here: the `/avatars/{file}` rule itself predates this ticket (`storage.rules:20-26`, scaffolded already) and its emulator coverage is `w0-storage-rules` (#19)'s own deliverable; `test:rules` also needs a local JRE + the Firebase emulator, unavailable in this sandboxed unit-test environment. `npm run typecheck && npm test && npm run build` are this ticket's verified gates, matching the DoD's "no lint script; app tests are not CI-run" note.

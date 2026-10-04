@@ -74,17 +74,20 @@ const SECTION_TITLES: Record<AdminSection, string> = {
 export default function Admin() {
   const { user } = useAuth();
   // Only the memory client's current, fully server-committed Event answer
-  // qualifies the Admin gate and #1151's archive gate. Cache-origin and pending
-  // snapshots remain unknown; the old persistent gameplay-cache gate explains
-  // the same metadata checks historically, not this private listener's storage.
+  // qualifies mounted Admin eligibility. The private hook retains
+  // that committed answer during later own pending writes; pending-first and
+  // cache-origin answers remain unknown. Latest pending metadata is preserved
+  // by the hook without replacing the roster with an optimistic payload. Archive
+  // arming separately requires the latest Event metadata to be committed.
   const { key: eventKey, data: event, loading, serverResolved, hasServerData, fromCache, hasPendingWrites } = useAdminEventDoc();
-  const eventConfirmed = hasServerData && !fromCache && !hasPendingWrites;
+  const eventEligible = hasServerData && !fromCache;
+  const eventConfirmed = eventEligible && !hasPendingWrites;
   const navigate = useNavigate();
   const session = usePrivateFirestore();
   const online = useOnline();
   const answerUnavailable = serverResolved && !loading && !hasServerData;
   const waitKey = user && online && session.db && session.uid === user.uid
-    && !session.failed && !session.recoveryRequired && !eventConfirmed && !answerUnavailable
+    && !session.failed && !session.recoveryRequired && !eventEligible && !answerUnavailable
     ? JSON.stringify([eventKey, user.uid, session.generation]) : null;
   const waitExpired = useBoundedPrivateWait(waitKey);
   if (user && session.recoveryRequired) {
@@ -101,7 +104,7 @@ export default function Admin() {
     : session.failed ? unavailable
     : !online ? 'Reconnect to use Admin.'
     : session.uid !== user.uid || !session.db ? 'Loading Admin…'
-    : !eventConfirmed ? (answerUnavailable || waitExpired ? unavailable : 'Loading Admin…')
+    : !eventEligible ? (answerUnavailable || waitExpired ? unavailable : 'Loading Admin…')
     : !event ? unavailable
     : !event.admins?.includes(user.uid) ? 'Admins only.'
     : null;
