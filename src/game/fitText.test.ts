@@ -84,6 +84,25 @@ describe('fitTextSize keeps words whole (#1345)', () => {
     const size = fitTextSize('在甲板上跳舞的祖父母们好', { width: 60, height: 200 }, { baseSize: 14 });
     expect(size).toBe(14);
   });
+
+  it('treats a hyphen as a legal break: each hyphen-delimited segment only has to fit', () => {
+    // "mother-in-law" (13 chars) is wider than one 60px line at 14px, but
+    // "mother-" (7) fits, so the tall box holds it at the base size.
+    const size = fitTextSize('mother-in-law', { width: 60, height: 200 }, { baseSize: 14 });
+    expect(size).toBe(14);
+  });
+
+  it('with keepWordsWhole: false, fits on height alone (the upper bound SquareText verifies against real glyphs)', () => {
+    const size = fitTextSize('Grandparents on the dance floor', { width: 60, height: 200 }, { baseSize: 14, keepWordsWhole: false });
+    expect(size).toBe(14);
+  });
+
+  it('still keeps the Latin segment of a mixed-script token whole', () => {
+    const width = 60;
+    const size = fitTextSize('Grandparents漢', { width, height: 200 }, { baseSize: 14 });
+    expect(size).toBeLessThan(14);
+    expect(wordFitsOnOneLine('Grandparents', width, size)).toBe(true);
+  });
 });
 
 describe('shrinkToWholeWords (#1345)', () => {

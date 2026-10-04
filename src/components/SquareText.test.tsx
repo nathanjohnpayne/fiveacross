@@ -80,6 +80,14 @@ describe('SquareText keeps words whole (#1345)', () => {
     expect(parseFloat(target.style.fontSize)).toBe(CEILING_PX - 0.5);
   });
 
+  it('keeps a narrow-glyph word at the ceiling when it really fits, even though the flat estimate says it is too wide', () => {
+    // 12 chars at 0.55 em overflow 62px at 12px in the estimate, but these
+    // glyphs really measure 0.4 em: 57.6px, a fit.
+    stubLayout(0.4);
+    const target = renderedSpan('Illimitables');
+    expect(parseFloat(target.style.fontSize)).toBe(CEILING_PX);
+  });
+
   it('keeps the no-mid-word-break overrides on the span once every word fits whole', () => {
     stubLayout();
     const target = renderedSpan('Grandparents on the dance floor');

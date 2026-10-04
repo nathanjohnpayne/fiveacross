@@ -43,6 +43,12 @@ export interface FitTextOptions {
   lineHeight?: number;
   /** The font-size step (px) the guard decrements by per iteration. */
   step?: number;
+  /** Require every word to fit on one line at the estimated glyph width
+   *  before accepting a size (#1345). Default true. `SquareText` passes
+   *  false to get the height-only upper bound it then verifies against the
+   *  REAL glyphs, so a narrow-glyph word the flat average over-estimates is
+   *  not shrunk below the size it actually fits at. */
+  keepWordsWhole?: boolean;
 }
 
 const DEFAULT_MIN_SIZE = 6;
@@ -60,11 +66,20 @@ const DEFAULT_STEP = 0.5;
  * requires of a size before accepting it (#1345). A whitespace-free run in a
  * script whose normal CSS line breaking falls BETWEEN its characters
  * (ideographs, kana, Hangul, and the dictionary-broken Southeast Asian
- * scripts) is not a word that must stay whole: wrapping it is a legal break,
- * so it never clears `wordsStayWhole`.
+ * scripts) is not a word that must stay whole: wrapping it is a legal break.
+ * Likewise CSS may wrap after a hyphen or dash ("mother-in-law"). A token is
+ * split at those break opportunities and each remaining unbreakable segment
+ * ("Grandparents" in "Grandparents漢", "mother-" in "mother-in-law") must
+ * still fit on one line.
  */
-const INTRA_WORD_BREAK_SCRIPTS =
-  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
+const INTRA_WORD_BREAK_RUNS =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]+/u;
+const BREAK_AFTER_DASH = /(?<=[-‐–—])/u;
+
+function longestUnbreakableSegment(word: string): number {
+  const segments = word.split(INTRA_WORD_BREAK_RUNS).flatMap((run) => run.split(BREAK_AFTER_DASH));
+  return Math.max(0, ...segments.map((segment) => segment.length));
+}
 
 function estimateLineCount(
   text: string,
@@ -83,7 +98,7 @@ function estimateLineCount(
   let wordsStayWhole = true;
   for (const word of words) {
     if (word.length > charsPerLine) {
-      if (!INTRA_WORD_BREAK_SCRIPTS.test(word)) wordsStayWhole = false;
+      if (longestUnbreakableSegment(word) > charsPerLine) wordsStayWhole = false;
       if (lineLen > 0) {
         lines += 1;
         lineLen = 0;
@@ -124,6 +139,7 @@ export function fitTextSize(text: string, box: FitTextBox, options: FitTextOptio
     charWidthRatio = DEFAULT_CHAR_WIDTH_RATIO,
     lineHeight = DEFAULT_LINE_HEIGHT,
     step = DEFAULT_STEP,
+    keepWordsWhole = true,
   } = options;
 
   if (!text.trim() || box.width <= 0 || box.height <= 0 || baseSize <= 0) return baseSize;
@@ -132,7 +148,7 @@ export function fitTextSize(text: string, box: FitTextBox, options: FitTextOptio
   for (let size = baseSize; size >= floor; size -= step) {
     const { lines, wordsStayWhole } = estimateLineCount(text, box.width, size, charWidthRatio);
     const blockHeight = lines * size * lineHeight;
-    if (wordsStayWhole && blockHeight <= box.height) return size;
+    if ((wordsStayWhole || !keepWordsWhole) && blockHeight <= box.height) return size;
   }
   return floor;
 }

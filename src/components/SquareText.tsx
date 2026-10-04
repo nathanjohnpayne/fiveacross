@@ -19,10 +19,17 @@ import { fitTextSize, shrinkToWholeWords } from '../game/fitText';
  * let the browser hyphenate or split a word that fits on its own line just to
  * fill a preceding line. They are removed only when even `minSize` cannot hold
  * the longest word, where `.cell`'s mid-word breaking is the last-resort
- * fallback. A host with no layout yet (width 0, pre-first-paint or jsdom) has
- * nothing to measure against, so the estimate stands with the overrides off.
+ * fallback.
+ *
+ * The probe starts from `heightBound` — the estimator's height-only fit, which
+ * does not reject a size for a word the flat average glyph width merely
+ * GUESSES is too wide — so real measurement decides the whole-word question:
+ * a token of narrow glyphs, or one that may wrap after a hyphen, keeps the
+ * largest size it actually fits at. A host with no layout yet (width 0,
+ * pre-first-paint or jsdom) has nothing to measure against, so the
+ * whole-word `estimated` size stands with the overrides off.
  */
-function keepWordsWhole(el: HTMLElement, host: HTMLElement, estimated: number): number {
+function keepWordsWhole(el: HTMLElement, host: HTMLElement, estimated: number, heightBound: number): number {
   clearWholeWordOverrides(el);
   const hostStyle = window.getComputedStyle(host);
   const insets = ['paddingLeft', 'paddingRight', 'borderLeftWidth', 'borderRightWidth'] as const;
@@ -38,7 +45,7 @@ function keepWordsWhole(el: HTMLElement, host: HTMLElement, estimated: number): 
     el.style.fontSize = `${size}px`;
     return el.getBoundingClientRect().width > usableWidth + 0.005;
   };
-  const fitted = shrinkToWholeWords(estimated, overflows);
+  const fitted = shrinkToWholeWords(heightBound, overflows);
   if (overflows(fitted)) clearWholeWordOverrides(el);
   return fitted;
 }
@@ -114,7 +121,8 @@ export default function SquareText({ text }: { text: string }) {
         height: Math.max(0, hostRect.height - HOST_PADDING),
       };
       const estimated = fitTextSize(text, box, { baseSize });
-      const fitted = keepWordsWhole(el, host, estimated);
+      const heightBound = fitTextSize(text, box, { baseSize, keepWordsWhole: false });
+      const fitted = keepWordsWhole(el, host, estimated, heightBound);
       el.style.fontSize = `${fitted}px`;
       setFontSize(fitted);
     };
