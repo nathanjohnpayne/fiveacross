@@ -1087,7 +1087,7 @@ describe('deleteProof — resolves the backing cell by the proof doc cellIndex (
 
 // #373 (follow-up to #369): deleteProof's Storage delete is the authoritative
 // revocation, but the deleting device may itself have the proof's media sitting
-// in the `proof-media` service-worker cache. deleteProof purges that local copy
+// in an old worker's legacy `proof-media` cache. deleteProof retains that purge
 // AFTER the transaction commits — never from inside the retryable callback,
 // and never in a way a purge rejection could fail the delete.
 // #134 (specs/post-sailing-archive.md § "Moderation is not a gameplay write"):
@@ -1341,7 +1341,7 @@ describe('deleteProof — the media revocation outlives the commit that removes 
   it('still purges this device’s cache when the revocation rejects (#1148)', async () => {
     // The commit is what the purge follows, not the blob delete: the Proof is
     // gone from the Feed either way, so this device must stop serving the photo
-    // out of its own CacheFirst copy whichever half failed (#373, #1142 item
+    // out of its legacy CacheFirst copy whichever half failed (#373, #1142 item
     // 12). The purge sits in a `finally`, and the Storage error still leaves.
     proofState = {
       uid: 'u1',
