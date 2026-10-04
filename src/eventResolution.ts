@@ -7,7 +7,7 @@ import { coerceEventPreview, type EventPreview } from './eventPreview';
 // Runs BEFORE authentication and BEFORE first paint, which is the whole
 // constraint. `events/{eventId}` requires `signedIn()`, so the Event cannot be
 // read from there in time to dress the sign-in screen; the public
-// `hostnames/{host}` lookup exists precisely to answer "which Event is this?"
+// `publicHostnames/{host}` lookup exists precisely to answer "which Event is this?"
 // while the user is still anonymous.
 //
 // Everything here is pure or injected — no Firestore import, no direct
@@ -33,7 +33,7 @@ export type Resolution =
        *  unlike `edition`: there is no "unknown" posture a gate could render, so
        *  an unknown answer resolves to the gated one. */
       adultContent: boolean;
-      /** Whether `adultContent` came from a LIVE read of `hostnames/{host}`, as
+      /** Whether `adultContent` came from a LIVE read of `publicHostnames/{host}`, as
        *  opposed to a build-time seed, a cached entry, or the fail-closed
        *  default. Only a proven `true` latches the session (`sessionRaised`);
        *  only a proven `false` is allowed to stand without revalidation. See the
@@ -59,10 +59,13 @@ export interface StorageLike {
 
 export const CACHE_PREFIX = 'fa:hostname:';
 
-/** Bumped when the cached shape changes. An entry written by an older version
+/** Bumped when the cached shape or trusted source changes. An entry written by an older version
  *  reads as a MISS rather than being coerced — the same discipline
  *  `cardCache.ts` uses for its snapshot version. */
-export const CACHE_VERSION = 1;
+// V1 was populated from canonical hostnames. It cannot supply an anonymous
+// fallback after #1419's public/private split: first obtain a public lookup.
+// Subsequent V2 public caches retain the existing offline routing/TTL contract.
+export const CACHE_VERSION = 2;
 
 /** How long a cached mapping may serve an Event without revalidation.
  *
@@ -85,8 +88,9 @@ interface CacheEnvelope {
   v: number;
   fetchedAt: number;
   /** Written only after this build has checked the optional preview slice.
-   *  Caches from before #647 lack it and need one network attempt so a newly
-   *  seeded postcard does not stay invisible for the routing TTL. */
+   *  An accepted Version 2 envelope without this flag needs one network attempt
+   *  so a newly seeded postcard does not stay invisible for the routing TTL.
+   *  Historical Version 1 envelopes are rejected before that fallback. */
   previewValidated: boolean;
   doc: HostnameDoc;
 }
@@ -109,8 +113,9 @@ export interface CacheRead {
   doc: HostnameDoc;
   fetchedAt: number;
   stale: boolean;
-  /** A pre-preview cache remains a routing fallback, but cannot short-circuit
-   *  its first post-upgrade network read. */
+  /** An accepted public Version 2 cache without preview validation remains a
+   *  routing fallback, but cannot short-circuit its first network attempt.
+   *  Version 1 canonical envelopes are always misses. */
   requiresPreviewRevalidation: boolean;
 }
 
@@ -144,19 +149,15 @@ export function readCache(
         canonicalHost: typeof d.canonicalHost === 'string' ? d.canonicalHost : hostname,
         edition: typeof d.edition === 'string' ? d.edition : '',
         status: d.status,
-        // Coerced, not version-gated. Adding a field to the cached shape would
-        // normally argue for a CACHE_VERSION bump, but a bump invalidates every
-        // stored mapping — and the entries this would evict are exactly the ones
-        // an offline cold boot depends on (step 3 below), so it would trade a
-        // correct fail-closed default for a not-found screen. `undefined` here
-        // reads as `true`, which IS the safe direction, so an entry written
-        // before #608 is already correct.
+        // Within an accepted public Version 2 envelope, a missing posture
+        // still defaults to true, preserving the safe additive behavior from
+        // #608. The version guard above already rejects all canonical V1 data.
         adultContent: coerceAdultContent(d.adultContent),
         slug: typeof d.slug === 'string' ? d.slug : undefined,
         isCanonical: typeof d.isCanonical === 'boolean' ? d.isCanonical : undefined,
-        // Same non-version-gated posture as `adultContent` above: additive,
-        // optional, and absent-is-no-card, so an entry written before #647
-        // needs no CACHE_VERSION bump to read correctly.
+        // Optional preview data within accepted Version 2 remains additive:
+        // absent means no card, with one revalidation attempt below. This does
+        // not admit historical pre-#647 canonical Version 1 envelopes.
         preview: coerceEventPreview(d.preview),
       },
       fetchedAt: env.fetchedAt,
@@ -239,21 +240,21 @@ const defaultDelay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
  *
  * ORDER, and why:
  *
- *  0. **A single-Event build never looks up at all.** A non-empty
+ *  0. **A single-Event build bypasses hostname-to-Event lookup.** A non-empty
  *     `VITE_EVENT_ID` signals that this bundle serves exactly one Event — the
  *     Gay Cruise Bingo build, whose hostname has no `hostnames/` document. It
  *     would be incoherent to consult the lookup and then discard the answer,
  *     and since resolution now blocks first paint, racing a Firestore read it
  *     cannot use would cost that build a round trip — or, on captive Wi-Fi, the
  *     full timeout — while already knowing the answer (Codex on #576).
- *  1. **Fresh cache wins outright.** A hit inside the TTL returns with no
+ *  1. **Fresh public V2 cache wins outright.** A hit inside the TTL returns with no
  *     network at all, which is what makes offline cold boot work (ADR 0006)
  *     and keeps first paint off the network's critical path.
  *  2. **Network, hard-bounded.** A miss, or a STALE hit, does one `get` raced
  *     against `timeoutMs`. This repo has shipped three blank-screen fixes; an
  *     unbounded pre-paint read is that failure class, so the race is
  *     load-bearing rather than defensive.
- *  3. **Stale cache is the offline fallback.** If revalidation fails and a
+ *  3. **Stale public V2 cache is the offline fallback.** If revalidation fails and a
  *     stale entry exists, serve it rather than a not-found — an expired mapping
  *     beats a dead app when the network is simply gone.
  *
@@ -286,7 +287,7 @@ export async function resolveEvent(opts: ResolveOptions): Promise<Resolution> {
   const delay = opts.delay ?? defaultDelay;
   const now = opts.now ?? Date.now;
 
-  // 0. Single-Event build: answer immediately, never touch the network.
+  // 0. Single-Event resolution: answer immediately, without a network read.
   if (envEventId) {
     // `adultContent` defaults CLOSED here, like everywhere else — this path
     // reads no hostname document, so there is nothing to derive from, and the
@@ -296,15 +297,15 @@ export async function resolveEvent(opts: ResolveOptions): Promise<Resolution> {
     // an answer (Phase 4b P1). A single-Event build is the shape the repo
     // documents for a small standalone deployment, and without some build-time
     // input it could never be anything but adults-only. But a baked `false` that
-    // simply STOOD would be the worst version of that: the build never reads a
-    // routing document, so an admin who later approves an explicit Prompt or
+    // simply STOOD would be the worst version of that: startup resolution never
+    // reads a routing document, so without the post-mount watcher an admin who later approves an explicit Prompt or
     // flips `forceAdult` would change nothing on those clients — not on a reload,
     // not ever, short of a rebuild — while the ticket advertises exactly that
     // transition.
     //
     // So the seed is marked UNPROVEN (`adultContentProven: false` below). It
     // paints the first frame, and `revalidateAdultContent` then has to confirm it
-    // against `hostnames/{host}` like any other ungated claim. If that read says
+    // against `publicHostnames/{host}` like any other ungated claim. If that read says
     // `true`, the gate goes up. If the document does not exist, there is no
     // channel through which this posture could ever be revoked — so the posture
     // returns to gated rather than standing forever on a promise nobody can keep.
@@ -355,13 +356,13 @@ export async function resolveEvent(opts: ResolveOptions): Promise<Resolution> {
   // evidence is precisely the fail-open the whole design is built to refuse.
   //
   // The offline cost is real and is paid deliberately. Two things bound it: an
-  // Event that has ALREADY flipped caches `true` and short-circuits normally, so
+  // Event that has ALREADY flipped caches `true` and, with a validated preview, short-circuits normally, so
   // this only touches the never-yet-adult case; and the gate is provisional, not
   // latched (`setActiveAdultContent(..., { proven: false })`), so the first
   // successful revalidation lowers it again. It is a gate until we can ask, not
   // a gate forever.
   //
-  // A cached `true` still short-circuits, so the gated path — every Gay Cruise
+  // A preview-validated cached `true` still short-circuits, so the gated path — every Gay Cruise
   // Bingo host, and every Event that has already flipped — keeps the pure
   // offline-first cold boot ADR 0006 specifies, at no cost.
   const cacheMayUnGate = cached?.doc.adultContent === false;

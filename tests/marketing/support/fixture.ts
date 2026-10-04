@@ -18,7 +18,8 @@
 //
 // `HERO_PROMPT_EXCLUSIONS` trims a handful of otherwise-fine prompts that read
 // badly blown up on a portfolio page.
-import { doc, setDoc } from 'firebase/firestore';
+import { doc, setDoc, writeBatch } from 'firebase/firestore';
+import { projectPublicHostname } from '../../../functions/src/publicHostnameFields';
 import { initializeTestEnvironment, type RulesTestEnvironment } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -32,14 +33,12 @@ import {
 
 // Re-exported so the spec imports its whole sign-in surface from one place.
 export { signedInUid };
-// @ts-expect-error — plain-JS seed script, no type declarations.
 import { seedItemDocId } from '../../../scripts/seed.mjs';
 import { ITEMS, EASY_ITEMS, CLOSING_ITEMS } from '../../../scripts/seed-data/bodega-bay-2026.mjs';
 // GCB: the `embark` TUTORIAL pool only. Importing med-2026's `ITEMS` here
 // would put the explicit main pool one typo away from a published capture —
 // this named import is the enforcement, so do not widen it to a namespace
 // import or re-export.
-// @ts-expect-error — plain-JS seed script, no type declarations.
 import { EASY_ITEMS as GCB_EMBARK_ITEMS } from '../../../scripts/seed-data/med-2026.mjs';
 
 /**
@@ -593,18 +592,22 @@ export async function seedHeroEvent(): Promise<RulesTestEnvironment> {
         dayIndex: HERO_TODAY_INDEX,
       });
 
-      // The world-readable routing document. A single-Event build treats
+      // The canonical/public routing pair. A single-Event build treats
       // VITE_ADULT_CONTENT=false as an UNPROVEN seed and re-derives the posture
-      // from `hostnames/{host}`; with no document the posture fails closed and
+      // from `publicHostnames/{host}`; with no document the posture fails closed and
       // the 18+ gate returns. Bodega's pool is tame, so this is the truthful
       // value, not a convenience.
-      await setDoc(doc(db, 'hostnames', '127.0.0.1'), {
+      const hostname = {
         eventId: HERO_EVENT_ID,
         canonicalHost: '127.0.0.1',
         edition: HERO_EDITION,
         status: 'active',
         adultContent: false,
-      });
+      };
+      const hostnamePair = writeBatch(db);
+      hostnamePair.set(doc(db, 'hostnames', '127.0.0.1'), hostname);
+      hostnamePair.set(doc(db, 'publicHostnames', '127.0.0.1'), projectPublicHostname(hostname));
+      await hostnamePair.commit();
 
       await setDoc(doc(db, 'events', HERO_EVENT_ID, 'moments', `${FIRST_BINGO.uid}-bingo`), {
         kind: 'bingo',

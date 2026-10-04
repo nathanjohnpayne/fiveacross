@@ -66,3 +66,31 @@ export function assertDeployFirebaseApiKey({
       '(These web identifiers are client-safe, not secret.)',
   );
 }
+
+/**
+ * No preview may use production Firebase Auth or data (#1420).
+ *
+ * No isolated preview project/web-app configuration has been approved yet.
+ * Refuse every Vercel preview build rather than trusting a caller-supplied
+ * project ID while its API key, Auth helper or handoff could still be production.
+ * This is a build boundary, not revocation of previously deployed artifacts or
+ * console OAuth registrations. Enable previews only through a reviewed isolated
+ * configuration and separately authorized rollout.
+ */
+export function assertPreviewFirebaseIsolation(
+  command: string,
+  vercelEnv: string | undefined,
+  vercel: string | undefined,
+): void {
+  if (command !== 'build') return;
+  if (vercel === '1' && vercelEnv !== 'production' && vercelEnv !== 'development' && vercelEnv !== 'preview') {
+    throw new Error('Refusing Vercel build: missing or unknown VERCEL_ENV prevents verifying preview isolation (#1420).');
+  }
+  if (vercelEnv === 'preview') {
+    throw new Error(
+      'Refusing Vercel preview build: previews require an approved isolated test Firebase Auth/data configuration. ' +
+      'Production Firebase projects and OAuth trust are forbidden for preview hosts (#1420). ' +
+      'Ask the owner to select the test project and authorize its configuration before enabling previews.',
+    );
+  }
+}

@@ -394,7 +394,7 @@ function registerBothSinks(props: Record<string, unknown>): void {
  * time a caller can reach this function.
  *
  * `eventSlug` falls back to the Event id when the Slug is unknown — a
- * single-Event build's Resolution never read a `hostnames/{host}` document
+ * single-Event build's Resolution never read a `publicHostnames/{host}` document
  * (see `Resolution.slug`'s own doc in eventResolution.ts), so it has no
  * separate Slug to report and the Event id is the closest identifier there is.
  *

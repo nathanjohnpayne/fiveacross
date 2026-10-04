@@ -1,7 +1,5 @@
 import { useState } from 'react';
-import { useAuth } from '../../auth/AuthContext';
-import { useMyPlayer, useNotices } from '../../hooks/useData';
-import { resolveDisplayName } from '../../data/api';
+import { useNotices } from '../../hooks/useData';
 import { defaultViewedIndex } from '../DaySwitcher';
 import {
   postNotice,
@@ -28,7 +26,7 @@ import type { DayDef, NoticeDoc } from '../../types';
  * guard, and an inline failure (role=alert) that KEEPS the draft so a retry is one
  * tap (#411, specs/admin-async-feedback.md). Clears only on a settled success.
  */
-function ComposeNotice({ adminUid, adminName, days }: { adminUid: string; adminName: string; days: DayDef[] }) {
+function ComposeNotice({ adminUid, days }: { adminUid: string; days: DayDef[] }) {
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
   const [pinned, setPinned] = useState(true);
@@ -55,7 +53,7 @@ function ComposeNotice({ adminUid, adminName, days }: { adminUid: string; adminN
       // a panel left mounted across a scheduled Day unlock would otherwise post
       // under the previous Day. Undefined for a schedule-less Event.
       const dayIndex = days.length ? defaultViewedIndex(days, Date.now()) : undefined;
-      await postNotice({ uid: adminUid, displayName: adminName, title, body, pinned, dayIndex });
+      await postNotice({ uid: adminUid, title, body, pinned, dayIndex });
       setTitle('');
       setBody('');
       setPinned(true);
@@ -198,7 +196,7 @@ function EditNoticeRow({ notice, onDone }: { notice: NoticeDoc; onDone: () => vo
 }
 
 /**
- * One sent-history row: title + a "Day N · Name · 📌 pinned · edited" attribution
+ * One sent-history row: title + a "Day N · Name · UID · 📌 pinned · edited" attribution
  * line, with the quiet Edit / Unpin (when pinned) / Delete controls trailing
  * (AsyncButton — disables in flight, surfaces a failure pill instead of a silent
  * rejection). Tapping Edit swaps the row for the inline copy editor above.
@@ -209,6 +207,7 @@ function SentNoticeRow({ notice, days }: { notice: NoticeDoc; days: DayDef[] }) 
   const meta = [
     hasDay ? `Day ${(notice.dayIndex as number) + 1}` : null,
     notice.displayName,
+    `UID ${notice.uid}`,
     notice.pinned ? '📌 pinned' : null,
     // Provenance, not a timestamp: an edit is visible but never shouted (#455).
     notice.editedAt !== undefined ? 'edited' : null,
@@ -244,22 +243,13 @@ function SentNoticeRow({ notice, days }: { notice: NoticeDoc; days: DayDef[] }) 
 }
 
 export default function MessagesPanel({ adminUid, days }: { adminUid: string; days: DayDef[] }) {
-  const { user } = useAuth();
-  const { data: player } = useMyPlayer(adminUid);
   const { notices } = useNotices();
-  // The posting admin's public identity, resolved the SAME validated way the Feed
-  // Moment/Tally writers do (Board.tsx): saved player-row name, else the auth
-  // displayName, else 'Anonymous'. Passing the auth fallback (not undefined) means
-  // a post fired while the player row is still loading attributes to the admin's
-  // real Google name rather than persisting 'Anonymous' onto the Notice
-  // (CodeRabbit, PR #440).
-  const adminName = resolveDisplayName(player, user?.displayName);
 
   return (
     <div>
       {/* `days` is threaded (not a precomputed dayIndex) so the compose form
           stamps the CURRENT Day at submit time, not this render (Codex P2, #440). */}
-      <ComposeNotice adminUid={adminUid} adminName={adminName} days={days} />
+      <ComposeNotice adminUid={adminUid} days={days} />
       <div className="admin-section">
         <h3>
           Sent
