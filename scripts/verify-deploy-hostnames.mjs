@@ -1,9 +1,10 @@
+import { hasOnlyPublicHostnameFields, projectPublicHostname } from '../functions/src/publicHostnameFields.ts';
 import { GoogleAuth } from 'google-auth-library';
 import { writeSync } from 'node:fs';
+import { isDeepStrictEqual } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { BODEGA_EVENT_ID, BODEGA_PREVIEW_HOSTS, BODEGA_PROJECT_ID } from './provision-bodega-preview.mjs';
 
-const fieldMask = '?mask.fieldPaths=eventId&mask.fieldPaths=status';
 const datastoreScopes = Object.freeze(['https://www.googleapis.com/auth/datastore']);
 const applicationDefaultAccessTokenTimeoutMs = 10_000;
 
@@ -50,46 +51,91 @@ export async function getApplicationDefaultAccessToken(
   return accessToken;
 }
 
+// Preserve Firestore's typed scalar/array values intact for equality; only
+// expose the existing preview map's fields to the shared 7+4 projection. No
+// recursive preview.days whitelist or lossy value decoding is introduced.
+function comparableHostnameFields(fields) {
+  const result = { ...fields };
+  if (Object.prototype.hasOwnProperty.call(result, 'preview')) {
+    const map = result.preview?.mapValue;
+    result.preview = map && typeof map === 'object' && !Array.isArray(map)
+      ? (Object.prototype.hasOwnProperty.call(map, 'fields') ? map.fields : {})
+      : null;
+  }
+  return result;
+}
+
+// A supplied preview must retain the required display name the browser's
+// coerceEventPreview accepts (trimmed nonblank text, at most 200 characters).
+// Absence stays compatible; optional fields and existing days values are not
+// recursively reinterpreted at this field-allowlist/value-parity boundary.
+function hasValidSuppliedPreview(fields) {
+  if (!Object.prototype.hasOwnProperty.call(fields, 'preview')) return true;
+  const preview = fields.preview?.mapValue?.fields;
+  if (!preview || typeof preview !== 'object' || Array.isArray(preview)) return false;
+  const name = preview.eventName?.stringValue;
+  return typeof name === 'string' && name.trim().length > 0 && name.trim().length <= 200;
+}
+
 export async function verifyBodegaHostnameDocuments({ projectId, accessToken, fetchImpl = fetch }) {
   assertFiveAcrossProject(projectId);
   for (const host of BODEGA_PREVIEW_HOSTS) {
-    const url =
-      `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}` +
-      `/databases/(default)/documents/hostnames/${encodeURIComponent(host)}${fieldMask}`;
-    let response;
-    try {
-      response = await fetchImpl(url, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-        signal: AbortSignal.timeout(10_000),
-      });
-    } catch {
-      throw new Error(`Hostname document read failed for ${host}.`);
-    }
-    if (response.status === 404) {
-      throw new Error(`Hostname document is missing for ${host}.`);
-    }
-    if (!response.ok) {
-      throw new Error(`Hostname document read failed for ${host} (HTTP ${response.status}).`);
-    }
-    let document;
-    try {
-      document = await response.json();
-    } catch {
-      throw new Error(`Hostname document is malformed for ${host}.`);
-    }
-    const expectedName = `projects/${BODEGA_PROJECT_ID}/databases/(default)/documents/hostnames/${host}`;
-    if (
-      document?.name !== expectedName ||
-      typeof document?.fields?.eventId?.stringValue !== 'string' ||
-      typeof document?.fields?.status?.stringValue !== 'string'
-    ) {
-      throw new Error(`Hostname document is malformed for ${host}.`);
-    }
-    if (document.fields.status.stringValue !== 'active') {
-      throw new Error(`Hostname document is not active for ${host}.`);
-    }
-    if (document.fields.eventId.stringValue !== BODEGA_EVENT_ID) {
-      throw new Error(`Hostname document resolves to the wrong Event for ${host}.`);
+    let canonicalProjection;
+    for (const collection of ['hostnames', 'publicHostnames']) {
+      const label = collection === 'hostnames' ? 'Hostname' : 'Public hostname';
+      const url =
+        `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}` +
+        `/databases/(default)/documents/${collection}/${encodeURIComponent(host)}`;
+      let response;
+      try {
+        response = await fetchImpl(url, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          signal: AbortSignal.timeout(10_000),
+        });
+      } catch {
+        throw new Error(`${label} document read failed for ${host}.`);
+      }
+      if (response.status === 404) {
+        throw new Error(`${label} document is missing for ${host}.`);
+      }
+      if (!response.ok) {
+        throw new Error(`${label} document read failed for ${host} (HTTP ${response.status}).`);
+      }
+      let document;
+      try {
+        document = await response.json();
+      } catch {
+        throw new Error(`${label} document is malformed for ${host}.`);
+      }
+      const expectedName = `projects/${BODEGA_PROJECT_ID}/databases/(default)/documents/${collection}/${host}`;
+      if (
+        document?.name !== expectedName ||
+        typeof document?.fields?.eventId?.stringValue !== 'string' ||
+        typeof document?.fields?.status?.stringValue !== 'string'
+      ) {
+        throw new Error(`${label} document is malformed for ${host}.`);
+      }
+      if (!hasValidSuppliedPreview(document.fields)) {
+        throw new Error(`${label} preview is malformed for ${host}.`);
+      }
+      if (collection === 'publicHostnames') {
+        // Read the full public document: a REST field mask would hide extras and
+        // approve a copy that whole-document Firestore Rules deny anonymously.
+        const fields = comparableHostnameFields(document.fields);
+        if (!hasOnlyPublicHostnameFields(fields)) throw new Error(`${label} document has unapproved fields for ${host}.`);
+        if (!isDeepStrictEqual(fields, canonicalProjection)) throw new Error(`${label} projection does not match canonical state for ${host}.`);
+      } else {
+        // Read canonical values in full: eventId/status alone cannot establish
+        // public posture, Edition, address or preview parity. Private fields
+        // are discarded only by the owner-approved shared projection.
+        canonicalProjection = projectPublicHostname(comparableHostnameFields(document.fields));
+      }
+      if (document.fields.status.stringValue !== 'active') {
+        throw new Error(`${label} document is not active for ${host}.`);
+      }
+      if (document.fields.eventId.stringValue !== BODEGA_EVENT_ID) {
+        throw new Error(`${label} document resolves to the wrong Event for ${host}.`);
+      }
     }
   }
   return BODEGA_PREVIEW_HOSTS;
@@ -116,7 +162,7 @@ export async function runBodegaHostnameVerification({
 export async function runBodegaHostnameVerificationCommand(options) {
   try {
     const hosts = await runBodegaHostnameVerification(options);
-    console.log(`Verified ${hosts.length} serving Bodega hostname documents.`);
+    console.log(`Verified ${hosts.length} serving Bodega canonical/public hostname pairs.`);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Five Across hostname verification failed.';
     if (error instanceof ApplicationDefaultAccessTokenTimeoutError) {

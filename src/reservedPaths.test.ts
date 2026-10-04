@@ -13,7 +13,7 @@ import {
   validateSlug,
 } from './slug';
 
-// `specs/path-addressing-and-root.md` § Reserved paths and § D3 step 1 (#1387).
+// `specs/path-addressing-and-root.md` § Reserved paths and the D3 parse (#1387).
 // The reserved list is ONE module holding the union of two floors, and the
 // address parser reads it. Everything below is pure: no Firestore, no router,
 // no network.
@@ -131,9 +131,9 @@ describe('parseAddress', () => {
   });
 
   it('is host-blind: whether a host addresses by path is decided later, by its pathNamespace', () => {
-    // Step 1 runs before the host's capability is known, so its answer is
+    // The parse runs before the host's capability is known, so its answer is
     // speculative on every host. The effective basename is resolution's job
-    // (D3 step 3), never this function's.
+    // (D3), never this function's.
     for (const hostname of ['fiveacross.app', 'bodega-bay.fiveacross.app', 'fiveacross.vercel.app', 'localhost']) {
       expect(parseAddress(hostname, '/bodega-bay/feed')).toEqual({ slug: 'bodega-bay', basename: '/bodega-bay' });
       expect(parseAddress(hostname, '/feed')).toEqual({ slug: null, basename: '' });

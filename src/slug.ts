@@ -277,21 +277,21 @@ export interface ParsedAddress {
 const NO_ADDRESS: ParsedAddress = { slug: null, basename: '' };
 
 /**
- * D3 step 1: split the first path segment off `pathname` as a CANDIDATE slug.
+ * D3's parse: split the first path segment off `pathname` as a CANDIDATE slug.
  * Pure — no I/O, no Firestore, no router.
  *
  * The answer is speculative on every host, and `hostname` deliberately does
  * not change it: whether a host addresses Events by path at all is decided by
- * its routing document's `pathNamespace` (step 2), which a pure parse cannot
- * know. So this never says "this host addresses by path"; it says "this
- * segment could be a slug". Resolution turns that into the EFFECTIVE basename
- * (step 3) and is the only thing that may hand a basename to the router — on a
+ * its `pathNamespace` capability, through the separately reviewed mechanism D3
+ * defers, which a pure parse cannot know. So this never says "this host
+ * addresses by path"; it says "this segment could be a slug". Resolution turns
+ * that into the EFFECTIVE basename and is the only thing that may hand a basename to the router — on a
  * live Event subdomain the candidate here is discarded. The parameter stays in
  * the spec's signature so every caller hands over the whole address.
  *
  * Only the reserved list and the dot rule are refused here. A segment that is
  * otherwise not a valid slug (`/Bodega-Bay`, `/x`) is still a candidate: it
- * resolves to not-found at step 2, which is the contract (`fiveacross.app/nope`
+ * resolves to not-found during resolution, which is the contract (`fiveacross.app/nope`
  * renders not-found, never the doorway), whereas refusing it here would turn it
  * into an app route that the catch-all could swallow.
  */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertDeployFirebaseApiKey, resolveAppVersion } from './build-config';
+import { assertDeployFirebaseApiKey, assertPreviewFirebaseIsolation, resolveAppVersion } from './build-config';
 
 describe('assertDeployFirebaseApiKey', () => {
   it.each(['gaycruisebingo', 'fiveacross'])('rejects an empty named deploy key for %s', (projectId) => {
@@ -71,5 +71,27 @@ describe('resolveAppVersion', () => {
         throw new Error('not a git repository');
       }),
     ).toBe('unknown');
+  });
+});
+
+describe('preview Firebase isolation (#1420)', () => {
+  it('refuses preview builds until an isolated configuration is reviewed', () => {
+    expect(() => assertPreviewFirebaseIsolation('build', 'preview', '1')).toThrow('isolated test Firebase');
+  });
+
+  it.each(['production', 'development', undefined])('preserves %s builds', (environment) => {
+    expect(() => assertPreviewFirebaseIsolation('build', environment, undefined)).not.toThrow();
+  });
+
+  it.each([undefined, '', 'staging', 'Preview'])('refuses partial or unknown Vercel metadata %s', (environment) => {
+    expect(() => assertPreviewFirebaseIsolation('build', environment, '1')).toThrow('missing or unknown VERCEL_ENV');
+  });
+
+  it.each(['production', 'development'])('preserves platform %s builds', (environment) => {
+    expect(() => assertPreviewFirebaseIsolation('build', environment, '1')).not.toThrow();
+  });
+
+  it('leaves local dev serving outside the publication boundary', () => {
+    expect(() => assertPreviewFirebaseIsolation('serve', 'preview', '1')).not.toThrow();
   });
 });

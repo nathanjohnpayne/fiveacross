@@ -89,7 +89,7 @@ beforeEach(async () => {
     await setDoc(doc(db, `eventInvitationRateLimits/${RATE_BUCKET}`), {
       attemptsMs: [1_760_000_000_000],
     });
-    await setDoc(doc(db, `hostnames/${HOST}`), {
+    await setDoc(doc(db, `publicHostnames/${HOST}`), {
       eventId: EVENT,
       canonicalHost: HOST,
       edition: 'vacay',
@@ -198,7 +198,7 @@ describe('membership writes remain default-denied pending #804', () => {
 });
 
 it('leaves the neighboring public hostname lookup unchanged', async () => {
-  const snapshot = await assertSucceeds(getDoc(doc(anon(), `hostnames/${HOST}`)));
+  const snapshot = await assertSucceeds(getDoc(doc(anon(), `publicHostnames/${HOST}`)));
   expect(snapshot.exists()).toBe(true);
   expect(snapshot.data()?.eventId).toBe(EVENT);
 });

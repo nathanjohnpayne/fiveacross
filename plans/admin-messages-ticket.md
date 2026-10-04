@@ -27,7 +27,7 @@ events/{eventId}/notices/{noticeId}
   pinned: boolean
 ```
 
-`firestore.rules`: read for any signed-in user; create/update/delete only when `request.auth.uid in events/{eventId}.admins` (the existing `isAdmin` pattern). Validate title/body types + length caps and `pinned: bool` on create. No report counter—Notices are admin-authored.
+`firestore.rules`: read requires `admitted(eventId)`; create/update/delete require `isAdmittedAdmin(eventId)`. Validate title/body types + length caps and `pinned: bool` on create. No report counter—Notices are admin-authored.
 
 ## First Notice (seed content—post via the new surface once it ships)
 
@@ -53,7 +53,7 @@ events/{eventId}/notices/{noticeId}
 
 ## Validation (tests are the gate; the frames define "right")
 
-- **Rules emulator** (`tests/rules/`): non-admin create/update/delete of a Notice denied; admin allowed; any signed-in read allowed; length caps enforced; `pinned` must be boolean.
+- **Rules emulator** (`tests/rules/`): non-admin create/update/delete of a Notice denied; admin allowed; Event-admitted read allowed; token-bound Notice names and stable Admin-history UID follow the accepted #1426 amendment; length caps enforced; `pinned` must be boolean.
 - **RTL** (`src/components/`): compose posts with title+body+pin and clears; `Unpin` flips `pinned` false; `Delete` removes from history; hub shows the Messages door and routes to `/more/admin/messages` under the existing dismissal contract (`Admin.test.tsx` / `admin-console-ia` patterns).
 - **`mergeFeed` unit**: a pinned Notice sorts above newer Proofs/Moments; an unpinned Notice interleaves by `createdAt`; cap still honored; empty-notice stream leaves the merge byte-identical to today (regression guard).
 - **Banner**: renders while a pinned Notice exists and undismissed; ✕ persists per device across reload (`fake-indexeddb`/localStorage test per the offline suite's pattern); dismissal never hides the Feed copy.
@@ -61,7 +61,7 @@ events/{eventId}/notices/{noticeId}
 
 ## Acceptance criteria
 
-- **Given** an admin, **when** they post the seed Notice with pin on, **then** every signed-in Player sees it at the top of the Feed and once as a Card-tab banner, attributed and day-stamped.
+- **Given** an admin, **when** they post the seed Notice with pin on, **then** every Event-admitted Player sees it at the top of the Feed and once as a Card-tab banner, attributed and day-stamped.
 - **Given** a Player taps ✕, **then** the banner never returns on that device, and the Feed copy remains.
 - **Given** unpin, **then** the Notice drops to its `createdAt` position in the Feed; **given** delete, **then** it disappears from Feed, banner, and history.
 - **Given** a non-admin, **then** every Notice write is rejected server-side.

@@ -671,6 +671,42 @@ describe('persisted recovery history validation', () => {
     await expect(parseRecoveryHistoryEntry(recoveryHistoryKey(value.sequence), value, HOST)).resolves.toEqual(value);
   });
 
+  it('retains both legacy fieldless and current complete replacement policy history', async () => {
+    const legacy = replacementRecord();
+    await expect(parseRecoveryHistoryEntry(recoveryHistoryKey(legacy.sequence), legacy, HOST)).resolves.toEqual(legacy);
+    const current = replacementRecord();
+    if (current.evidence.kind !== 'apply' || current.evidence.publisherReplacement === null) throw new Error('test setup');
+    for (const account of current.evidence.publisherReplacement.controlEvidence.serviceAccountAccess) account.inheritedPoliciesComplete = true;
+    current.evidence.publisherReplacement.controlEvidence.serviceAccountAccess[1].tokenCreatorMembers = ['serviceAccount:service-5297095641@gcp-sa-pubsub.iam.gserviceaccount.com'];
+    await expect(parseRecoveryHistoryEntry(recoveryHistoryKey(current.sequence), current, HOST)).resolves.toEqual(current);
+    const unapproved = structuredClone(current);
+    if (unapproved.evidence.kind !== 'apply' || unapproved.evidence.publisherReplacement === null) throw new Error('test setup');
+    unapproved.evidence.publisherReplacement.controlEvidence.serviceAccountAccess[1].tokenCreatorMembers = ['user:operator@example.com'];
+    await expect(parseRecoveryHistoryEntry(recoveryHistoryKey(unapproved.sequence), unapproved, HOST)).rejects.toThrow('recovery history malformed');
+    current.evidence.publisherReplacement.controlEvidence.serviceAccountAccess[1].inheritedPoliciesComplete = false as never;
+    await expect(parseRecoveryHistoryEntry(recoveryHistoryKey(current.sequence), current, HOST)).rejects.toThrow('recovery history malformed');
+  });
+
+  it('rejects a current cross-project replacement history with no token creators', async () => {
+    const current = replacementRecord();
+    if (current.evidence.kind !== 'apply' || current.evidence.publisherReplacement === null) throw new Error('test setup');
+    const control = current.evidence.publisherReplacement.controlEvidence;
+    for (const account of control.serviceAccountAccess) account.inheritedPoliciesComplete = true;
+    const email = control.replacementRuntime.serviceAccountEmail;
+    const foreignEmail = 'replacement-publisher@foreign-project.iam.gserviceaccount.com';
+    const foreign = JSON.parse(JSON.stringify(current)
+      .replaceAll(email, foreignEmail)
+      .replaceAll(`projects/fiveacross/serviceAccounts/${foreignEmail}`, `projects/foreign-project/serviceAccounts/${foreignEmail}`)) as RecoveryRecord;
+    await expect(parseRecoveryHistoryEntry(recoveryHistoryKey(foreign.sequence), foreign, HOST)).rejects.toThrow('recovery history malformed');
+  });
+
+  it.each([0, 1])('rejects mixed legacy/current completeness when only account %s is current', async (index) => {
+    const value = replacementRecord();
+    if (value.evidence.kind !== 'apply' || value.evidence.publisherReplacement === null) throw new Error('test setup');
+    value.evidence.publisherReplacement.controlEvidence.serviceAccountAccess[index].inheritedPoliciesComplete = true;
+    await expect(parseRecoveryHistoryEntry(recoveryHistoryKey(value.sequence), value, HOST)).rejects.toThrow('recovery history malformed');
+  });
+
   it.each([
     {
       label: 'replacement subject/runtime',

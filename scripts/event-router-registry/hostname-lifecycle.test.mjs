@@ -1,3 +1,4 @@
+import { projectPublicHostname } from '../../functions/src/publicHostnameFields.ts';
 import { describe, expect, it, vi } from 'vitest';
 import { Timestamp } from 'firebase/firestore';
 import { HostnameLifecycleRefusal, applyHostnameMutation } from './hostname-lifecycle.mjs';
@@ -61,6 +62,11 @@ function store(seed = {}, { listEventMappings = true } = {}) {
       if (op === 'set') docs.set(path, cloneDocumentValue(value));
       else if (op === 'update') docs.set(path, { ...(docs.get(path) ?? {}), ...cloneDocumentValue(value) });
       else docs.delete(path);
+    }
+    for (const [, path] of staged.filter(([, path]) => path.startsWith('hostnames/'))) {
+      const publicPath = path.replace('hostnames/', 'publicHostnames/');
+      if (docs.has(path)) expect(docs.get(publicPath)).toEqual(projectPublicHostname(docs.get(path)));
+      else expect(docs.has(publicPath)).toBe(false);
     }
     return result;
   };
@@ -140,6 +146,8 @@ describe('provision', () => {
     );
     expect(plan.revisions).toEqual([{ host: HOST, from: null, to: '1' }]);
     expect(docs.get(`hostnames/${HOST}`).status).toBe('disabled');
+    expect(docs.get(`publicHostnames/${HOST}`)).toEqual(projectPublicHostname(docs.get(`hostnames/${HOST}`)));
+    expect(docs.get(`publicHostnames/${HOST}`)).not.toHaveProperty('pathNamespace');
     expect(docs.get(`routerReplicas/${HOST}`)).toEqual({
       schemaVersion: 1,
       revision: '1',
@@ -183,7 +191,7 @@ describe('provision', () => {
     expect(docs.size).toBe(0);
     const wet = await applyHostnameMutation({ ...input, apply: true }, dependencies);
     expect(wet.writes).toEqual(dry.writes);
-    expect(docs.size).toBe(2);
+    expect(docs.size).toBe(3);
   });
 
   it('refuses an explicit non-disabled initial status', async () => {
@@ -272,7 +280,7 @@ describe('ordinary update', () => {
     );
     expect(plan.projectedChange).toBe(false);
     expect(plan.revisions).toEqual([]);
-    expect(plan.writes).toEqual([{ op: 'update', path: `hostnames/${HOST}`, value: { adultContent: true } }]);
+    expect(plan.writes).toEqual([{ op: 'update', path: `hostnames/${HOST}`, value: { adultContent: true } }, { op: 'set', path: `publicHostnames/${HOST}`, value: projectPublicHostname({ ...hostnameDocument(), adultContent: true }) }]);
     expect(docs.get(`hostnames/${HOST}`).adultContent).toBe(true);
     expect(docs.get(`routerReplicas/${HOST}`)).toEqual(before);
   });

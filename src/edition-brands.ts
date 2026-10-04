@@ -289,7 +289,7 @@ assertEditionRegistryParity(Object.keys(BRANDS));
  * and none of them is an `EditionBrand`, so the two lookups below would install
  * a function as the resolved Edition and hand `undefined` to every copy site —
  * a blank wordmark and a blank tagline on the sign-in gate — instead of falling
- * back to `gcb`. `hostnames/{host}.edition` is operator-authored data, so the
+ * back to `gcb`. `publicHostnames/{host}.edition` is operator-authored data, so the
  * value reaching here is not under this module's control.
  *
  * `Object.prototype.hasOwnProperty.call`, not `Object.hasOwn`: this program
@@ -304,7 +304,7 @@ export function isKnownEdition(edition: string | null | undefined): edition is E
  *
  * An absent, non-string or unrecognised id resolves to {@link DEFAULT_EDITION}
  * rather than to `undefined`, which is the SAME rule the app's own resolution
- * path follows: `hostnames/{host}` coerces a non-string `edition` to `''`
+ * path follows: `publicHostnames/{host}` coerces a non-string `edition` to `''`
  * (`src/data/hostnames.ts`) and `setActiveEdition('')` then resets to the
  * default. Edge and client must not disagree even about the fallback — a
  * hostname whose document names an Edition this build has never heard of has

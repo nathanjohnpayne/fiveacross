@@ -169,7 +169,7 @@ export function useAdultContentFlipConfirm(): {
 /**
  * The dialog itself — destructive-action shape (`.warnbox`, as `ReshuffleSheet`
  * uses), not a dismissible toast. "This can't be undone" is literally true:
- * `hostnames/{host}.adultContent` is monotone by design, because retracting the
+ * `publicHostnames/{host}.adultContent` is monotone by design, because retracting the
  * posture from players who already attested is meaningless.
  */
 export function AdultContentConfirmDialog({
