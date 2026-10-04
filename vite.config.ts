@@ -4,7 +4,7 @@ import { VitePWA } from 'vite-plugin-pwa';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
-import { assertDeployFirebaseApiKey, resolveAppVersion } from './src/build-config';
+import { assertDeployFirebaseApiKey, assertPreviewFirebaseIsolation, resolveAppVersion } from './src/build-config';
 // The SAME brand table the app renders the sign-in gate from (#580's one-table
 // rule, extended to the browser chrome in #586). Importing it rather than
 // restating four strings here is the whole point: a second copy is how the
@@ -165,6 +165,9 @@ function precacheExclusionGuard(): Plugin {
 
 // https://vitejs.dev/config/
 export default defineConfig(({ command, mode }) => {
+  // Check before loading any Firebase configuration; named production targets
+  // and generic CI cannot exempt a Vercel preview from the isolation boundary.
+  assertPreviewFirebaseIsolation(command, process.env.VERCEL_ENV, process.env.VERCEL);
   const targetBuild = process.env.DEPLOY_TARGET_BUILD === '1';
   // Normal local builds load their development VITE_* values from env files.
   // A named deploy target instead receives its complete VITE_* environment
