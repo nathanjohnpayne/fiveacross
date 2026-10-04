@@ -1,9 +1,18 @@
-// Exact transport exception for the checked-in Five Across Gen2 Firestore
+// Exact required service-agent ceiling for the checked-in Five Across Gen2
 // publisher (router-publisher/deployment.json), project number 5297095641.
+// Members denote effective getAccessToken/getOpenIdToken authority from ANY
+// direct/inherited predefined/custom role, not just a role named Token Creator.
+// The trusted source attestor must establish that enumeration's completeness.
 // This is an admission ceiling, never an instruction to grant Token Creator.
-// Other projects/agents require separately verified contract evidence (#1427).
-const PUBSUB_TOKEN_CREATOR = 'serviceAccount:service-5297095641@gcp-sa-pubsub.iam.gserviceaccount.com';
+// Exact agent/role necessity is recorded in specs/event-router-registry.md.
+const PUBLISHER_TOKEN_CREATORS = new Set([
+  'serviceAccount:service-5297095641@gcp-sa-pubsub.iam.gserviceaccount.com',
+  'serviceAccount:service-5297095641@gcp-sa-eventarc.iam.gserviceaccount.com',
+  'serviceAccount:service-5297095641@gcf-admin-robot.iam.gserviceaccount.com',
+  'serviceAccount:service-5297095641@serverless-robot-prod.iam.gserviceaccount.com',
+  'serviceAccount:service-5297095641@gcp-sa-cloudbuild.iam.gserviceaccount.com',
+]);
 
 export function isAllowedPublisherTokenCreator(serviceAccountEmail, member) {
-  return serviceAccountEmail.endsWith('@fiveacross.iam.gserviceaccount.com') && member === PUBSUB_TOKEN_CREATOR;
+  return serviceAccountEmail.endsWith('@fiveacross.iam.gserviceaccount.com') && PUBLISHER_TOKEN_CREATORS.has(member);
 }

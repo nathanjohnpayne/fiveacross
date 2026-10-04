@@ -618,8 +618,12 @@ describe('operator recovery evidence controller', () => {
     'serviceAccount:firebase-adminsdk-fbsvc@fiveacross.iam.gserviceaccount.com',
     'serviceAccount:unapproved-runtime@fiveacross.iam.gserviceaccount.com',
     'serviceAccount:service-999999@gcp-sa-pubsub.iam.gserviceaccount.com',
-    'serviceAccount:service-5297095641@gcf-admin-robot.iam.gserviceaccount.com',
-    'serviceAccount:service-5297095641@serverless-robot-prod.iam.gserviceaccount.com',
+    'serviceAccount:service-999999@gcf-admin-robot.iam.gserviceaccount.com',
+    'serviceAccount:service-999999@serverless-robot-prod.iam.gserviceaccount.com',
+    'serviceAccount:service-999999@gcp-sa-eventarc.iam.gserviceaccount.com',
+    'serviceAccount:service-999999@gcp-sa-cloudbuild.iam.gserviceaccount.com',
+    'serviceAccount:service-5297095641@gcp-sa-cloudscheduler.iam.gserviceaccount.com',
+    'serviceAccount:service-5297095641@gcp-sa-firebasemods.iam.gserviceaccount.com',
     'principal://iam.googleapis.com/unapproved-subject',
     'group:operators@example.com',
     'domain:example.com',
@@ -652,9 +656,12 @@ describe('operator recovery evidence controller', () => {
     expect(deps.obtainSourceAttestorSession).not.toHaveBeenCalled();
   });
 
-  it('admits the verified project-bound Pub/Sub agent and retries unchanged evidence', async () => {
+  it.each([
+    'gcp-sa-pubsub', 'gcp-sa-eventarc', 'gcf-admin-robot',
+    'serverless-robot-prod', 'gcp-sa-cloudbuild',
+  ])('admits the verified project-bound %s agent and retries unchanged evidence', async (agent) => {
     const readback = controlReadbacks();
-    readback.serviceAccountAccess[1].tokenCreatorMembers = ['serviceAccount:service-5297095641@gcp-sa-pubsub.iam.gserviceaccount.com'];
+    readback.serviceAccountAccess[1].tokenCreatorMembers = [`serviceAccount:service-5297095641@${agent}.iam.gserviceaccount.com`];
     const deps = dependencies({ readPublisherControlReadbacks: vi.fn(async () => readback) });
     const first = await buildRecoveryArtifacts(recoveryInput(), deps);
     const retry = await buildRecoveryArtifacts(recoveryInput(), deps);

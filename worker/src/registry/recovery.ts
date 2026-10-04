@@ -92,6 +92,8 @@ export type ServiceAccountAccessReadback = {
   iamMember: string;
   fullResourceName: string;
   policyEtag: string;
+  // Effective getAccessToken/getOpenIdToken principals, including custom and
+  // predefined direct/inherited role grants; the signed attestor proves coverage.
   tokenCreatorMembers: string[];
   // Optional only when displaying pre-#1427 history; new recovery requires true.
   inheritedPoliciesComplete?: true;

@@ -623,8 +623,12 @@ describe('source-attested recovery', () => {
       'serviceAccount:firebase-adminsdk-fbsvc@fiveacross.iam.gserviceaccount.com',
       'serviceAccount:unapproved-runtime@fiveacross.iam.gserviceaccount.com',
       'serviceAccount:service-999999@gcp-sa-pubsub.iam.gserviceaccount.com',
-      'serviceAccount:service-5297095641@gcf-admin-robot.iam.gserviceaccount.com',
-      'serviceAccount:service-5297095641@serverless-robot-prod.iam.gserviceaccount.com',
+      'serviceAccount:service-999999@gcf-admin-robot.iam.gserviceaccount.com',
+      'serviceAccount:service-999999@serverless-robot-prod.iam.gserviceaccount.com',
+      'serviceAccount:service-999999@gcp-sa-eventarc.iam.gserviceaccount.com',
+      'serviceAccount:service-999999@gcp-sa-cloudbuild.iam.gserviceaccount.com',
+      'serviceAccount:service-5297095641@gcp-sa-cloudscheduler.iam.gserviceaccount.com',
+      'serviceAccount:service-5297095641@gcp-sa-firebasemods.iam.gserviceaccount.com',
       'principal://iam.googleapis.com/unapproved-subject',
       'group:operators@example.com',
       'domain:example.com',
@@ -663,6 +667,16 @@ describe('source-attested recovery', () => {
     const approvedApply = await applyRecovery(acquired.state, approvedRequest, replacementContext);
     expect(approvedApply.state.minimumPublisherEpoch).toBe('8');
     expect((await applyRecovery(acquired.state, approvedRequest, replacementContext)).state).toEqual(approvedApply.state);
+
+    for (const agent of ['gcp-sa-eventarc', 'gcf-admin-robot', 'serverless-robot-prod', 'gcp-sa-cloudbuild']) {
+      const required = structuredClone(replacement);
+      required.controlEvidence.serviceAccountAccess[1].tokenCreatorMembers = [`serviceAccount:service-5297095641@${agent}.iam.gserviceaccount.com`];
+      const requiredRequest = await request(acquired.state, { kind: 'apply', lockId: 'lock-1', publisherReplacement: required }, sourceAudit('2'));
+      expect(parseRecovery(requiredRequest)).toEqual(requiredRequest);
+      await expect.soft(applyRecovery(acquired.state, requiredRequest, replacementContext), agent).resolves.toMatchObject({
+        state: { minimumPublisherEpoch: '8', highestQuarantinedPublisherEpoch: '7' },
+      });
+    }
 
     const applied = await applyRecovery(acquired.state, strictRequest, replacementContext);
     expect(applied.state.minimumPublisherEpoch).toBe('8');
