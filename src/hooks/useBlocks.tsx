@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { onSnapshot, query, where } from 'firebase/firestore';
-import { EVENT_ID } from '../firebase';
+import { onSnapshot, query, waitForPendingWrites, where } from 'firebase/firestore';
+import { db as gameplayDb, EVENT_ID } from '../firebase';
 import { capturePrivateFirestore, retryPrivateFirestoreSession } from '../privateFirestore';
 import { usePrivateFirestore } from './usePrivateFirestore';
 import { blockPairsCol, blocksCol } from '../data/paths';
@@ -18,11 +18,11 @@ import type { BlockDoc } from '../types';
 export interface HiddenUids {
   /** The uids the viewer hides and is hidden from in this Event. */
   hidden: ReadonlySet<string>;
-  /** True only after a confirmed private-memory answer for this UID/Event.
+  /** True only after gameplay queue drain and a confirmed private-memory answer for this UID/Event.
    * Mid-use offline retains that same scope's confirmed set in memory; cold
    * offline starts and unreadable first answers withhold Feed/Tally. */
   ready: boolean;
-  /** A failed bridge is actionable, rather than an indefinite loading state. */
+  /** A failed bridge or queue-drain budget is actionable instead of loading forever. */
   failed?: boolean;
   retry?: () => void;
 }
@@ -72,6 +72,7 @@ interface HiddenState {
   generation: number;
   hidden: ReadonlySet<string>;
   ready: boolean;
+  failed?: boolean;
 }
 
 // Signed out: ready with nothing hidden. Signed in with no key (the shell has
@@ -86,7 +87,8 @@ const initial = (uid: string | null, key: string | null, generation: number): Hi
 
 /** One private-memory pair listener per viewer/Event. Only confirmed answers
  * can establish visibility. Pending/cache answers preserve the confirmed union;
- * reconnect keeps that conservative set until a fresh server answer. Private
+ * same-session offline retains that conservative set. Online rebootstrap waits
+ * for the gameplay queue to drain before a fresh server answer. Private
  * pair listeners never populate the persistent read cache; the unchanged own
  * block batch still persists its direction/pair write payload for offline sync. */
 export function useHiddenUidsSubscription(uid: string | null, enabled: boolean): HiddenUids {
@@ -114,13 +116,35 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
       confirmed.current.generation === session.generation || session.transition === 'connection' || !navigator.onLine
     ) ? confirmed.current : null;
     confirmed.current = carried;
-    setState(carried ? { key, generation: session.generation, hidden: carried.hidden, ready: true } : initial(uid, key, session.generation));
+    setState(carried ? { key, generation: session.generation, hidden: carried.hidden, ready: !navigator.onLine } : initial(uid, key, session.generation));
     if (key === null || uid === null || session.uid !== uid || session.failed || !session.db) return;
     // Filter bootstrap reads only the named memory client, never the legacy cache.
     // Ordinary own-block/private panels remain gated by attended recovery.
     const lease = captureMatchingLease(uid, session.db, true);
     if (!lease) return;
     let active = true;
+    let unsubscribe: (() => void) | null = null;
+    let draining = true;
+    const isCurrent = () => {
+      if (!active || EVENT_ID !== eventId || !navigator.onLine) return false;
+      try { lease.assertCurrent(); return true; } catch { return false; }
+    };
+    const failVisibility = () => {
+      if (!isCurrent()) return;
+      confirmed.current = null;
+      setState({ key, generation: session.generation, hidden: EMPTY, ready: false, failed: true });
+    };
+    const failDrain = () => {
+      if (!draining) return;
+      draining = false;
+      clearTimeout(drainTimer);
+      failVisibility();
+    };
+    // A reloaded process has no pending-target relay, but its persistent SDK
+    // queue may still contain block writes. Never seed visibility from a private
+    // server answer taken before that queue drains. No extra disk hint is used.
+    const drainTimer = setTimeout(failDrain, 5_000);
+    let confirmedThisSubscription = false;
     let lastCommitted: ReadonlySet<string> = carried?.hidden ?? EMPTY;
     // The counterparts of the previous snapshot (pending or settled), so a
     // pair DISAPPEARING from a server-confirmed snapshot can be seen.
@@ -172,12 +196,11 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
         },
       );
     };
-    const unsub = onSnapshot(
+    const subscribe = () => onSnapshot(
       query(blockPairsCol(eventId, lease.db), where('uids', 'array-contains', uid)),
       { includeMetadataChanges: true },
       (snap) => {
-        if (!active) return;
-        try { lease.assertCurrent(); } catch { return; }
+        if (!isCurrent()) return;
         const current = hiddenUidsFromPairs(snap.docs.map((d) => d.data()), uid);
         if ([...previous].some((other) => !current.has(other))) repairOwed = true;
         // A pair that APPEARS after this subscription's first server answer
@@ -199,6 +222,7 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
         serverBacked = !snap.metadata.fromCache;
         const settled = !snap.metadata.fromCache && !snap.metadata.hasPendingWrites;
         if (settled) {
+          confirmedThisSubscription = true;
           lastCommitted = current;
           confirmed.current = { key, generation: session.generation, authGeneration: session.authGeneration, hidden: current };
           observeConfirmedBlockTargets(uid, eventId, current);
@@ -230,26 +254,38 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
         setState({
           key, generation: session.generation,
           hidden: computeHiddenSet(current, lastCommitted, !settled),
-          ready: settled || confirmed.current?.key === key,
+          ready: settled || confirmedThisSubscription,
         });
       },
       (err) => {
-        if (!active) return;
-        try { lease.assertCurrent(); } catch { return; }
+        if (!isCurrent()) return;
         // A denial retires the visibility witness. Only a connection loss
         // may carry a confirmed same-scope set; an unreadable listener cannot
         // qualify this session (including a later offline transition).
         confirmed.current = null;
+        confirmedThisSubscription = false;
         serverBacked = false;
         clearRetry();
         console.error('[blocks] hidden-set listener failed; withholding until a confirmed answer is available', err);
         setState({ key, generation: session.generation, hidden: EMPTY, ready: false });
       },
     );
+    const subscribeAfterDrain = () => {
+      if (!draining) return;
+      draining = false;
+      clearTimeout(drainTimer);
+      if (!isCurrent()) return;
+      try { unsubscribe = subscribe(); }
+      catch { failVisibility(); }
+    };
+    try { void waitForPendingWrites(gameplayDb).then(subscribeAfterDrain, failDrain); }
+    catch { failDrain(); }
     return () => {
       active = false;
+      draining = false;
+      clearTimeout(drainTimer);
       clearRetry();
-      unsub();
+      unsubscribe?.();
     };
   }, [key, uid, eventId, session.db, session.generation, session.authGeneration, session.transition, session.uid, session.recoveryRequired, session.failed]);
   // With no key there is no listener, so the answer follows from `uid` alone,
@@ -259,8 +295,9 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
   if (key === null) return { hidden: EMPTY, ready: uid === null };
   if (session.failed) return { hidden: EMPTY, ready: false, failed: true, retry: retryPrivateFirestoreSession };
   const sameSession = session.uid === uid && !session.failed;
-  if (!sameSession || (state.generation !== session.generation && !witness)) return { hidden: EMPTY, ready: false };
+  if (!sameSession || (state.generation !== session.generation && (navigator.onLine || !witness))) return { hidden: EMPTY, ready: false };
   if (!session.db && (navigator.onLine || !witness)) return { hidden: EMPTY, ready: false };
+  if (state.key === key && state.failed) return { hidden: EMPTY, ready: false, failed: true, retry: retryPrivateFirestoreSession };
   return state.key === key
     ? { hidden: state.ready && pending.size > 0 ? computeHiddenSet(pending, state.hidden, true) : state.hidden, ready: state.ready }
     : { hidden: EMPTY, ready: false };

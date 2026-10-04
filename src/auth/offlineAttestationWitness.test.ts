@@ -92,6 +92,31 @@ describe('minimal offline render witness (#1411)', () => {
     expect(get).not.toHaveBeenCalled();
     expect(localStorage.length).toBe(1);
   });
+  it('handles a native-style AbortError that arrives after the lock deadline', async () => {
+    await recordOfflineAttestation('late-abort-project', 'alice', true);
+    vi.useFakeTimers();
+    let aborted = false;
+    let rejected = false;
+    const request = vi.fn((_name: string, options: LockOptions) => new Promise<never>((_resolve, reject) => {
+      options.signal!.addEventListener('abort', () => {
+        aborted = true;
+        setTimeout(() => {
+          rejected = true;
+          reject(new DOMException('Lock request aborted.', 'AbortError'));
+        }, 10);
+      }, { once: true });
+    }));
+    vi.stubGlobal('navigator', { locks: { request } });
+    const lookup = hasOfflineAttestation('late-abort-project', 'alice');
+    await vi.advanceTimersByTimeAsync(1001);
+    expect(await lookup).toBe(false);
+    expect(aborted).toBe(true);
+    expect(rejected).toBe(false);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(rejected).toBe(true);
+    // Promise.race observes its losing input even after its winner settled.
+    expect(localStorage.getItem('fiveacross:late-abort-project:offline-attested:alice')).toBe('1');
+  });
   it('preserves a successful other-document revocation before lookup acquires its lock', async () => {
     await recordOfflineAttestation('first-revocation', 'alice', true);
     vi.resetModules();

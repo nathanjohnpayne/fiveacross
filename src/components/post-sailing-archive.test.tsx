@@ -2862,6 +2862,47 @@ describe('ArchiveEvent caller owns its private actor and mounted Event (#1411)',
     expect(H.capturePrivate).toHaveBeenCalledOnce();
     expect(screen.queryByText(/The final standings could not be read back/)).toBeNull();
   });
+  it.each(['account', 'incarnation', 'offline', 'event'] as const)(
+    'releases its local cleanup wait after %s retirement without an obsolete report', async (retirement) => {
+      let resolve!: (result: string) => void;
+      H.archiveEvent.mockResolvedValueOnce('read-failed:roster');
+      H.abandonArchive.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+      const view = renderConsole();
+      await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+      await waitFor(() => expect(H.abandonArchive).toHaveBeenCalledOnce());
+      view.rerender(<ArchiveEvent {...props(mkEvent({ archiving: true, archiveToken: 1 }))} />);
+      expect(screen.getByRole('button', { name: 'Reopen play' })).toBeDisabled();
+      if (retirement === 'account') H.actorUid = 'bob';
+      if (retirement === 'incarnation') H.actorGeneration++;
+      if (retirement === 'offline') H.online = false;
+      if (retirement === 'event') H.eventId = 'other-event';
+      await act(async () => { resolve('reopened'); });
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Reopen play' })).toBeEnabled());
+      expect(screen.getByRole('button', { name: 'Freeze the record now' })).toBeEnabled();
+      expect(screen.queryByText(/until that write settles/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/The final standings could not be read back/)).toBeNull();
+      expect(H.writes).toEqual(['begin', 'archive', 'abandon']);
+      expect(H.capturePrivate).toHaveBeenCalledOnce();
+    },
+  );
+  it('releases a rejected cleanup wait after actor retirement without enabling an obsolete report', async () => {
+    let reject!: (error: Error) => void;
+    H.archiveEvent.mockResolvedValueOnce('read-failed:roster');
+    H.abandonArchive.mockReturnValueOnce(new Promise((_done, fail) => { reject = fail; }));
+    const view = renderConsole();
+    await userEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Archive the Event now' }));
+    await waitFor(() => expect(H.abandonArchive).toHaveBeenCalledOnce());
+    view.rerender(<ArchiveEvent {...props(mkEvent({ archiving: true, archiveToken: 1 }))} />);
+    H.actorGeneration++;
+    await act(async () => { reject(new Error('reopen rejected')); });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reopen play' })).toBeEnabled());
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByText(/until that write settles/)).not.toBeInTheDocument();
+    expect(H.writes).toEqual(['begin', 'archive', 'abandon']);
+    expect(H.capturePrivate).toHaveBeenCalledOnce();
+  });
   it('does not chain a freeze after the opening acknowledgement changes actor', async () => {
     let resolve!: (value: { result: string; token: number; created: boolean; eventId: string }) => void;
     H.beginArchive.mockReturnValueOnce(new Promise((done) => { resolve = done; }));

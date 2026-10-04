@@ -644,8 +644,10 @@ export default function ArchiveEvent({
   //
   // Cleared in a `finally` and NOT behind `isCurrent()`: this describes a write
   // that is genuinely outstanding, so a rejected reopen has to give the controls
-  // back too, and a flag that could stick would leave the console dead.
+  // back too, and a flag that could stick would leave the console dead. Only the
+  // operation owning this local wait may clear it, within its mounted lifetime.
   const [cleanupInFlight, setCleanupInFlight] = useState(false);
+  const cleanupOwnerRef = useRef<object | null>(null);
   useEffect(() => {
     setResult((current) => {
       if (!current || phase === current.from) return current;
@@ -1086,12 +1088,21 @@ export default function ArchiveEvent({
         // between this check passing and the reopen committing. See the flag's
         // own note beside `reopenSuperseded` for why the controls are closed
         // here rather than made to queue behind this promise.
+        const cleanupOwner = {};
+        const cleanupLifetime = mountedLifetimeRef.current;
+        cleanupOwnerRef.current = cleanupOwner;
         setCleanupInFlight(true);
         let reopened: AbandonArchiveResult;
         try {
           reopened = await abandonArchive(token ?? undefined, eventId);
         } finally {
-          if (isCurrent()) setCleanupInFlight(false);
+          // Local housekeeping records the settled write, even if its actor
+          // retired. It grants no write/report authority and cannot clear a
+          // different cleanup's wait or update a retired mounted lifetime.
+          if (cleanupLifetime && cleanupLifetime === mountedLifetimeRef.current && cleanupOwner === cleanupOwnerRef.current) {
+            cleanupOwnerRef.current = null;
+            setCleanupInFlight(false);
+          }
         }
         if (isCurrent()) setReopenSuperseded(reopened === 'quiesce-changed');
         // WHERE THE EVENT ACTUALLY ENDS UP (Codex P2 on PR #1162). The reopen

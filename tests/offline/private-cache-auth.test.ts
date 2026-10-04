@@ -5,9 +5,9 @@ import {
   initializeAuth, signOut, updateCurrentUser, type Auth,
 } from 'firebase/auth';
 import {
-  connectFirestoreEmulator, disableNetwork, doc, getDocFromCache,
-  getDocFromServer, initializeFirestore, memoryLocalCache, onSnapshot,
-  persistentLocalCache, setDoc, terminate, waitForPendingWrites, type Firestore,
+  collection, connectFirestoreEmulator, disableNetwork, doc, enableNetwork, getDocFromCache,
+  getDocFromServer, getDocsFromServer, initializeFirestore, memoryLocalCache, onSnapshot, query,
+  persistentLocalCache, setDoc, terminate, waitForPendingWrites, where, writeBatch, type Firestore,
 } from 'firebase/firestore';
 import { cellsFromData, cellsToMap } from '../../src/game/cells';
 import { createPrivateFirestoreSessions } from '../../src/auth/privateFirestoreSession';
@@ -171,6 +171,52 @@ describe('private-cache named-app Auth feasibility (#1411)', () => {
     const snap = await getDocFromServer(doc(reloaded.db, path));
     expect(snap.metadata.hasPendingWrites).toBe(false);
     expect(cellsFromData(snap.data()?.cells)[7].marked).toBe(true);
+  });
+
+  it('a reloaded durable block batch can still be pending while a named memory client sees an empty server pair set', async () => {
+    await seedEventDoc(projectId, eventId);
+    const primary = client('durable-block-reload', true);
+    const user = (await createUserWithEmailAndPassword(primary.auth, runScopedEmail('queued-block'), 'passw0rd!')).user;
+    const target = 'queued-block-target';
+    const uids = [user.uid, target].sort();
+    const directionPath = `events/${eventId}/blocks/${user.uid}_${target}`;
+    const pairPath = `events/${eventId}/blockPairs/${uids[0]}_${uids[1]}`;
+    await disableNetwork(primary.db);
+    // The real blind write shape from blockPlayer: no private payload read or
+    // persisted UI hint is needed to queue the reciprocal atomic batch.
+    const batch = writeBatch(primary.db);
+    batch.set(doc(primary.db, directionPath), { ownerUid: user.uid, targetUid: target, eventId, createdAt: Date.now() });
+    batch.set(doc(primary.db, pairPath), { uids, eventId });
+    void batch.commit().catch(() => {});
+    // SDK shutdown follows the queued write on its own async queue; no block
+    // cache read is used as an acknowledgement or recovery-readiness signal.
+    await terminate(primary.db); await deleteApp(primary.app);
+
+    const reloaded = client('durable-block-reload', true);
+    await disableNetwork(reloaded.db);
+    await updateCurrentUser(reloaded.auth, user);
+    const observer = client('block-server-observer');
+    await updateCurrentUser(observer.auth, user);
+    const pairs = (db: Firestore) => query(collection(db, `events/${eventId}/blockPairs`), where('uids', 'array-contains', user.uid));
+    expect((await getDocsFromServer(pairs(observer.db))).empty).toBe(true);
+    let drained = false;
+    const drain = waitForPendingWrites(reloaded.db).then(() => { drained = true; });
+    // A confirmed empty memory snapshot is not proof that the independent
+    // durable client's queue has drained. Keep that client's transport offline.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(drained).toBe(false);
+    expect((await getDocsFromServer(pairs(observer.db))).empty).toBe(true);
+    expect(drained).toBe(false);
+
+    await enableNetwork(reloaded.db);
+    await drain;
+    expect(drained).toBe(true);
+    const fresh = client('block-fresh-server-observer');
+    await updateCurrentUser(fresh.auth, user);
+    const committed = await getDocsFromServer(pairs(fresh.db));
+    expect(committed.docs.map((row) => row.id)).toEqual([`${uids[0]}_${uids[1]}`]);
+    expect(committed.docs[0].data()).toEqual({ uids, eventId });
+    expect((await getDocFromServer(doc(fresh.db, directionPath))).data()).toMatchObject({ ownerUid: user.uid, targetUid: target, eventId });
   });
 
   it('does not mistake the active-user drain for a safe all-user legacy-cache purge', async () => {

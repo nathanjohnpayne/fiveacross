@@ -27,11 +27,12 @@ const H = vi.hoisted(() => ({
   repaired: [] as string[],
   ownListings: 0,
   ownTargets: [] as string[] | Error,
-  blockCommits: [] as Array<() => Promise<void>>, retryPrivate: vi.fn(),
+  blockCommits: [] as Array<() => Promise<void>>, retryPrivate: vi.fn(), waitPending: vi.fn(),
+  gameplayDb: { persistent: true },
 }));
 
 vi.mock('../firebase', () => ({
-  db: {},
+  db: H.gameplayDb,
   auth: { get currentUser() { return H.session.uid ? { uid: H.session.uid } : null; } },
   get EVENT_ID() {
     return H.eventId;
@@ -47,6 +48,7 @@ vi.mock('../privateFirestore', () => {
   return { retryPrivateFirestoreSession: H.retryPrivate, capturePrivateFirestore: capture, awaitPrivateFirestore: async (uid: string) => { const lease = capture(); if (lease.uid !== uid) throw new Error('Private account changed.'); lease.assertCurrent(); return lease; } };
 });
 vi.mock('firebase/firestore', () => ({
+  waitForPendingWrites: H.waitPending,
   collection: (_db: unknown, ...segments: string[]) => ({ database: _db, kind: 'collection', path: segments.join('/'), withConverter() { return this; } }),
   doc: (_db: unknown, ...segments: string[]) => ({ kind: 'doc', path: segments.join('/'), withConverter() { return this; } }),
   writeBatch: () => ({ set: vi.fn(), commit: () => (H.blockCommits.shift() ?? (() => Promise.resolve()))() }),
@@ -114,6 +116,9 @@ beforeEach(() => {
   H.repaired = [];
   H.ownListings = 0;
   H.ownTargets = []; H.blockCommits = [];
+  // Empty-queue controls deliver the mocked drain signal immediately. Race
+  // cases below hold a native Promise to exercise real asynchronous ordering.
+  H.waitPending.mockImplementation(() => ({ then: (done: () => void) => { done(); } }));
   for (const uid of ['bob', 'carol']) for (const eventId of ['event-a', 'event-b']) retirePendingBlocks(uid, eventId);
   resetReconcileAttemptsForTests();
 });
@@ -676,7 +681,7 @@ describe('useHiddenUidsSubscription', () => {
     vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
     H.session = { ...H.session, db: { memory: true }, generation: 2, transition: 'connection' };
     view.rerender();
-    expect(view.result.current).toEqual({ hidden: new Set(['alice']), ready: true });
+    expect(view.result.current).toEqual({ hidden: new Set(['alice']), ready: false });
     H.session = { ...H.session, db: { memory: true }, generation: 3, transition: 'auth' };
     view.rerender();
     expect(view.result.current).toEqual({ hidden: new Set(), ready: false });
@@ -835,5 +840,101 @@ describe('useMyBlocks', () => {
     const view = renderHook(() => useMyBlocks('bob'));
     act(() => H.subscriptions[0].onError(new Error('denied')));
     expect(view.result.current).toEqual({ data: [], loading: false, error: true, confirmed: false, pendingTargets: new Set() });
+  });
+});
+
+
+describe('private block bootstrap waits for the persistent gameplay queue (#1670)', () => {
+  it('a cold empty private answer cannot reveal a queued block before drain and a fresh server query', async () => {
+    let release!: () => void;
+    let queuedBlockOnServer = false;
+    H.blockCommits = [() => new Promise<void>((resolve) => { release = () => { queuedBlockOnServer = true; resolve(); }; })];
+    // Enqueue the actual blind writer, then model the reload's loss of its
+    // process relay while the SDK's durable commit remains pending.
+    const commit = blockPlayer({ me: 'bob', target: 'alice' });
+    retirePendingBlocks('bob', H.eventId);
+    H.waitPending.mockReturnValueOnce(commit);
+    expect(pendingBlockTargets('bob', H.eventId).size).toBe(0);
+    const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+    if (H.subscriptions[0]) act(() => H.subscriptions[0].listener(pairs(queuedBlockOnServer ? [['alice', 'bob']] : [])));
+    expect(view.result.current.ready).toBe(false);
+    expect(H.subscriptions).toHaveLength(0);
+    await act(async () => { release(); });
+    expect(H.waitPending).toHaveBeenCalledWith(H.gameplayDb);
+    expect(H.subscriptions).toHaveLength(1);
+    expect(view.result.current.ready).toBe(false);
+    act(() => H.subscriptions[0].listener({ ...pairs([]), metadata: { fromCache: true, hasPendingWrites: false } }));
+    expect(view.result.current.ready).toBe(false);
+    act(() => H.subscriptions[0].listener(pairs([['alice', 'bob']])));
+    expect(view.result.current).toEqual({ hidden: new Set(['alice']), ready: true });
+  });
+
+  it.each(['account', 'incarnation', 'event', 'offline', 'unmount'] as const)('a delayed drain cannot start the retired %s query', async (retirement) => {
+    let release!: () => void;
+    H.waitPending.mockReturnValueOnce(new Promise<void>((resolve) => { release = resolve; }));
+    const view = renderHook(({ uid }) => useHiddenUidsSubscription(uid, true), { initialProps: { uid: 'bob' } });
+    expect(H.subscriptions).toHaveLength(0);
+    if (retirement === 'account') H.session = { ...H.session, uid: 'carol', generation: 1 };
+    if (retirement === 'incarnation') H.session = { ...H.session, db: { memory: true }, generation: 1 };
+    if (retirement === 'event') H.eventId = 'event-b';
+    if (retirement === 'offline') {
+      vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+      H.session = { ...H.session, db: null, generation: 1, transition: 'connection' };
+    }
+    if (retirement === 'unmount') view.unmount();
+    else view.rerender({ uid: H.session.uid! });
+    const newerQueries = H.subscriptions.length;
+    await act(async () => { release(); });
+    expect(H.subscriptions).toHaveLength(newerQueries);
+    if (retirement !== 'unmount') expect(view.result.current.ready).toBe(false);
+  });
+
+  it('rejecting the drain withholds content and offers the existing fresh-session Retry', async () => {
+    H.waitPending.mockRejectedValueOnce(new Error('account queue unavailable'));
+    const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+    await act(async () => {});
+    expect(view.result.current).toMatchObject({ ready: false, failed: true, hidden: new Set() });
+    expect(H.subscriptions).toHaveLength(0);
+    H.retryPrivate.mockClear();
+    act(() => view.result.current.retry?.());
+    expect(H.retryPrivate).toHaveBeenCalledOnce();
+  });
+
+  it('bounds a never-draining queue and refuses late completion after exhaustion', async () => {
+    vi.useFakeTimers();
+    try {
+      let release!: () => void;
+      H.waitPending.mockReturnValueOnce(new Promise<void>((resolve) => { release = resolve; }));
+      const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(view.result.current).toMatchObject({ ready: false, failed: true });
+      await act(async () => { release(); });
+      expect(H.subscriptions).toHaveLength(0);
+      expect(view.result.current.ready).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('reconnect keeps offline confirmation but requires drain then a new settled answer', async () => {
+    const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+    act(() => H.subscriptions[0].listener(pairs([['alice', 'bob']])));
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    H.session = { ...H.session, db: null, generation: 1, transition: 'connection' };
+    view.rerender();
+    expect(view.result.current).toEqual({ hidden: new Set(['alice']), ready: true });
+    let release!: () => void;
+    H.waitPending.mockReturnValueOnce(new Promise<void>((resolve) => { release = resolve; }));
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
+    H.session = { ...H.session, db: { memory: true }, generation: 2, transition: 'connection' };
+    view.rerender();
+    expect(view.result.current.ready).toBe(false);
+    expect(H.subscriptions).toHaveLength(1);
+    await act(async () => { release(); });
+    const fresh = H.subscriptions[1];
+    act(() => fresh.listener({ ...pairs([]), metadata: { fromCache: true, hasPendingWrites: false } }));
+    expect(view.result.current.ready).toBe(false);
+    act(() => fresh.listener(pairs([], true)));
+    expect(view.result.current.ready).toBe(false);
+    act(() => fresh.listener(pairs([['alice', 'bob'], ['carol', 'bob']])));
+    expect(view.result.current).toEqual({ hidden: new Set(['alice', 'carol']), ready: true });
   });
 });
