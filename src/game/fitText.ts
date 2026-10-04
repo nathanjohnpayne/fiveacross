@@ -156,9 +156,12 @@ export function fitTextSize(text: string, box: FitTextBox, options: FitTextOptio
  * glyph width with a flat average, which is only an approximation of whatever
  * face the browser actually resolved (a headless Linux fallback face runs
  * wider than the bold condensed face the estimate assumes), so a word the
- * estimate says fits can still break. The caller supplies `overflows(size)`,
+ * estimate says fits can still break, and its line count can over- or
+ * under-estimate the block's height. The caller supplies `overflows(size)`,
  * which applies `size`, lays the text out with mid-word breaking disabled and
- * reports whether any word is wider than the box; this steps down from
+ * reports whether the rendered text overflows the box in EITHER dimension:
+ * any word wider than the usable width, or the wrapped block taller than the
+ * usable height (`SquareText` checks both). This steps down from
  * `startSize` by `step` until it reports false, bottoming out at `minSize`
  * (default 6px) — and never raising `startSize` itself if that is already
  * below the floor. Pure of any DOM so it is unit-testable.

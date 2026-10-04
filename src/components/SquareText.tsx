@@ -148,6 +148,23 @@ export default function SquareText({ text }: { text: string }) {
 
     measure();
 
+    // #1345: the probe measures with `getBoundingClientRect`, which includes
+    // CSS transforms, and a fresh card's Squares mount mid-`deal-drop`
+    // (index.css, starting at `scale(0.85)`) — a transform ResizeObserver
+    // never reports. Re-fit once the Square's own animation ends (or is
+    // cancelled), so a size probed against the shrunken, still-animating box
+    // never sticks once the Square lands at its real size.
+    const animated = host.closest('.cell') ?? host;
+    const onAnimationDone = (event: Event) => {
+      if (event.target === animated) measure();
+    };
+    animated.addEventListener('animationend', onAnimationDone);
+    animated.addEventListener('animationcancel', onAnimationDone);
+    const removeAnimationListeners = () => {
+      animated.removeEventListener('animationend', onAnimationDone);
+      animated.removeEventListener('animationcancel', onAnimationDone);
+    };
+
     // Recompute on any cell-size change (phone rotation, split-screen,
     // desktop resize, sidebar toggling the grid's column count, etc.) — PR
     // #237 Codex finding: without this, an already-mounted Square keeps the
@@ -156,10 +173,13 @@ export default function SquareText({ text }: { text: string }) {
     // at a narrower one. ResizeObserver is unavailable in some older/jsdom
     // test environments, so this is a best-effort enhancement, not a hard
     // dependency of the guard (the effect above still fits on mount/change).
-    if (typeof ResizeObserver === 'undefined') return;
+    if (typeof ResizeObserver === 'undefined') return removeAnimationListeners;
     const observer = new ResizeObserver(() => measure());
     observer.observe(host);
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      removeAnimationListeners();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textSize only retriggers the DOM re-read above; see the doc comment.
   }, [text, textSize]);
 

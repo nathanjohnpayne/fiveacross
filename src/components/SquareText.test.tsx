@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render } from '@testing-library/react';
+import { act, render } from '@testing-library/react';
 import SquareText from './SquareText';
 
 // #1345: the Square fit guard verifies the estimate against the real rendered
@@ -42,16 +42,21 @@ function stubLayout(realCharEm = REAL_CHAR_EM, renderedLines = 2) {
     }
     return realGetComputedStyle.call(window, el, pseudo ?? undefined);
   });
+  // `transform.scale` mimics a CSS transform on the Square (the deal-drop
+  // animation): it scales every bounding rect but not the computed padding.
+  const transform = { scale: 1 };
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
-    if (!this.classList.contains('cell-text')) return rect(CELL);
+    const s = transform.scale;
+    if (!this.classList.contains('cell-text')) return rect(CELL * s, CELL * s);
     const size = parseFloat(this.style.fontSize);
     // The widest unbreakable run: CSS may wrap at whitespace or after a hyphen.
     const longest = Math.max(...((this.textContent ?? '').match(/[^\s-]*-|[^\s-]+/g) ?? []).map((w) => w.length));
     const unbrokenWidth = longest * size * realCharEm;
     // With mid-word breaking allowed the word wraps inside the box instead.
     const height = renderedLines * size * 1.05;
-    return rect(this.style.wordBreak === 'normal' ? unbrokenWidth : Math.min(unbrokenWidth, USABLE), height);
+    return rect((this.style.wordBreak === 'normal' ? unbrokenWidth : Math.min(unbrokenWidth, USABLE)) * s, height * s);
   });
+  return transform;
 }
 
 function renderedSpan(text: string): HTMLElement {
@@ -93,6 +98,27 @@ describe('SquareText keeps words whole (#1345)', () => {
     // glyphs really measure 0.4 em: 57.6px, a fit.
     stubLayout(0.4);
     const target = renderedSpan('Illimitables');
+    expect(parseFloat(target.style.fontSize)).toBe(CEILING_PX);
+  });
+
+  it('re-fits once the deal animation ends, so a size probed mid-transform does not stick', () => {
+    // "Poolside" renders 61.2px at 12px: a fit in the landed 62px box. Mid
+    // deal-drop (scale 0.85) the rects shrink but the 8px padding does not,
+    // so the probe sees 52.02px against 51.5px and steps down.
+    const transform = stubLayout(61.2 / (8 * CEILING_PX));
+    transform.scale = 0.85;
+    const { container } = render(
+      <div className="cell">
+        <SquareText text="Poolside" />
+      </div>,
+    );
+    const target = container.querySelector('.cell-text') as HTMLElement;
+    expect(parseFloat(target.style.fontSize)).toBe(CEILING_PX - 0.5);
+
+    transform.scale = 1;
+    act(() => {
+      container.querySelector('.cell')!.dispatchEvent(new Event('animationend', { bubbles: true }));
+    });
     expect(parseFloat(target.style.fontSize)).toBe(CEILING_PX);
   });
 
