@@ -55,19 +55,49 @@ const DEFAULT_STEP = 0.5;
  * once wrapped to `width`, given `charWidthRatio`? A single word longer
  * than one full line wraps mid-word (mirroring `.cell`'s `word-break:
  * break-word`), consuming `ceil(word.length / charsPerLine)` lines on its
- * own rather than overflowing sideways.
+ * own rather than overflowing sideways. `wordsStayWhole` reports whether
+ * that never happened — every word fit on one line — which `fitTextSize`
+ * requires of a size before accepting it (#1345). A whitespace-free run in a
+ * script whose normal CSS line breaking falls BETWEEN its characters
+ * (ideographs, kana, Hangul, and the dictionary-broken Southeast Asian
+ * scripts) is not a word that must stay whole: wrapping it is a legal break.
+ * Likewise CSS may wrap after a hyphen or dash ("mother-in-law"). A token is
+ * split at those break opportunities and each remaining unbreakable segment
+ * ("Grandparents" in "Grandparents漢", "mother-" in "mother-in-law") must
+ * still fit on one line.
  */
-function estimateLineCount(text: string, width: number, fontSize: number, charWidthRatio: number): number {
+const INTRA_WORD_BREAK_RUNS =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]+/u;
+// Each match is one segment ending just after a hyphen/dash, or the trailing
+// remainder. Deliberately no lookbehind: RegExp lookbehind throws at module
+// evaluation on Safari before 16.4, and this module loads with the Board.
+const SEGMENTS_BREAKING_AFTER_DASH = /[^\-‐–—]*[\-‐–—]|[^\-‐–—]+/gu;
+
+function longestUnbreakableSegment(word: string): number {
+  const segments = word
+    .split(INTRA_WORD_BREAK_RUNS)
+    .flatMap((run) => run.match(SEGMENTS_BREAKING_AFTER_DASH) ?? []);
+  return Math.max(0, ...segments.map((segment) => segment.length));
+}
+
+function estimateLineCount(
+  text: string,
+  width: number,
+  fontSize: number,
+  charWidthRatio: number,
+): { lines: number; wordsStayWhole: boolean } {
   const charWidth = fontSize * charWidthRatio;
-  if (charWidth <= 0 || width <= 0) return 1;
+  if (charWidth <= 0 || width <= 0) return { lines: 1, wordsStayWhole: true };
   const charsPerLine = Math.max(1, Math.floor(width / charWidth));
   const words = text.trim().split(/\s+/).filter(Boolean);
-  if (words.length === 0) return 1;
+  if (words.length === 0) return { lines: 1, wordsStayWhole: true };
 
   let lines = 1;
   let lineLen = 0;
+  let wordsStayWhole = true;
   for (const word of words) {
     if (word.length > charsPerLine) {
+      if (longestUnbreakableSegment(word) > charsPerLine) wordsStayWhole = false;
       if (lineLen > 0) {
         lines += 1;
         lineLen = 0;
@@ -84,7 +114,7 @@ function estimateLineCount(text: string, width: number, fontSize: number, charWi
       lineLen = nextLen;
     }
   }
-  return lines;
+  return { lines, wordsStayWhole };
 }
 
 /**
@@ -93,7 +123,10 @@ function estimateLineCount(text: string, width: number, fontSize: number, charWi
  * always-wins rule (daily-cards-spec § "More menu" item 3). A short string
  * that already fits at `baseSize` returns `baseSize` UNSHRUNK; an oversized
  * one steps down by `options.step` until it fits or bottoms out at
- * `options.minSize`, whichever comes first. `text` with no content, or a
+ * `options.minSize`, whichever comes first. A size only fits when the block
+ * is short enough AND no single word has to break across lines (#1345): the
+ * guard keeps shrinking past a mid-word break ("Grandparent / s") and only
+ * accepts one when even the floor cannot hold the longest word. `text` with no content, or a
  * box with no usable area (mirrors `Board.tsx`'s not-yet-laid-out guard —
  * `getBoundingClientRect` reports 0x0 before first paint), never shrinks:
  * there is nothing to measure against yet, so the ceiling wins by default.
@@ -111,9 +144,37 @@ export function fitTextSize(text: string, box: FitTextBox, options: FitTextOptio
 
   const floor = Math.min(minSize, baseSize);
   for (let size = baseSize; size >= floor; size -= step) {
-    const lines = estimateLineCount(text, box.width, size, charWidthRatio);
+    const { lines, wordsStayWhole } = estimateLineCount(text, box.width, size, charWidthRatio);
     const blockHeight = lines * size * lineHeight;
-    if (blockHeight <= box.height) return size;
+    if (wordsStayWhole && blockHeight <= box.height) return size;
+  }
+  return floor;
+}
+
+/**
+ * Second pass against the REAL rendered glyphs (#1345). `fitTextSize` models
+ * glyph width with a flat average, which is only an approximation of whatever
+ * face the browser actually resolved (a headless Linux fallback face runs
+ * wider than the bold condensed face the estimate assumes), so a word the
+ * estimate says fits can still break, and its line count can over- or
+ * under-estimate the block's height. The caller supplies `overflows(size)`,
+ * which applies `size`, lays the text out with mid-word breaking disabled and
+ * reports whether the rendered text overflows the box in EITHER dimension:
+ * any word wider than the usable width, or the wrapped block taller than the
+ * usable height (`SquareText` checks both). This steps down from
+ * `startSize` by `step` until it reports false, bottoming out at `minSize`
+ * (default 6px) — and never raising `startSize` itself if that is already
+ * below the floor. Pure of any DOM so it is unit-testable.
+ */
+export function shrinkToWholeWords(
+  startSize: number,
+  overflows: (size: number) => boolean,
+  options: { minSize?: number; step?: number } = {},
+): number {
+  const { minSize = DEFAULT_MIN_SIZE, step = DEFAULT_STEP } = options;
+  const floor = Math.min(minSize, startSize);
+  for (let size = startSize; size >= floor; size -= step) {
+    if (!overflows(size)) return size;
   }
   return floor;
 }
