@@ -107,7 +107,8 @@ beforeEach(() => {
   firebaseIdentity.applyResolvedEventId('__unset__');
   cardCache.setCardCacheEventId('__unset__');
   mocks.getDocFromServer.mockImplementation(({ path }) => {
-    const hostname = path.slice('hostnames/'.length);
+    expect(path).toMatch(/^publicHostnames\//);
+    const hostname = path.slice('publicHostnames/'.length);
     return Promise.resolve(snap(hostnameDocs[hostname] ?? null));
   });
 });

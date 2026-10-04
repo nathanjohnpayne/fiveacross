@@ -455,7 +455,7 @@ describe('Bodega canonical-host migration execution', () => {
       canonicalHost: CANONICAL_HOST,
       isCanonical: false,
     });
-    expect(transaction.set).not.toHaveBeenCalled();
+    expect(transaction.set).toHaveBeenCalledWith(fixture.db.doc(`publicHostnames/${LEGACY_HOST}`), expect.objectContaining({ canonicalHost: CANONICAL_HOST, isCanonical: false }));
     expect(transaction.delete).not.toHaveBeenCalled();
   });
 

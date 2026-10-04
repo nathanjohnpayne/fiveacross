@@ -16,6 +16,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { initFirestore } from './seed.mjs';
+import { projectPublicHostname } from '../functions/src/publicHostnameFields.ts';
 
 export const BODEGA_EVENT_ID = 'bodega-bay-2026';
 export const BODEGA_PROJECT_ID = 'fiveacross';
@@ -31,8 +32,8 @@ export const BODEGA_PREVIEW_HOSTS = Object.freeze([
 ]);
 
 // Public display copy only. It mirrors the #647 wireframe and has no
-// membership, roster, card, or Prompt-pool data; hostname documents are
-// intentionally world-readable before sign-in (specs/hostnames-lookup.md).
+// membership, roster, card, or Prompt-pool data; only strict publicHostnames
+// projections are readable before sign-in (specs/hostnames-lookup.md).
 export const BODEGA_EVENT_PREVIEW = Object.freeze({
   eventName: 'Weekend in Bodega Bay',
   dateRange: 'Aug 7–9',
@@ -113,7 +114,7 @@ export function formatBodegaPreviewPlan(plan) {
   const unchangedLine = plan.alreadyCorrect.length
     ? `already correct: ${plan.alreadyCorrect.join(', ')}`
     : null;
-  return [changeLine, unchangedLine].filter(Boolean).join('\n');
+  return [changeLine, unchangedLine, `will replace strict public projections: ${BODEGA_PREVIEW_HOSTS.join(', ')}`].filter(Boolean).join('\n');
 }
 
 function rowsFromSnapshots(snapshots) {
@@ -128,14 +129,16 @@ async function readPlan(db, refs) {
   return planBodegaPreviewProvisioning(rowsFromSnapshots(snapshots));
 }
 
-async function applyPlan(db, refs) {
+export async function applyBodegaPreviewProvisioning(db) {
+  const refs = BODEGA_PREVIEW_HOSTS.map(host => db.doc(`hostnames/${host}`));
   return db.runTransaction(async (transaction) => {
     // All reads precede all writes. Firestore retries the transaction if any
     // validated hostname changes while this command is deciding to update it.
     const snapshots = await Promise.all(refs.map((ref) => transaction.get(ref)));
     const plan = planBodegaPreviewProvisioning(rowsFromSnapshots(snapshots));
-    for (const host of plan.updates) {
-      transaction.update(db.doc(`hostnames/${host}`), { preview: BODEGA_EVENT_PREVIEW });
+    for (const [index, host] of BODEGA_PREVIEW_HOSTS.entries()) {
+      if (plan.updates.includes(host)) transaction.update(db.doc(`hostnames/${host}`), { preview: BODEGA_EVENT_PREVIEW });
+      transaction.set(db.doc(`publicHostnames/${host}`), projectPublicHostname({ ...snapshots[index].data(), preview: BODEGA_EVENT_PREVIEW }));
     }
     return plan;
   });
@@ -167,13 +170,13 @@ async function main() {
   }
 
   const refs = BODEGA_PREVIEW_HOSTS.map((host) => db.doc(`hostnames/${host}`));
-  const plan = apply ? await applyPlan(db, refs) : await readPlan(db, refs);
+  const plan = apply ? await applyBodegaPreviewProvisioning(db) : await readPlan(db, refs);
   console.log(`bodega-preview: project=${projectId} mode=${apply ? 'APPLY' : 'DRY-RUN'}`);
   console.log(formatBodegaPreviewPlan(plan));
-  if (!apply && plan.updates.length) {
+  if (!apply) {
     console.log('Dry run only: no data was changed. Re-run with --apply after reviewing this plan.');
   }
-  if (apply && plan.updates.length) {
+  if (apply) {
     console.log('Applied transactionally. The sign-in postcard is now present on every configured serving host.');
   }
 }
