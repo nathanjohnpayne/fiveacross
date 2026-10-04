@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Timestamp } from 'firebase/firestore';
-import { HostnameLifecycleRefusal, applyHostnameMutation } from './hostname-lifecycle.mjs';
+import { HostnameLifecycleRefusal, applyHostnameMutation, archiveSnapshotConfig } from './hostname-lifecycle.mjs';
 import { ROOT_HOSTS, cloneDocumentValue, deriveCanonicalProjection, projectionDigest } from './hostname-projection.mjs';
 // The application's own record builder, so the parity case below proves the
 // helper accepts exactly what the operator command will hand it (#1256).
-import { buildEventArchive } from '../../src/data/eventArchive.ts';
+import { MAX_ARCHIVED_STANDING_ROWS, buildEventArchive, writableArchiveRecord } from '../../src/data/eventArchive.ts';
+import { ARCHIVE_NUMBER_BOUND, MAX_DAYS } from '../../src/data/eventLimits.ts';
 
 const HOST = 'bodega-bay.fiveacross.app';
 const MIRROR = 'vacaybingo.vercel.app';
@@ -1198,10 +1199,22 @@ describe('archive', () => {
     archive: archiveRecord(),
     ...overrides,
   });
-  const composedFlip = (generation = GENERATION) => ({ archiveToken: generation, flip: flipFor(generation) });
+  const composedFlip = (generation = GENERATION) => ({
+    archiveToken: generation,
+    flip: flipFor(generation),
+    snapshotConfig: archiveSnapshotConfig(quiescedEvent()),
+  });
+  // The configuration the record is defined by (`archiveSnapshotConfig`).
+  const SNAPSHOT_FIELDS = {
+    name: 'Bodega Bay',
+    claimMode: 'honor',
+    days: [{ index: 0, theme: 'neon-playground', unlockAt: 1_000, tonight: [] }],
+    standingsFreezeAt: 5_000,
+  };
   const quiescedEvent = (overrides = {}) => ({
     status: 'active',
     admins: ['nathan'],
+    ...SNAPSHOT_FIELDS,
     archiving: true,
     archiveToken: GENERATION,
     ...overrides,
@@ -1277,6 +1290,7 @@ describe('archive', () => {
     // and every other field left as it was.
     expect(docs.get('events/bodega-bay-2026')).toEqual({
       admins: ['nathan'],
+      ...SNAPSHOT_FIELDS,
       archiveToken: GENERATION,
       status: 'archived',
       archivedAt: ARCHIVED_AT,
@@ -1692,6 +1706,67 @@ describe('archive', () => {
       untouched(docs, quiescedEvent());
     });
 
+    it.each([
+      ['no configuration at all', undefined],
+      ['a configuration that is not a map', 'bodega'],
+      ['a configuration missing a key', (() => { const { frozenAt: _f, ...rest } = archiveSnapshotConfig(quiescedEvent()); return rest; })()],
+      ['a configuration with a key the snapshot does not define', { ...archiveSnapshotConfig(quiescedEvent()), bannedUids: [] }],
+      ['a schedule that is not a list', { ...archiveSnapshotConfig(quiescedEvent()), days: {} }],
+    ])('refuses %s as invalid input before the first read', async (_why, snapshotConfig) => {
+      const input = archiveInput({ snapshotConfig });
+      if (snapshotConfig === undefined) delete input.snapshotConfig;
+      const { docs, reads, dependencies } = store(flagship());
+      expect(await refusal(input, dependencies)).toBe('invalid-input');
+      expect(reads).toEqual([]);
+      untouched(docs, quiescedEvent());
+    });
+
+    // The quiesce shuts gameplay, not administration: inside ONE generation an
+    // Admin can still edit what the record was built against, and the token
+    // check cannot see it. The console's `archiveEvent` aborts on the same
+    // change (`config-changed`); this transaction does too, with nothing moved.
+    it.each([
+      ['renamed', { name: 'Bodega Bay Redux' }],
+      ['switched claim mode', { claimMode: 'admin_confirmed' }],
+      ['re-themed a Day', { days: [{ ...SNAPSHOT_FIELDS.days[0], theme: 'disco' }] }],
+      ['added a Day', { days: [...SNAPSHOT_FIELDS.days, { index: 1, theme: 'disco', unlockAt: 2_000, tonight: [] }] }],
+      ['moved the Standings Freeze', { standingsFreezeAt: 6_000 }],
+      ['stamped the freeze', { frozenAt: 5_000 }],
+    ])('refuses an archive whose Event was %s after the record was prepared', async (_why, edit) => {
+      const seed = flagship();
+      seed['events/bodega-bay-2026'] = quiescedEvent(edit);
+      const { docs, dependencies } = store(seed);
+      expect(await refusal(archiveInput(), dependencies)).toBe('archive-config-changed');
+      untouched(docs, seed['events/bodega-bay-2026']);
+      for (const host of [HOST, SECOND, ALIAS]) expect(docs.get(`hostnames/${host}`).status).toBe('active');
+    });
+
+    // …and the two edits the console deliberately leaves outside its own
+    // fingerprint stay outside this one: a ban is moderation, open through the
+    // quiesce on purpose, and a finale marker only ever makes the archive more
+    // permitted.
+    it.each([
+      ['banned a Player', { bannedUids: ['p9'] }],
+      ['completed its finale', { finaleCompletedAt: 4_000 }],
+    ])('accepts an archive whose Event was %s after the record was prepared', async (_why, edit) => {
+      const seed = flagship();
+      seed['events/bodega-bay-2026'] = quiescedEvent(edit);
+      const { docs, dependencies } = store(seed);
+      await applyHostnameMutation(archiveInput(), dependencies);
+      expect(docs.get('events/bodega-bay-2026')).toMatchObject({ status: 'archived', ...edit });
+    });
+
+    it('derives the configuration of an Event that stores none of it as nulls and an empty schedule', () => {
+      expect(archiveSnapshotConfig({ status: 'active' })).toEqual({
+        name: null,
+        claimMode: null,
+        days: [],
+        standingsFreezeAt: null,
+        frozenAt: null,
+      });
+      expect(archiveSnapshotConfig({ days: 'not-a-list' }).days).toEqual([]);
+    });
+
     // Every question the rules' flip arm asks, because an Admin write is not
     // asked them by the boundary: a record the console could never have
     // written is still irreversible once this transaction commits it.
@@ -1777,6 +1852,53 @@ describe('archive', () => {
       const { docs, dependencies } = store(flagship());
       await applyHostnameMutation(archiveInput({ flip: flipFor(GENERATION, { archive }) }), dependencies);
       expect(docs.get('events/bodega-bay-2026')).toMatchObject({ status: 'archived', archive });
+    });
+
+    // THE SECOND COPY, PINNED TO THE FIRST. This helper is a plain Node module
+    // and cannot import the console's TypeScript validator, so the record's
+    // bounds and per-entry questions are restated here, the way
+    // `firestore.rules` restates them. What keeps the copies from drifting is
+    // this table: every boundary is derived from the console's own constants,
+    // and each case asserts the console's `writableArchiveRecord` AND this
+    // intent agree on it. A change to `MAX_DAYS`, the standings bound, the
+    // number bound or an entry predicate on either side fails here, and the
+    // builder parity case below fails on a new `EventArchive` key.
+    const honours = (count) => Array.from({ length: count }, (_, dayIndex) => HONOR(dayIndex));
+    const prefix = (count) => Array.from({ length: count }, () => ROW);
+    it.each([
+      ['honours at the Day bound', archiveRecord({ dailyHonors: honours(MAX_DAYS) }), true],
+      ['honours past the Day bound', archiveRecord({ dailyHonors: honours(MAX_DAYS + 1) }), false],
+      [
+        'the full standings prefix of a larger roster',
+        archiveRecord({ standings: prefix(MAX_ARCHIVED_STANDING_ROWS), playerCount: MAX_ARCHIVED_STANDING_ROWS + 1 }),
+        true,
+      ],
+      [
+        'a standings prefix one row short of the bound',
+        archiveRecord({ standings: prefix(MAX_ARCHIVED_STANDING_ROWS - 1), playerCount: MAX_ARCHIVED_STANDING_ROWS + 1 }),
+        false,
+      ],
+      ['a freeze just inside the number bound', archiveRecord({ freezeAt: ARCHIVE_NUMBER_BOUND - 1 }), true],
+      ['a freeze at the number bound', archiveRecord({ freezeAt: ARCHIVE_NUMBER_BOUND }), false],
+      ['a negative freeze just inside the bound', archiveRecord({ freezeAt: -ARCHIVE_NUMBER_BOUND + 1 }), true],
+      ['an honour instant at the number bound', archiveRecord({ dailyHonors: [{ ...HONOR(0), firstBingoAt: ARCHIVE_NUMBER_BOUND }] }), false],
+      ['an empty honour', archiveRecord({ dailyHonors: [{}] }), false],
+      ['an honour with an empty uid', archiveRecord({ dailyHonors: [{ ...HONOR(0), uid: '' }] }), false],
+      ['honours out of Day order', archiveRecord({ dailyHonors: [HONOR(1), HONOR(0)] }), false],
+      ['a held row ranked past the roster', archiveRecord({ firstBingoRow: { ...ROW, rank: 2 } }), false],
+      ['a held row ranked zero', archiveRecord({ firstBingoRow: { ...ROW, rank: 0 } }), false],
+      ['a held row with a non-boolean blackout', archiveRecord({ firstBingoRow: { ...ROW, blackout: 0, rank: 1 } }), false],
+    ])('agrees with the console writer on %s', async (_why, archive, writable) => {
+      expect(writableArchiveRecord(archive)).toBe(writable);
+      const { docs, dependencies } = store(flagship());
+      const input = archiveInput({ flip: flipFor(GENERATION, { archive }) });
+      if (writable) {
+        await applyHostnameMutation(input, dependencies);
+        expect(docs.get('events/bodega-bay-2026').archive).toEqual(archive);
+      } else {
+        expect(await refusal(input, dependencies)).toBe('archive-flip-invalid');
+        untouched(docs, quiescedEvent());
+      }
     });
 
     // The record the application's own builder produces is one this helper

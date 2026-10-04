@@ -42,7 +42,11 @@ import {
 // The operator module is plain `.mjs` with no build step and no type
 // declarations. `tests/` sits outside every tsconfig program (`tsconfig.json`
 // includes `src` only), so Vitest resolves this import and `tsc` never sees it.
-import { applyHostnameMutation, createTransactionRunner } from '../../scripts/event-router-registry/hostname-lifecycle.mjs';
+import {
+  applyHostnameMutation,
+  archiveSnapshotConfig,
+  createTransactionRunner,
+} from '../../scripts/event-router-registry/hostname-lifecycle.mjs';
 
 const RULES_PATH = fileURLToPath(new URL('../../firestore.rules', import.meta.url));
 const RULES = readFileSync(RULES_PATH, 'utf8');
@@ -95,14 +99,28 @@ const ARCHIVE_RECORD = {
   archivedAt: ARCHIVED_AT,
 };
 const flipFor = (archivedUnder: number): Doc => ({ archivedAt: ARCHIVED_AT, archivedUnder, archive: ARCHIVE_RECORD });
-const COMPOSED_FLIP: Doc = { archiveToken: GENERATION, flip: flipFor(GENERATION) };
+// The configuration the record is defined by, stored on the Event so the
+// transaction's structural comparison runs over values that went through the
+// real SDK rather than over the fixture's own objects.
+const SNAPSHOT_FIELDS: Doc = {
+  name: 'Bodega Bay',
+  claimMode: 'honor',
+  days: [{ index: 0, theme: 'neon-playground', unlockAt: 1_000, tonight: [] }],
+  standingsFreezeAt: 5_000,
+};
 const quiescedEvent = (overrides: Doc = {}): Doc => ({
   status: 'active',
   admins: ['nathan'],
+  ...SNAPSHOT_FIELDS,
   archiving: true,
   archiveToken: GENERATION,
   ...overrides,
 });
+const COMPOSED_FLIP: Doc = {
+  archiveToken: GENERATION,
+  flip: flipFor(GENERATION),
+  snapshotConfig: archiveSnapshotConfig(quiescedEvent()),
+};
 
 let testEnv: RulesTestEnvironment;
 
@@ -394,6 +412,7 @@ describe('the trusted hostname mutation helper against a real transaction', () =
       // The application flip, whole, in the same commit (#1256).
       expect(await read(db, `events/${EVENT_ID}`)).toEqual({
         admins: ['nathan'],
+        ...SNAPSHOT_FIELDS,
         archiveToken: GENERATION,
         status: 'archived',
         archivedAt: ARCHIVED_AT,
@@ -404,10 +423,11 @@ describe('the trusted hostname mutation helper against a real transaction', () =
     });
   });
 
-  // The quiesce and its generation are re-read INSIDE the real transaction
-  // that moves the mappings, so a refusal there is a rolled-back transaction
-  // rather than a pre-check a concurrent reopen could slip past (#1256).
-  it('refuses an archive outside the quiesce or under a superseded generation, and moves nothing', async () => {
+  // The quiesce, its generation and the configuration the record was built
+  // against are re-read INSIDE the real transaction that moves the mappings,
+  // so a refusal there is a rolled-back transaction rather than a pre-check a
+  // concurrent reopen or edit could slip past (#1256).
+  it('refuses an archive outside the quiesce, under a superseded generation or over an edited configuration, and moves nothing', async () => {
     await trusted(async (db) => {
       await seedConverged(db, HOST, hostnameDocument());
       const archive = (extra: Doc = {}) =>
@@ -420,6 +440,10 @@ describe('the trusted hostname mutation helper against a real transaction', () =
         // declares 1, and naming 2 beside it is refused as well.
         [quiescedEvent({ archiveToken: 2 }), archive(), 'archive-quiesce-changed'],
         [quiescedEvent({ archiveToken: 2 }), archive({ archiveToken: 2 }), 'archive-flip-generation-mismatch'],
+        // Edited inside the same generation, after the record was prepared:
+        // the quiesce and the token are unchanged, the configuration is not.
+        [quiescedEvent({ name: 'Renamed' }), archive(), 'archive-config-changed'],
+        [quiescedEvent({ days: [{ index: 0, theme: 'disco', unlockAt: 1_000, tonight: [] }] }), archive(), 'archive-config-changed'],
       ] as Array<[Doc, Doc, string]>) {
         await setDoc(doc(db, `events/${EVENT_ID}`), event);
         expect(await refusalCode(() => applyHostnameMutation(input, dependencies(db)))).toBe(expected);
