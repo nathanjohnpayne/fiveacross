@@ -84,14 +84,20 @@ spec_test_map:
   # #1079's fail-closed Mark/Echo preview, and #804 deploy 1's switch freeze.
   # The full deployed Firestore admission inventory remains #804 deploy 2's and
   # Storage remains #806's, so map these prerequisite layers explicitly.
-  # path-addressing-and-root is design-first; the shipped seams are the
-  # router's path-capability projection (#972), tested with the router, and
-  # the reserved-path module with parseAddress (#1387).
+  # path-addressing-and-root is design-first; three seams have shipped: the
+  # router's path-capability projection (#972), tested with the router; the
+  # reserved-path module with parseAddress (#1387); and the D8 archive
+  # interlock, the registry's archive intent composed with the application
+  # flip (#1256), tested by the lifecycle unit suite and its emulator-backed
+  # transaction suite. Neither the parser nor the archive intent has a
+  # production caller yet.
   path-addressing-and-root:
     - worker/src/router.test.ts
     - worker/src/registry/routerRegistry.integration.test.ts
     - src/reservedPaths.test.ts
     - src/slug.test.ts
+    - scripts/event-router-registry/hostname-lifecycle.test.mjs
+    - tests/rules/event-router-hostname-lifecycle.test.ts
   event-membership:
     - src/data/eventMembership.test.ts
     - tests/functions/approve-prompts.test.ts
