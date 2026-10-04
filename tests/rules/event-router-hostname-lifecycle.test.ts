@@ -1,3 +1,4 @@
+import { projectPublicHostname } from '../../functions/src/publicHostnameFields';
 /**
  * #971's lifecycle/helper-specific emulator coverage, layered on #970's
  * deny-all `routerReplicas/{host}` and `routerRehearsals/{host}` baseline
@@ -197,7 +198,7 @@ async function refusalCode(work: () => Promise<unknown>): Promise<string | null>
 }
 
 describe('the trusted hostname mutation helper against a real transaction', () => {
-  it('writes the canonical document and its replica ledger in one committed transaction', async () => {
+  it('writes canonical source, strict public projection and replica ledger in one committed transaction', async () => {
     await trusted(async (db) => {
       await applyHostnameMutation(
         mutation({
@@ -207,7 +208,8 @@ describe('the trusted hostname mutation helper against a real transaction', () =
         }),
         dependencies(db),
       );
-      expect(await read(db, `hostnames/${HOST}`)).toMatchObject({ status: 'disabled', eventId: EVENT_ID });
+      expect(await read(db, `hostnames/${HOST}`)).toMatchObject({ status: 'disabled', eventId: EVENT_ID, pathNamespace: null });
+      expect(await read(db, `publicHostnames/${HOST}`)).toEqual({ eventId: EVENT_ID, canonicalHost: HOST, edition: 'fiveacross', status: 'disabled', slug: 'bodega-bay', isCanonical: true });
       expect(await read(db, `routerReplicas/${HOST}`)).toEqual({
         schemaVersion: 1,
         revision: '1',
@@ -231,6 +233,7 @@ describe('the trusted hostname mutation helper against a real transaction', () =
         dependencies(db),
       );
       expect(await read(db, `hostnames/${HOST}`)).toBeNull();
+      expect(await read(db, `publicHostnames/${HOST}`)).toBeNull();
       expect(await read(db, `routerReplicas/${HOST}`)).toBeNull();
     });
   });
@@ -266,6 +269,7 @@ describe('the trusted hostname mutation helper against a real transaction', () =
         ),
       ).toBe('rehearsal-reservation');
       expect(await read(db, `hostnames/${HOST}`)).toBeNull();
+      expect(await read(db, `publicHostnames/${HOST}`)).toBeNull();
       expect(await read(db, `routerReplicas/${HOST}`)).toBeNull();
     });
   });
@@ -692,18 +696,22 @@ describe('what a Firebase client may see once the helper has written real routin
   beforeEach(async () => {
     await trusted(async (db) => {
       await seedConverged(db, HOST, hostnameDocument());
+      await setDoc(doc(db, `publicHostnames/${HOST}`), projectPublicHostname(hostnameDocument()));
       await setDoc(doc(db, `routerRehearsals/${SYNTHETIC}`), { class: 'route', reservedAt: 1 });
       await setDoc(doc(db, `events/${EVENT_ID}`), { admins: ['admin'] });
     });
   });
 
-  it.each(['anonymous', 'player', 'event admin'])('%s still gets the hostname document and nothing more', async (actor) => {
+  it.each(['anonymous', 'player', 'event admin'])('%s gets the public projection without exposing canonical registry data to anonymous callers', async (actor) => {
     const db = (
       actor === 'anonymous'
         ? testEnv.unauthenticatedContext().firestore()
         : testEnv.authenticatedContext(actor === 'event admin' ? 'admin' : 'player').firestore()
     ) as unknown as Firestore;
-    await assertSucceeds(getDoc(doc(db, `hostnames/${HOST}`)));
+    await assertSucceeds(getDoc(doc(db, `publicHostnames/${HOST}`)));
+    if (actor === 'anonymous') await assertFails(getDoc(doc(db, `hostnames/${HOST}`)));
+    else await assertSucceeds(getDoc(doc(db, `hostnames/${HOST}`)));
+    await assertFails(getDocs(collection(db, 'publicHostnames')));
     await assertFails(getDocs(collection(db, 'hostnames')));
     await assertFails(getDoc(doc(db, `routerReplicas/${HOST}`)));
     await assertFails(getDocs(collection(db, 'routerReplicas')));

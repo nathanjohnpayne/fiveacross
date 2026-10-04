@@ -969,9 +969,10 @@ export const backfillHideOnThresholdDecrease = onDocumentWritten(
  * close.
  *
  * Retrying is safe because both handlers are idempotent by construction: the
- * stamp skips documents already at `true`, and the cheap predicates short-circuit
- * before any read, so a redelivery on a write that never qualified cannot fail
- * and cannot loop. The one cost is that a PERMANENT failure (a broken IAM
+ * stamp reads the canonical/public pair and skips writes only when it already
+ * matches. Cheap source predicates short-circuit before any read on a write
+ * that never qualified. Unchanged paired state produces no further writes,
+ * so retries converge without a trigger loop. The one cost is that a PERMANENT failure (a broken IAM
  * binding) retries for up to seven days — which for a fail-closed security flag
  * is the behaviour you want, and is loud in the logs rather than silent.
  */
@@ -997,8 +998,10 @@ export const deriveAdultContentOnEvent = onDocumentWritten(
  *
  * Watches `hostnames` itself, which is why it is the one trigger here whose own
  * writes land on the collection it observes. That is safe and needs no separate
- * loop guard: the handler returns before any read when the document is already
- * `adultContent: true`, which is exactly what its own stamp produces.
+ * loop guard: an already-true snapshot checks the live canonical/public pair,
+ * repairs a missing or stale projection, and performs no write for an exact
+ * pair. A historical snapshot cannot re-raise a live canonical posture that an
+ * operator lowered, or stamp a repointed Event.
  */
 export const reconcileHostnameOnWrite = onDocumentWritten(
   { document: 'hostnames/{host}', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT, retry: true },

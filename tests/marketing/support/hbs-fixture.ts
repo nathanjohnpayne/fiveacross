@@ -19,11 +19,11 @@
 //
 // The same three safety rules as fixture.ts hold: invented display names, a
 // general-audience pool (every prompt is `spicy: false`), and no photo proofs.
-import { doc, setDoc } from 'firebase/firestore';
+import { doc, setDoc, writeBatch } from 'firebase/firestore';
+import { projectPublicHostname } from '../../../functions/src/publicHostnameFields';
 import { initializeTestEnvironment, type RulesTestEnvironment } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-// @ts-expect-error — plain-JS seed script, no type declarations.
 import { seedItemDocId } from '../../../scripts/seed.mjs';
 import { HERO_EVENT_ID, HERO_PROJECT_ID } from './fixture';
 
@@ -261,15 +261,19 @@ export async function seedHbsEvent(): Promise<RulesTestEnvironment> {
         doc(db, 'events', HERO_EVENT_ID, 'days', String(HBS_TODAY_INDEX), 'meta', String(HBS_TODAY_INDEX)),
         { firstBingo: { uid: 'hero-p1', displayName: 'Rae M.', at: unlockAt(HBS_TODAY_INDEX) + 26 * HOUR } },
       );
-      // The world-readable routing document: without it the single-Event build
+      // The public routing projection, paired with its canonical source: without it the single-Event build
       // fails closed to the 18+ gate (see docs/app/marketing-screenshots.md).
-      await setDoc(doc(db, 'hostnames', '127.0.0.1'), {
+      const hostname = {
         eventId: HERO_EVENT_ID,
         canonicalHost: '127.0.0.1',
         edition: 'fiveacross',
         status: 'active',
         adultContent: false,
-      });
+      };
+      const hostnamePair = writeBatch(db);
+      hostnamePair.set(doc(db, 'hostnames', '127.0.0.1'), hostname);
+      hostnamePair.set(doc(db, 'publicHostnames', '127.0.0.1'), projectPublicHostname(hostname));
+      await hostnamePair.commit();
     });
   } catch (error) {
     await testEnv.cleanup().catch(() => {});

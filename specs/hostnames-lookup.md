@@ -3,11 +3,11 @@ spec_id: hostnames-lookup
 status: accepted
 ---
 
-# `hostnames/{host}`—the pre-auth Event lookup and its rules (`hostnames-lookup`)
+# `publicHostnames/{host}`—the pre-auth Event lookup and its rules (`hostnames-lookup`)
 
-Implements [ADR 0009](../docs/adr/0009-event-resolved-from-hostname.md). One world-readable document per public address, resolvable by `get` and never by `list`, so an application can decide which Event it is serving before it has a signed-in user. Guarded by `tests/rules/hostnames-lookup.test.ts`.
+Implements [ADR 0009](../docs/adr/0009-event-resolved-from-hostname.md). One field-allowlisted public document per address, resolvable by `get` and never by `list`, so an application can decide which Event it is serving before it has a signed-in user. Guarded by `tests/rules/hostnames-lookup.test.ts`.
 
-This ticket owns the collection and its rules only. Consuming it at startup—parsing the hostname, caching the result, canonicalising an alias—is separate work.
+The original lookup ticket owned the collection and its Rules. The #1419 amendment also moves existing startup and live-posture readers to the strict public copy and pairs the canonical writers; parsing, cache and alias-resolution behavior stays with its existing owners.
 
 ## Glossary
 
@@ -15,7 +15,7 @@ This ticket owns the collection and its rules only. Consuming it at startup—pa
 
 ## Data model
 
-`hostnames/{host}` where `{host}` is the full lowercase hostname.
+`publicHostnames/{host}` where `{host}` is the full lowercase hostname. The canonical source remains `hostnames/{host}`. **Any authenticated Firebase user may point-read its full document**; this is an authentication boundary, not an Admin-only or Event-membership boundary. Anonymous callers cannot read even a missing canonical path. Canonical hostname records must never contain personal or operator-secret data; routing/registry metadata is omitted from the anonymous projection, while server-only control-plane ledgers have their own stricter Rules.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -23,6 +23,7 @@ This ticket owns the collection and its rules only. Consuming it at startup—pa
 | `canonicalHost` | string | The address this Event is actually served from; equals `{host}` on the canonical document |
 | `edition` | string | Which Edition dresses this address—the only source available early enough to style the sign-in screen |
 | `status` | string | `active` \| `disabled` \| `archived` |
+| `adultContent` | bool | Server-derived pre-auth 18+ posture |
 | `slug` | string | The first label, denormalised for the edge router |
 | `isCanonical` | bool | Whether this document is the canonical address or an alias |
 | `preview` | map (optional) | The sign-in gate's Event-preview slice (#647): `{ eventName, dateRange?, hostedBy?, days?: [{date, title, emoji?}] }`—display copy only, read fail-soft (`coerceEventPreview`, src/eventPreview.ts); absent means the gate draws no card |
@@ -46,23 +47,31 @@ The gate picks ONE Day out of `days`—the first whose `date` is on or after the
 
 ```
 match /hostnames/{host} {
-  allow get: if true;
-  allow list: if false;
-  allow create, update, delete: if false;
+  allow get: if signedIn();
+  allow list, create, update, delete: if false;
+}
+match /publicHostnames/{host} {
+  allow get: if !exists(/databases/$(database)/documents/publicHostnames/$(host))
+    || publicHostnameData(resource.data);
+  allow list, create, update, delete: if false;
 }
 ```
 
 **The get/list split is the safety property, not a stylistic choice.** `get` resolves an address the caller already knows; `list` would enumerate every Event on the platform, converting a set of unguessable addresses into a directory. `allow read` grants both and must not be used here.
 
-**World-readable is deliberate and bounded.** A Slug is an address, not a secret: knowing one grants nothing, because every read of Event data still passes the membership gate. What is exposed is that an Event exists at a hostname the reader already typed, plus its Edition—which the branding on the page announces regardless—plus, when the document carries a `preview` slice (#647), the display copy the sign-in page itself shows to anyone who loads that hostname: the Event's name, its date range, the host's display name, and the Day schedule's titles. That is a real widening of the disclosure relative to the original contract, accepted deliberately with the postcard design (wireframes § "Join—the postcard, not the casino"): every field in the slice is copy the signed-out gate renders on screen, so the document discloses nothing the page does not. Nothing rules-gated may be moved into `preview`; membership, rosters, pools and everything else on the Event document stay behind `signedIn()`.
+**Public field admission (#1419).** The owner [confirmed](https://github.com/nathanjohnpayne/fiveacross/issues/1419#issuecomment-5975989928) seven routing fields (`eventId`, `canonicalHost`, `edition`, `status`, `adultContent`, `slug`, `isCanonical`) and four fields inside the existing optional `preview` map (`eventName`, `dateRange`, `days`, `hostedBy`). No flattening or schedule format change is introduced: `preview.days` keeps its existing value; the allowlist checks approved field names, without a recursive Day-key policy. `functions/src/publicHostnameFields.ts` is the pure shared allowlist for provisioning and read tests; the Rules runtime cannot import JavaScript, so a parity test pins its literals to that constant.
+
+Firestore reads whole documents: an unexpected root or preview key denies the entire anonymous point read, including permitted fields; it does not redact a field or merely hide it in the UI. Canonical records are private to signed-in callers. Public projection point reads use this whole-document allowlist even when signed in; missing public documents still return `exists() == false`, and list/client-write denial is unchanged. Value coercion remains with the existing routing and preview consumers; this amendment limits field names rather than introducing a new schedule or routing-value policy.
+
+**Public preview is deliberate and bounded.** A Slug is an address, not a secret: knowing one grants nothing, because every read of Event data still passes the membership gate. What is exposed is that an Event exists at a hostname the reader already typed, plus its Edition—which the branding on the page announces regardless—plus, when the document carries a `preview` slice (#647), the display copy the sign-in page itself shows to anyone who loads that hostname: the Event's name, its date range, the host's display name, and the Day schedule's titles. That is a real widening of the disclosure relative to the original contract, accepted deliberately with the postcard design (wireframes § "Join—the postcard, not the casino"): every field in the slice is copy the signed-out gate renders on screen, so the document discloses nothing the page does not. Nothing rules-gated may be moved into `preview`; membership, rosters, pools and everything else on the Event document stay behind `signedIn()`.
 
 **No client writes at all**, including admins. The mapping is authoritative routing state across a global namespace, where no per-Event admin has authority; a writable mapping would let a client point an existing hostname at an Event it should not see, or squat an address before its Event exists. Only the Admin SDK populates it.
 
 ## Who writes a hostname document
 
-The rules contract above is unchanged by #971 and remains the whole client story: `get` only, never `list`, no client writes at all. What changed is on the trusted side, and it matters to anyone reading a hostname document, because a field's value now tells you which writer produced it.
+The lifecycle introduced by #971 retains its canonical/ledger authority, with #1419 adding an atomic public copy. The client story is: `get` only, never `list`, no client writes at all. What changed is on the trusted side, and it matters to anyone reading a hostname document, because a field's value now tells you which writer produced it.
 
-Every mutation of a **projected** field — `eventId`, `status`, `slug`, `edition`, and the `root` and `pathNamespace` fields `specs/path-addressing-and-root.md` defines — plus every create and delete, goes through the one transaction helper in `scripts/event-router-registry/hostname-lifecycle.mjs`, which writes this document and the private `routerReplicas/{host}` ledger in the same Firestore transaction ([`event-router-registry`](event-router-registry.md) § Provisioning, mutation, and deletion). A direct or partial Admin SDK write to one of those fields is a contract violation the reconciler reports as drift, and every later mutation of that host refuses until the explicit Admin ledger advance has repaired it.
+Every mutation of a **projected** field — `eventId`, `status`, `slug`, `edition`, and the `root` and `pathNamespace` fields `specs/path-addressing-and-root.md` defines — plus every create and delete, goes through the one transaction helper in `scripts/event-router-registry/hostname-lifecycle.mjs`, which writes the canonical document, its strict `publicHostnames/{host}` copy and the private `routerReplicas/{host}` ledger in the same Firestore transaction ([`event-router-registry`](event-router-registry.md) § Provisioning, mutation, and deletion). A direct or partial Admin SDK write to one of those fields is a contract violation the reconciler reports as drift, and every later mutation of that host refuses until the explicit Admin ledger advance has repaired it.
 
 The **non-projected** fields are deliberately outside that helper, because the edge does not copy them and a change to one must not churn a revision. `adultContent` (#608) keeps its own derivation and trigger path in `functions/src/adultContent.ts`. `preview` (#647) keeps `scripts/provision-bodega-preview.mjs`. `canonicalHost` and `isCanonical` keep `scripts/migrate-bodega-canonical-host.mjs`. Each of those three writers touches only non-projected fields, which is exactly why they remain separate reviewed paths rather than becoming lifecycle intents, and the three owner writers remain the only things that SET `preview`, `canonicalHost` and `isCanonical`. A repoint to another Event and `convert-to-route` clear them, because the document then names a different Event.
 
@@ -74,7 +83,7 @@ Four lifecycle writes replace a hostname document rather than patching it: that 
 
 ## Bodega postcard provisioning
 
-The Bodega sign-in postcard is public display copy on the same pre-auth lookup; it must exist on **every serving Bodega hostname**, never only on the canonical host. `scripts/provision-bodega-preview.mjs` is the controlled Admin-SDK maintenance path. It validates the fixed live set (`bodega-bay.fiveacross.app`, `bodega-bay.vacaybingo.com`, and `fiveacross.app`) before it writes anything, refuses missing, inactive, or repointed documents, and applies only `preview` in one transaction. It never creates a routing document or changes `eventId`, `status`, or canonical metadata.
+The Bodega sign-in postcard is public display copy on the same pre-auth lookup; it must exist on **every serving Bodega hostname**, never only on the canonical host. `scripts/provision-bodega-preview.mjs` is the controlled Admin-SDK maintenance path. It validates the fixed live set (`bodega-bay.fiveacross.app`, `bodega-bay.vacaybingo.com`, and `fiveacross.app`) before it writes anything, refuses missing, inactive or repointed documents, and applies `preview` plus a full allowlisted public projection in one transaction. It never creates a routing document or changes `eventId`, `status`, or canonical metadata.
 
 Run its dry run and then its explicit apply **before** deploying the postcard UI:
 
@@ -90,7 +99,7 @@ The command refuses any project other than `fiveacross`; no default Firebase tar
 
 The reviewed #960 migration retires the domain migration's temporary dual-canonical state when its explicit apply step and readback succeed. The required steady state has `bodega-bay.fiveacross.app` as the one Bodega document with `isCanonical: true`; both `bodega-bay.vacaybingo.com` and `fiveacross.app` name it in `canonicalHost` and carry `isCanonical: false`. This matters beyond redirects: clients install `canonicalHost` as their analytics origin, and server-side email origin selection prefers the row marked canonical.
 
-`scripts/migrate-bodega-canonical-host.mjs` is the audited production correction. It is hard-pinned to project `fiveacross`, Event `bodega-bay-2026`, and the fixed three-host inventory. Dry-run is the default. Before an explicit `--apply`, it validates that every document exists, is active, still targets Bodega, and that the canonical/apex metadata has not drifted. It accepts only the exact historical or converged pair on the legacy document, then transactionally changes only `canonicalHost` and `isCanonical`; partial or unfamiliar state fails closed. A post-commit readback must reproduce the converged plan. Apply also requires the credential file selected by the Five Across deploy preflight: it must be the same path in `GOOGLE_APPLICATION_CREDENTIALS` and the preflight marker, and it must parse as the `fiveacross` service account `firebase-deployer@fiveacross.iam.gserviceaccount.com`. Validation happens before Firestore initialisation, and the shared initializer is told to ignore any repo-root `serviceAccountKey.json`, so neither a local key nor ambient ADC can replace the reviewed apply credential.
+`scripts/migrate-bodega-canonical-host.mjs` is the audited production correction. It is hard-pinned to project `fiveacross`, Event `bodega-bay-2026`, and the fixed three-host inventory. Dry-run is the default. Before an explicit `--apply`, it validates that every document exists, is active, still targets Bodega, and that the canonical/apex metadata has not drifted. It accepts only the exact historical or converged pair on the legacy document, then transactionally changes only `canonicalHost` and `isCanonical` on the canonical source and replaces its paired public projection; partial or unfamiliar state fails closed. A post-commit readback must reproduce the converged plan. Apply also requires the credential file selected by the Five Across deploy preflight: it must be the same path in `GOOGLE_APPLICATION_CREDENTIALS` and the preflight marker, and it must parse as the `fiveacross` service account `firebase-deployer@fiveacross.iam.gserviceaccount.com`. Validation happens before Firestore initialisation, and the shared initializer is told to ignore any repo-root `serviceAccountKey.json`, so neither a local key nor ambient ADC can replace the reviewed apply credential.
 
 ```bash
 eval "$(OP_PREFLIGHT_FIREBASE_PROJECT_ID=fiveacross scripts/op-preflight.sh --agent codex --mode deploy)"
@@ -104,12 +113,20 @@ Merge the reviewed migration code before applying it. Keep the script afterward 
 
 ## Acceptance criteria
 
-- **Given** an unauthenticated client, **when** it `get`s a hostname document, **then** the read succeeds. (Test: unauth-get.)
-- **Given** a signed-in client, **when** it `get`s a hostname document, **then** the read succeeds. (Test: auth-get.)
-- **Given** any client, authenticated or not, **when** it queries the `hostnames` collection, **then** the read is denied. (Test: list-denied.)
-- **Given** an unknown hostname, **when** a client `get`s it, **then** the read succeeds and the document does not exist—a not-found path, never an error. (Test: unknown-host.)
+- **Given** an unauthenticated client, **when** it `get`s a valid public hostname projection, **then** the read succeeds. (Test: unauth-get.)
+- **Given** a signed-in client, **when** it `get`s a valid public hostname projection, **then** the read succeeds. (Test: auth-get.)
+- **Given** any client, authenticated or not, **when** it queries either hostname collection, **then** the read is denied. (Test: list-denied.)
+- **Given** an unknown hostname, **when** a client `get`s its public projection, **then** the read succeeds and the document does not exist—a not-found path, never an error. (Test: unknown-host.)
 - **Given** any client, **when** it attempts to create, update, or delete a hostname document, **then** the write is denied—including a signed-in user and an Event admin. (Test: writes-denied, admin-write-denied.)
 
 ## Test coverage
 
 `tests/rules/hostnames-lookup.test.ts` (rules emulator, `npm run test:rules`)—its own `projectId` so `clearFirestore()` cannot race the other rules suites under Vitest's file parallelism, matching the convention in `w1-attestation.test.ts`. Seeds fixture documents through `withSecurityRulesDisabled` (the Admin-SDK stand-in), then exercises each arm above.
+
+## Deployment acceptance for the public projection
+
+The owner [selected a separate strict public projection](https://github.com/nathanjohnpayne/fiveacross/issues/1419#issuecomment-5976577326). Seven routing fields and four nested preview fields remain public; canonical registry/recovery fields including `root`, `pathNamespace` and `apexPath` stay unchanged and authenticated-only. This accepts a public-design boundary, not a claim that the historical scanner's deliberate-preview observation was a code defect.
+
+All reviewed source writers pair actual canonical mutations with a full public replacement in the same transaction: hostname lifecycle creation/update/repoint/root/route/archive/delete/repair, adult-content Event and per-host stamps, preview provisioning and canonical-host correction. The public copy never feeds source attestation, signed registry recovery, email-origin selection or authenticated wizard occupancy. Legacy Version 1 canonical routing envelopes are invalidated; only a successful public lookup can populate the Version 2 offline routing cache. Anonymous browser bootstrap and the live adult watcher read only `publicHostnames`; there is no canonical fallback, even when the public copy is missing.
+
+Source tests are not deployed-state evidence. Before separately authorized rollout, inventory all serving canonical records and every deployed writer in both projects; backfill public documents using this shared projection without stripping canonical metadata, deploy the paired writers, and verify convergence. Coordinate the browser and Rules rollout only after every serving public projection exists. A browser upgrading with only a Version 1 cache needs one online public lookup before its next offline boot; prime Version 2 online before offline use. This routing-cache transition never clears dealt Boards or queued Marks. Verify root/path/alias registry behavior, missing public paths, strict whole-document denial, no enumeration/client writes, and live adult/preview updates. Legacy backfill, production Functions/Hosting/Rules deployment and deployed readback remain separate owner actions; this PR performs none of them. Old deployed writers must not remain capable of creating stale public copies during cutover.

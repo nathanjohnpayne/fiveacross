@@ -31,3 +31,12 @@ export function validateBodegaServingInventory(
 ): Map<string, Record<string, unknown>>;
 export function planBodegaPreviewProvisioning(hostDocs: Iterable<BodegaHostnameRead>): BodegaPreviewPlan;
 export function formatBodegaPreviewPlan(plan: BodegaPreviewPlan): string;
+
+export function applyBodegaPreviewProvisioning(db: {
+  doc(path: string): unknown;
+  runTransaction<T>(work: (transaction: {
+    get(ref: unknown): Promise<{ exists: boolean; data(): Record<string, unknown> }>;
+    update(ref: unknown, data: Record<string, unknown>): unknown;
+    set(ref: unknown, data: Record<string, unknown>): unknown;
+  }) => Promise<T>): Promise<T>;
+}): Promise<BodegaPreviewPlan>;

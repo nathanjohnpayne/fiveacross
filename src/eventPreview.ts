@@ -3,8 +3,8 @@
 // `events/{eventId}` requires `signedIn()`, so the postcard on the SIGN-IN
 // screen — Event name, dates, host, today's Day line — cannot read the Event
 // doc any more than the wordmark can (the #543 constraint, restated). The only
-// pre-auth data surface is `hostnames/{host}`, which is already deliberately
-// world-readable by `get`; this module owns the OPTIONAL `preview` slice that
+// pre-auth data surface is `publicHostnames/{host}`, which is already deliberately
+// field-allowlisted public by `get`; this module owns the OPTIONAL `preview` slice that
 // document may carry, the defensive read of it, and the resolved-state
 // singleton the gate renders from.
 //
