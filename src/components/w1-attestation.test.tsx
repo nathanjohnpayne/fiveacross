@@ -419,7 +419,7 @@ describe('the 18+ gate follows the EVENT, not the Edition (#608)', () => {
   it('re-gates every un-attested Player the moment the Event turns 18+', async () => {
     // The retroactive path, and the whole reason the posture rides the pre-auth
     // routing document: an admin approves the first explicit Prompt, the
-    // derivation flips `hostnames/{host}.adultContent`, the next resolution
+    // derivation flips `publicHostnames/{host}.adultContent`, the next resolution
     // installs `true`, and the EXISTING re-prompt does the rest — no new
     // surface, no new state machine.
     mocks.readAdultAttestation.mockResolvedValue(null);

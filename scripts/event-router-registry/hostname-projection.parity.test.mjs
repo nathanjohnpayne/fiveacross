@@ -111,8 +111,8 @@ const controlReadbacks = () => ({
     { cryptoKey: NEXT_KEY, policyEtag: 'next-etag', signMembers: [NEXT_MEMBER], enabledVersions: [{ keyVersion: NEXT_VERSION, algorithm: 'RSA_SIGN_PKCS1_2048_SHA256', spkiSha256: NEXT_FINGERPRINT }], responseDigest: '9'.repeat(64) },
   ],
   serviceAccountAccess: [
-    { fullResourceName: `//iam.googleapis.com/projects/fiveacross/serviceAccounts/${QUARANTINED_EMAIL}`, serviceAccountEmail: QUARANTINED_EMAIL, oidcSubject: QUARANTINED_SUB, policyEtag: 'old-sa-etag', tokenCreatorMembers: [], responseDigest: 'a'.repeat(64) },
-    { fullResourceName: NEXT_ACCOUNT_FULL, serviceAccountEmail: REPLACEMENT_EMAIL, oidcSubject: REPLACEMENT_SUB, policyEtag: 'next-sa-etag', tokenCreatorMembers: [], responseDigest: 'b'.repeat(64) },
+    { fullResourceName: `//iam.googleapis.com/projects/fiveacross/serviceAccounts/${QUARANTINED_EMAIL}`, serviceAccountEmail: QUARANTINED_EMAIL, oidcSubject: QUARANTINED_SUB, policyEtag: 'old-sa-etag', tokenCreatorMembers: [], inheritedPoliciesComplete: true, responseDigest: 'a'.repeat(64) },
+    { fullResourceName: NEXT_ACCOUNT_FULL, serviceAccountEmail: REPLACEMENT_EMAIL, oidcSubject: REPLACEMENT_SUB, policyEtag: 'next-sa-etag', tokenCreatorMembers: [], inheritedPoliciesComplete: true, responseDigest: 'b'.repeat(64) },
   ],
   activeRegistry: { configDigest: REGISTRY_DIGEST, mappings: MAPPINGS },
   accessDecisions: [

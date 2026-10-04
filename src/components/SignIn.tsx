@@ -11,7 +11,7 @@ import EventPostcard from './EventPostcard';
 // EDITION (#543, src/editions.ts), not from constants. They cannot come from the
 // Event doc: `events/{eventId}` requires `signedIn()`, so the only Edition signal
 // that exists on the screen whose job is to get you signed in is the one
-// `hostnames/{host}` supplied before mount. Hardcoding them was correct while one
+// `publicHostnames/{host}` supplied before mount. Hardcoding them was correct while one
 // build served one hostname; once the resolver ships, a Bodega guest would have
 // opened the app to another product's name and a cruise that is not happening
 // (Codex on #576).
@@ -29,7 +29,7 @@ import EventPostcard from './EventPostcard';
 // state — an honor-system self-statement, never identity verification (ADR 0001).
 //
 // …and the checkbox itself is now CONDITIONAL (#608). The 18+ posture follows
-// the Event's content, not its Edition: `hostnames/{host}.adultContent` is
+// the Event's content, not its Edition: `publicHostnames/{host}.adultContent` is
 // server-derived from whether the pool holds explicit Prompts, resolved pre-auth
 // alongside the Edition, and fails closed to `true`. An Event with a tame pool
 // shows no acknowledgement and no age claim, and its Continue button is enabled
