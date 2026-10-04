@@ -9,7 +9,7 @@ Implements the consuming half of [ADR 0009](../docs/adr/0009-event-resolved-from
 
 ## Glossary
 
-**Resolution**—the answer to "which Event is this address?", always one of `{ kind: 'event', … }`, `{ kind: 'root', hostname, edition, pathNamespace, source }` (a host whose `/` is a doorway, [`path-addressing-and-root`](path-addressing-and-root.md) § D1) or `{ kind: 'not-found', hostname, reason }`. Never an exception: not-found is a state the app draws. *Avoid:* lookup result, route match.
+**Resolution**—the answer to "which Event is this address?", always one of `{ kind: 'event', … }`, `{ kind: 'root', hostname, edition, pathNamespace, source }` (a host whose `/` is a doorway, [`path-addressing-and-root`](path-addressing-and-root.md) § D1; until the doorway ships in #1392 it renders the not-found screen) or `{ kind: 'not-found', hostname, reason }`. Never an exception: not-found is a state the app draws. *Avoid:* lookup result, route match.
 
 **Edition brand**—the wordmark, the platform **endorsement byline** under it, the one-line description and the offline note the signed-out gate shows, plus the **chrome identity**: the document title and the PWA names (`src/editions.ts`). Keyed by the Edition the hostname resolved to. *Avoid:* theme (that is a look, not an identity).
 

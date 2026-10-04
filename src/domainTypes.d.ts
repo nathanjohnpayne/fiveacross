@@ -808,7 +808,8 @@ export interface HostnameDoc {
 /**
  * A ROOT-SHAPED `hostnames/{host}` document (specs/path-addressing-and-root.md
  * § D1): no `eventId`, and an explicit `root` discriminator. `doorway` serves
- * the host's Edition doorway at `/`; `not-found` keeps the host's path
+ * the host's Edition doorway at `/` (deferred to #1392: until then the boot
+ * renders it as `EventNotFound`, see `bootNotFound`); `not-found` keeps the host's path
  * capability while `/` is not-found. Written only by the lifecycle helper
  * (`scripts/event-router-registry/hostname-lifecycle.mjs`), which removes
  * `eventId`, `status` and `slug` when it converts a route into a marker.
