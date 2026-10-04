@@ -1,11 +1,13 @@
+import { projectPublicHostname } from '../../functions/src/publicHostnameFields.ts';
 /**
  * The ONE transaction helper that owns every projected hostname mutation
  * (#971), implementing `specs/event-router-registry.md` § Provisioning,
  * mutation, and deletion.
  *
  * Why one helper rather than a mutation per command: `hostnames/{host}` is the
- * public source and `routerReplicas/{host}` is the private desired state the
- * publisher converges to the edge. If any command could move one without the
+ * authenticated authoritative source, `publicHostnames/{host}` is its strict public
+ * copy, and `routerReplicas/{host}` is the private desired state the publisher
+ * converges to the edge. If any command could move one without the
  * other, "the edge is a projection of Firestore" would be a convention rather
  * than an invariant, and the reconciler's drift report would be reporting on
  * whichever writer last forgot. So every create, status, Edition, root-marker,
@@ -13,7 +15,8 @@
  * `applyHostnameMutation`, which reads both
  * documents plus the permanent rehearsal reservation in ONE Firestore
  * transaction, derives the projection from the RESULTING hostname document
- * rather than from the caller's patch, and writes both sides together.
+ * rather than from the caller's patch, and writes canonical state, the public
+ * copy, and edge desired state together.
  *
  * `pathNamespace` is deliberately absent from that list even though it is a
  * projected field. Under the frozen `ROOT_HOSTS` table it is a pure function of
@@ -494,10 +497,28 @@ function requireEdgeConvergence(converged, stored, code) {
  * writes are flushed. Firestore requires every read before the first write, and
  * buffering is what makes that ordering structural rather than remembered.
  */
-function createWriteBuffer() {
+function createWriteBuffer(canonicalReads) {
   const writes = [];
   return {
     writes,
+    pairPublicProjections() {
+      const next = new Map();
+      for (const write of writes) {
+        if (!write.path.startsWith('hostnames/')) continue;
+        if (write.op === 'delete') next.set(write.path, null);
+        else if (write.op === 'set') next.set(write.path, write.value);
+        else {
+          const previous = next.has(write.path) ? next.get(write.path) : canonicalReads.get(write.path);
+          if (!previous) throw new Error(`missing transaction read for ${write.path}`);
+          next.set(write.path, { ...previous, ...write.value });
+        }
+      }
+      for (const [path, value] of next) {
+        const publicPath = path.replace('hostnames/', 'publicHostnames/');
+        if (value === null) writes.push({ op: 'delete', path: publicPath });
+        else writes.push({ op: 'set', path: publicPath, value: projectPublicHostname(value) });
+      }
+    },
     // `cloneDocumentValue` rather than `structuredClone`, which would strip a
     // Firestore `Timestamp` to a plain two-number map on its way through the
     // buffer and store the ledger's `updatedAt` as one.
@@ -1616,7 +1637,10 @@ function validTombstone(host, ledger) {
  *
  * It may advance the ledger above the DO high-water mark, using the CURRENT
  * canonical hostname projection — never an invented one — and it never lowers a
- * revision and never touches the public document. A new read transaction and a
+ * revision. If source preparation normalizes a legacy canonical pathNamespace,
+ * the paired write also replaces its strict public projection; without that
+ * normalization the repair does not provision or rewrite a public copy. A new
+ * read transaction and a
  * fresh signed audit follow; this call blesses nothing by itself.
  */
 async function planAdvanceLedger(input, transaction, clock, buffer, revisions, projections) {
@@ -1731,10 +1755,20 @@ export async function applyHostnameMutation(input, dependencies) {
   const planner = PLANNERS[input.intent];
 
   return dependencies.runTransaction(async (transaction) => {
-    const buffer = createWriteBuffer();
+    const canonicalReads = new Map();
+    const trackedTransaction = {
+      ...transaction,
+      async get(path) {
+        const value = await transaction.get(path);
+        if (path.startsWith('hostnames/')) canonicalReads.set(path, value);
+        return value;
+      },
+    };
+    const buffer = createWriteBuffer(canonicalReads);
     const revisions = [];
     const projections = [];
-    const outcome = await planner(input, transaction, clock, buffer, revisions, projections);
+    const outcome = await planner(input, trackedTransaction, clock, buffer, revisions, projections);
+    buffer.pairPublicProjections();
     if (input.apply) {
       for (const write of buffer.writes) {
         if (write.op === 'set') transaction.set(write.path, write.value);

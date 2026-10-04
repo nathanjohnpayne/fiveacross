@@ -6,7 +6,7 @@
 //
 // Why a code table and not Firestore: the sign-in gate has to be branded, and
 // `events/{eventId}` requires `signedIn()`, so the Event doc cannot reach the
-// screen that gets you signed in. `hostnames/{host}.edition` is the only
+// screen that gets you signed in. `publicHostnames/{host}.edition` is the only
 // Edition signal available that early, and it is an identifier, not copy.
 // Editions are few and their wordmark is product copy rather than per-Event
 // data, so resolving that identifier against a table here beats widening the
@@ -53,7 +53,7 @@ export { DEFAULT_EDITION } from './edition-brands';
  *
  * Seeded from `VITE_EDITION` so a single-Edition build is correct with no
  * network resolution at all, then overwritten by `bootstrapEventResolution`
- * with whatever `hostnames/{host}` said. Read through the accessors below, never
+ * with whatever `publicHostnames/{host}` said. Read through the accessors below, never
  * captured at import time — a module-level constant would freeze whatever was
  * true before resolution ran.
  *
@@ -129,7 +129,7 @@ export function wordmarkSegments(brand: EditionBrand = editionBrand()): {
  * This mirrors the runtime rule rather than restating it loosely. A non-empty
  * `VITE_EVENT_ID` marks a single-Event build (ADR 0009 step 0), and such a build
  * owns its `VITE_EDITION`: a hostname-resolved bundle defers to
- * `hostnames/{host}.edition`, where an Edition-less mapping resets to the
+ * `publicHostnames/{host}.edition`, where an Edition-less mapping resets to the
  * default — which is exactly why `setActiveEdition('')` does the same. A named
  * target may separately preserve a trusted static fallback for the static HTML
  * identity and the manifest a host serves before the Worker's routes are
@@ -225,7 +225,7 @@ export function alternateNamespaceApex(edition: string): string | null {
  * the right strings baked into `index.html` at build time, which is strictly
  * better — it is correct before the first byte of JavaScript runs, and it
  * survives a crash that never mounts React. A multi-Event bundle cannot have
- * them baked, because it does not know its Edition until `hostnames/{host}`
+ * them baked, because it does not know its Edition until `publicHostnames/{host}`
  * answers, so it repairs the DOM afterwards instead. Calling it on the
  * single-Event path is a harmless no-op that rewrites the identical string.
  *

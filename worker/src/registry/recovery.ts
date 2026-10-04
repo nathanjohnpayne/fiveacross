@@ -1,3 +1,4 @@
+import { isAllowedPublisherReplacementAccount, isAllowedPublisherTokenCreator } from '../../../scripts/event-router-registry/publisher-impersonation.mjs';
 import {
   projectionDigest,
   type CommittedReplica,
@@ -91,7 +92,11 @@ export type ServiceAccountAccessReadback = {
   iamMember: string;
   fullResourceName: string;
   policyEtag: string;
+  // Effective getAccessToken/getOpenIdToken principals, including custom and
+  // predefined direct/inherited role grants; the signed attestor proves coverage.
   tokenCreatorMembers: string[];
+  // Optional only when displaying pre-#1427 history; new recovery requires true.
+  inheritedPoliciesComplete?: true;
   responseDigest: string;
 };
 
@@ -692,10 +697,18 @@ function validateReplacement(
     }
   }
   if (!replacementSigningGrant) throw new Error('replacement subject lacks a direct signing grant');
+  if (!isAllowedPublisherReplacementAccount(control.replacementRuntime.serviceAccountEmail)) {
+    throw new Error('replacement service-account policy targets another project');
+  }
   for (const readback of control.serviceAccountAccess) {
     if (
+      readback.inheritedPoliciesComplete !== true ||
       readback.tokenCreatorMembers.length > 16 ||
-      readback.tokenCreatorMembers.some((member) => broadMember(member) || oldPrincipals.has(member)) ||
+      readback.tokenCreatorMembers.some((member) =>
+        broadMember(member) || oldPrincipals.has(member) ||
+        (readback.subject === control.replacementRuntime.subject &&
+          !isAllowedPublisherTokenCreator(readback.serviceAccountEmail, member)),
+      ) ||
       !isSha256Hex(readback.responseDigest)
     ) {
       throw new Error('replacement service-account policy does not quarantine the old publisher');

@@ -156,6 +156,28 @@ describe('eventResolution — resolveEvent decision table', () => {
     expect(r).toMatchObject({ slug: null });
   });
 
+  it.each(['missing', 'denied'] as const)('does not serve a legacy canonical V1 cache when public lookup is %s', async (outcome) => {
+    const s = fakeStorage({ [cacheKey(HOST)]: JSON.stringify({ v: 1, fetchedAt: T0, previewValidated: true, doc: DOC }) });
+    const fetchDoc = vi.fn(async () => {
+      if (outcome === 'denied') throw new Error('permission-denied');
+      return null;
+    });
+    const result = await resolveEvent({ hostname: HOST, fetchDoc, storage: s, now: at(T0) });
+    expect(result).toMatchObject({ kind: 'not-found', reason: outcome === 'missing' ? 'missing' : 'unreachable' });
+    expect(fetchDoc).toHaveBeenCalledOnce();
+  });
+
+  it('replaces a legacy canonical envelope with a public lookup and preserves subsequent offline boot', async () => {
+    const s = fakeStorage({ [cacheKey(HOST)]: JSON.stringify({ v: 1, fetchedAt: T0, previewValidated: true, doc: DOC }) });
+    const publicDoc = { ...DOC, eventId: 'public-event' };
+    const online = await resolveEvent({ hostname: HOST, fetchDoc: async () => publicDoc, storage: s, now: at(T0) });
+    expect(online).toMatchObject({ kind: 'event', eventId: 'public-event', source: 'network' });
+    expect(JSON.parse(s.getItem(cacheKey(HOST))!)).toMatchObject({ v: 2, doc: publicDoc });
+    const offline = vi.fn(never);
+    expect(await resolveEvent({ hostname: HOST, fetchDoc: offline, storage: s, now: at(T0 + 1) })).toMatchObject({ kind: 'event', eventId: 'public-event', source: 'cache' });
+    expect(offline).not.toHaveBeenCalled();
+  });
+
   it('a FRESH cache hit resolves with no network call', async () => {
     const fetchDoc = vi.fn(never);
     const s = fakeStorage({ [cacheKey(HOST)]: envelope(DOC, T0) });
@@ -164,7 +186,7 @@ describe('eventResolution — resolveEvent decision table', () => {
     expect(fetchDoc).not.toHaveBeenCalled();
   });
 
-  it('revalidates a fresh cache written before the optional preview slice', async () => {
+  it('revalidates a fresh public V2 cache without the optional preview slice', async () => {
     const s = fakeStorage({ [cacheKey(HOST)]: prePreviewEnvelope(DOC, T0) });
     const fresh = { ...DOC, preview: { eventName: 'Weekend in Bodega Bay' } };
     const fetchDoc = vi.fn(async () => fresh);
@@ -174,7 +196,7 @@ describe('eventResolution — resolveEvent decision table', () => {
     expect(readCache(s, HOST, T0)?.requiresPreviewRevalidation).toBe(false);
   });
 
-  it('keeps a pre-preview cache as the offline routing fallback', async () => {
+  it('keeps a public V2 pre-preview cache as the offline routing fallback', async () => {
     const s = fakeStorage({ [cacheKey(HOST)]: prePreviewEnvelope(DOC, T0) });
     const fetchDoc = vi.fn(async () => {
       throw new Error('offline');
