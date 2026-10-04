@@ -83,7 +83,9 @@ const ROOT_HOSTS = new Map<string, readonly [string, string | null]>([
   ['vacaybingo.vercel.app', ['vacay', 'vacaybingo.com']],
   ['gaycruisebingo.vercel.app', ['gcb', null]],
 ]);
-// MIRROR of `RESERVED_LABELS` in `src/slug.ts`, not an independent policy.
+// MIRROR of the reserved union in `src/slug.ts` (the hostname-label floor
+// plus the path-segment floor, `specs/path-addressing-and-root.md` § Reserved
+// paths, #1387), not an independent policy.
 // It cannot import that module: this service's `tsconfig.json` pins
 // `rootDir: "src"`, so reaching outside it would change the emitted artifact
 // shape of a separately deployed Cloud Function. The copy is instead pinned by
@@ -92,13 +94,21 @@ const ROOT_HOSTS = new Map<string, readonly [string, string | null]>([
 // same reason: a mirror without a parity test is how mirrors drift. `send`
 // carries the Resend return-path MX for `fiveacross.app` (#1102).
 const RESERVED_EVENT_SLUGS = new Set([
+  '__',
   'admin',
   'api',
+  'assets',
   'auth',
   'd',
+  'feed',
+  'items',
+  'leaderboard',
+  'more',
   'play',
   'send',
+  'setup',
   'status',
+  'unsubscribe',
   'www',
 ]);
 
