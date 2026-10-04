@@ -4,9 +4,9 @@
 // see src/sw-rescue.ts for why a generated worker could not close the gap #513
 // left open.
 //
-// PORTED, NOT REDESIGNED. Everything below the rescue section is a faithful
-// port of what `vite-plugin-pwa` previously generated for us in `generateSW`
-// mode; the switch to `injectManifest` (vite.config.ts) is what buys the space
+// The original worker port preserved what `vite-plugin-pwa` previously
+// generated in `generateSW` mode. #1410 later replaced proof-media caching
+// with network-only fetches and legacy bucket removal; the switch to `injectManifest` (vite.config.ts) is what buys the space
 // to add an install-time handler at all. Each ported behaviour keeps the ticket
 // reference that justified it, because losing one of them silently is the real
 // risk of hand-rolling this file:
@@ -15,18 +15,15 @@
 //   - SPA navigation fallback to `index.html`, with `/__/*` denied so the Google
 //     sign-in navigation reaches Firebase's real OAuth handler instead of the app
 //     shell (#182);
-//   - CacheFirst for proof media, opaque responses included (#363);
+//   - network-only proof media, bypassing HTTP caches (#1410);
 //   - the `SKIP_WAITING` message handler that `registerType: 'prompt'` and
 //     `UpdatePrompt`'s Reload button depend on (#178).
 
-import { CacheableResponsePlugin } from 'workbox-cacheable-response';
-import { ExpirationPlugin } from 'workbox-expiration';
 import { cleanupOutdatedCaches, createHandlerBoundToURL, precacheAndRoute } from 'workbox-precaching';
 import { NavigationRoute, registerRoute } from 'workbox-routing';
-import { CacheFirst } from 'workbox-strategies';
+import { NetworkOnly } from 'workbox-strategies';
+import { CacheExpiration } from 'workbox-expiration';
 import {
-  PROOF_MEDIA_CACHE_MAX_AGE_SECONDS,
-  PROOF_MEDIA_CACHE_MAX_ENTRIES,
   PROOF_MEDIA_CACHE_NAME,
   PROOF_MEDIA_URL_PATTERN,
 } from './data/proofMediaCache';
@@ -124,22 +121,13 @@ registerRoute(
   }),
 );
 
-// #363: proof media are immutable Storage objects, so CacheFirst. Status 0 is
-// allowed because <img> loads are no-cors and those cross-origin responses are
-// opaque — omitting it would silently cache nothing.
+// #1410: even an immutable object can be deleted or hidden. Never serve a
+// retained SW copy or populate the browser HTTP cache; old immutable headers
+// must not let an upgraded client skip the network. Bearer URL authorization
+// and moderation-state revocation remain the separate #1356/#806 decisions.
 registerRoute(
   PROOF_MEDIA_URL_PATTERN,
-  new CacheFirst({
-    cacheName: PROOF_MEDIA_CACHE_NAME,
-    plugins: [
-      new ExpirationPlugin({
-        maxEntries: PROOF_MEDIA_CACHE_MAX_ENTRIES,
-        maxAgeSeconds: PROOF_MEDIA_CACHE_MAX_AGE_SECONDS,
-        purgeOnQuotaError: true,
-      }),
-      new CacheableResponsePlugin({ statuses: [0, 200] }),
-    ],
-  }),
+  new NetworkOnly({ fetchOptions: { cache: 'no-store' } }),
 );
 
 // #178: the friendly path. `registerType: 'prompt'` means this worker waits,
@@ -296,7 +284,15 @@ self.addEventListener('install', (event: ExtendableEvent) => {
 self.addEventListener('activate', (event: ExtendableEvent) => {
   event.waitUntil(
     (async () => {
-      // Consume the persisted decision FIRST — it is the source of truth across
+      // Retire legacy responses and token-bearing Workbox expiration records,
+      // scoped only to proof-media. Never clear Firestore or queued Marks. Each
+      // operation is best-effort so one failure cannot prevent the other cleanup.
+      try { await caches.delete(PROOF_MEDIA_CACHE_NAME); } catch { /* retry on the next upgrade */ }
+      try {
+        // Workbox requires a retention option even when only deleting metadata.
+        await new CacheExpiration(PROOF_MEDIA_CACHE_NAME, { maxEntries: 1 }).delete();
+      } catch { /* retry on the next upgrade */ }
+      // Consume the persisted rescue decision — it is the source of truth across
       // a worker teardown, and consuming it clears the flag so a later ordinary
       // activation cannot inherit a stale force and re-navigate the player's
       // windows. The module flag is only a fallback for storage refusing us.
