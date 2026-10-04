@@ -14,6 +14,10 @@ Two dependencies shipped before this ticket, so this ticket adds only the client
 - **The type**—`UserDoc.attestedAdultAt?: number` already exists (`src/types.ts`, added by #16 and pinned by `src/data/w0-type-contract.test.ts`). This ticket consumes it and does not re-declare it.
 - **The rule**—`users/{uid}` is already owner-writable and the owner self-write already shape-checks `attestedAdultAt` as a number (`firestore.rules`, the `allow create, update` block, from #18 and pinned by `tests/rules/w0-firestore-rules.test.ts`). The self-write is allowed BY DESIGN (ADR 0001): recording your own attestation is a self-statement, not identity verification. So **no firestore.rules change is required or made**—this ticket delivers the client half gated on the existing allowance, and `tests/rules/w1-attestation.test.ts` pins that allowance under this ticket's slug so a future "lock-down" of the self-write trips a named test.
 
+## Private-cache boundary (#1411)
+
+The timestamp remains server-persisted. Client profile reads use the independent memory-only private session. The owner-approved offline exception is a per-project, per-UID boolean for provisional rendering of an existing cached Board; it contains no profile fields or timestamp, grants no deal authority, and is revoked by definitive server absence. Same-session optimistic UI remains intact. See [the isolation and attended recovery contract](private-cache-isolation.md).
+
 ## Contract
 
 - `src/data/api.ts` (profile region only) adds two small functions and leaves `ensureUserProfile` (the #77-pinned create-only bootstrap) and the whole Mark path untouched:

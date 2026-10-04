@@ -18,6 +18,8 @@ import { renderHook, act } from '@testing-library/react';
 
 const H = vi.hoisted(() => ({ onSnapshot: vi.fn(), eventId: 'event-a' }));
 
+vi.mock('./usePrivateFirestore', () => ({ usePrivateFirestore: () => ({ uid: 'u1', db: {}, generation: 1, recoveryRequired: false, failed: false }) }));
+
 vi.mock('../firebase', () => ({
   db: {},
   get EVENT_ID() {

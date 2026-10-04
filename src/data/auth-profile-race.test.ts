@@ -11,7 +11,16 @@ const { docMock, runTransactionMock } = vi.hoisted(() => ({
   runTransactionMock: vi.fn(),
 }));
 vi.mock('firebase/firestore', () => ({ doc: docMock, runTransaction: runTransactionMock }));
-vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event' }));
+const privateState = vi.hoisted(() => ({ uid: 'sailor-1', generation: 0, projectId: 'test-project', privateDb: {} }));
+vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event', auth: { get currentUser() { return { uid: privateState.uid }; } }, firebaseConfig: { get projectId() { return privateState.projectId; } } }));
+vi.mock('../privateFirestore', () => ({
+  awaitPrivateFirestore: vi.fn(async (uid: string, allowRecovery = false) => {
+    const generation = privateState.generation;
+    const assertCurrent = () => { if (uid !== privateState.uid || generation !== privateState.generation) throw new Error('Private session expired.'); };
+    assertCurrent();
+    return { db: privateState.privateDb, uid, assertCurrent, allowRecovery, guard: async <T,>(op: () => Promise<T>) => { assertCurrent(); const value = await op(); assertCurrent(); return value; } };
+  }),
+}));
 
 import { ensureUserProfile } from './api';
 
@@ -47,6 +56,10 @@ const userFrom = (
 
 beforeEach(() => {
   vi.clearAllMocks();
+  privateState.uid = 'sailor-1';
+  privateState.generation = 0;
+  privateState.projectId = 'test-project';
+  localStorage.clear();
 });
 
 describe('ensureUserProfile create is exists-checked (#77 — never clobbers a racing save)', () => {

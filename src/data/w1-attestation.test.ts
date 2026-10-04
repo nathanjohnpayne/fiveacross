@@ -5,22 +5,35 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // `runTransaction` is driven to model the transactional read-then-write that makes
 // `attestAdult` create-only (an existing earlier stamp is never overwritten), and
 // `getDoc` the point read `readAdultAttestation` uses for the re-prompt gate.
-const { docMock, runTransactionMock, getDocMock, getDocFromServerMock } = vi.hoisted(() => ({
+const { docMock, runTransactionMock, getDocMock, getDocFromServerMock, getDocFromCacheMock } = vi.hoisted(() => ({
   docMock: vi.fn((_db: unknown, ...segments: string[]) => ({ path: segments.join('/') })),
   runTransactionMock: vi.fn(),
   getDocMock: vi.fn(),
   getDocFromServerMock: vi.fn(),
+  getDocFromCacheMock: vi.fn(),
 }));
 vi.mock('firebase/firestore', () => ({
   doc: docMock,
   runTransaction: runTransactionMock,
   getDoc: getDocMock,
   getDocFromServer: getDocFromServerMock,
+  getDocFromCache: getDocFromCacheMock,
 }));
-vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event' }));
+const privateState = vi.hoisted(() => ({ uid: 'sailor-1', generation: 0, projectId: 'test-project', privateDb: {} }));
+vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event', auth: { get currentUser() { return { uid: privateState.uid }; } }, firebaseConfig: { get projectId() { return privateState.projectId; } } }));
+vi.mock('../privateFirestore', () => ({
+  awaitPrivateFirestore: vi.fn(async (uid: string, allowRecovery = false) => {
+    const generation = privateState.generation;
+    const assertCurrent = () => { if (uid !== privateState.uid || generation !== privateState.generation) throw new Error('Private session expired.'); };
+    assertCurrent();
+    return { db: privateState.privateDb, uid, assertCurrent, allowRecovery, guard: async <T,>(op: () => Promise<T>) => { assertCurrent(); const value = await op(); assertCurrent(); return value; } };
+  }),
+}));
 
 import type { User } from 'firebase/auth';
-import { attestAdult, readAdultAttestation, readAdultAttestationFromServer } from './api';
+import { recordOfflineAttestation, hasOfflineAttestation } from '../auth/offlineAttestationWitness';
+import { awaitPrivateFirestore } from '../privateFirestore';
+import { attestAdult, readAdultAttestation, readAdultAttestationFromServer, readAdultAttestationFromCache, ensureUserProfile } from './api';
 
 type FakeTx = { get: ReturnType<typeof vi.fn>; set: ReturnType<typeof vi.fn> };
 
@@ -49,6 +62,10 @@ function driveTransaction(snapshot: ReturnType<typeof snap>): FakeTx {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  privateState.uid = 'sailor-1';
+  privateState.generation = 0;
+  privateState.projectId = 'test-project';
+  localStorage.clear();
 });
 
 describe('attestAdult persists the 18+ self-attestation create-only (#23)', () => {
@@ -128,5 +145,63 @@ describe('readAdultAttestationFromServer is the SERVER-ONLY authority read (#117
   it('REJECTS when the server is unreachable (never falls back to cache)', async () => {
     getDocFromServerMock.mockRejectedValue(new Error('Failed to reach server'));
     await expect(readAdultAttestationFromServer('sailor-1')).rejects.toThrow(/server/i);
+  });
+});
+
+
+describe('private profile ownership and minimal offline witness (#1411)', () => {
+  it('uses memory Firestore for bootstrap and server reads, including recovery bootstrap', async () => {
+    driveTransaction(snap(null));
+    await ensureUserProfile(userLike());
+    expect(awaitPrivateFirestore).toHaveBeenCalledWith('sailor-1', true);
+    expect(runTransactionMock.mock.calls[0][0]).toBe(privateState.privateDb);
+    expect(docMock.mock.calls[0][0]).toBe(privateState.privateDb);
+    getDocFromServerMock.mockResolvedValue(snap({ attestedAdultAt: 44 }));
+    await readAdultAttestationFromServer('sailor-1');
+    expect(hasOfflineAttestation('test-project', 'sailor-1')).toBe(true);
+  });
+
+  it('rejects another UID before acquiring any private session', async () => {
+    privateState.uid = 'bob';
+    await expect(ensureUserProfile(userLike())).rejects.toThrow(/account changed/i);
+    expect(awaitPrivateFirestore).not.toHaveBeenCalled();
+    expect(runTransactionMock).not.toHaveBeenCalled();
+  });
+
+  it('retired transaction read cannot write or record an offline witness', async () => {
+    const tx = driveTransaction(snap(null));
+    tx.get.mockImplementation(async () => { privateState.generation++; return snap(null); });
+    await expect(attestAdult(userLike())).rejects.toThrow(/expired/i);
+    expect(tx.set).not.toHaveBeenCalled();
+    expect(hasOfflineAttestation('test-project', 'sailor-1')).toBe(false);
+  });
+
+  it('definitive server revocation removes the witness; a failed server read does not', async () => {
+    recordOfflineAttestation('test-project', 'sailor-1', true);
+    getDocFromServerMock.mockRejectedValueOnce(new Error('offline'));
+    await expect(readAdultAttestationFromServer('sailor-1')).rejects.toThrow('offline');
+    expect(hasOfflineAttestation('test-project', 'sailor-1')).toBe(true);
+    getDocFromServerMock.mockResolvedValue(snap(null));
+    await expect(readAdultAttestationFromServer('sailor-1')).resolves.toBeNull();
+    expect(hasOfflineAttestation('test-project', 'sailor-1')).toBe(false);
+  });
+
+  it('requires both the current UID/project witness and an existing cached Board', async () => {
+    recordOfflineAttestation('test-project', 'sailor-1', true);
+    getDocFromCacheMock.mockRejectedValueOnce(new Error('cache miss'));
+    await expect(readAdultAttestationFromCache('sailor-1')).resolves.toBeNull();
+    getDocFromCacheMock.mockResolvedValue(snap({ uid: 'sailor-1' }));
+    await expect(readAdultAttestationFromCache('sailor-1')).resolves.toBe(1);
+    expect(docMock.mock.calls.filter((call) => call.slice(1).join('/').startsWith('users/'))).toHaveLength(0);
+    privateState.projectId = 'other-project';
+    await expect(readAdultAttestationFromCache('sailor-1')).resolves.toBeNull();
+    privateState.uid = 'bob';
+    await expect(readAdultAttestationFromCache('sailor-1')).rejects.toThrow(/account changed/i);
+  });
+
+  it('does not grant an old UID witness after an account switch during the Board probe', async () => {
+    recordOfflineAttestation('test-project', 'sailor-1', true);
+    getDocFromCacheMock.mockImplementation(async () => { privateState.uid = 'bob'; return snap({ uid: 'sailor-1' }); });
+    await expect(readAdultAttestationFromCache('sailor-1')).rejects.toThrow(/account changed/i);
   });
 });

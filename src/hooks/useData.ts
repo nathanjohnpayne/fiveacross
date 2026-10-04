@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { collectionGroup, onSnapshot, query, where, type DocumentReference, type Query } from 'firebase/firestore';
+import { usePrivateFirestore } from './usePrivateFirestore';
 import { db, EVENT_ID } from '../firebase';
 import { eventRef, itemsCol, boardRef, dayBoardRef, dayMetaRef, playerRef, playersCol, proofsCol, claimsCol, userRef, tallyMarkersCol, momentsCol, noticesCol, doubtsCol, heartsCol } from '../data/paths';
 import { isReportHidden, isBanned, isExplicitWithheld, isSystemAuthor, isHiddenFor } from '../data/moderation';
@@ -98,6 +99,7 @@ function useDocSub<T>(
    * function defined once at module load.
    */
   observe?: (data: T | null, origin: SnapshotOrigin, eventId: string) => void,
+  clearOnError = false,
 ) {
   const [state, setState] = useState<DocSubscriptionState<T>>(() => emptyDocState(key, ref !== null));
   // The per-snapshot halves of the same `{ includeMetadataChanges: true }`
@@ -166,7 +168,7 @@ function useDocSub<T>(
       () => {
         if (!active) return;
         setState((previous) =>
-          previous.key === key
+          previous.key === key && !clearOnError
             ? { ...previous, loading: false, serverResolved: true }
             : { ...emptyDocState<T>(key, false), serverResolved: true },
         );
@@ -270,6 +272,31 @@ function useColSub<T>(q: Query<T> | null, key: string, clearOnError = false) {
   return state.key === key
     ? state
     : emptyCollectionState<T>(key, q !== null);
+}
+
+// Private listeners publish only current server snapshots from the named
+// memory-app incarnation. Denial, account changes and offline transitions
+// retire displayed private data instead of carrying a cached answer forward.
+function usePrivateCol<T>(build: (database: NonNullable<ReturnType<typeof usePrivateFirestore>['db']>) => Query<T>, key: string, enabled = true) {
+  const session = usePrivateFirestore();
+  const ready = enabled && session.db !== null && !session.recoveryRequired;
+  const state = useColSub<T>(ready ? build(session.db!) : null,
+    eventScopeKey(EVENT_ID, key, session.uid ?? 'none', session.generation, ready ? 'ready' : 'closed'), true);
+  const confirmed = ready && state.hasServerData && !state.fromCache && !state.hasPendingWrites && !state.failed;
+  return { ...state, data: confirmed ? state.data : [], hasServerData: confirmed };
+}
+
+function usePrivateDoc<T>(build: (database: NonNullable<ReturnType<typeof usePrivateFirestore>['db']>) => DocumentReference<T>, key: string, enabled = true, eventScoped = true) {
+  const session = usePrivateFirestore();
+  const ready = enabled && session.db !== null && !session.recoveryRequired;
+  const state = useDocSub<T>(ready ? build(session.db!) : null,
+    eventScopeKey(eventScoped ? EVENT_ID : 'global', key, session.uid ?? 'none', session.generation, ready ? 'ready' : 'closed'), undefined, true);
+  const confirmed = ready && state.hasServerData && !state.fromCache && !state.hasPendingWrites;
+  return { ...state, data: confirmed ? state.data : null, hasServerData: confirmed };
+}
+
+export function useAdminEventDoc() {
+  return usePrivateDoc<EventDoc>((database) => eventRef(database), 'admin-event');
 }
 
 const eventSubscriptionKey = (...parts: readonly (string | number)[]): string =>
@@ -910,8 +937,8 @@ export function useTally(itemId: string | null | undefined) {
 
 /** The signed-in User's global profile (`users/{uid}`) — display name + avatar. */
 export function useMyUser(uid: string | undefined) {
-  // Identity is global by contract: users/{uid} carries across Events.
-  return useDocSub<UserDoc>(uid ? userRef(uid) : null, `user:${uid ?? 'none'}`);
+  const session = usePrivateFirestore();
+  return usePrivateDoc<UserDoc>((database) => userRef(uid!, database), `my-user:${uid ?? 'none'}`, !!uid && uid === session.uid, false);
 }
 
 export function useLeaderboard() {
@@ -1529,9 +1556,9 @@ export function useFeed(max = 60) {
  * gate that passes vacuously is no gate at all.
  */
 export function usePendingClaims() {
-  const { data, loading, hasServerData } = useColSub<ClaimDoc>(
-    claimsCol(),
-    eventSubscriptionKey('claims'),
+  const { data, loading, hasServerData } = usePrivateCol<ClaimDoc>(
+    (database) => claimsCol(database),
+    'claims',
   );
   const claims = data.filter((c) => c.status === 'pending').sort((a, b) => a.createdAt - b.createdAt);
   return { claims, loading, hasServerData };
@@ -1549,9 +1576,9 @@ export function usePendingClaims() {
  * every pool) on every render just to find the handful of pending rows.
  */
 export function usePendingItems() {
-  const { data, loading } = useColSub<ItemDoc>(
-    query(itemsCol(), where('status', '==', 'pending')),
-    eventSubscriptionKey('items-pending'),
+  const { data, loading } = usePrivateCol<ItemDoc>(
+    (database) => query(itemsCol(database), where('status', '==', 'pending')),
+    'items-pending',
   );
   const items = [...data].sort((a, b) => a.createdAt - b.createdAt);
   return { items, loading };
@@ -1576,9 +1603,9 @@ export function useMyPendingItems(uid: string | null | undefined) {
   // CACHE snapshot too, which would otherwise let a genuinely still-pending
   // submission read as `not_selected`. See `deriveMySubmissions`'s `ready`
   // doc comment.
-  const { data, loading, hasServerData } = useColSub<ItemDoc>(
-    uid ? query(itemsCol(), where('createdBy', '==', uid), where('status', '==', 'pending')) : null,
-    eventSubscriptionKey('items-pending-mine', uid ?? 'none'),
+  const { data, loading, hasServerData } = usePrivateCol<ItemDoc>(
+    (database) => query(itemsCol(database), where('createdBy', '==', uid), where('status', '==', 'pending')),
+    `items-pending-mine:${uid ?? 'none'}`, !!uid,
   );
   const items = [...data].sort((a, b) => a.createdAt - b.createdAt);
   return { items, loading, hasServerData };
@@ -1622,9 +1649,9 @@ export function useMyActiveItems(uid: string | null | undefined) {
  * already-confirmed Claims are history, not fresh confirms to announce.
  */
 export function useMyClaims(uid: string | undefined) {
-  const { data, loading, hasServerData, fromCache } = useColSub<ClaimDoc>(
-    uid ? query(claimsCol(), where('uid', '==', uid)) : null,
-    eventSubscriptionKey('my-claims', uid ?? 'none'),
+  const { data, loading, hasServerData, fromCache } = usePrivateCol<ClaimDoc>(
+    (database) => query(claimsCol(database), where('uid', '==', uid)),
+    `my-claims:${uid ?? 'none'}`, !!uid,
   );
   // `fromCache` lets `ConfirmWinMoments` seed its freshness witness ONLY from a
   // server-backed pending observation (Codex #116 R2 finding 2): a cache-only
@@ -1647,9 +1674,9 @@ export function useMyClaims(uid: string | undefined) {
  * anything writes it).
  */
 export function usePendingItemCount(enabled = true) {
-  const { data, loading } = useColSub<ItemDoc>(
-    enabled ? query(itemsCol(), where('status', '==', 'pending')) : null,
-    eventSubscriptionKey(enabled ? 'items-pending' : 'items-pending:disabled'),
+  const { data, loading } = usePrivateCol<ItemDoc>(
+    (database) => query(itemsCol(database), where('status', '==', 'pending')),
+    'items-pending-count', enabled,
   );
   return { count: data.length, loading };
 }
@@ -1664,7 +1691,7 @@ export function usePendingItemCount(enabled = true) {
  * too and no Admin could ever act on it — the exact failure ADR 0004 warns of.
  */
 export function useAllItems() {
-  const { data, loading } = useColSub<ItemDoc>(itemsCol(), eventSubscriptionKey('items-admin'));
+  const { data, loading } = usePrivateCol<ItemDoc>((database) => itemsCol(database), 'items-admin');
   return { items: data.sort((a, b) => b.reportCount - a.reportCount), loading };
 }
 
@@ -1699,7 +1726,7 @@ export function useAllItems() {
  * no second listener, no composite index.
  */
 export function useReportedProofs() {
-  const { data, loading } = useColSub<ProofDoc>(proofsCol(), eventSubscriptionKey('proofs-admin'));
+  const { data, loading } = usePrivateCol<ProofDoc>((database) => proofsCol(database), 'proofs-admin');
   const flagged = data
     .filter(
       (p) =>

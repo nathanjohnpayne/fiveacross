@@ -33,11 +33,17 @@ const H = vi.hoisted(() => ({
 
 vi.mock('../analytics', () => ({ track: H.trackSpy }));
 
+
+// Explicit memory-session lifecycle seam; gameplay database stays the existing fixture.
+vi.mock('../privateFirestore', () => ({ awaitPrivateFirestore: vi.fn(async (uid: string) => ({
+  uid, db: { privateMemory: true }, assertCurrent: vi.fn(),
+  guard: async <T,>(op: () => Promise<T>) => op(),
+})) }));
 vi.mock('../firebase', () => ({
   db: {},
   EVENT_ID: 'test-event',
   storage: {},
-  auth: {},
+  auth: { currentUser: { uid: 'u1' } },
   googleProvider: {},
   analytics: null,
 }));

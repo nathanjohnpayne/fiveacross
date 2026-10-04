@@ -29,6 +29,15 @@ const { setSpy, deleteSpy, commitSpy, getDocFromCacheSpy } = vi.hoisted(() => ({
   getDocFromCacheSpy: vi.fn((): Promise<FakeSnap> => Promise.reject(new Error('no cache'))),
 }));
 
+// This closed Admin fixture supplies a recovered, current memory-session seam;
+// actor retirement and distinct database binding are tested in private-admin-session.test.ts.
+vi.mock('../privateFirestore', async () => {
+  const { db } = await import('../firebase');
+  return { capturePrivateFirestore: () => ({
+    db, functions: {}, uid: 'admin-1', generation: 1, assertCurrent: () => {},
+    guard: async <T,>(operation: () => Promise<T>) => operation(),
+  }) };
+});
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'med-2026' }));
 vi.mock('firebase/firestore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('firebase/firestore')>();
@@ -174,6 +183,7 @@ describe('rejectClaim / confirmClaim — the admin resolve keeps the marker symm
       fn({ get: txGet, set: txSet, delete: txDelete } as never),
     );
     txGet.mockImplementation((ref: { path: string }): Promise<FakeSnap> => {
+      if (ref.path.includes('/claims/')) return Promise.resolve({ exists: () => true, data: () => claim() });
       if (ref.path.includes('/boards/'))
         return Promise.resolve({ exists: () => true, data: () => ({ cells }) });
       if (ref.path.includes('/players/'))

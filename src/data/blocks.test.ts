@@ -16,6 +16,11 @@ type Batch = {
 
 const H = vi.hoisted(() => ({
   eventId: 'event-a',
+  uid: 'bob', generation: 0, privateDb: { memory: true },
+  databases: [] as unknown[],
+  pathDatabases: [] as unknown[],
+  readPause: null as Promise<void> | null,
+  commitPause: null as Promise<void> | null,
   batches: [] as Batch[],
   commitResults: [] as Array<'ok' | Error>,
   // The server listing `repairMissingPairs` reads: the caller's own direction
@@ -30,10 +35,17 @@ const H = vi.hoisted(() => ({
 
 vi.mock('../firebase', () => ({
   db: { kind: 'db' },
+  auth: { get currentUser() { return { uid: H.uid }; } },
   get EVENT_ID() {
     return H.eventId;
   },
 }));
+vi.mock('../privateFirestore', () => ({ awaitPrivateFirestore: vi.fn(async (uid: string) => {
+  const generation = H.generation;
+  const assertCurrent = () => { if (uid !== H.uid || generation !== H.generation) throw new Error('Private session expired.'); };
+  assertCurrent();
+  return { db: H.privateDb, uid, assertCurrent, guard: async <T,>(op: () => Promise<T>) => { assertCurrent(); const value = await op(); assertCurrent(); return value; } };
+}) }));
 vi.mock('firebase/firestore', () => {
   const open = (kind: Batch['kind']): Batch => {
     const next = H.commitResults.shift() ?? 'ok';
@@ -50,6 +62,7 @@ vi.mock('firebase/firestore', () => {
     query: (...args: unknown[]) => ({ kind: 'query', args }),
     where: (...args: unknown[]) => ({ kind: 'where', args }),
     getDocsFromServer: async (q: { args: unknown[] }) => {
+      if (H.readPause) await H.readPause;
       if (q.args[0] === `events/${H.eventId}/blockPairs`) {
         H.pairQueries.push(q);
         if (H.pairExists instanceof Error) throw H.pairExists;
@@ -62,26 +75,28 @@ vi.mock('firebase/firestore', () => {
       if (H.ownTargets instanceof Error) throw H.ownTargets;
       return { docs: H.ownTargets.map((targetUid) => ({ data: () => ({ targetUid }) })) };
     },
-    writeBatch: () => open('batch'),
+    writeBatch: (database: unknown) => { H.databases.push(database); return open('batch'); },
     runTransaction: async (_db: unknown, update: (tx: Batch) => Promise<void>) => {
+      H.databases.push(_db);
       const tx = open('transaction');
       await update(tx);
+      if (H.commitPause) await H.commitPause;
       return tx.commit();
     },
   };
 });
 vi.mock('./paths', () => ({
-  blocksCol: (eventId: string) => `events/${eventId}/blocks`,
-  blockRef: (owner: string, target: string, eventId: string) => `events/${eventId}/blocks/${owner}_${target}`,
-  blockPairsCol: (eventId: string) => `events/${eventId}/blockPairs`,
-  blockPairRef: (a: string, b: string, eventId: string) =>
-    `events/${eventId}/blockPairs/${a < b ? `${a}_${b}` : `${b}_${a}`}`,
+  blocksCol: (eventId: string, database?: unknown) => { H.pathDatabases.push(database); return `events/${eventId}/blocks`; },
+  blockRef: (owner: string, target: string, eventId: string, database?: unknown) => { H.pathDatabases.push(database); return `events/${eventId}/blocks/${owner}_${target}`; },
+  blockPairsCol: (eventId: string, database?: unknown) => { H.pathDatabases.push(database); return `events/${eventId}/blockPairs`; },
+  blockPairRef: (a: string, b: string, eventId: string, database?: unknown) => { H.pathDatabases.push(database); return `events/${eventId}/blockPairs/${a < b ? `${a}_${b}` : `${b}_${a}`}`; },
   blockPairId: (a: string, b: string) => (a < b ? `${a}_${b}` : `${b}_${a}`),
 }));
 
 import {
   blockPairId,
   blockPlayer,
+  retirePendingBlocks,
   computeHiddenSet,
   hiddenUidsFromPairs,
   isPermissionDenied,
@@ -95,7 +110,9 @@ const denied = Object.assign(new Error('Missing or insufficient permissions.'), 
 });
 
 beforeEach(() => {
+  for (const uid of ['bob', 'carol']) for (const eventId of ['event-a', 'event-b']) retirePendingBlocks(uid, eventId);
   H.eventId = 'event-a';
+  H.uid = 'bob'; H.generation = 0; H.databases = []; H.pathDatabases = []; H.readPause = null; H.commitPause = null;
   H.batches = [];
   H.commitResults = [];
   H.ownTargets = [];
@@ -320,5 +337,50 @@ describe('computeHiddenSet', () => {
   it('a pending block hides immediately, and a pending unblock keeps the last committed uid hidden', () => {
     expect([...computeHiddenSet(new Set(['alice', 'carol']), committed, true)].sort()).toEqual(['alice', 'carol']);
     expect([...computeHiddenSet(new Set(), committed, true)]).toEqual(['alice']);
+  });
+});
+
+
+describe('private block maintenance and durable blind write boundary (#1411)', () => {
+  it('keeps blind block batches on the durable store without acquiring a private read lease', async () => {
+    await blockPlayer({ me: 'bob', target: 'alice' });
+    expect(H.databases).toEqual([{ kind: 'db' }]);
+    expect(H.pathDatabases).toEqual([undefined, undefined]);
+  });
+  it('unblock transactions use the own memory session', async () => {
+    await unblockPlayer({ me: 'bob', target: 'alice' });
+    expect(H.databases).toEqual([H.privateDb]);
+    expect(H.pathDatabases).toEqual([H.privateDb, H.privateDb]);
+  });
+
+  it('repair listing uses memory and a resumed old-account answer cannot write', async () => {
+    let release!: () => void;
+    H.readPause = new Promise<void>((resolve) => { release = resolve; });
+    H.ownTargets = ['alice'];
+    const result = repairMissingPairs({ me: 'bob', knownCounterparts: new Set() });
+    const rejected = expect(result).rejects.toThrow(/session expired/);
+    await Promise.resolve(); await Promise.resolve();
+    expect(H.pathDatabases).toEqual([H.privateDb]);
+    H.uid = 'carol'; H.generation += 1;
+    release();
+    await rejected;
+    expect(H.batches).toHaveLength(0);
+  });
+  it('unblock completion after account retirement refuses acknowledgement without another attempt', async () => {
+    let release!: () => void;
+    H.commitPause = new Promise<void>((resolve) => { release = resolve; });
+    const result = unblockPlayer({ me: 'bob', target: 'alice' });
+    const rejected = expect(result).rejects.toThrow(/session expired/);
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    H.uid = 'carol'; H.generation += 1;
+    release();
+    await rejected;
+    // The old transaction may have committed; retirement is not cancellation.
+    expect(H.batches).toHaveLength(1);
+  });
+  it('wrong initiating UID cannot construct a maintenance transaction', async () => {
+    H.uid = 'carol';
+    await expect(unblockPlayer({ me: 'bob', target: 'alice' })).rejects.toThrow(/account changed/);
+    expect(H.batches).toHaveLength(0);
   });
 });

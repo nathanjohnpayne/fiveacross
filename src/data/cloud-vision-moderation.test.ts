@@ -39,6 +39,15 @@ const { txGet, txSet, txUpdate, txDelete, runTx, getDocMock, getDocsMock, ops } 
   ops: [] as Array<{ op: 'get' | 'set' | 'update' | 'delete'; path: string }>,
 }));
 
+// This closed Admin fixture supplies a recovered, current memory-session seam;
+// actor retirement and distinct database binding are tested in private-admin-session.test.ts.
+vi.mock('../privateFirestore', async () => {
+  const { db } = await import('../firebase');
+  return { capturePrivateFirestore: () => ({
+    db, functions: {}, uid: 'admin-1', generation: 1, assertCurrent: () => {},
+    guard: async <T,>(operation: () => Promise<T>) => operation(),
+  }) };
+});
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'med-2026', storage: {} }));
 // attachProof (below, the #1143 create-shape pin) uploads media before its
 // transaction; stub the two Storage calls proofs.ts uses so nothing here touches
@@ -236,7 +245,8 @@ beforeEach(() => {
     }
     if (ref.path.includes('/claims/')) {
       const match = claimsForProof.find((c) => ref.path.endsWith(`/claims/${c.id}`));
-      return Promise.resolve({ exists: () => !!match?.live, data: () => match?.live });
+      const row = match ? match.live : pendingClaim();
+      return Promise.resolve({ exists: () => !!row, data: () => row });
     }
     return Promise.resolve({ exists: () => false, data: () => undefined });
   });
@@ -286,7 +296,7 @@ describe('confirmClaim — a Vision safety hide survives the claim confirm (spec
     // Nothing is written to the Proof — no `status: 'active'`, so the media stays
     // out of the Feed and the trigger's own state is untouched.
     expect(setPayload('/proofs/')).toBeUndefined();
-    // The claim still resolves and the Square still credits: only the media is held.
+    // This fresh-credit Claim resolves and credits its Square: only the media is held.
     expect(setPayload('/claims/')).toMatchObject({ status: 'confirmed', resolvedBy: 'admin-1' });
     const board = setPayload('/boards/') as { cells: Cell[] };
     expect(board.cells[4]).toMatchObject({ status: 'confirmed', markedAt: 1000 });
@@ -403,12 +413,17 @@ describe('confirmClaim — a Vision safety hide survives the claim confirm (spec
     expect(setPayload('/claims/')).toMatchObject({ status: 'confirmed' });
   });
 
-  it('never reads the Proof on a REJECT — a rejected claim publishes nothing either way', async () => {
+  it('reads the live Proof before rejecting, without publishing its held media', async () => {
     liveProof = { status: 'hidden', safetyHide: true, visionFlag: 'violence' };
 
     await rejectClaim(pendingClaim(), 'admin-1');
 
-    expect(ops.some((o) => o.path === 'events/med-2026/proofs/P')).toBe(false);
+    const proofGet = ops.findIndex((o) => o.op === 'get' && o.path === 'events/med-2026/proofs/P');
+    const firstWrite = ops.findIndex((o) => o.op !== 'get');
+    expect(proofGet).toBeGreaterThanOrEqual(0);
+    expect(proofGet).toBeLessThan(firstWrite);
+    // This legacy fixture has no owner/cell/Day binding: no classification
+    // write is warranted, and rejection never publishes held media.
     expect(setPayload('/proofs/')).toBeUndefined();
     expect(setPayload('/claims/')).toMatchObject({ status: 'rejected' });
   });
@@ -498,7 +513,7 @@ describe('hideProof — an admin Hide preserves a standing safety hold (#1143)',
 // photo whose claim nobody has judged can be flagged, hidden, and then Restored.
 // Publishing it 'active' there would put it in every Player's Feed BEFORE the
 // decision, and rejecting the claim afterwards would leave it public: rejectClaim
-// deliberately writes nothing to the Proof, so nothing would take it back down.
+// never publishes the Proof, so nothing would take it back down.
 
 describe('restoreProof — claim-aware (specs/cloud-vision-moderation.md)', () => {
   // The Proof's owner is `u1`; only u1's pending claim may steer the restore.

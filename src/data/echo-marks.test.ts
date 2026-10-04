@@ -13,6 +13,7 @@ const EVENT_ID = 'test-event';
 
 const H = vi.hoisted(() => ({
   eventId: 'test-event',
+  authUid: 'sailor-1',
   event: null as Record<string, unknown> | null,
   itemsById: new Map<string, Record<string, unknown>>(),
   dayBoards: new Map<number, Record<string, unknown> | null>(),
@@ -48,6 +49,18 @@ const H = vi.hoisted(() => ({
   track: vi.fn(),
 }));
 
+
+// Explicit memory-session lifecycle seam; gameplay database stays the existing fixture.
+const adminSession = vi.hoisted(() => ({ uid: 'admin-1' }));
+vi.mock('../privateFirestore', () => ({
+  capturePrivateFirestore: () => ({
+    uid: adminSession.uid, db: { privateMemory: true }, functions: {}, generation: 1, assertCurrent: () => {},
+    guard: async <T,>(operation: () => Promise<T>) => operation(),
+  }),
+  awaitPrivateFirestore: vi.fn(async (uid: string) => ({
+  uid, db: { privateMemory: true }, assertCurrent: vi.fn(),
+  guard: async <T,>(op: () => Promise<T>) => op(),
+})) }));
 vi.mock('../firebase', () => ({
   db: {},
   get EVENT_ID() {
@@ -55,7 +68,7 @@ vi.mock('../firebase', () => ({
   },
   functions: {},
   storage: {},
-  auth: {},
+  auth: { get currentUser() { return { uid: H.authUid }; } },
   googleProvider: {},
   analytics: null,
 }));
@@ -145,6 +158,7 @@ function route(ref: { args?: unknown[] }) {
     const board = H.dayBoards.get(Number(a[3]));
     return board ? snap(true, a[5], board) : snap(false);
   }
+  if (a[2] === 'claims') return snap(true, a[3], { status: 'pending' });
   if (a[2] === 'players') return H.player ? snap(true, a[3], H.player) : snap(false);
   if (a[2] === 'tally' && a[4] === 'markers') {
     const m = H.markerServer.get(a[3]);
@@ -235,8 +249,10 @@ const day = (index: number, over: Partial<DayDef> = {}): DayDef =>
   }) as DayDef;
 
 beforeEach(() => {
+  adminSession.uid = 'admin-1';
   vi.clearAllMocks();
   H.eventId = EVENT_ID;
+  H.authUid = 'sailor-1';
   resetPendingMoments();
   H.event = { days: [day(0), day(1), day(2), day(3)], settings: { spicyRatio: 0.4 } };
   H.itemsById.clear();
@@ -262,6 +278,7 @@ describe('Event-scoped mark operation lifecycles (#807)', () => {
     });
 
     H.eventId = 'event-a';
+    H.authUid = 'scope-user';
     const joining = joinAndDeal({
       uid: 'scope-user',
       displayName: 'Scope User',
@@ -2956,6 +2973,7 @@ describe('confirmClaim — the admin_confirmed echo moment (spec § Contract)', 
     });
     H.dayBoards.set(2, { uid: 'u1', seed: 222, dayIndex: 2, cells: card((i) => (i === 7 ? 'shared' : `b${i}`)) });
     H.player = { uid: 'u1', displayName: 'Alice', dayStats: {} };
+    adminSession.uid = 'admin-2';
     await confirmClaim(claim(), 'admin-2');
     await new Promise((r) => setTimeout(r, 0));
     expect(H.track).not.toHaveBeenCalledWith('mark_square', expect.anything());

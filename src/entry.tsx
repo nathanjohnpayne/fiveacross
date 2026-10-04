@@ -44,7 +44,14 @@ void runApplicationBootstrap({
     const { completeHandoffReturn } = await import('./auth/handoffReturn');
     return completeHandoffReturn({ code, origin: window.location.origin });
   },
-  loadMain: () => import('./main'),
+  loadMain: async () => {
+    if (window.location.hash === '#device-cache-recovery') {
+      const { renderPrivateCacheRecovery } = await import('./auth/privateCacheRecoveryPage');
+      renderPrivateCacheRecovery();
+      return;
+    }
+    return import('./main');
+  },
   // The return module may already have touched primary Auth. The boot seam
   // therefore maps any unexpected return failure to recovery, never app mount.
   renderFailure: renderBootstrapFailure,

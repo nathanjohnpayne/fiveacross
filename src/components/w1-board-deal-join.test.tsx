@@ -20,6 +20,7 @@ import type { BoardDoc, EventDoc, ItemDoc, PlayerDoc } from '../types';
 // close over the same mutable fixtures and spies the test bodies drive.
 const H = vi.hoisted(() => ({
   authUser: null as User | null,
+  privateGeneration: 0,
   useItemsSpy: vi.fn(),
   data: {
     board: null as BoardDoc | null,
@@ -46,11 +47,20 @@ const H = vi.hoisted(() => ({
 // Neutralize Firebase init (firebase.ts calls initializeApp at import) and the
 // Firestore SDK so `../data/api` (real) exercises its freeze/deal logic against
 // controllable stubs rather than a live backend.
+
+// Explicit memory-session lifecycle seam; gameplay database stays the existing fixture.
+vi.mock('../privateFirestore', () => ({ awaitPrivateFirestore: vi.fn(async (uid: string) => {
+  const generation = H.privateGeneration;
+  const assertCurrent = () => { if (uid !== H.authUser?.uid || generation !== H.privateGeneration) throw new Error('Private session expired.'); };
+  assertCurrent();
+  return { uid, db: { privateMemory: true }, assertCurrent,
+    guard: async <T,>(op: () => Promise<T>) => { assertCurrent(); const value = await op(); assertCurrent(); return value; } };
+}) }));
 vi.mock('../firebase', () => ({
   db: {},
   EVENT_ID: 'test-event',
   storage: {},
-  auth: {},
+  auth: { get currentUser() { return H.authUser; } },
   googleProvider: {},
   analytics: null,
 }));
@@ -185,6 +195,7 @@ const dealPool: DealItem[] = SEED_ITEMS.map((it, i) => ({ id: `seed${i}`, text: 
 
 beforeEach(() => {
   H.authUser = SIGNED_IN;
+  H.privateGeneration = 0;
   H.useItemsSpy.mockReset();
   H.data.board = null;
   H.data.boardLoading = false;
@@ -219,7 +230,7 @@ describe('ensureUserProfile', () => {
 
     await ensureUserProfile(SIGNED_IN_WITH_PHOTO);
 
-    expect(H.runTransaction).toHaveBeenCalledWith({}, expect.any(Function));
+    expect(H.runTransaction).toHaveBeenCalledWith({ privateMemory: true }, expect.any(Function));
     expect(H.txSet).toHaveBeenCalledWith(
       expect.objectContaining({ kind: 'doc' }),
       expect.objectContaining({
@@ -1020,5 +1031,28 @@ describe('joinAndDeal Player-row attribution (Codex P2 on PR #67, api half)', ()
       displayName: 'Sailor',
       photoURL: 'https://lh3.googleusercontent.com/google.jpg',
     });
+  });
+});
+
+
+describe('join identity stays private and lease-bound (#1411)', () => {
+  it('daily join reads users from memory but writes the Player on gameplay Firestore', async () => {
+    H.getDoc.mockResolvedValueOnce({ exists: () => true, data: () => ({ days: [{ index: 0 }] }) });
+    await joinAndDeal(SIGNED_IN);
+    const reads = H.getDoc.mock.calls.map((call) => call[0] as { args: unknown[] });
+    const profileRead = reads.find((ref) => ref.args[1] === 'users');
+    expect(profileRead?.args[0]).toEqual({ privateMemory: true });
+    expect(H.runTransaction.mock.calls[0][0]).toEqual({});
+  });
+  it('an account switch while the advisory profile read resumes cannot fall back and write the old Player', async () => {
+    H.getDoc.mockResolvedValueOnce({ exists: () => true, data: () => ({ days: [{ index: 0 }] }) });
+    H.getDoc.mockImplementationOnce(async () => {
+      H.authUser = { ...SIGNED_IN, uid: 'bob' } as User;
+      H.privateGeneration++;
+      return { exists: () => true, data: () => ({ displayName: 'Old profile' }) };
+    });
+    await expect(joinAndDeal(SIGNED_IN)).rejects.toThrow(/expired/);
+    expect(H.runTransaction).not.toHaveBeenCalled();
+    expect(H.txSet).not.toHaveBeenCalled();
   });
 });

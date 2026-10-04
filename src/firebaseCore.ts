@@ -1,5 +1,5 @@
 import { initializeApp } from 'firebase/app';
-import { initializeAppCheck, ReCaptchaEnterpriseProvider } from 'firebase/app-check';
+import { initializeAppCheck, ReCaptchaEnterpriseProvider, type AppCheck } from 'firebase/app-check';
 import { connectFunctionsEmulator, getFunctions } from 'firebase/functions';
 import { resolveAuthDomain } from './auth-domain';
 
@@ -37,9 +37,10 @@ if (firebaseEmulatorsEnabled()) {
 // App Check must exist on the PAGE before exchangeAuthHandoff is called. The
 // reCAPTCHA Enterprise provider depends on the DOM and cannot be moved into the
 // dedicated commit Worker.
+export let appCheck: AppCheck | null = null;
 if (import.meta.env.VITE_RECAPTCHA_SITE_KEY) {
   try {
-    initializeAppCheck(app, {
+    appCheck = initializeAppCheck(app, {
       provider: new ReCaptchaEnterpriseProvider(import.meta.env.VITE_RECAPTCHA_SITE_KEY),
       isTokenAutoRefreshEnabled: true,
     });

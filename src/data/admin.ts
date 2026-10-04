@@ -1,6 +1,8 @@
-import { addDoc, collection, doc, getDoc, getDocFromServer, getDocs, getDocsFromServer, limit, query, where, updateDoc, deleteDoc, runTransaction, arrayUnion, arrayRemove } from 'firebase/firestore';
+import { addDoc, collection, doc, getDoc, getDocFromServer, getDocs, getDocsFromServer, limit, query, where, updateDoc, deleteDoc, arrayUnion, arrayRemove, type Transaction } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
-import { db, functions, EVENT_ID } from '../firebase';
+import { EVENT_ID } from '../firebase';
+import { capturePrivateFirestore } from '../privateFirestore';
+import { runPrivateTransaction } from './privateTransaction';
 import { completedLines, countMarked, isBlackout, foldDayStat, foldEchoStats, applyEchoes, echoMarksEnabled, tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen, type DayStats, type EchoBucket, type StatWrite } from '../game/logic';
 import { cellsPatch, changedCells, cellsFromData } from '../game/cells';
 import { cellsMergeSet } from './cellsMerge';
@@ -15,32 +17,58 @@ import {
   usableDayIndexes,
 } from './eventArchive';
 import { migrateClaimMode, migrateDayFields } from './converters';
-import { dayMetaRef, playersCol } from './paths';
+import { dayMetaRef as boundDayMetaRef, playersCol as boundPlayersCol } from './paths';
 import { scheduleEditFromFor } from './eventLimits';
 import { normalizePool } from '../game/pool';
 import type { ApprovalOutcome, ApprovalPlacement, ApprovePromptsRequest, Cell, ClaimMode, ThemeId, ClaimDoc, DayMetaDoc, EventDoc, ItemDoc, DayDef, PlayerDoc, ProofDoc } from '../types';
 
-const evt = (eventId = EVENT_ID) => doc(db, 'events', eventId);
-const item = (id: string, eventId = EVENT_ID) => doc(db, 'events', eventId, 'items', id);
-const itemsRaw = () => collection(db, 'events', EVENT_ID, 'items');
-const proof = (id: string, eventId = EVENT_ID) => doc(db, 'events', eventId, 'proofs', id);
-const claim = (id: string, eventId = EVENT_ID) => doc(db, 'events', eventId, 'claims', id);
-const claimsRaw = (eventId = EVENT_ID) => collection(db, 'events', eventId, 'claims');
-const board = (uid: string, eventId = EVENT_ID) => doc(db, 'events', eventId, 'boards', uid);
-// The day-scoped board a daily-mode claim resolves against (#246).
-const dayBoard = (dayIndex: number, uid: string, eventId = EVENT_ID) =>
-  doc(db, 'events', eventId, 'days', String(dayIndex), 'boards', uid);
-const dayMeta = (dayIndex: number, eventId = EVENT_ID) =>
-  doc(db, 'events', eventId, 'days', String(dayIndex), 'meta', String(dayIndex));
-const player = (uid: string, eventId = EVENT_ID) =>
-  doc(db, 'events', eventId, 'players', uid);
-// A per-Prompt Tally marker (ADR 0002): the same path setMark/attachProof write.
-const marker = (itemId: string, uid: string, eventId = EVENT_ID) =>
-  doc(db, 'events', eventId, 'tally', itemId, 'markers', uid);
+/** One Admin action owns one memory-only Auth incarnation and Event. Never
+ * reselect a private database after an await or a transaction retry. */
+function captureAdmin(adminUid?: string, eventId: string = EVENT_ID) {
+  const lease = capturePrivateFirestore();
+  if (adminUid !== undefined && adminUid !== lease.uid) throw new Error('Admin account changed.');
+  const { db } = lease;
+  return {
+    ...lease, eventId,
+    evt: (id = eventId) => doc(db, 'events', id),
+    item: (id: string, event = eventId) => doc(db, 'events', event, 'items', id),
+    itemsRaw: () => collection(db, 'events', eventId, 'items'),
+    proof: (id: string, event = eventId) => doc(db, 'events', event, 'proofs', id),
+    claim: (id: string, event = eventId) => doc(db, 'events', event, 'claims', id),
+    claimsRaw: (event = eventId) => collection(db, 'events', event, 'claims'),
+    board: (uid: string, event = eventId) => doc(db, 'events', event, 'boards', uid),
+    dayBoard: (day: number, uid: string, event = eventId) => doc(db, 'events', event, 'days', String(day), 'boards', uid),
+    dayMeta: (day: number, event = eventId) => doc(db, 'events', event, 'days', String(day), 'meta', String(day)),
+    player: (uid: string, event = eventId) => doc(db, 'events', event, 'players', uid),
+    marker: (id: string, uid: string, event = eventId) => doc(db, 'events', event, 'tally', id, 'markers', uid),
+    playersCol: (event = eventId) => boundPlayersCol(event, db),
+    dayMetaRef: (day: number, event = eventId) => boundDayMetaRef(day, event, db),
+    transaction: <T>(operation: (tx: Transaction) => Promise<T>): Promise<T> => runPrivateTransaction(lease, operation),
+  };
+}
+type AdminAction = ReturnType<typeof captureAdmin>;
 
-export const hideItem = (id: string) => updateDoc(item(id), { status: 'hidden' });
-export const restoreItem = (id: string) => updateDoc(item(id), { status: 'active', reportHideSuppressed: true });
-export const deleteItem = (id: string) => deleteDoc(item(id));
+export const hideItem = (id: string) => {
+  const action = captureAdmin(undefined, EVENT_ID);
+  const { item } = action;
+  return action.guard(async () => {
+    return action.guard(() => updateDoc(item(id), { status: 'hidden' }));
+  });
+};
+export const restoreItem = (id: string) => {
+  const action = captureAdmin(undefined, EVENT_ID);
+  const { item } = action;
+  return action.guard(async () => {
+    return action.guard(() => updateDoc(item(id), { status: 'active', reportHideSuppressed: true }));
+  });
+};
+export const deleteItem = (id: string) => {
+  const action = captureAdmin(undefined, EVENT_ID);
+  const { item } = action;
+  return action.guard(async () => {
+    return action.guard(() => deleteDoc(item(id)));
+  });
+};
 
 // Phase 1.5 approval flow (#210, daily-cards-spec § "Item pools and the approval
 // flow"): the Admin Approvals-queue write path. A main-pool submission lands
@@ -151,7 +179,7 @@ function narrowPlacements(data: unknown, expectedLength: number): ApprovalPlacem
  * click therefore reaches the server and comes back `stale`, which
  * `ReviewQueue`'s outcome reporting treats as benign.
  *
- * `adminUid` is kept for call-site compatibility and is UNUSED: the server
+ * `adminUid` must match the captured private session; the server still
  * stamps `approvedBy` from the verified auth uid and never reads an identity
  * from the payload. `eventId` is captured when the call starts, so a tab that
  * switches Event mid-flight still approves into the Event it was asked about.
@@ -171,17 +199,21 @@ export async function approveItems(
   _adminUid: string,
   eventId: string = EVENT_ID,
 ): Promise<ApprovalPlacement[]> {
-  if (items.length === 0) return [];
-  const callable = httpsCallable<ApprovePromptsRequest, unknown>(functions, 'approvePrompts');
-  const res = await callable({
-    eventId,
-    items: items.map(({ id, pool, spicy }) => ({
-      id,
-      ...(pool === undefined ? {} : { pool }),
-      ...(spicy === undefined ? {} : { spicy }),
-    })),
+  const action = captureAdmin(_adminUid, eventId);
+  const { functions } = action;
+  return action.guard(async () => {
+    if (items.length === 0) return [];
+    const callable = httpsCallable<ApprovePromptsRequest, unknown>(functions, 'approvePrompts');
+    const res = await action.guard(() => callable({
+      eventId,
+      items: items.map(({ id, pool, spicy }) => ({
+        id,
+        ...(pool === undefined ? {} : { pool }),
+        ...(spicy === undefined ? {} : { spicy }),
+      })),
+    }));
+    return narrowPlacements(res.data, items.length);
   });
-  return narrowPlacements(res.data, items.length);
 }
 /**
  * Approve one Prompt. Takes the queue ROW because that is what the Approvals
@@ -198,7 +230,13 @@ export const approveItem = (
   eventId: string = EVENT_ID,
 ) => approveItems([row], adminUid, eventId).then((placements) => placements[0]);
 export const rejectItem = (id: string, adminUid: string) =>
-  updateDoc(item(id), { status: 'rejected', approvedBy: adminUid, approvedAt: Date.now() });
+  {
+  const action = captureAdmin(adminUid, EVENT_ID);
+  const { item } = action;
+  return action.guard(async () => {
+    return action.guard(() => updateDoc(item(id), { status: 'rejected', approvedBy: adminUid, approvedAt: Date.now() }));
+  });
+};
 
 // `spicyRevision` is optional by contract (`ItemDoc.spicyRevision?`) and reaches
 // Firestore only through `setItemSpicy`'s transaction, one increment at a time.
@@ -265,39 +303,43 @@ export async function setItemSpicy(
   spicy: boolean,
   eventId: string = EVENT_ID,
 ): Promise<number | null> {
-  // Firestore can invoke or retry the callback after the app has switched
-  // Events. Resolve the acted document once, before entering that lifecycle.
-  const ref = item(id, eventId);
-  // The corruption line describes a fence restart that HAPPENED, so the callback
-  // only carries the finding out and the warning is spoken after settlement
-  // (Codex P2 on PR #1201). Warning inside the callback would say it once per
-  // ATTEMPT rather than once per correction: Firestore re-runs this callback on
-  // contention — the same retry the comment above relies on — and also runs it
-  // for transactions it ultimately abandons, so one toggle could log the same
-  // corruption several times, or announce a re-based fence that no write ever
-  // re-based. Returning the finding alongside the revision ties it to the
-  // attempt that actually committed.
-  const committed = await runTransaction(db, async (tx) => {
-    const snap = await tx.get(ref);
-    if (!snap.exists()) return null;
-    const row = snap.data() as Partial<ItemDoc>;
-    if (row.status !== 'pending' || normalizePool(row.pool) !== 'main') return null;
-    const fence = readSpicyRevision(row.spicyRevision);
-    if (fence.revision === Number.MAX_SAFE_INTEGER) {
-      throw new Error('Prompt spicy revision exhausted');
+  const action = captureAdmin(undefined, eventId);
+  const { item } = action;
+  return action.guard(async () => {
+    // Firestore can invoke or retry the callback after the app has switched
+    // Events. Resolve the acted document once, before entering that lifecycle.
+    const ref = item(id, eventId);
+    // The corruption line describes a fence restart that HAPPENED, so the callback
+    // only carries the finding out and the warning is spoken after settlement
+    // (Codex P2 on PR #1201). Warning inside the callback would say it once per
+    // ATTEMPT rather than once per correction: Firestore re-runs this callback on
+    // contention — the same retry the comment above relies on — and also runs it
+    // for transactions it ultimately abandons, so one toggle could log the same
+    // corruption several times, or announce a re-based fence that no write ever
+    // re-based. Returning the finding alongside the revision ties it to the
+    // attempt that actually committed.
+    const committed = await action.transaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists()) return null;
+      const row = snap.data() as Partial<ItemDoc>;
+      if (row.status !== 'pending' || normalizePool(row.pool) !== 'main') return null;
+      const fence = readSpicyRevision(row.spicyRevision);
+      if (fence.revision === Number.MAX_SAFE_INTEGER) {
+        throw new Error('Prompt spicy revision exhausted');
+      }
+      const revision = fence.revision + 1;
+      tx.update(ref, { spicy, spicyRevision: revision });
+      return { revision, restartedFrom: fence.restartedFrom };
+    });
+    if (!committed) return null;
+    if (committed.restartedFrom !== null) {
+      console.warn(
+        `[admin] item ${id} has an out-of-contract spicyRevision ` +
+          `(${committed.restartedFrom}); restarting the correction fence at 0`,
+      );
     }
-    const revision = fence.revision + 1;
-    tx.update(ref, { spicy, spicyRevision: revision });
-    return { revision, restartedFrom: fence.restartedFrom };
+    return committed.revision;
   });
-  if (!committed) return null;
-  if (committed.restartedFrom !== null) {
-    console.warn(
-      `[admin] item ${id} has an out-of-contract spicyRevision ` +
-        `(${committed.restartedFrom}); restarting the correction fence at 0`,
-    );
-  }
-  return committed.revision;
 }
 
 /**
@@ -361,13 +403,17 @@ export function bulkApproveItems(
  * authoritative.
  */
 export function hideProof(id: string, eventId: string = EVENT_ID): Promise<void> {
-  return runTransaction(db, async (tx) => {
-    const ref = proof(id, eventId);
-    const snap = await tx.get(ref);
-    const held = snap.exists() && safetyHideStands(snap.data() as SafetyHideState);
-    // `tx.update` on a missing doc still rejects, exactly as the previous
-    // `updateDoc` did — a Hide on a deleted Proof is an error, not a silent no-op.
-    tx.update(ref, held ? { status: 'hidden', safetyHide: true } : { status: 'hidden' });
+  const action = captureAdmin(undefined, eventId);
+  const { proof } = action;
+  return action.guard(async () => {
+    return action.transaction(async (tx) => {
+      const ref = proof(id, eventId);
+      const snap = await tx.get(ref);
+      const held = snap.exists() && safetyHideStands(snap.data() as SafetyHideState);
+      // `tx.update` on a missing doc still rejects, exactly as the previous
+      // `updateDoc` did — a Hide on a deleted Proof is an error, not a silent no-op.
+      tx.update(ref, held ? { status: 'hidden', safetyHide: true } : { status: 'hidden' });
+    });
   });
 }
 
@@ -392,8 +438,8 @@ export function hideProof(id: string, eventId: string = EVENT_ID): Promise<void>
  * and Cloud Vision scans the uploaded object — so a photo whose claim is still
  * undecided can be flagged, hidden, and then Restored. Publishing it `'active'`
  * there would put it in every Player's Feed BEFORE the claim was judged, and
- * rejecting the claim afterwards leaves it public: `rejectClaim` deliberately
- * writes nothing to the Proof (it leaves a rejected Proof `'pending'` rather than
+ * rejecting the claim afterwards leaves it public: `rejectClaim`
+ * never publishes the Proof (it leaves a rejected Proof `'pending'` rather than
  * exposed), so nothing would ever take it back down. Restoring to `'pending'`
  * hands the Proof back to the claim queue instead, where Confirm publishes it and
  * Reject leaves it unpublished — the decision the console is actually asking for.
@@ -521,15 +567,18 @@ export const RESTORE_CLAIM_LOOKUP_LIMIT = 5;
 export const RESTORE_STALE_PAGE_ATTEMPTS = 3;
 
 export async function restoreProof(id: string, eventId: string = EVENT_ID): Promise<void> {
-  for (let attempt = 0; attempt < RESTORE_STALE_PAGE_ATTEMPTS; attempt++) {
-    if (await restoreProofOnce(id, eventId)) return;
-  }
-  // Every attempt read a truncated page whose rows had all resolved before the
-  // transaction could re-read them. Nothing was written, so the Proof is exactly
-  // as hidden, as queued and as restorable as before the click (#1250).
-  throw new Error(
-    `Restore could not settle proof ${id}: its pending claims kept resolving while it looked. Try again.`,
-  );
+  const action = captureAdmin(undefined, eventId);
+  return action.guard(async () => {
+    for (let attempt = 0; attempt < RESTORE_STALE_PAGE_ATTEMPTS; attempt++) {
+      if (await restoreProofOnce(id, eventId, action)) return;
+    }
+    // Every attempt read a truncated page whose rows had all resolved before the
+    // transaction could re-read them. Nothing was written, so the Proof is exactly
+    // as hidden, as queued and as restorable as before the click (#1250).
+    throw new Error(
+      `Restore could not settle proof ${id}: its pending claims kept resolving while it looked. Try again.`,
+    );
+  });
 }
 
 /**
@@ -537,69 +586,72 @@ export async function restoreProof(id: string, eventId: string = EVENT_ID): Prom
  * `false` — having written nothing — when the page the lookup returned was a
  * truncation whose every row has since resolved, so the caller can look again.
  */
-async function restoreProofOnce(id: string, eventId: string): Promise<boolean> {
-  // The owner, read plainly and outside the transaction: `uid` is written once at
-  // create and is immutable thereafter, so there is no state here a stale read
-  // could get wrong. It only SCOPES the query; the authority for the decision is
-  // the live re-read inside the transaction below.
-  const ownerSnap = await getDoc(proof(id, eventId));
-  const owner = ownerSnap.exists() ? (ownerSnap.data() as Partial<ProofDoc>).uid : undefined;
-  // One row MORE than the cap: the overflow sentinel. It exists so that
-  // `fetched.length` can distinguish a page that holds every one of the owner's
-  // pending claims from a page that merely holds the first
-  // `RESTORE_CLAIM_LOOKUP_LIMIT` of them.
-  const fetched =
-    owner === undefined
-      ? [] // no Proof, or no owner on it: nothing may steer the restore anyway
-      : (
-          await getDocs(
-            query(
-              claimsRaw(eventId),
-              where('proofId', '==', id),
-              where('uid', '==', owner),
-              where('status', '==', 'pending'),
-              limit(RESTORE_CLAIM_LOOKUP_LIMIT + 1),
-            ),
-          )
-        ).docs;
-  const truncated = fetched.length > RESTORE_CLAIM_LOOKUP_LIMIT;
-  // A truncated page re-reads the sentinel too: on that page a live pending row
-  // is the only evidence that Confirm still has a claim to act on (#1250).
-  const claimRefs = fetched.map((d) => claim(d.id, eventId));
-  return runTransaction(db, async (tx) => {
-    // The Proof first: a claim steers the restore only when it is the Proof
-    // OWNER's claim. A pending claim naming someone else's Proof is refused at
-    // create now (specs/sec-rules-shape-hardening.md), but Claims written
-    // before that rule can still carry one, and trusting it would let a stranger send another
-    // Player's photo back to `pending` instead of to the Feed (Codex P2 on
-    // #1143). The owner is read live, inside the transaction, ahead of any claim.
-    const proofSnap = await tx.get(proof(id, eventId));
-    const owner = proofSnap.exists() ? (proofSnap.data() as Partial<ProofDoc>).uid : undefined;
-    let claimUndecided = false;
-    for (const ref of claimRefs) {
-      const snap = await tx.get(ref);
-      if (!snap.exists()) continue;
-      const data = snap.data() as Partial<ClaimDoc>;
-      if (data.status !== 'pending') continue;
-      if (data.proofId !== id) continue;
-      if (owner === undefined || data.uid !== owner) continue;
-      claimUndecided = true;
-    }
-    if (truncated && !claimUndecided && owner !== undefined) {
-      // The lookup dropped at least one of the owner's claims that was PENDING
-      // when the query ran, and every row it kept has resolved since, so the
-      // kept rows cannot say whether that one still is. Publishing on them is
-      // the leak the sentinel exists to prevent (Codex P2 on #1237); settling
-      // `'pending'` on them strands the Proof with no claim left to Confirm
-      // (#1250). Neither: write nothing, and let the caller look again.
-      return false;
-    }
-    tx.update(proof(id, eventId), {
-      status: claimUndecided ? 'pending' : 'active',
-      safetyHide: false,
-      reportHideSuppressed: true,
+async function restoreProofOnce(id: string, eventId: string, action: AdminAction): Promise<boolean> {
+  const { proof, claim, claimsRaw } = action;
+  return action.guard(async () => {
+    // The owner, read plainly and outside the transaction: `uid` is written once at
+    // create and is immutable thereafter, so there is no state here a stale read
+    // could get wrong. It only SCOPES the query; the authority for the decision is
+    // the live re-read inside the transaction below.
+    const ownerSnap = await action.guard(() => getDoc(proof(id, eventId)));
+    const owner = ownerSnap.exists() ? (ownerSnap.data() as Partial<ProofDoc>).uid : undefined;
+    // One row MORE than the cap: the overflow sentinel. It exists so that
+    // `fetched.length` can distinguish a page that holds every one of the owner's
+    // pending claims from a page that merely holds the first
+    // `RESTORE_CLAIM_LOOKUP_LIMIT` of them.
+    const fetched =
+      owner === undefined
+        ? [] // no Proof, or no owner on it: nothing may steer the restore anyway
+        : (
+            await action.guard(() => getDocs(
+              query(
+                claimsRaw(eventId),
+                where('proofId', '==', id),
+                where('uid', '==', owner),
+                where('status', '==', 'pending'),
+                limit(RESTORE_CLAIM_LOOKUP_LIMIT + 1),
+              ),
+            ))
+          ).docs;
+    const truncated = fetched.length > RESTORE_CLAIM_LOOKUP_LIMIT;
+    // A truncated page re-reads the sentinel too: on that page a live pending row
+    // is the only evidence that Confirm still has a claim to act on (#1250).
+    const claimRefs = fetched.map((d) => claim(d.id, eventId));
+    return action.transaction(async (tx) => {
+      // The Proof first: a claim steers the restore only when it is the Proof
+      // OWNER's claim. A pending claim naming someone else's Proof is refused at
+      // create now (specs/sec-rules-shape-hardening.md), but Claims written
+      // before that rule can still carry one, and trusting it would let a stranger send another
+      // Player's photo back to `pending` instead of to the Feed (Codex P2 on
+      // #1143). The owner is read live, inside the transaction, ahead of any claim.
+      const proofSnap = await tx.get(proof(id, eventId));
+      const owner = proofSnap.exists() ? (proofSnap.data() as Partial<ProofDoc>).uid : undefined;
+      let claimUndecided = false;
+      for (const ref of claimRefs) {
+        const snap = await tx.get(ref);
+        if (!snap.exists()) continue;
+        const data = snap.data() as Partial<ClaimDoc>;
+        if (data.status !== 'pending') continue;
+        if (data.proofId !== id) continue;
+        if (owner === undefined || data.uid !== owner) continue;
+        claimUndecided = true;
+      }
+      if (truncated && !claimUndecided && owner !== undefined) {
+        // The lookup dropped at least one of the owner's claims that was PENDING
+        // when the query ran, and every row it kept has resolved since, so the
+        // kept rows cannot say whether that one still is. Publishing on them is
+        // the leak the sentinel exists to prevent (Codex P2 on #1237); settling
+        // `'pending'` on them strands the Proof with no claim left to Confirm
+        // (#1250). Neither: write nothing, and let the caller look again.
+        return false;
+      }
+      tx.update(proof(id, eventId), {
+        status: claimUndecided ? 'pending' : 'active',
+        safetyHide: false,
+        reportHideSuppressed: true,
+      });
+      return true;
     });
-    return true;
   });
 }
 
@@ -607,10 +659,34 @@ async function restoreProofOnce(id: string, eventId: string): Promise<boolean> {
 // automatic report hiding for this incarnation, and retains distinct-reporter
 // receipts. Further new reporters remain reviewable; prior reporters do not
 // regain admission by clearing the counter (#1405, owner decision #1355).
-export const clearItemReports = (id: string) => updateDoc(item(id), { reportCount: 0, reportHideSuppressed: true });
-export const clearProofReports = (id: string) => updateDoc(proof(id), { reportCount: 0, reportHideSuppressed: true });
-export const setClaimMode = (mode: ClaimMode) => updateDoc(evt(), { claimMode: mode });
-export const setEventTheme = (theme: ThemeId) => updateDoc(evt(), { defaultTheme: theme });
+export const clearItemReports = (id: string) => {
+  const action = captureAdmin(undefined, EVENT_ID);
+  const { item } = action;
+  return action.guard(async () => {
+    return action.guard(() => updateDoc(item(id), { reportCount: 0, reportHideSuppressed: true }));
+  });
+};
+export const clearProofReports = (id: string) => {
+  const action = captureAdmin(undefined, EVENT_ID);
+  const { proof } = action;
+  return action.guard(async () => {
+    return action.guard(() => updateDoc(proof(id), { reportCount: 0, reportHideSuppressed: true }));
+  });
+};
+export const setClaimMode = (mode: ClaimMode) => {
+  const action = captureAdmin(undefined, EVENT_ID);
+  const { evt } = action;
+  return action.guard(async () => {
+    return action.guard(() => updateDoc(evt(), { claimMode: mode }));
+  });
+};
+export const setEventTheme = (theme: ThemeId) => {
+  const action = captureAdmin(undefined, EVENT_ID);
+  const { evt } = action;
+  return action.guard(async () => {
+    return action.guard(() => updateDoc(evt(), { defaultTheme: theme }));
+  });
+};
 
 // The Admin "Proof & Claims" panel (#222): four single-field `settings.*`
 // writes mirroring setClaimMode/setEventTheme. Each is a DOT-PATH `updateDoc`
@@ -621,13 +697,37 @@ export const setEventTheme = (theme: ThemeId) => updateDoc(evt(), { defaultTheme
 // is presentational-only for now: `functions/src/visionGate.ts` still gates
 // `moderateProof` on its own deploy-time env flag, not this field.
 export const setPhotoProofSource = (source: 'camera_or_library' | 'camera_only'): Promise<void> =>
-  updateDoc(evt(), { 'settings.photoProofSource': source });
+  {
+  const action = captureAdmin(undefined, EVENT_ID);
+  const { evt } = action;
+  return action.guard(async () => {
+    return action.guard(() => updateDoc(evt(), { 'settings.photoProofSource': source }));
+  });
+};
 export const setStripPhotoExif = (on: boolean): Promise<void> =>
-  updateDoc(evt(), { 'settings.stripPhotoExif': on });
+  {
+  const action = captureAdmin(undefined, EVENT_ID);
+  const { evt } = action;
+  return action.guard(async () => {
+    return action.guard(() => updateDoc(evt(), { 'settings.stripPhotoExif': on }));
+  });
+};
 export const setVisionGate = (on: boolean): Promise<void> =>
-  updateDoc(evt(), { 'settings.visionGate': on });
+  {
+  const action = captureAdmin(undefined, EVENT_ID);
+  const { evt } = action;
+  return action.guard(async () => {
+    return action.guard(() => updateDoc(evt(), { 'settings.visionGate': on }));
+  });
+};
 export const setReportHideThreshold = (n: number): Promise<void> =>
-  updateDoc(evt(), { 'settings.reportHideThreshold': n });
+  {
+  const action = captureAdmin(undefined, EVENT_ID);
+  const { evt } = action;
+  return action.guard(async () => {
+    return action.guard(() => updateDoc(evt(), { 'settings.reportHideThreshold': n }));
+  });
+};
 
 /**
  * The Admin override on the Event's 18+ posture (#608).
@@ -649,7 +749,13 @@ export const setReportHideThreshold = (n: number): Promise<void> =>
  * confirm on the way ON (`AdultContentConfirm`) says so.
  */
 export const setForceAdult = (on: boolean): Promise<void> =>
-  updateDoc(evt(), { 'settings.forceAdult': on });
+  {
+  const action = captureAdmin(undefined, EVENT_ID);
+  const { evt } = action;
+  return action.guard(async () => {
+    return action.guard(() => updateDoc(evt(), { 'settings.forceAdult': on }));
+  });
+};
 
 // Easy mix (specs/easy-mix.md): the share of a main-day Board dealt from the embark
 // pool, a live `settings.easyMixRatio` write mirroring the four above. A DOT-PATH
@@ -657,7 +763,13 @@ export const setForceAdult = (on: boolean): Promise<void> =>
 // a deploy — an admin changing it before a Day unlocks changes that Day's mix (the
 // value is read at deal time off the frozen snapshot, which already carries both pools).
 export const setEasyMixRatio = (ratio: number): Promise<void> =>
-  updateDoc(evt(), { 'settings.easyMixRatio': ratio });
+  {
+  const action = captureAdmin(undefined, EVENT_ID);
+  const { evt } = action;
+  return action.guard(async () => {
+    return action.guard(() => updateDoc(evt(), { 'settings.easyMixRatio': ratio }));
+  });
+};
 
 // The Admin Schedule editor (#221, daily-cards-spec § "Admin console" / §
 // "Itinerary and schedule"): "changing a locked-future Day's theme is safe,
@@ -686,15 +798,19 @@ export const setEasyMixRatio = (ratio: number): Promise<void> =>
 // this edit surgical under concurrency. The `days` param is retained as the
 // fallback when the doc is somehow missing.
 export const setDayTheme = (days: DayDef[], dayIndex: number, theme: ThemeId): Promise<void> => {
-  const eventId = EVENT_ID;
-  const eventRef = evt(eventId);
-  return runTransaction(db, async (tx) => {
-    const snap = await tx.get(eventRef);
-    const current =
-      (snap.exists() ? (snap.data().days as DayDef[] | undefined) : undefined) ?? days;
-    tx.update(eventRef, {
-      days: current.map((d) => (d.index === dayIndex ? { ...d, theme } : d)),
-      ...scheduleEditWindow(current, dayIndex),
+  const action = captureAdmin(undefined, EVENT_ID);
+  const { evt } = action;
+  return action.guard(async () => {
+    const eventId = action.eventId;
+    const eventRef = evt(eventId);
+    return action.transaction(async (tx) => {
+      const snap = await tx.get(eventRef);
+      const current =
+        (snap.exists() ? (snap.data().days as DayDef[] | undefined) : undefined) ?? days;
+      tx.update(eventRef, {
+        days: current.map((d) => (d.index === dayIndex ? { ...d, theme } : d)),
+        ...scheduleEditWindow(current, dayIndex),
+      });
     });
   });
 };
@@ -732,28 +848,32 @@ function isValidTonight(tonight: string[]): boolean {
  * this control.
  */
 export const setDayTonight = (days: DayDef[], dayIndex: number, tonight: string[]): Promise<void> => {
-  const eventId = EVENT_ID;
-  const eventRef = evt(eventId);
-  return runTransaction(db, async (tx) => {
-    if (!isValidTonight(tonight)) {
-      throw new Error('Tonight must contain exactly two non-empty entries.');
-    }
-    const snap = await tx.get(eventRef);
-    const current = snap.exists() ? (snap.data().days as DayDef[] | undefined) : undefined;
-    if (!Array.isArray(current)) {
-      throw new Error('Cannot edit Tonight: event schedule is missing.');
-    }
-    const target = current.find((d) => d.index === dayIndex);
-    if (!target) {
-      throw new Error(`Cannot edit Tonight: Day ${dayIndex + 1} is missing.`);
-    }
-    if (target.unlockAt <= Date.now()) {
-      throw new Error(`Cannot edit Tonight: Day ${dayIndex + 1} has already unlocked.`);
-    }
-    const nextTonight = normalizeTonightEntries(tonight);
-    tx.update(eventRef, {
-      days: current.map((d) => (d.index === dayIndex ? { ...d, tonight: nextTonight } : d)),
-      ...scheduleEditWindow(current, dayIndex),
+  const action = captureAdmin(undefined, EVENT_ID);
+  const { evt } = action;
+  return action.guard(async () => {
+    const eventId = action.eventId;
+    const eventRef = evt(eventId);
+    return action.transaction(async (tx) => {
+      if (!isValidTonight(tonight)) {
+        throw new Error('Tonight must contain exactly two non-empty entries.');
+      }
+      const snap = await tx.get(eventRef);
+      const current = snap.exists() ? (snap.data().days as DayDef[] | undefined) : undefined;
+      if (!Array.isArray(current)) {
+        throw new Error('Cannot edit Tonight: event schedule is missing.');
+      }
+      const target = current.find((d) => d.index === dayIndex);
+      if (!target) {
+        throw new Error(`Cannot edit Tonight: Day ${dayIndex + 1} is missing.`);
+      }
+      if (target.unlockAt <= Date.now()) {
+        throw new Error(`Cannot edit Tonight: Day ${dayIndex + 1} has already unlocked.`);
+      }
+      const nextTonight = normalizeTonightEntries(tonight);
+      tx.update(eventRef, {
+        days: current.map((d) => (d.index === dayIndex ? { ...d, tonight: nextTonight } : d)),
+        ...scheduleEditWindow(current, dayIndex),
+      });
     });
   });
 };
@@ -798,12 +918,16 @@ export type ResnapshotDayResult =
  * mistake. Follows the `submitBugReport` callable shape in `data/bugReports.ts`.
  */
 export async function unlockDayNow(dayIndex: number): Promise<UnlockDayNowResult> {
-  const callable = httpsCallable<{ eventId: string; dayIndex: number }, { result: UnlockDayNowResult }>(
-    functions,
-    'unlockDayNow',
-  );
-  const res = await callable({ eventId: EVENT_ID, dayIndex });
-  return res.data.result;
+  const action = captureAdmin(undefined, EVENT_ID);
+  const { functions } = action;
+  return action.guard(async () => {
+    const callable = httpsCallable<{ eventId: string; dayIndex: number }, { result: UnlockDayNowResult }>(
+      functions,
+      'unlockDayNow',
+    );
+    const res = await action.guard(() => callable({ eventId: action.eventId, dayIndex }));
+    return res.data.result;
+  });
 }
 
 /**
@@ -816,12 +940,16 @@ export async function unlockDayNow(dayIndex: number): Promise<UnlockDayNowResult
  * gets `has-boards` and no change). Scoped to `EVENT_ID` like every write here.
  */
 export async function resnapshotDayNow(dayIndex: number): Promise<ResnapshotDayResult> {
-  const callable = httpsCallable<
-    { eventId: string; dayIndex: number; resnapshot: true },
-    { result: ResnapshotDayResult }
-  >(functions, 'unlockDayNow');
-  const res = await callable({ eventId: EVENT_ID, dayIndex, resnapshot: true });
-  return res.data.result;
+  const action = captureAdmin(undefined, EVENT_ID);
+  const { functions } = action;
+  return action.guard(async () => {
+    const callable = httpsCallable<
+      { eventId: string; dayIndex: number; resnapshot: true },
+      { result: ResnapshotDayResult }
+    >(functions, 'unlockDayNow');
+    const res = await action.guard(() => callable({ eventId: action.eventId, dayIndex, resnapshot: true }));
+    return res.data.result;
+  });
 }
 
 // The Admin ban (#108): add/remove a uid on the event doc's `bannedUids` roster —
@@ -850,8 +978,20 @@ export async function resnapshotDayNow(dayIndex: number): Promise<ResnapshotDayR
 // gated — it removes ANY uid including a sentinel, so an admin who banned 'seed' on
 // a pre-fix build (or by any other means) can always recover the pool.
 export const banUser = (uid: string): Promise<void> =>
-  isSystemAuthor(uid) ? Promise.resolve() : updateDoc(evt(), { bannedUids: arrayUnion(uid) });
-export const unbanUser = (uid: string) => updateDoc(evt(), { bannedUids: arrayRemove(uid) });
+  {
+  const action = captureAdmin(undefined, EVENT_ID);
+  const { evt } = action;
+  return action.guard(async () => {
+    return isSystemAuthor(uid) ? Promise.resolve() : action.guard(() => updateDoc(evt(), { bannedUids: arrayUnion(uid) }));
+  });
+};
+export const unbanUser = (uid: string) => {
+  const action = captureAdmin(undefined, EVENT_ID);
+  const { evt } = action;
+  return action.guard(async () => {
+    return action.guard(() => updateDoc(evt(), { bannedUids: arrayRemove(uid) }));
+  });
+};
 
 /** What the archive's FIRST write reports back — shutting the Event to gameplay
  *  so the freeze has something that has stopped moving to land on. */
@@ -1086,38 +1226,42 @@ function nextArchiveGeneration(stored: unknown): number {
  * happily succeed at exactly the write the condition exists to refuse.
  */
 export async function beginArchive(eventId: string = EVENT_ID): Promise<BeginArchiveOutcome> {
-  const eventRef = evt(eventId);
-  return runTransaction(db, async (tx): Promise<BeginArchiveOutcome> => {
-    const snap = await tx.get(eventRef);
-    if (!snap.exists()) return { result: 'no-event', token: null, created: false, eventId };
-    const data = snap.data() as Partial<EventDoc>;
-    if (data.status === 'archived') {
-      return { result: 'already-archived', token: null, created: false, eventId };
-    }
-    // JOINED, not created: the Event was already closing under a generation
-    // this build can bind to, so that generation stands and this call owns
-    // nothing (#1142 item 6). The token is restated rather than left alone so
-    // the write shape is the same from either state.
-    const stored = data.archiveToken;
-    if (data.archiving === true && usableArchiveToken(stored)) {
-      tx.update(eventRef, { archiving: true, archiveToken: stored });
-      return { result: 'closing', token: stored, created: false, eventId };
-    }
-    // A closing Event carrying no USABLE generation is not a join — there is no
-    // quiesce this build could have bound to, and the rules refuse the flip
-    // from an unidentified one — so minting here opens a new generation and
-    // this call owns it.
-    //
-    // MINTED FROM THE STORED VALUE, INSIDE THIS TRANSACTION, because the
-    // generation must strictly exceed the one on the document (Phase 4b P1 on
-    // PR #1157, run 4). The transaction is what makes `stored + 1` safe against
-    // two Admins closing at once: both read the same document, so the loser
-    // re-runs against the winner's value instead of writing the same counter
-    // twice. A random id needed no read and bought no freshness — the rules
-    // could only tell it apart from the ONE token still stored.
-    const token = nextArchiveGeneration(stored);
-    tx.update(eventRef, { archiving: true, archiveToken: token });
-    return { result: 'closing', token, created: true, eventId };
+  const action = captureAdmin(undefined, eventId);
+  const { evt } = action;
+  return action.guard(async () => {
+    const eventRef = evt(eventId);
+    return action.transaction(async (tx): Promise<BeginArchiveOutcome> => {
+      const snap = await tx.get(eventRef);
+      if (!snap.exists()) return { result: 'no-event', token: null, created: false, eventId };
+      const data = snap.data() as Partial<EventDoc>;
+      if (data.status === 'archived') {
+        return { result: 'already-archived', token: null, created: false, eventId };
+      }
+      // JOINED, not created: the Event was already closing under a generation
+      // this build can bind to, so that generation stands and this call owns
+      // nothing (#1142 item 6). The token is restated rather than left alone so
+      // the write shape is the same from either state.
+      const stored = data.archiveToken;
+      if (data.archiving === true && usableArchiveToken(stored)) {
+        tx.update(eventRef, { archiving: true, archiveToken: stored });
+        return { result: 'closing', token: stored, created: false, eventId };
+      }
+      // A closing Event carrying no USABLE generation is not a join — there is no
+      // quiesce this build could have bound to, and the rules refuse the flip
+      // from an unidentified one — so minting here opens a new generation and
+      // this call owns it.
+      //
+      // MINTED FROM THE STORED VALUE, INSIDE THIS TRANSACTION, because the
+      // generation must strictly exceed the one on the document (Phase 4b P1 on
+      // PR #1157, run 4). The transaction is what makes `stored + 1` safe against
+      // two Admins closing at once: both read the same document, so the loser
+      // re-runs against the winner's value instead of writing the same counter
+      // twice. A random id needed no read and bought no freshness — the rules
+      // could only tell it apart from the ONE token still stored.
+      const token = nextArchiveGeneration(stored);
+      tx.update(eventRef, { archiving: true, archiveToken: token });
+      return { result: 'closing', token, created: true, eventId };
+    });
   });
 }
 
@@ -1172,17 +1316,21 @@ export async function abandonArchive(
    *  reopen a different Event (#1142 item 7). */
   eventId: string = EVENT_ID,
 ): Promise<AbandonArchiveResult> {
-  const eventRef = evt(eventId);
-  return runTransaction(db, async (tx): Promise<AbandonArchiveResult> => {
-    const snap = await tx.get(eventRef);
-    if (!snap.exists()) return 'no-event';
-    const data = snap.data() as Partial<EventDoc>;
-    if (data.status === 'archived') return 'already-archived';
-    if (expectedToken !== undefined && data.archiveToken !== expectedToken) {
-      return 'quiesce-changed';
-    }
-    tx.update(eventRef, { archiving: false });
-    return 'reopened';
+  const action = captureAdmin(undefined, eventId);
+  const { evt } = action;
+  return action.guard(async () => {
+    const eventRef = evt(eventId);
+    return action.transaction(async (tx): Promise<AbandonArchiveResult> => {
+      const snap = await tx.get(eventRef);
+      if (!snap.exists()) return 'no-event';
+      const data = snap.data() as Partial<EventDoc>;
+      if (data.status === 'archived') return 'already-archived';
+      if (expectedToken !== undefined && data.archiveToken !== expectedToken) {
+        return 'quiesce-changed';
+      }
+      tx.update(eventRef, { archiving: false });
+      return 'reopened';
+    });
   });
 }
 
@@ -1333,319 +1481,323 @@ export async function archiveEvent(
     beforeFinale?: boolean;
   } = {},
 ): Promise<ArchiveEventResult> {
-  // THE EVENT THIS CALL IS ABOUT, resolved ONCE and used for every read and the
-  // write (#1142 item 7). Everything below awaits, and `EVENT_ID` can move.
-  const eventId = params.eventId ?? EVENT_ID;
-  const eventRef = evt(eventId);
-  // Refused before anything is read rather than compared inside the transaction:
-  // a missing, non-integer or non-positive generation is not one this build can
-  // bind to, so there is nothing for the stored value to agree WITH — and the
-  // rules refuse the flip from an unidentified quiesce besides. `beginArchive`
-  // mints one, so reopening and archiving again is the way through.
-  if (!usableArchiveToken(token)) return 'quiesce-changed';
-  // The pre-read is FROM THE SERVER: a cache-sourced Event could still report
-  // the pre-quiesce state, and the Day count read off it decides which honour
-  // pins are fetched below.
-  //
-  // A read that does not answer is REPORTED, not thrown (CodeRabbit Major, PR
-  // #1162): the Event is already shut by the time this runs, and only a returned
-  // refusal reaches the console's reopen. `getDocFromServer` has no cache to fall
-  // back to by design, so an offline tab is exactly the case that lands here.
-  const preRead = await archiveRead(() => getDocFromServer(eventRef));
-  if (!preRead.ok) return 'read-failed:event';
-  const pre = preRead.value;
-  if (!pre.exists()) return 'no-event';
-  const preData = pre.data() as Partial<EventDoc>;
-  if (preData.status === 'archived') return 'already-archived';
-  if (preData.archiving !== true) return 'not-closing';
-  // The binding, checked BEFORE the reads as well as inside the transaction.
-  // Every read below describes the Event as it stands under THIS closing state;
-  // taking them against a generation that has already moved would spend four
-  // round trips to build a record the commit must refuse anyway.
-  if (preData.archiveToken !== token) return 'quiesce-changed';
-  // …and the CONFIGURATION those reads are about to be taken under (Codex P2,
-  // PR #1139). The quiesce shuts gameplay, not administration, so an Admin can
-  // still change the Event between this read and the commit — and the drain gate
-  // below is evaluated against THIS document while the record is built against
-  // the transaction's. A `claimMode` flipped from `honor` afterwards turns a gate
-  // that passed vacuously into a queue full of Claims the freeze has just made
-  // unresolvable; an edited `days` leaves the record built from honour pins
-  // fetched for a schedule that no longer exists. The transaction refuses rather
-  // than combining the two.
-  //
-  // FINGERPRINTED WITHOUT THROWING (Codex P2 on PR #1162). This line runs after
-  // the close and outside every `archiveRead` wrapper, over a RAW document whose
-  // `days` no rules arm validates — so a value the canonicaliser cannot walk
-  // threw out of `archiveEvent` entirely, skipping the console's automatic reopen
-  // and stranding a live Event shut with no record and no explanation. The
-  // canonicaliser is cycle-safe and Firestore-aware now; this is what makes a
-  // cause nobody anticipated a refusal the console can clean up after instead.
-  const configAtRead = archiveSnapshotFingerprintOrNull(preData);
-  if (configAtRead === null) return 'config-unreadable';
+  const action = captureAdmin(undefined, params.eventId ?? EVENT_ID);
+  const { evt, claimsRaw, playersCol, dayMetaRef } = action;
+  return action.guard(async () => {
+    // THE EVENT THIS CALL IS ABOUT, resolved ONCE and used for every read and the
+    // write (#1142 item 7). Everything below awaits, and `EVENT_ID` can move.
+    const eventId = action.eventId;
+    const eventRef = evt(eventId);
+    // Refused before anything is read rather than compared inside the transaction:
+    // a missing, non-integer or non-positive generation is not one this build can
+    // bind to, so there is nothing for the stored value to agree WITH — and the
+    // rules refuse the flip from an unidentified quiesce besides. `beginArchive`
+    // mints one, so reopening and archiving again is the way through.
+    if (!usableArchiveToken(token)) return 'quiesce-changed';
+    // The pre-read is FROM THE SERVER: a cache-sourced Event could still report
+    // the pre-quiesce state, and the Day count read off it decides which honour
+    // pins are fetched below.
+    //
+    // A read that does not answer is REPORTED, not thrown (CodeRabbit Major, PR
+    // #1162): the Event is already shut by the time this runs, and only a returned
+    // refusal reaches the console's reopen. `getDocFromServer` has no cache to fall
+    // back to by design, so an offline tab is exactly the case that lands here.
+    const preRead = await archiveRead(() => action.guard(() => getDocFromServer(eventRef)));
+    if (!preRead.ok) return 'read-failed:event';
+    const pre = preRead.value;
+    if (!pre.exists()) return 'no-event';
+    const preData = pre.data() as Partial<EventDoc>;
+    if (preData.status === 'archived') return 'already-archived';
+    if (preData.archiving !== true) return 'not-closing';
+    // The binding, checked BEFORE the reads as well as inside the transaction.
+    // Every read below describes the Event as it stands under THIS closing state;
+    // taking them against a generation that has already moved would spend four
+    // round trips to build a record the commit must refuse anyway.
+    if (preData.archiveToken !== token) return 'quiesce-changed';
+    // …and the CONFIGURATION those reads are about to be taken under (Codex P2,
+    // PR #1139). The quiesce shuts gameplay, not administration, so an Admin can
+    // still change the Event between this read and the commit — and the drain gate
+    // below is evaluated against THIS document while the record is built against
+    // the transaction's. A `claimMode` flipped from `honor` afterwards turns a gate
+    // that passed vacuously into a queue full of Claims the freeze has just made
+    // unresolvable; an edited `days` leaves the record built from honour pins
+    // fetched for a schedule that no longer exists. The transaction refuses rather
+    // than combining the two.
+    //
+    // FINGERPRINTED WITHOUT THROWING (Codex P2 on PR #1162). This line runs after
+    // the close and outside every `archiveRead` wrapper, over a RAW document whose
+    // `days` no rules arm validates — so a value the canonicaliser cannot walk
+    // threw out of `archiveEvent` entirely, skipping the console's automatic reopen
+    // and stranding a live Event shut with no record and no explanation. The
+    // canonicaliser is cycle-safe and Firestore-aware now; this is what makes a
+    // cause nobody anticipated a refusal the console can clean up after instead.
+    const configAtRead = archiveSnapshotFingerprintOrNull(preData);
+    if (configAtRead === null) return 'config-unreadable';
 
-  // THE DRAIN GATE, RE-TAKEN FROM THE SERVER AFTER THE CLOSE (Codex P2, PR
-  // #1139). The console's own gate reads a passive listener, and a Claim can
-  // commit between that listener's last render and the closing write — the exact
-  // window the quiesce exists to have. Nothing downstream would notice: the
-  // freeze never reads the Claim collection, so an `admin_confirmed` Claim left
-  // pending here is pending FOREVER, behind a Confirm/Reject pair whose Board and
-  // Player writes the freeze now denies.
-  //
-  // Re-read the same way the roster is, and for the same reason: this read is
-  // issued after the closing write is acknowledged, so its result is the state of
-  // a collection that can no longer change. Refused rather than fixed — resolving
-  // a Claim from here would be the gameplay write the freeze just denied — and
-  // the console reopens play when it was this call that shut the Event.
-  //
-  // The gate reads a NORMALIZED Claim Mode (Codex P2, PR #1139). This pre-read is
-  // deliberately converter-free — the freeze reads the STORED document, the
-  // `setDayTheme`/`confirmClaim` discipline — but `claimsQueueOpen` compares
-  // against the CURRENT contract, and an Event seeded or written before the
-  // rename persists `'verified'` for what is now `'admin_confirmed'`. The console
-  // gates on the converted document (`eventConverter` runs `migrateClaimMode`),
-  // so on such an Event the two halves of one gate read the same queue and
-  // disagreed: the console counted the pending Claims and refused to arm, while
-  // this take saw a mode that is not `admin_confirmed`, passed vacuously, and
-  // would have frozen the Event over exactly the Claims the gate exists to drain.
-  //
-  // AND A QUEUE THAT WILL NOT ANSWER IS NOT A DRAINED QUEUE (CodeRabbit Major,
-  // PR #1162). This is the read a caller who has just lost their admin claim
-  // gets `permission-denied` on, and the gate reads `.docs` off the result — so
-  // an unanswered read is refused by name rather than allowed to throw past the
-  // console's cleanup.
-  const preClaimMode = migrateClaimMode(preData.claimMode);
-  const claimsRead = await archiveRead(() => getDocsFromServer(claimsRaw(eventId)));
-  if (!claimsRead.ok) return 'read-failed:claims';
-  if (
-    claimsAwaitingAdmin(
-      { claimMode: preClaimMode },
-      claimsRead.value.docs.map((d) => d.data() as ClaimDoc),
-    ).length > 0
-  ) {
-    return 'claims-pending';
-  }
+    // THE DRAIN GATE, RE-TAKEN FROM THE SERVER AFTER THE CLOSE (Codex P2, PR
+    // #1139). The console's own gate reads a passive listener, and a Claim can
+    // commit between that listener's last render and the closing write — the exact
+    // window the quiesce exists to have. Nothing downstream would notice: the
+    // freeze never reads the Claim collection, so an `admin_confirmed` Claim left
+    // pending here is pending FOREVER, behind a Confirm/Reject pair whose Board and
+    // Player writes the freeze now denies.
+    //
+    // Re-read the same way the roster is, and for the same reason: this read is
+    // issued after the closing write is acknowledged, so its result is the state of
+    // a collection that can no longer change. Refused rather than fixed — resolving
+    // a Claim from here would be the gameplay write the freeze just denied — and
+    // the console reopens play when it was this call that shut the Event.
+    //
+    // The gate reads a NORMALIZED Claim Mode (Codex P2, PR #1139). This pre-read is
+    // deliberately converter-free — the freeze reads the STORED document, the
+    // `setDayTheme`/`confirmClaim` discipline — but `claimsQueueOpen` compares
+    // against the CURRENT contract, and an Event seeded or written before the
+    // rename persists `'verified'` for what is now `'admin_confirmed'`. The console
+    // gates on the converted document (`eventConverter` runs `migrateClaimMode`),
+    // so on such an Event the two halves of one gate read the same queue and
+    // disagreed: the console counted the pending Claims and refused to arm, while
+    // this take saw a mode that is not `admin_confirmed`, passed vacuously, and
+    // would have frozen the Event over exactly the Claims the gate exists to drain.
+    //
+    // AND A QUEUE THAT WILL NOT ANSWER IS NOT A DRAINED QUEUE (CodeRabbit Major,
+    // PR #1162). This is the read a caller who has just lost their admin claim
+    // gets `permission-denied` on, and the gate reads `.docs` off the result — so
+    // an unanswered read is refused by name rather than allowed to throw past the
+    // console's cleanup.
+    const preClaimMode = migrateClaimMode(preData.claimMode);
+    const claimsRead = await archiveRead(() => action.guard(() => getDocsFromServer(claimsRaw(eventId))));
+    if (!claimsRead.ok) return 'read-failed:claims';
+    if (
+      claimsAwaitingAdmin(
+        { claimMode: preClaimMode },
+        claimsRead.value.docs.map((d) => d.data() as ClaimDoc),
+      ).length > 0
+    ) {
+      return 'claims-pending';
+    }
 
-  // Everything the record freezes, read after the close. `playersCol()` /
-  // `dayMetaRef()` are the same converter-attached references the live
-  // subscriptions use, so the rows are the identical shape — this is the live
-  // Leaderboard's own data, read once more at the one moment it is guaranteed to
-  // have stopped moving. Both take the captured `eventId` (#1142 item 7).
-  //
-  // WRAPPED SEPARATELY, and still issued together (CodeRabbit Major, PR #1162).
-  // Each half is guarded on its own so the refusal can name WHICH one did not
-  // answer — a roster read that fails is a connection problem, a Day pin that
-  // fails can be a schedule pointing at a path that is not there — and because
-  // neither wrapper ever rejects, the `Promise.all` cannot either: the two reads
-  // still overlap on the wire, and neither can leave the other's rejection
-  // unhandled.
-  // THE SCHEDULE IS NORMALISED BEFORE ITS INDEXES ARE READ (Codex P2 on PR
-  // #1162). This is a RAW read, and `EventDoc.days` is admin-written with no
-  // per-entry validation in its rules arm — an older seed, an Admin-SDK repair
-  // or a console hand edit can leave a `null` in the list. `eventConverter`
-  // tolerates exactly that (`migrateDayFields` treats a nullish entry as `{}`),
-  // so the Admin console renders, previews and ARMS over such an Event
-  // perfectly happily — and then this line dereferenced the entry directly and
-  // threw. The throw lands after `beginArchive` has closed play and outside
-  // every `archiveRead` wrapper, so `archiveEvent` REJECTED instead of
-  // returning a refusal, the console's automatic reopen never ran, and the
-  // Admin was left with a generic failure pill over an Event nobody could play
-  // on: the one outcome the two-write protocol exists to make impossible.
-  //
-  // Normalised through the converter's OWN helper rather than a local guard, so
-  // the raw read and the console agree about what a Day is — the same reason the
-  // record's derivations below run on `migrateDayFields` output.
-  const scheduleDays = (Array.isArray(preData.days) ? preData.days : []).map(migrateDayFields);
-  // …and an entry that still has no usable index is REFUSED rather than read.
-  // `migrateDayFields` defaults the fields it knows about; `index` is not one of
-  // them, because there is nothing to default a Day's identity to — it is the
-  // `days/{dayIndex}` path segment every honour pin below is addressed by, so a
-  // missing or fractional one would read a document at `days/undefined` and
-  // freeze whatever it found (or did not) as that Day's honour. A typed refusal
-  // is what the console's cleanup keys on, so this reopens play exactly as the
-  // read refusals do.
-  //
-  // AN INTEGER OUTSIDE THE SUPPORTED RANGE IS THE SAME REFUSAL, and the more
-  // dangerous half (Codex P2 on PR #1162, round 7). `-1`, `MAX_DAYS` and an unsafe
-  // large integer read a document that genuinely EXISTS as a path — the honour
-  // pin fetch below succeeds, quietly, at `days/-1/meta/-1` — while naming no Day
-  // the `DayDef` contract has, so a hand-edited or legacy schedule could freeze
-  // an `ArchivedDayHonor` labelled `D0` or `D{MAX_DAYS + 1}` into a `dailyHonors` list the
-  // rules cannot look inside. `usableDayIndexes` asks `supportedDayIndex` of every
-  // entry, which is the one place the range is stated.
-  //
-  // A REPEATED index is refused by the same clause (Codex P2 on PR #1162). It is
-  // readable — both entries address a real document — but the two reads are not
-  // two Days: `dayMetas` below is keyed by index, so the second snapshot simply
-  // overwrites the first, while `draftEventArchive`'s honour selection flat-maps
-  // over the schedule ENTRIES and emits that one Day's honour once per entry. The
-  // record would then carry the same `dayIndex` twice, permanently, against a
-  // `dailyHonors` contract that is one honour per Day — and `completeArchiveRecord`
-  // cannot look inside a list to refuse it. Asked through the shared
-  // `usableDayIndexes`, so this refusal and the console's own arming gate cannot
-  // drift apart; a unique NON-CONTIGUOUS schedule (a one-Day Event at index 4)
-  // stays perfectly usable, which is the whole point of keying on `DayDef.index`.
-  const dayIndexes = scheduleDays.map((d) => d.index);
-  if (!usableDayIndexes(dayIndexes)) return 'schedule-unusable';
-  const [rosterRead, metaRead] = await Promise.all([
-    archiveRead(() => getDocsFromServer(playersCol(eventId))),
-    archiveRead(() =>
-      Promise.all(dayIndexes.map((index) => getDocFromServer(dayMetaRef(index, eventId)))),
-    ),
-  ]);
-  if (!rosterRead.ok) return 'read-failed:roster';
-  if (!metaRead.ok) return 'read-failed:day-meta';
-  const players = rosterRead.value.docs.map((d) => d.data());
-  const dayMetas = new Map<number, DayMetaDoc>();
-  metaRead.value.forEach((snap, i) => {
-    if (snap.exists()) dayMetas.set(dayIndexes[i], snap.data());
-  });
+    // Everything the record freezes, read after the close. `playersCol()` /
+    // `dayMetaRef()` are the same converter-attached references the live
+    // subscriptions use, so the rows are the identical shape — this is the live
+    // Leaderboard's own data, read once more at the one moment it is guaranteed to
+    // have stopped moving. Both take the captured `eventId` (#1142 item 7).
+    //
+    // WRAPPED SEPARATELY, and still issued together (CodeRabbit Major, PR #1162).
+    // Each half is guarded on its own so the refusal can name WHICH one did not
+    // answer — a roster read that fails is a connection problem, a Day pin that
+    // fails can be a schedule pointing at a path that is not there — and because
+    // neither wrapper ever rejects, the `Promise.all` cannot either: the two reads
+    // still overlap on the wire, and neither can leave the other's rejection
+    // unhandled.
+    // THE SCHEDULE IS NORMALISED BEFORE ITS INDEXES ARE READ (Codex P2 on PR
+    // #1162). This is a RAW read, and `EventDoc.days` is admin-written with no
+    // per-entry validation in its rules arm — an older seed, an Admin-SDK repair
+    // or a console hand edit can leave a `null` in the list. `eventConverter`
+    // tolerates exactly that (`migrateDayFields` treats a nullish entry as `{}`),
+    // so the Admin console renders, previews and ARMS over such an Event
+    // perfectly happily — and then this line dereferenced the entry directly and
+    // threw. The throw lands after `beginArchive` has closed play and outside
+    // every `archiveRead` wrapper, so `archiveEvent` REJECTED instead of
+    // returning a refusal, the console's automatic reopen never ran, and the
+    // Admin was left with a generic failure pill over an Event nobody could play
+    // on: the one outcome the two-write protocol exists to make impossible.
+    //
+    // Normalised through the converter's OWN helper rather than a local guard, so
+    // the raw read and the console agree about what a Day is — the same reason the
+    // record's derivations below run on `migrateDayFields` output.
+    const scheduleDays = (Array.isArray(preData.days) ? preData.days : []).map(migrateDayFields);
+    // …and an entry that still has no usable index is REFUSED rather than read.
+    // `migrateDayFields` defaults the fields it knows about; `index` is not one of
+    // them, because there is nothing to default a Day's identity to — it is the
+    // `days/{dayIndex}` path segment every honour pin below is addressed by, so a
+    // missing or fractional one would read a document at `days/undefined` and
+    // freeze whatever it found (or did not) as that Day's honour. A typed refusal
+    // is what the console's cleanup keys on, so this reopens play exactly as the
+    // read refusals do.
+    //
+    // AN INTEGER OUTSIDE THE SUPPORTED RANGE IS THE SAME REFUSAL, and the more
+    // dangerous half (Codex P2 on PR #1162, round 7). `-1`, `MAX_DAYS` and an unsafe
+    // large integer read a document that genuinely EXISTS as a path — the honour
+    // pin fetch below succeeds, quietly, at `days/-1/meta/-1` — while naming no Day
+    // the `DayDef` contract has, so a hand-edited or legacy schedule could freeze
+    // an `ArchivedDayHonor` labelled `D0` or `D{MAX_DAYS + 1}` into a `dailyHonors` list the
+    // rules cannot look inside. `usableDayIndexes` asks `supportedDayIndex` of every
+    // entry, which is the one place the range is stated.
+    //
+    // A REPEATED index is refused by the same clause (Codex P2 on PR #1162). It is
+    // readable — both entries address a real document — but the two reads are not
+    // two Days: `dayMetas` below is keyed by index, so the second snapshot simply
+    // overwrites the first, while `draftEventArchive`'s honour selection flat-maps
+    // over the schedule ENTRIES and emits that one Day's honour once per entry. The
+    // record would then carry the same `dayIndex` twice, permanently, against a
+    // `dailyHonors` contract that is one honour per Day — and `completeArchiveRecord`
+    // cannot look inside a list to refuse it. Asked through the shared
+    // `usableDayIndexes`, so this refusal and the console's own arming gate cannot
+    // drift apart; a unique NON-CONTIGUOUS schedule (a one-Day Event at index 4)
+    // stays perfectly usable, which is the whole point of keying on `DayDef.index`.
+    const dayIndexes = scheduleDays.map((d) => d.index);
+    if (!usableDayIndexes(dayIndexes)) return 'schedule-unusable';
+    const [rosterRead, metaRead] = await Promise.all([
+      archiveRead(() => action.guard(() => getDocsFromServer(playersCol(eventId)))),
+      archiveRead(() =>
+        Promise.all(dayIndexes.map((index) => action.guard(() => getDocFromServer(dayMetaRef(index, eventId))))),
+      ),
+    ]);
+    if (!rosterRead.ok) return 'read-failed:roster';
+    if (!metaRead.ok) return 'read-failed:day-meta';
+    const players = rosterRead.value.docs.map((d) => d.data());
+    const dayMetas = new Map<number, DayMetaDoc>();
+    metaRead.value.forEach((snap, i) => {
+      if (snap.exists()) dayMetas.set(dayIndexes[i], snap.data());
+    });
 
-  // THE TRANSACTIONAL EVENT RE-READ, CLASSIFIED WITHOUT COSTING ITS RETRIES
-  // (CodeRabbit Major, PR #1162). `runTransaction` rejects for two quite
-  // different reasons — the read did not answer, or the WRITE did not land — and
-  // only the first may become a refusal: swallowing a failed commit would report
-  // "nothing was frozen" about an archive whose outcome this call does not know.
-  // Catching inside the callback would also spend the SDK's own retry, which is
-  // the thing that gets a transient read through. So the read is flagged and
-  // RE-THROWN — the SDK retries exactly as it did before, the flag is reset at
-  // the top of every attempt so only the LAST one counts — and the classification
-  // happens out here, on a transaction that has already given up and is therefore
-  // known to have written nothing.
-  let lastTxFailureWasTheRead = false;
-  return runTransaction(db, async (tx): Promise<ArchiveEventResult> => {
-    lastTxFailureWasTheRead = false;
-    // FLAGGED AND RE-THROWN, never swallowed here. The ORIGINAL error is what
-    // leaves the callback, so the SDK still decides its own retry from it; the
-    // flag only records that the last thing to fail in THIS attempt was the read,
-    // and the write below is outside the only `catch` in this transaction.
-    const snap = await tx.get(eventRef).catch((err: unknown) => {
-      lastTxFailureWasTheRead = true;
+    // THE TRANSACTIONAL EVENT RE-READ, CLASSIFIED WITHOUT COSTING ITS RETRIES
+    // (CodeRabbit Major, PR #1162). `runTransaction` rejects for two quite
+    // different reasons — the read did not answer, or the WRITE did not land — and
+    // only the first may become a refusal: swallowing a failed commit would report
+    // "nothing was frozen" about an archive whose outcome this call does not know.
+    // Catching inside the callback would also spend the SDK's own retry, which is
+    // the thing that gets a transient read through. So the read is flagged and
+    // RE-THROWN — the SDK retries exactly as it did before, the flag is reset at
+    // the top of every attempt so only the LAST one counts — and the classification
+    // happens out here, on a transaction that has already given up and is therefore
+    // known to have written nothing.
+    let lastTxFailureWasTheRead = false;
+    return action.transaction(async (tx): Promise<ArchiveEventResult> => {
+      lastTxFailureWasTheRead = false;
+      // FLAGGED AND RE-THROWN, never swallowed here. The ORIGINAL error is what
+      // leaves the callback, so the SDK still decides its own retry from it; the
+      // flag only records that the last thing to fail in THIS attempt was the read,
+      // and the write below is outside the only `catch` in this transaction.
+      const snap = await tx.get(eventRef).catch((err: unknown) => {
+        lastTxFailureWasTheRead = true;
+        throw err;
+      });
+      if (!snap.exists()) return 'no-event';
+      const data = snap.data() as Partial<EventDoc>;
+      if (data.status === 'archived') return 'already-archived';
+      // Re-checked HERE, inside the transaction that writes: an Admin (or another
+      // console) can abandon the archive between the reads above and this commit,
+      // and an Event whose gameplay reopened in that window is one whose roster may
+      // have moved again. Refuse rather than freeze what may already be stale.
+      if (data.archiving !== true) return 'not-closing';
+      // …and the flag alone cannot see the ABA case (Codex P1, PR #1139). Play can
+      // be REOPENED and SHUT AGAIN inside the window the reads above occupy:
+      // gameplay resumes, Marks land, Claims are created, and a second quiesce
+      // begins — and the document this transaction reads then carries an
+      // `archiving: true` indistinguishable from the one the reads were taken
+      // under. Committing here would freeze standings that predate the reopened
+      // play, permanently, and the record is what the rules lock. Refused, never
+      // repaired, and deliberately WITHOUT reopening play: the closing state in
+      // force belongs to whoever took it.
+      if (data.archiveToken !== token) return 'quiesce-changed';
+      // The snapshot-defining configuration, held across the same window. Every
+      // read above describes the Event under `configAtRead`; this record would be
+      // built under whatever the transaction found. `bannedUids` is deliberately
+      // outside the fingerprint — moderation stays open through the quiesce on
+      // purpose, and a ban is applied to the rows the record keeps rather than
+      // deciding which rows were read (see `archiveSnapshotFingerprint`).
+      //
+      // …and the transactional side is fingerprinted the same way, for the same
+      // reason (Codex P2 on PR #1162). A throw here would leave the transaction
+      // rejecting, which the classification below reads as a failed COMMIT — the
+      // one outcome that must keep surfacing as a thrown failure — so an
+      // unfingerprintable document would be reported as an archive whose fate this
+      // call does not know, when in fact it wrote nothing at all.
+      const configNow = archiveSnapshotFingerprintOrNull(data);
+      if (configNow === null) return 'config-unreadable';
+      if (configNow !== configAtRead) return 'config-changed';
+      // THE FINALE GATE (#1151, routed here from #1150's review). The quiesce only
+      // DELAYS the finale beats — the freeze stamp, the podium Moment and the
+      // Most-Loved award are withheld while play is shut and land at the scheduled
+      // cutoff once it reopens — but `status: 'archived'` is irreversible, so an
+      // Event flipped before its Standings Freeze never receives them, and the
+      // record it freezes is one the podium never got to settle. Checked against
+      // the TRANSACTIONAL read, which is the state the flip actually lands on; a
+      // finale committing between the pre-read and here moves `frozenAt` and is
+      // caught by the fingerprint above first.
+      if (!params.beforeFinale && !finaleHasRun(data)) return 'finale-pending';
+      const archivedAt = params.now ?? Date.now();
+      const draft = draftEventArchive({
+        players,
+        event: {
+          // Frozen INTO the record, from the transactional read, so the archived
+          // Share Card is titled by the Event as it stood at the freeze rather than
+          // by a name an Admin can still edit afterwards (Codex P2, PR #1139).
+          name: data.name,
+          // NORMALIZED for the derivations, while the raw document above and below
+          // stays raw (Codex P2, PR #1139). The frozen honour chip's label comes
+          // from `dayHonorChipLabel`, which resolves the Day's theme emoji out of
+          // `THEMES` — and every LIVE surface hands that helper Days that have
+          // already been through `migrateDayFields` / `normalizeEventTheme`
+          // (`eventConverter`), while this writer holds the stored document. The
+          // two disagree on exactly the Days the freeze has to get right: an
+          // unknown persisted theme renders the Edition's default emoji live and NO
+          // emoji in the record, and an off-Edition theme renders the default live
+          // while the record freezes that other Theme's emoji. Either way the
+          // permanent label is not the one the last live strip showed, which is the
+          // whole promise `dayLabel` was stored to keep. Normalizing here also puts
+          // this writer's Tutorial-Day and freeze-boundary derivations on the same
+          // footing as the console preview's, which reads the converted document.
+          //
+          // Deliberately NOT applied to `archiveSnapshotFingerprint` (which
+          // compares two RAW reads against each other, so normalizing either side
+          // could only invent or hide a change) or to `existing` below (which is
+          // MEASURED, and what the write lands on is the stored document).
+          days: Array.isArray(data.days) ? data.days.map(migrateDayFields) : [],
+          bannedUids: Array.isArray(data.bannedUids) ? data.bannedUids : [],
+          frozenAt: data.frozenAt,
+          standingsFreezeAt: data.standingsFreezeAt,
+        },
+        dayMetas,
+        // Every Day's pin was read from the server above, so an absent pin is the
+        // server's answer rather than an unfilled cache — which is the one thing
+        // `dayMetasLoaded` exists to tell apart.
+        dayMetasLoaded: true,
+        archivedAt,
+        // The STORED document, so the size check measures what the write actually
+        // produces rather than the record alone (Codex P2, PR #1139). `data` is the
+        // raw transactional read — the same one this update is about to be applied
+        // to — so `days`, `bannedUids` and `mostLovedPhoto` are counted at the
+        // sizes they will really have.
+        existing: data as Readonly<Record<string, unknown>>,
+      });
+      // The last line of the same defence the Admin console applies BEFORE the
+      // quiesce (Codex P2, PR #1139). The console checks the record it previewed
+      // from the live subscriptions; this checks the one actually built from the
+      // server re-read, which is a different roster and can be a different size —
+      // and, since #1162, a different SHAPE too: `record-unwritable` is the draft
+      // saying `firestore.rules` would refuse this record, which is the one
+      // failure that would otherwise arrive as a REJECTED write on an Event this
+      // call has already shut. Reported verbatim, because every refusal the draft
+      // can name is an `ArchiveEventResult` member.
+      if (draft.refusal !== null) return draft.refusal;
+      tx.update(eventRef, {
+        status: 'archived',
+        archivedAt,
+        // The frozen record, written in the SAME update as the stamp it agrees
+        // with. `firestore.rules` requires it to be complete and locks it here.
+        archive: draft.archive,
+        // The quiesce is over. `status` carries the freeze from here, and unlike
+        // this flag it cannot be cleared.
+        archiving: false,
+        // The generation this flip was bound to, written to a FLIP-ONLY field so
+        // the RULES can hold the same binding this transaction just checked
+        // (Phase 4b P1 on PR #1157, run 3): the flip arm requires `archivedUnder`
+        // to be written by the flip and to equal the stored `archiveToken`.
+        // Restating `archiveToken` was no binding — the merged write inherits
+        // it — whereas a field the document does not carry until the flip cannot
+        // be inherited, so a stale or tokenless flip is refused.
+        archivedUnder: token,
+      });
+      return 'archived';
+      // Only the READ becomes a refusal. Anything else — the commit, above all —
+      // is the caller's to see, so the console's failure pill still means what it
+      // has always meant.
+    }).catch((err: unknown): ArchiveEventResult => {
+      if (lastTxFailureWasTheRead) return 'read-failed:event';
       throw err;
     });
-    if (!snap.exists()) return 'no-event';
-    const data = snap.data() as Partial<EventDoc>;
-    if (data.status === 'archived') return 'already-archived';
-    // Re-checked HERE, inside the transaction that writes: an Admin (or another
-    // console) can abandon the archive between the reads above and this commit,
-    // and an Event whose gameplay reopened in that window is one whose roster may
-    // have moved again. Refuse rather than freeze what may already be stale.
-    if (data.archiving !== true) return 'not-closing';
-    // …and the flag alone cannot see the ABA case (Codex P1, PR #1139). Play can
-    // be REOPENED and SHUT AGAIN inside the window the reads above occupy:
-    // gameplay resumes, Marks land, Claims are created, and a second quiesce
-    // begins — and the document this transaction reads then carries an
-    // `archiving: true` indistinguishable from the one the reads were taken
-    // under. Committing here would freeze standings that predate the reopened
-    // play, permanently, and the record is what the rules lock. Refused, never
-    // repaired, and deliberately WITHOUT reopening play: the closing state in
-    // force belongs to whoever took it.
-    if (data.archiveToken !== token) return 'quiesce-changed';
-    // The snapshot-defining configuration, held across the same window. Every
-    // read above describes the Event under `configAtRead`; this record would be
-    // built under whatever the transaction found. `bannedUids` is deliberately
-    // outside the fingerprint — moderation stays open through the quiesce on
-    // purpose, and a ban is applied to the rows the record keeps rather than
-    // deciding which rows were read (see `archiveSnapshotFingerprint`).
-    //
-    // …and the transactional side is fingerprinted the same way, for the same
-    // reason (Codex P2 on PR #1162). A throw here would leave the transaction
-    // rejecting, which the classification below reads as a failed COMMIT — the
-    // one outcome that must keep surfacing as a thrown failure — so an
-    // unfingerprintable document would be reported as an archive whose fate this
-    // call does not know, when in fact it wrote nothing at all.
-    const configNow = archiveSnapshotFingerprintOrNull(data);
-    if (configNow === null) return 'config-unreadable';
-    if (configNow !== configAtRead) return 'config-changed';
-    // THE FINALE GATE (#1151, routed here from #1150's review). The quiesce only
-    // DELAYS the finale beats — the freeze stamp, the podium Moment and the
-    // Most-Loved award are withheld while play is shut and land at the scheduled
-    // cutoff once it reopens — but `status: 'archived'` is irreversible, so an
-    // Event flipped before its Standings Freeze never receives them, and the
-    // record it freezes is one the podium never got to settle. Checked against
-    // the TRANSACTIONAL read, which is the state the flip actually lands on; a
-    // finale committing between the pre-read and here moves `frozenAt` and is
-    // caught by the fingerprint above first.
-    if (!params.beforeFinale && !finaleHasRun(data)) return 'finale-pending';
-    const archivedAt = params.now ?? Date.now();
-    const draft = draftEventArchive({
-      players,
-      event: {
-        // Frozen INTO the record, from the transactional read, so the archived
-        // Share Card is titled by the Event as it stood at the freeze rather than
-        // by a name an Admin can still edit afterwards (Codex P2, PR #1139).
-        name: data.name,
-        // NORMALIZED for the derivations, while the raw document above and below
-        // stays raw (Codex P2, PR #1139). The frozen honour chip's label comes
-        // from `dayHonorChipLabel`, which resolves the Day's theme emoji out of
-        // `THEMES` — and every LIVE surface hands that helper Days that have
-        // already been through `migrateDayFields` / `normalizeEventTheme`
-        // (`eventConverter`), while this writer holds the stored document. The
-        // two disagree on exactly the Days the freeze has to get right: an
-        // unknown persisted theme renders the Edition's default emoji live and NO
-        // emoji in the record, and an off-Edition theme renders the default live
-        // while the record freezes that other Theme's emoji. Either way the
-        // permanent label is not the one the last live strip showed, which is the
-        // whole promise `dayLabel` was stored to keep. Normalizing here also puts
-        // this writer's Tutorial-Day and freeze-boundary derivations on the same
-        // footing as the console preview's, which reads the converted document.
-        //
-        // Deliberately NOT applied to `archiveSnapshotFingerprint` (which
-        // compares two RAW reads against each other, so normalizing either side
-        // could only invent or hide a change) or to `existing` below (which is
-        // MEASURED, and what the write lands on is the stored document).
-        days: Array.isArray(data.days) ? data.days.map(migrateDayFields) : [],
-        bannedUids: Array.isArray(data.bannedUids) ? data.bannedUids : [],
-        frozenAt: data.frozenAt,
-        standingsFreezeAt: data.standingsFreezeAt,
-      },
-      dayMetas,
-      // Every Day's pin was read from the server above, so an absent pin is the
-      // server's answer rather than an unfilled cache — which is the one thing
-      // `dayMetasLoaded` exists to tell apart.
-      dayMetasLoaded: true,
-      archivedAt,
-      // The STORED document, so the size check measures what the write actually
-      // produces rather than the record alone (Codex P2, PR #1139). `data` is the
-      // raw transactional read — the same one this update is about to be applied
-      // to — so `days`, `bannedUids` and `mostLovedPhoto` are counted at the
-      // sizes they will really have.
-      existing: data as Readonly<Record<string, unknown>>,
-    });
-    // The last line of the same defence the Admin console applies BEFORE the
-    // quiesce (Codex P2, PR #1139). The console checks the record it previewed
-    // from the live subscriptions; this checks the one actually built from the
-    // server re-read, which is a different roster and can be a different size —
-    // and, since #1162, a different SHAPE too: `record-unwritable` is the draft
-    // saying `firestore.rules` would refuse this record, which is the one
-    // failure that would otherwise arrive as a REJECTED write on an Event this
-    // call has already shut. Reported verbatim, because every refusal the draft
-    // can name is an `ArchiveEventResult` member.
-    if (draft.refusal !== null) return draft.refusal;
-    tx.update(eventRef, {
-      status: 'archived',
-      archivedAt,
-      // The frozen record, written in the SAME update as the stamp it agrees
-      // with. `firestore.rules` requires it to be complete and locks it here.
-      archive: draft.archive,
-      // The quiesce is over. `status` carries the freeze from here, and unlike
-      // this flag it cannot be cleared.
-      archiving: false,
-      // The generation this flip was bound to, written to a FLIP-ONLY field so
-      // the RULES can hold the same binding this transaction just checked
-      // (Phase 4b P1 on PR #1157, run 3): the flip arm requires `archivedUnder`
-      // to be written by the flip and to equal the stored `archiveToken`.
-      // Restating `archiveToken` was no binding — the merged write inherits
-      // it — whereas a field the document does not carry until the flip cannot
-      // be inherited, so a stale or tokenless flip is refused.
-      archivedUnder: token,
-    });
-    return 'archived';
-    // Only the READ becomes a refusal. Anything else — the commit, above all —
-    // is the caller's to see, so the console's failure pill still means what it
-    // has always meant.
-  }).catch((err: unknown): ArchiveEventResult => {
-    if (lastTxFailureWasTheRead) return 'read-failed:event';
-    throw err;
   });
 }
 
@@ -1683,18 +1835,22 @@ export async function adminAddItem(
   spicy: boolean,
   pool: 'main' | 'easy' | 'closing',
 ): Promise<void> {
-  const t = text.trim();
-  if (!t) return;
-  const safeSpicy = pool === 'main' ? spicy : false;
-  await addDoc(itemsRaw(), {
-    text: t.slice(0, 80),
-    createdBy: uid,
-    createdAt: Date.now(),
-    isFreeSpace: false,
-    status: 'active',
-    reportCount: 0,
-    spicy: safeSpicy,
-    pool: persistedPool(pool),
+  const action = captureAdmin(uid, EVENT_ID);
+  const { itemsRaw } = action;
+  return action.guard(async () => {
+    const t = text.trim();
+    if (!t) return;
+    const safeSpicy = pool === 'main' ? spicy : false;
+    await action.guard(() => addDoc(itemsRaw(), {
+      text: t.slice(0, 80),
+      createdBy: uid,
+      createdAt: Date.now(),
+      isFreeSpace: false,
+      status: 'active',
+      reportCount: 0,
+      spicy: safeSpicy,
+      pool: persistedPool(pool),
+    }));
   });
 }
 
@@ -1715,16 +1871,20 @@ function itemTextLockedByUnlockedSnapshot(days: DayDef[] | undefined, id: string
  * cannot change text once an unlocked Day's snapshot can still deal that item.
  */
 export async function adminUpdateItemText(id: string, text: string): Promise<void> {
-  const eventId = EVENT_ID;
-  const t = text.trim();
-  if (!t) return;
-  const eventRef = evt(eventId);
-  const itemRef = item(id, eventId);
-  await runTransaction(db, async (tx) => {
-    const evSnap = await tx.get(eventRef);
-    const days = evSnap.exists() ? (evSnap.data().days as DayDef[] | undefined) : undefined;
-    if (itemTextLockedByUnlockedSnapshot(days, id)) return;
-    tx.update(itemRef, { text: t.slice(0, 80) });
+  const action = captureAdmin(undefined, EVENT_ID);
+  const { evt, item } = action;
+  return action.guard(async () => {
+    const eventId = action.eventId;
+    const t = text.trim();
+    if (!t) return;
+    const eventRef = evt(eventId);
+    const itemRef = item(id, eventId);
+    await action.transaction(async (tx) => {
+      const evSnap = await tx.get(eventRef);
+      const days = evSnap.exists() ? (evSnap.data().days as DayDef[] | undefined) : undefined;
+      if (itemTextLockedByUnlockedSnapshot(days, id)) return;
+      tx.update(itemRef, { text: t.slice(0, 80) });
+    });
   });
 }
 
@@ -1756,358 +1916,397 @@ async function resolve(
   adminUid: string,
   status: 'confirmed' | 'rejected',
 ): Promise<ResolveResult> {
-  // Claims can finish after hostname/Event resolution changes. Capture the
-  // acted Event before the first await and keep every read, write and durable
-  // analytics identity inside that one Event for the whole resolution.
-  const eventId = EVENT_ID;
-  // One stable identity outside the retryable transaction. The server trigger
-  // observes the actual pending→confirmed edge and ignores this token unless
-  // that edge commits, so a closed admin tab cannot lose or invent an event.
-  const analyticsRequest =
-    status === 'confirmed'
-      ? directMarkAnalyticsRequest({
-          cellIndex: c.cellIndex,
-          marked: true,
-          mode: 'admin_confirmed',
-          source: 'admin_confirm',
-          eventId,
-        })
-      : undefined;
-  // Daily mode (#246, Codex #247 P2): a claim created on a day-scoped board carries
-  // its `dayIndex`, so resolve against `days/{dayIndex}/boards/{uid}` and fold the
-  // owner's `dayStats[dayIndex]` — the SAME routing attachProof/setMark use. Legacy
-  // claims (no dayIndex) resolve the single event-level board. The tutorial set for
-  // the cruise-wide first-bingo exclusion is read once, outside the atomic txn
-  // (stable config, not part of the board/player invariant).
-  const daily = typeof c.dayIndex === 'number';
-  const boardRef = daily
-    ? dayBoard(c.dayIndex as number, c.uid, eventId)
-    : board(c.uid, eventId);
-  let isTutorialDay: ((i: number) => boolean) | undefined;
-  let isCeremonialDay: ((i: number) => boolean) | undefined;
-  // The claim owner's OTHER Day indexes (specs/echo-marks.md, #446): a CONFIRM
-  // is the moment an admin_confirmed Mark reaches confirmed, so it is the
-  // moment the Prompt echoes onto the owner's sibling Day Cards — inside this
-  // same transaction, each echoed board carrying its own markSeed, all stat
-  // deltas folded into the ONE player write below. A reject uses the same reads
-  // only to preserve a standing sibling's Tally marker; it never echoes.
-  let echoSiblingDays: number[] = [];
-  // #1360: an Event with Echo switched off (`settings.echoMarks: false`)
-  // confirms the Claim on its own card only. The sibling reads still happen —
-  // a reject uses them to keep a standing sibling's Tally marker alive.
-  let echoOn = true;
-  // The freeze gate is a GETTER re-evaluated inside the transaction callback
-  // (Codex P2 on #278 round 4): a resolve started seconds before 08:00 must
-  // fold with the post-boundary truth on retry/commit, not a pre-read capture.
-  let isStatsFrozen: () => boolean = () => false;
-  if (daily) {
-    const evSnap = await getDoc(evt(eventId));
-    const days = (evSnap?.data()?.days as DayDef[] | undefined) ?? [];
-    echoOn = echoMarksEnabled(evSnap?.data()?.settings as { echoMarks?: unknown } | undefined);
-    const set = tutorialDayIndexSet(days);
-    isTutorialDay = (i: number) => set.has(i);
-    // The freeze + ceremonial gates apply to the ADMIN resolve fold too (#265,
-    // Codex P1 on #278): a post-freeze claim approval must not move the frozen
-    // standings — it narrows to the bucket-only write below, exactly like
-    // setMark/attachProof — and the farewell bucket never enters the root sums.
-    const ceremonial = ceremonialDayIndexSet(days);
-    isCeremonialDay = (i: number) => ceremonial.has(i);
-    const frozenAt = evSnap?.data()?.frozenAt as number | undefined;
-    // The CONFIGURED freeze rides along with the stamp (ADR 0011): this
-    // transaction re-reads the RAW event doc, so nothing has resolved
-    // `standingsFreezeAt` for it and omitting it would silently fall back to
-    // the schedule derivation on an Event that states its own freeze.
-    const standingsFreezeAt = evSnap?.data()?.standingsFreezeAt as number | undefined;
-    isStatsFrozen = () => standingsFrozen({ frozenAt, standingsFreezeAt, days });
-    if (status === 'confirmed' || status === 'rejected') {
-      echoSiblingDays = days.map((d) => d.index).filter((i) => i !== (c.dayIndex as number));
-    }
-  }
-  return await runTransaction(db, async (tx): Promise<ResolveResult> => {
-    // Read board + player inside the txn so a concurrent mark/proof from the same
-    // player isn't clobbered by a stale snapshot (mirrors setMark/attachProof).
-    const bSnap = await tx.get(boardRef);
-    if (!bSnap.exists()) return { transitioned: false };
-    const pSnap = await tx.get(player(c.uid, eventId));
-    // The owner's sibling Day Cards, read in the SAME transaction (before any
-    // write, per Firestore's reads-first contract) so a retry re-derives the
-    // echo set from committed state (specs/echo-marks.md).
-    const echoSiblingRefs = echoSiblingDays.map((i) => dayBoard(i, c.uid, eventId));
-    const echoSiblingSnaps = await Promise.all(echoSiblingRefs.map((ref) => tx.get(ref)));
-    const boardData = bSnap.data() as { cells?: unknown; seed?: number };
-    const cells = cellsFromData(boardData.cells);
-    const next = transform(cells);
-    // The transition verdict (#721, Codex round 1 findings 3 & 5): computed
-    // from THIS transaction's own before/after reads of the claim's cell —
-    // see this function's doc comment. `isClaimCell` matches nothing when the
-    // claim's board has moved on (a reshuffle traded the cell's position
-    // away, or the index is simply stale); a `before` that is anything but
-    // 'pending' means either it was never pending (a legacy/malformed claim)
-    // or another confirm already credited it.
-    const claimCellBefore = cells.find((x) => isClaimCell(x, c));
-    const claimCellAfter = next.find((x) => isClaimCell(x, c));
-    const transitionedToConfirmed =
-      status === 'confirmed' && claimCellBefore?.status === 'pending' && claimCellAfter?.status === 'confirmed';
-    const bingoCount = completedLines(next).length;
-    const bingoTransition = completedLines(cells).length === 0 && bingoCount > 0;
-    const squares = countMarked(next);
-    const blackout = isBlackout(next);
-    const dayHonorName = honorDisplayName(c.displayName, pSnap.exists() ? pSnap.data().displayName : undefined);
-    // The prior first-bingo stamp is per-BOARD: in daily mode read the VIEWED Day's
-    // bucket, not the cruise-wide root (which would restamp a cross-Day time).
-    const priorDayStats = pSnap.exists() ? (pSnap.data().dayStats as DayStats | undefined) : undefined;
-    const existingFirst = daily
-      ? (priorDayStats?.[c.dayIndex as number]?.firstBingoAt ?? null)
-      : (pSnap.exists() ? ((pSnap.data().firstBingoAt as number | null) ?? null) : null);
-    // Clear the first-bingo stamp when the resolved board has no bingo (rejecting
-    // a claim can remove the last line); keep the earliest stamp otherwise.
-    const firstBingoAt = bingoCount > 0 ? (existingFirst ?? Date.now()) : null;
-    const shouldPinDayHonor =
-      daily &&
-      status === 'confirmed' &&
-      bingoTransition &&
-      typeof firstBingoAt === 'number' &&
-      dayHonorName !== null;
-    const metaRef = shouldPinDayHonor ? dayMeta(c.dayIndex as number, eventId) : null;
-    const metaSnap = metaRef ? await tx.get(metaRef) : null;
-
-    // Echo Marks (specs/echo-marks.md, #446): a CONFIRM is the moment the
-    // Prompt reaches confirmed, so echo it onto every sibling Day Card of the
-    // owner's that carries it unmarked — in this SAME transaction, each echoed
-    // board carrying ITS OWN markSeed. Echoed cells are born `confirmed`: the
-    // achievement was already admin-confirmed once, so they raise no second
-    // Claim. A reject writes no Echo, but uses the sibling snapshots below to
-    // preserve a marker while another confirmed carrier stands. Unmarking a
-    // rejected cell never cascades to prior echoes. No Feed Moment is posted
-    // from here — this runs on the ADMIN's device and a Moment must be written
-    // by its winner (see the spec's Moments residual for this mode) — but an
-    // echo-completed first line DOES pin its Day's write-once honor below
-    // (Codex P2 on #447), through the day-meta create rule's admin arm,
-    // attributed to the WINNER like the claim Day's own pin. Computed here —
-    // BEFORE any tx write — because the pin needs its meta doc read first
-    // (Firestore's reads-before-writes transaction contract).
-    const confirmedCell = status === 'confirmed' ? next.find((x) => isClaimCell(x, c)) : undefined;
-    const echoItemId =
-      echoOn && confirmedCell && !confirmedCell.free && confirmedCell.marked ? confirmedCell.itemId : null;
-    const echoBuckets: EchoBucket[] = [];
-    const echoWrites: Array<{ ref: ReturnType<typeof dayBoard>; set: ReturnType<typeof cellsMergeSet> }> = [];
-    const echoPinDays: number[] = [];
-    const echoNow = Date.now();
-    if (echoItemId && echoSiblingSnaps.length > 0) {
-      const achieved = new Set([echoItemId]);
-      echoSiblingSnaps.forEach((snap, idx) => {
-        if (!snap.exists()) return;
-        const sib = snap.data() as { cells?: unknown; seed?: number };
-        const sibCells = cellsFromData(sib.cells);
-        const rawRes = applyEchoes(sibCells, achieved, echoNow);
-        const res = {
-          ...rawRes,
-          cells: stampEchoAnalyticsTransitions({
-            cells: rawRes.cells,
-            changed: changedCells(sibCells, rawRes.cells),
+  const action = captureAdmin(adminUid, EVENT_ID);
+  const { evt, proof, claim, board, dayBoard, dayMeta, player, marker } = action;
+  return action.guard(async () => {
+    // Claims can finish after hostname/Event resolution changes. Capture the
+    // acted Event before the first await and keep every read, write and durable
+    // analytics identity inside that one Event for the whole resolution.
+    const eventId = action.eventId;
+    // One stable identity outside the retryable transaction. The server trigger
+    // observes the actual pending→confirmed edge and ignores this token unless
+    // that edge commits, so a closed admin tab cannot lose or invent an event.
+    const analyticsRequest =
+      status === 'confirmed'
+        ? directMarkAnalyticsRequest({
+            cellIndex: c.cellIndex,
+            marked: true,
+            mode: 'admin_confirmed',
+            source: 'admin_confirm',
             eventId,
-            uid: c.uid,
-            dayIndex: echoSiblingDays[idx],
-            boardSeed: typeof sib.seed === 'number' ? sib.seed : undefined,
-            trigger: 'admin_confirm',
-          }),
-        };
-        if (!res.changed) return;
-        echoWrites.push({
-          ref: echoSiblingRefs[idx],
-          // Per-cell merge (#457): only the newly echoed cells ride the write.
-          set: cellsMergeSet(cellsPatch(changedCells(sibCells, res.cells)), {
-            ...(typeof sib.seed === 'number' ? { markSeed: sib.seed } : {}),
-          }),
-        });
-        echoBuckets.push({
-          dayIndex: echoSiblingDays[idx],
-          bingoCount: res.bingoCount,
-          squaresMarked: res.squaresMarked,
-          blackout: res.blackout,
-        });
-        if (res.bingoTransition && dayHonorName) echoPinDays.push(echoSiblingDays[idx]);
-      });
-    }
-    // Echo Day-honor meta reads — the same post-freeze narrowing as the stats.
-    const pinnableEchoDays = echoPinDays.filter((d) => !isStatsFrozen() || !!isCeremonialDay?.(d));
-    const echoMetaSnaps: Array<{ dayIndex: number; exists: boolean }> = [];
-    for (const d of pinnableEchoDays) {
-      const snap = await tx.get(dayMeta(d, eventId));
-      echoMetaSnaps.push({ dayIndex: d, exists: snap.exists() });
-    }
-    // The claim's Proof, read LIVE and BEFORE any write (Firestore's
-    // reads-before-writes contract), so the publish below can be conditional on
-    // the state Cloud Vision may have moved it to since the Player submitted it
-    // (#133). `null` whenever there is nothing to publish — a reject, or a
-    // legacy claim carrying no proofId — so no other resolve pays for the read.
-    const claimProofRef = status === 'confirmed' && c.proofId ? proof(c.proofId, eventId) : null;
-    const claimProofSnap = claimProofRef ? await tx.get(claimProofRef) : null;
-
-    tx.set(
-      boardRef,
-      // Per-cell merge (#457): only the resolved claim's cell rides the write.
-      ...cellsMergeSet(cellsPatch(changedCells(cells, next)), {
-        ...(typeof boardData.seed === 'number' ? { markSeed: boardData.seed } : {}),
-        ...(transitionedToConfirmed && analyticsRequest ? { directAnalyticsRequest: analyticsRequest } : {}),
-      }),
-    );
-    for (const write of echoWrites) {
-      tx.set(write.ref, ...write.set);
-    }
-    for (const { dayIndex: echoDay, exists } of echoMetaSnaps) {
-      if (exists) continue; // the write-once honor is already claimed
-      tx.set(dayMeta(echoDay, eventId), {
-        firstBingo: {
-          uid: c.uid,
-          displayName: dayHonorName!,
-          at: echoNow,
-        },
-      });
-    }
-    if (daily) {
-      const siblingBlackout =
-        status === 'rejected' &&
-        pSnap.exists() &&
-        (pSnap.data() as Partial<PlayerDoc>).blackout === true &&
-        echoSiblingSnaps.some(
-          (snap) => snap.exists() && isBlackout(cellsFromData((snap.data() as { cells?: unknown }).cells)),
-        );
-      const playerWrite = foldDayStat({
-        priorDayStats,
-        dayIndex: c.dayIndex as number,
-        bucket: { bingoCount, squaresMarked: squares, firstBingoAt },
-        blackout: blackout || siblingBlackout,
-        isTutorialDay,
-        isCeremonialDay,
-      });
-      // The ONE aggregated player write: the claim Day's fold composed with
-      // every echoed board's bucket (specs/echo-marks.md § Scoring).
-      const aggregatedWrite =
-        echoBuckets.length > 0
-          ? foldEchoStats({
-              priorDayStats,
-              echoes: echoBuckets,
-              now: echoNow,
-              isTutorialDay,
-              isCeremonialDay,
-              // Preserve a blackout standing on an UNTOUCHED board (Codex P2
-              // on #447): a confirm only adds Marks, so the latch is safe.
-              priorBlackout: pSnap.exists() && (pSnap.data() as Partial<PlayerDoc>).blackout === true,
-              base: playerWrite,
-            })
-          : playerWrite;
-      const canWriteStats = !isStatsFrozen() || !!isCeremonialDay?.(c.dayIndex as number);
-      if (isStatsFrozen()) {
-        // Ceremonial-day-only post-freeze buckets, mirroring setMark (Codex P2
-        // on #278 round 2): any other Day's bucket would drift settled honors —
-        // echoed main-day buckets are dropped with the root aggregates.
-        const ceremonialBuckets: Record<number, StatWrite> = {};
-        for (const [k, v] of Object.entries(aggregatedWrite.dayStats)) {
-          if (isCeremonialDay?.(Number(k))) ceremonialBuckets[Number(k)] = v;
-        }
-        if (Object.keys(ceremonialBuckets).length > 0) {
-          tx.set(player(c.uid, eventId), { dayStats: ceremonialBuckets }, { merge: true });
-        }
-      } else {
-        tx.set(player(c.uid, eventId), aggregatedWrite, { merge: true });
-      }
-      if (canWriteStats && shouldPinDayHonor) {
-        if (metaRef && !metaSnap?.exists()) {
-          tx.set(metaRef, {
-            firstBingo: {
-              uid: c.uid,
-              displayName: dayHonorName!,
-              at: firstBingoAt,
-            },
-          });
-        }
-      }
-    } else {
-      tx.set(
-        player(c.uid, eventId),
-        { squaresMarked: squares, bingoCount, blackout, firstBingoAt },
-        { merge: true },
-      );
-    }
-    // Tally symmetry (ADR 0002): wherever a write flips a cell marked→unmarked it
-    // must delete that cell's per-Prompt Tally marker, and wherever it flips
-    // →marked it must ensure the marker (setMark and attachProof do). Rejecting a
-    // claim unmarks the claim's cell via the transform above, so diff old→new and
-    // delete the marker for exactly the cells that lost their mark — the SAME
-    // conditionality as the flip itself; without this, a rejected admin_confirmed
-    // claim would reverse the board + stats but leave the player in the Prompt's
-    // public count/who-list (Codex P2, PR #87). The transform is a positional map,
-    // so old/new align by index; the free centre (null itemId) never has a marker;
-    // confirming never unmarks, so this is a no-op for confirmClaim. tx.delete is
-    // a write, so the reads-before-writes transaction contract holds unchanged.
-    next.forEach((after, i) => {
-      const before = cells[i];
-      const siblingStillCarriesMarker = echoSiblingSnaps.some(
-        (snap) =>
-          snap.exists() &&
-          cellsFromData((snap.data() as { cells?: unknown }).cells).some(
-            (cell) => !cell.free && cell.marked && cell.itemId === before.itemId,
-          ),
-      );
-      if (before.marked && !after.marked && before.itemId && !siblingStillCarriesMarker) {
-        tx.delete(marker(before.itemId, c.uid, eventId));
-      }
-    });
-    tx.set(claim(c.id, eventId), { status, resolvedBy: adminUid }, { merge: true });
-    // Confirming an admin-confirmed claim publishes its proof, which was created 'pending'
-    // (admin-only readable) so it stayed hidden from the public feed until now. A
-    // rejected proof is left 'pending' (still admin-only) rather than exposed.
-    //
-    // UNLESS a server-authoritative safety hide stands on it (#133, Codex P1).
-    // Cloud Vision scans the uploaded object, so an admin_confirmed claim's Proof
-    // can be flagged and hidden BEFORE its claim is ever reviewed. Publishing it
-    // unconditionally would write `status: 'active'`, and active Proofs are
-    // outside `qualifiesForVisionHide` — so extreme/illegal media would go back
-    // in front of every Player (the re-hide arm takes it back down only while
-    // the marker stands, and only after the exposure), lifted by Confirm — a
-    // claim control, NOT the warned, explicit moderation Restore (ReviewQueue),
-    // which is the one place an admin may override an AI verdict, having been
-    // told what they are lifting. So the claim still resolves and the Mark is still confirmed —
-    // only the media stays hidden, and the queue row says so on the claim.
-    //
-    // `safetyHideStands` reads the SERVER's own record — `hideProofOnVisionFlag`'s
-    // `safetyHide` marker, and the `'flagged'` status only `moderateProof` writes
-    // — never the verdict string (Codex P1 round 2). The verdict's MEANING lives
-    // in the Functions allowlist, and Functions and this bundle deploy
-    // separately, so a client that re-derived it would publish a Proof hidden for
-    // a verdict its cached copy of the list had never heard of.
-    //
-    // The gate reads the LIVE snapshot, not the stale event that opened the
-    // admin's console, and only a genuinely publishable Proof is moved: see the
-    // ownership-and-status gate below.
-    //
-    // AND ONLY THE CLAIMANT'S OWN, STILL-PENDING PROOF IS PUBLISHED. A Claim's
-    // `proofId` is creator-supplied, so the Proof it names is trusted only once
-    // the live read shows it is the claimant's own upload (`uid === c.uid`) and
-    // is still the admin-only `'pending'` Proof this Claim was filed with — the
-    // same owner-first discipline `restoreProof` applies to the claims that
-    // steer it. Anything else is left exactly as it stands: another Player's
-    // Proof (a hidden or pending one must not reach the Feed through somebody
-    // else's Claim), an already-active one (publishing it would be a no-op), a
-    // report- or admin-hidden one (its lift is `Restore`, never a confirm), and a
-    // missing one (a merge `set` would CREATE a ghost Proof carrying nothing but
-    // a status). The Claim still resolves and the Mark is
-    // still confirmed in every case.
-    if (claimProofRef) {
-      const liveProof = claimProofSnap?.exists()
-        ? (claimProofSnap.data() as Partial<ProofDoc> | undefined)
+          })
         : undefined;
-      if (
-        liveProof !== undefined &&
-        liveProof.uid === c.uid &&
-        liveProof.status === 'pending' &&
-        !safetyHideStands(liveProof)
-      ) {
-        tx.set(claimProofRef, { status: 'active' }, { merge: true });
+    // Daily mode (#246, Codex #247 P2): a claim created on a day-scoped board carries
+    // its `dayIndex`, so resolve against `days/{dayIndex}/boards/{uid}` and fold the
+    // owner's `dayStats[dayIndex]` — the SAME routing attachProof/setMark use. Legacy
+    // claims (no dayIndex) resolve the single event-level board. The tutorial set for
+    // the cruise-wide first-bingo exclusion is read once, outside the atomic txn
+    // (stable config, not part of the board/player invariant).
+    const daily = typeof c.dayIndex === 'number';
+    const boardRef = daily
+      ? dayBoard(c.dayIndex as number, c.uid, eventId)
+      : board(c.uid, eventId);
+    let isTutorialDay: ((i: number) => boolean) | undefined;
+    let isCeremonialDay: ((i: number) => boolean) | undefined;
+    // The claim owner's OTHER Day indexes (specs/echo-marks.md, #446): a CONFIRM
+    // is the moment an admin_confirmed Mark reaches confirmed, so it is the
+    // moment the Prompt echoes onto the owner's sibling Day Cards — inside this
+    // same transaction, each echoed board carrying its own markSeed, all stat
+    // deltas folded into the ONE player write below. A reject uses the same reads
+    // only to preserve a standing sibling's Tally marker; it never echoes.
+    let echoSiblingDays: number[] = [];
+    // #1360: an Event with Echo switched off (`settings.echoMarks: false`)
+    // confirms the Claim on its own card only. The sibling reads still happen —
+    // a reject uses them to keep a standing sibling's Tally marker alive.
+    let echoOn = true;
+    // The freeze gate is a GETTER re-evaluated inside the transaction callback
+    // (Codex P2 on #278 round 4): a resolve started seconds before 08:00 must
+    // fold with the post-boundary truth on retry/commit, not a pre-read capture.
+    let isStatsFrozen: () => boolean = () => false;
+    if (daily) {
+      const evSnap = await action.guard(() => getDoc(evt(eventId)));
+      const days = (evSnap?.data()?.days as DayDef[] | undefined) ?? [];
+      echoOn = echoMarksEnabled(evSnap?.data()?.settings as { echoMarks?: unknown } | undefined);
+      const set = tutorialDayIndexSet(days);
+      isTutorialDay = (i: number) => set.has(i);
+      // The freeze + ceremonial gates apply to the ADMIN resolve fold too (#265,
+      // Codex P1 on #278): a post-freeze claim approval must not move the frozen
+      // standings — it narrows to the bucket-only write below, exactly like
+      // setMark/attachProof — and the farewell bucket never enters the root sums.
+      const ceremonial = ceremonialDayIndexSet(days);
+      isCeremonialDay = (i: number) => ceremonial.has(i);
+      const frozenAt = evSnap?.data()?.frozenAt as number | undefined;
+      // The CONFIGURED freeze rides along with the stamp (ADR 0011): this
+      // transaction re-reads the RAW event doc, so nothing has resolved
+      // `standingsFreezeAt` for it and omitting it would silently fall back to
+      // the schedule derivation on an Event that states its own freeze.
+      const standingsFreezeAt = evSnap?.data()?.standingsFreezeAt as number | undefined;
+      isStatsFrozen = () => standingsFrozen({ frozenAt, standingsFreezeAt, days });
+      if (status === 'confirmed' || status === 'rejected') {
+        echoSiblingDays = days.map((d) => d.index).filter((i) => i !== (c.dayIndex as number));
       }
     }
-    return { transitioned: transitionedToConfirmed };
+    return await action.transaction(async (tx): Promise<ResolveResult> => {
+      // ReviewQueue only acts on pending Claims. Read that state in the same
+      // transaction as the Board so an opposite admin decision forces a retry
+      // that observes the winner's terminal status instead of reclassifying its
+      // newly credited Mark as content-only review. A stale/removed Claim is a no-op.
+      const claimRef = claim(c.id, eventId);
+      const claimSnap = await tx.get(claimRef);
+      if (!claimSnap.exists() || claimSnap.data().status !== 'pending') return { transitioned: false };
+      // Read board + player inside the txn so a concurrent mark/proof from the same
+      // player isn't clobbered by a stale snapshot (mirrors setMark/attachProof).
+      const bSnap = await tx.get(boardRef);
+      if (!bSnap.exists()) return { transitioned: false };
+      const pSnap = await tx.get(player(c.uid, eventId));
+      // The owner's sibling Day Cards, read in the SAME transaction (before any
+      // write, per Firestore's reads-first contract) so a retry re-derives the
+      // echo set from committed state (specs/echo-marks.md).
+      const echoSiblingRefs = echoSiblingDays.map((i) => dayBoard(i, c.uid, eventId));
+      const echoSiblingSnaps = await Promise.all(echoSiblingRefs.map((ref) => tx.get(ref)));
+      const boardData = bSnap.data() as { cells?: unknown; seed?: number };
+      const cells = cellsFromData(boardData.cells);
+      const next = transform(cells);
+      // The transition verdict (#721, Codex round 1 findings 3 & 5): computed
+      // from THIS transaction's own before/after reads of the claim's cell —
+      // see this function's doc comment. `isClaimCell` matches nothing when the
+      // claim's board has moved on (a reshuffle traded the cell's position
+      // away, or the index is simply stale); a `before` that is anything but
+      // 'pending' means either it was never pending (a legacy/malformed claim)
+      // or another confirm already credited it.
+      const claimCellBefore = cells.find((x) => isClaimCell(x, c));
+      // A new Proof on an established Mark queues content review, not new credit.
+      // Confirm/reject may publish/remove its artifact but cannot rewrite stats,
+      // timestamps or propagate achievements that were already confirmed.
+      const contentOnly = claimCellBefore?.marked === true && claimCellBefore.status === 'confirmed';
+      const claimCellAfter = next.find((x) => isClaimCell(x, c));
+      const transitionedToConfirmed =
+        status === 'confirmed' && claimCellBefore?.status === 'pending' && claimCellAfter?.status === 'confirmed';
+      const bingoCount = completedLines(next).length;
+      const bingoTransition = completedLines(cells).length === 0 && bingoCount > 0;
+      const squares = countMarked(next);
+      const blackout = isBlackout(next);
+      const dayHonorName = honorDisplayName(c.displayName, pSnap.exists() ? pSnap.data().displayName : undefined);
+      // The prior first-bingo stamp is per-BOARD: in daily mode read the VIEWED Day's
+      // bucket, not the cruise-wide root (which would restamp a cross-Day time).
+      const priorDayStats = pSnap.exists() ? (pSnap.data().dayStats as DayStats | undefined) : undefined;
+      const existingFirst = daily
+        ? (priorDayStats?.[c.dayIndex as number]?.firstBingoAt ?? null)
+        : (pSnap.exists() ? ((pSnap.data().firstBingoAt as number | null) ?? null) : null);
+      // Clear the first-bingo stamp when the resolved board has no bingo (rejecting
+      // a claim can remove the last line); keep the earliest stamp otherwise.
+      const firstBingoAt = bingoCount > 0 ? (existingFirst ?? Date.now()) : null;
+      const shouldPinDayHonor =
+        daily &&
+        status === 'confirmed' &&
+        bingoTransition &&
+        typeof firstBingoAt === 'number' &&
+        dayHonorName !== null;
+      const metaRef = shouldPinDayHonor ? dayMeta(c.dayIndex as number, eventId) : null;
+      const metaSnap = metaRef ? await tx.get(metaRef) : null;
+
+      // Echo Marks (specs/echo-marks.md, #446): a CONFIRM is the moment the
+      // Prompt reaches confirmed, so echo it onto every sibling Day Card of the
+      // owner's that carries it unmarked — in this SAME transaction, each echoed
+      // board carrying ITS OWN markSeed. Echoed cells are born `confirmed`: the
+      // achievement was already admin-confirmed once, so they raise no second
+      // Claim. A reject writes no Echo, but uses the sibling snapshots below to
+      // preserve a marker while another confirmed carrier stands. Unmarking a
+      // rejected cell never cascades to prior echoes. No Feed Moment is posted
+      // from here — this runs on the ADMIN's device and a Moment must be written
+      // by its winner (see the spec's Moments residual for this mode) — but an
+      // echo-completed first line DOES pin its Day's write-once honor below
+      // (Codex P2 on #447), through the day-meta create rule's admin arm,
+      // attributed to the WINNER like the claim Day's own pin. Computed here —
+      // BEFORE any tx write — because the pin needs its meta doc read first
+      // (Firestore's reads-before-writes transaction contract).
+      const confirmedCell = status === 'confirmed' ? next.find((x) => isClaimCell(x, c)) : undefined;
+      const echoItemId =
+        !contentOnly && echoOn && confirmedCell && !confirmedCell.free && confirmedCell.marked ? confirmedCell.itemId : null;
+      const echoBuckets: EchoBucket[] = [];
+      const echoWrites: Array<{ ref: ReturnType<typeof dayBoard>; set: ReturnType<typeof cellsMergeSet> }> = [];
+      const echoPinDays: number[] = [];
+      const echoNow = Date.now();
+      if (echoItemId && echoSiblingSnaps.length > 0) {
+        const achieved = new Set([echoItemId]);
+        echoSiblingSnaps.forEach((snap, idx) => {
+          if (!snap.exists()) return;
+          const sib = snap.data() as { cells?: unknown; seed?: number };
+          const sibCells = cellsFromData(sib.cells);
+          const rawRes = applyEchoes(sibCells, achieved, echoNow);
+          const res = {
+            ...rawRes,
+            cells: stampEchoAnalyticsTransitions({
+              cells: rawRes.cells,
+              changed: changedCells(sibCells, rawRes.cells),
+              eventId,
+              uid: c.uid,
+              dayIndex: echoSiblingDays[idx],
+              boardSeed: typeof sib.seed === 'number' ? sib.seed : undefined,
+              trigger: 'admin_confirm',
+            }),
+          };
+          if (!res.changed) return;
+          echoWrites.push({
+            ref: echoSiblingRefs[idx],
+            // Per-cell merge (#457): only the newly echoed cells ride the write.
+            set: cellsMergeSet(cellsPatch(changedCells(sibCells, res.cells)), {
+              ...(typeof sib.seed === 'number' ? { markSeed: sib.seed } : {}),
+            }),
+          });
+          echoBuckets.push({
+            dayIndex: echoSiblingDays[idx],
+            bingoCount: res.bingoCount,
+            squaresMarked: res.squaresMarked,
+            blackout: res.blackout,
+          });
+          if (res.bingoTransition && dayHonorName) echoPinDays.push(echoSiblingDays[idx]);
+        });
+      }
+      // Echo Day-honor meta reads — the same post-freeze narrowing as the stats.
+      const pinnableEchoDays = echoPinDays.filter((d) => !isStatsFrozen() || !!isCeremonialDay?.(d));
+      const echoMetaSnaps: Array<{ dayIndex: number; exists: boolean }> = [];
+      for (const d of pinnableEchoDays) {
+        const snap = await tx.get(dayMeta(d, eventId));
+        echoMetaSnaps.push({ dayIndex: d, exists: snap.exists() });
+      }
+      // The claim's Proof, read LIVE and BEFORE any write (Firestore's
+      // reads-before-writes contract), so the publish below can be conditional on
+      // the state Cloud Vision may have moved it to since the Player submitted it
+      // (#133). Confirm and reject also normalize deletion classification for
+      // an owned Proof bound to this live Claim and Board cell; absent proofId
+      // leaves the legacy artifact-less path unchanged.
+      const claimProofRef = c.proofId ? proof(c.proofId, eventId) : null;
+      const claimProofSnap = claimProofRef ? await tx.get(claimProofRef) : null;
+
+      tx.set(
+        boardRef,
+        // Per-cell merge (#457): only the resolved claim's cell rides the write.
+        ...cellsMergeSet(cellsPatch(changedCells(cells, next)), {
+          ...(typeof boardData.seed === 'number' ? { markSeed: boardData.seed } : {}),
+          ...(transitionedToConfirmed && analyticsRequest ? { directAnalyticsRequest: analyticsRequest } : {}),
+        }),
+      );
+      for (const write of echoWrites) {
+        tx.set(write.ref, ...write.set);
+      }
+      for (const { dayIndex: echoDay, exists } of echoMetaSnaps) {
+        if (exists) continue; // the write-once honor is already claimed
+        tx.set(dayMeta(echoDay, eventId), {
+          firstBingo: {
+            uid: c.uid,
+            displayName: dayHonorName!,
+            at: echoNow,
+          },
+        });
+      }
+      // An old Claim may outlive its Board attachment. Resolve its review without
+      // folding an unrelated current Day over prior wins or root blackout.
+      if (claimCellBefore !== undefined && !contentOnly && daily) {
+        const siblingBlackout =
+          status === 'rejected' &&
+          pSnap.exists() &&
+          (pSnap.data() as Partial<PlayerDoc>).blackout === true &&
+          echoSiblingSnaps.some(
+            (snap) => snap.exists() && isBlackout(cellsFromData((snap.data() as { cells?: unknown }).cells)),
+          );
+        const playerWrite = foldDayStat({
+          priorDayStats,
+          dayIndex: c.dayIndex as number,
+          bucket: { bingoCount, squaresMarked: squares, firstBingoAt },
+          blackout: blackout || siblingBlackout,
+          isTutorialDay,
+          isCeremonialDay,
+        });
+        // The ONE aggregated player write: the claim Day's fold composed with
+        // every echoed board's bucket (specs/echo-marks.md § Scoring).
+        const aggregatedWrite =
+          echoBuckets.length > 0
+            ? foldEchoStats({
+                priorDayStats,
+                echoes: echoBuckets,
+                now: echoNow,
+                isTutorialDay,
+                isCeremonialDay,
+                // Preserve a blackout standing on an UNTOUCHED board (Codex P2
+                // on #447): a confirm only adds Marks, so the latch is safe.
+                priorBlackout: pSnap.exists() && (pSnap.data() as Partial<PlayerDoc>).blackout === true,
+                base: playerWrite,
+              })
+            : playerWrite;
+        const canWriteStats = !isStatsFrozen() || !!isCeremonialDay?.(c.dayIndex as number);
+        if (isStatsFrozen()) {
+          // Ceremonial-day-only post-freeze buckets, mirroring setMark (Codex P2
+          // on #278 round 2): any other Day's bucket would drift settled honors —
+          // echoed main-day buckets are dropped with the root aggregates.
+          const ceremonialBuckets: Record<number, StatWrite> = {};
+          for (const [k, v] of Object.entries(aggregatedWrite.dayStats)) {
+            if (isCeremonialDay?.(Number(k))) ceremonialBuckets[Number(k)] = v;
+          }
+          if (Object.keys(ceremonialBuckets).length > 0) {
+            tx.set(player(c.uid, eventId), { dayStats: ceremonialBuckets }, { merge: true });
+          }
+        } else {
+          tx.set(player(c.uid, eventId), aggregatedWrite, { merge: true });
+        }
+        if (canWriteStats && shouldPinDayHonor) {
+          if (metaRef && !metaSnap?.exists()) {
+            tx.set(metaRef, {
+              firstBingo: {
+                uid: c.uid,
+                displayName: dayHonorName!,
+                at: firstBingoAt,
+              },
+            });
+          }
+        }
+      } else if (claimCellBefore !== undefined && !contentOnly) {
+        tx.set(
+          player(c.uid, eventId),
+          { squaresMarked: squares, bingoCount, blackout, firstBingoAt },
+          { merge: true },
+        );
+      }
+      // Tally symmetry (ADR 0002): wherever a write flips a cell marked→unmarked it
+      // must delete that cell's per-Prompt Tally marker, and wherever it flips
+      // →marked it must ensure the marker (setMark and attachProof do). Rejecting a
+      // pending-credit claim unmarks its cell via the transform above; a content-only
+      // reject keeps established credit and its marker. Diff old→new and
+      // delete the marker for exactly the cells that lost their mark — the SAME
+      // conditionality as the flip itself; without this, a rejected admin_confirmed
+      // claim would reverse the board + stats but leave the player in the Prompt's
+      // public count/who-list (Codex P2, PR #87). The transform is a positional map,
+      // so old/new align by index; the free centre (null itemId) never has a marker;
+      // confirming never unmarks, so this is a no-op for confirmClaim. tx.delete is
+      // a write, so the reads-before-writes transaction contract holds unchanged.
+      next.forEach((after, i) => {
+        const before = cells[i];
+        const siblingStillCarriesMarker = echoSiblingSnaps.some(
+          (snap) =>
+            snap.exists() &&
+            cellsFromData((snap.data() as { cells?: unknown }).cells).some(
+              (cell) => !cell.free && cell.marked && cell.itemId === before.itemId,
+            ),
+        );
+        if (before.marked && !after.marked && before.itemId && !siblingStillCarriesMarker) {
+          tx.delete(marker(before.itemId, c.uid, eventId));
+        }
+      });
+      // The caller's optional hint controls ceremony only after an Admin decision.
+      // Normalize it to this live credit fold; retain flag-less legacy semantics.
+      tx.set(claimRef, {
+        status,
+        resolvedBy: adminUid,
+        ...(typeof claimSnap.data().contentOnly === 'boolean' ? { contentOnly } : {}),
+      }, { merge: true });
+      // Confirming an admin-confirmed claim publishes its proof, which was created 'pending'
+      // (admin-only readable) so it stayed hidden from the public feed until now. A
+      // rejected proof is left 'pending' (still admin-only) rather than exposed.
+      //
+      // UNLESS a server-authoritative safety hide stands on it (#133, Codex P1).
+      // Cloud Vision scans the uploaded object, so an admin_confirmed claim's Proof
+      // can be flagged and hidden BEFORE its claim is ever reviewed. Publishing it
+      // unconditionally would write `status: 'active'`, and active Proofs are
+      // outside `qualifiesForVisionHide` — so extreme/illegal media would go back
+      // in front of every Player (the re-hide arm takes it back down only while
+      // the marker stands, and only after the exposure), lifted by Confirm — a
+      // claim control, NOT the warned, explicit moderation Restore (ReviewQueue),
+      // which is the one place an admin may override an AI verdict, having been
+      // told what they are lifting. So the claim still resolves and the Mark is still confirmed —
+      // only the media stays hidden, and the queue row says so on the claim.
+      //
+      // `safetyHideStands` reads the SERVER's own record — `hideProofOnVisionFlag`'s
+      // `safetyHide` marker, and the `'flagged'` status only `moderateProof` writes
+      // — never the verdict string (Codex P1 round 2). The verdict's MEANING lives
+      // in the Functions allowlist, and Functions and this bundle deploy
+      // separately, so a client that re-derived it would publish a Proof hidden for
+      // a verdict its cached copy of the list had never heard of.
+      //
+      // The gate reads the LIVE snapshot, not the stale event that opened the
+      // admin's console, and only a genuinely publishable Proof is moved: see the
+      // ownership-and-status gate below.
+      //
+      // AND ONLY THE CLAIMANT'S OWN, STILL-PENDING PROOF IS PUBLISHED. A Claim's
+      // `proofId` is creator-supplied, so the Proof it names is trusted only once
+      // the live read shows it is the claimant's own upload (`uid === c.uid`) and
+      // is still the admin-only `'pending'` Proof this Claim was filed with — the
+      // same owner-first discipline `restoreProof` applies to the claims that
+      // steer it. The publication gate leaves every other status as it stands: another Player's
+      // Proof (a hidden or pending one must not reach the Feed through somebody
+      // else's Claim), an already-active one (publishing it would be a no-op), a
+      // report- or admin-hidden one (its lift is `Restore`, never a confirm), and a
+      // missing one (a merge `set` would CREATE a ghost Proof carrying nothing but
+      // a status). The Claim still resolves; matched fresh credit confirms its
+      // Mark, and content-only review preserves established credit. Bound
+      // deletion classification is independent of publication.
+      if (claimProofRef) {
+        const liveProof = claimProofSnap?.exists()
+          ? (claimProofSnap.data() as Partial<ProofDoc> | undefined)
+          : undefined;
+        const storedClaim = claimSnap.data() as Partial<ClaimDoc>;
+        // A mode change can establish Honor credit after this Proof was born.
+        // Persist the terminal live classification for deletion, but only when
+        // stored Claim, owner, Proof identity, cell and Day all bind this artifact.
+        // Missing/legacy binding metadata grants no new deletion guarantee.
+        const classificationBound = liveProof !== undefined &&
+          storedClaim.uid === c.uid && storedClaim.proofId === c.proofId &&
+          storedClaim.cellIndex === c.cellIndex &&
+          (daily ? storedClaim.dayIndex === c.dayIndex : storedClaim.dayIndex == null) &&
+          liveProof.uid === c.uid && liveProof.cellIndex === c.cellIndex &&
+          (daily ? liveProof.dayIndex === c.dayIndex : liveProof.dayIndex == null) &&
+          claimCellBefore?.index === c.cellIndex && claimCellBefore.proofId === c.proofId;
+        const publish = status === 'confirmed' && liveProof !== undefined &&
+          liveProof.uid === c.uid && liveProof.status === 'pending' &&
+          !safetyHideStands(liveProof);
+        if (classificationBound || publish) {
+          tx.set(claimProofRef, {
+            ...(classificationBound ? { contentOnly } : {}),
+            ...(publish ? { status: 'active' } : {}),
+          }, { merge: true });
+        }
+      }
+      return { transitioned: transitionedToConfirmed };
+    });
   });
 }
 
@@ -2126,7 +2325,8 @@ export function confirmClaim(c: ClaimDoc, adminUid: string): Promise<void> {
     c,
     (cells) =>
       cells.map((x) =>
-        isClaimCell(x, c) ? { ...x, status: 'confirmed' as const, markedAt: creditedAt } : x,
+        isClaimCell(x, c) && !(x.marked && x.status === 'confirmed')
+          ? { ...x, status: 'confirmed' as const, markedAt: creditedAt } : x,
       ),
     adminUid,
     'confirmed',
@@ -2139,32 +2339,24 @@ export function confirmClaim(c: ClaimDoc, adminUid: string): Promise<void> {
   // earlier, at proof-attach time (ProofSheet's `source: 'proof'` event), so
   // one confirmed admin_confirmed-mode Square produces TWO `mark_square`
   // events before it counts once in `dayStats[*].squaresMarked` — documented
-  // in specs/w2-ga4-events.md § Reconciliation, not a double-count bug. Fired
-  // only after `confirmed` resolves (the transaction committed), via a
-  // dynamic import — matching src/data/api.ts's `mark_rejected` call site —
-  // so this Firestore-only module stays free of an eager
-  // analytics/firebase-singleton dependency; test doubles mock `../firebase`
-  // with only what the writes need.
+  // in specs/w2-ga4-events.md § Reconciliation, not a double-count bug. The
+  // stable request is stamped into the Claim owner's Board inside resolve's
+  // captured private transaction. The server recorder observes that commit;
+  // this promise continuation performs no callable or analytics write.
   //
   // Gated on `resolve()`'s own transition verdict (Codex round 1 finding 3):
   // a stale claim (no board, or `isClaimCell` matches nothing on the current
   // board — a reshuffle traded the cell away) resolves without moving the
   // Square from pending to confirmed at all, and two admins racing the SAME
   // claim have their loser's transaction replay against the winner's
-  // already-confirmed cell — a rewrite, not a transition. Firing here
+  // terminal Claim — a no-op, not a transition. Firing here
   // unconditionally would report a credited Square in both cases even though
   // `dayStats[*].squaresMarked` never moved, breaking the reconciliation
   // identity specs/w2-ga4-events.md § Reconciliation documents.
   //
-  // `uid: c.uid` (Codex round 1 finding 6): `track()` runs in the resolving
-  // ADMIN's own browser/session, so without an explicit target-player
-  // identifier PostHog/GA4 attribute this event to the ADMIN's distinct id,
-  // not the claim owner's — there is otherwise no way to recover whose
-  // Square this was from the payload alone.
-  //
-  // `resolve` stamps this committed edge with a stable request token. The
-  // server-side recorder, rather than this administrator's browser, delivers
-  // the analytics event for the claim owner's Board transition.
+  // The server recorder derives the target player's UID from that committed
+  // Board path, so the resolving Admin's browser identity cannot substitute
+  // for the Claim owner's analytics identity.
   return confirmed.then(() => undefined);
 }
 
@@ -2177,7 +2369,9 @@ export function rejectClaim(c: ClaimDoc, adminUid: string): Promise<void> {
     (cells) =>
       cells.map((x) =>
         isClaimCell(x, c)
-          ? { ...x, marked: false, status: 'confirmed' as const, proofId: null, markedAt: null }
+          ? (x.marked && x.status === 'confirmed'
+              ? { ...x, proofId: null }
+              : { ...x, marked: false, status: 'confirmed' as const, proofId: null, markedAt: null })
           : x,
       ),
     adminUid,

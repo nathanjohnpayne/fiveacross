@@ -1,6 +1,8 @@
-import { collection, doc, increment, runTransaction, updateDoc } from 'firebase/firestore';
+import { collection, doc, increment, runTransaction, updateDoc, type Firestore, type Transaction } from 'firebase/firestore';
 import { allowedPhotoUrlOrNull } from './photoUrl';
 import { db, EVENT_ID } from '../firebase';
+import { capturePrivateFirestore } from '../privateFirestore';
+import { runPrivateTransaction } from './privateTransaction';
 import { uploadProofMedia, deleteStoragePath, proofMediaGeneration } from './storage';
 import { purgeProofMediaFromCaches } from './proofMediaCache';
 import { resolveProofMediaUrl } from './proofMediaUrl';
@@ -22,20 +24,20 @@ import type {
   ProofType,
 } from '../types';
 
-const rawEvent = (eventId: string = EVENT_ID) => doc(db, 'events', eventId);
+const rawEvent = (eventId: string = EVENT_ID, database: Firestore = db) => doc(database, 'events', eventId);
 const rawProofs = (eventId: string = EVENT_ID) => collection(db, 'events', eventId, 'proofs');
-const rawProof = (id: string, eventId: string = EVENT_ID) =>
-  doc(db, 'events', eventId, 'proofs', id);
+const rawProof = (id: string, eventId: string = EVENT_ID, database: Firestore = db) =>
+  doc(database, 'events', eventId, 'proofs', id);
 const rawClaims = (eventId: string = EVENT_ID) => collection(db, 'events', eventId, 'claims');
-const rawBoard = (uid: string, eventId: string = EVENT_ID) =>
-  doc(db, 'events', eventId, 'boards', uid);
+const rawBoard = (uid: string, eventId: string = EVENT_ID, database: Firestore = db) =>
+  doc(database, 'events', eventId, 'boards', uid);
 // The day-scoped Board write ref (#246, daily-cards-spec § "Data model"): one
 // Board per Player per Day at events/{eventId}/days/{dayIndex}/boards/{uid}.
 // `String(dayIndex)` is the canonical decimal segment the rules gate accepts (#201).
-const rawDayBoard = (dayIndex: number, uid: string, eventId: string = EVENT_ID) =>
-  doc(db, 'events', eventId, 'days', String(dayIndex), 'boards', uid);
-const rawPlayer = (uid: string, eventId: string = EVENT_ID) =>
-  doc(db, 'events', eventId, 'players', uid);
+const rawDayBoard = (dayIndex: number, uid: string, eventId: string = EVENT_ID, database: Firestore = db) =>
+  doc(database, 'events', eventId, 'days', String(dayIndex), 'boards', uid);
+const rawPlayer = (uid: string, eventId: string = EVENT_ID, database: Firestore = db) =>
+  doc(database, 'events', eventId, 'players', uid);
 
 /**
  * The pending-revocation tombstone for a deleted Proof's Storage object (#134
@@ -48,8 +50,8 @@ const rawPlayer = (uid: string, eventId: string = EVENT_ID) =>
  * lets the sweeper read the Proof id straight off its trigger path.
  */
 export const PROOF_STORAGE_DELETES = 'proofStorageDeletes';
-const rawProofStorageDelete = (proofId: string, eventId: string = EVENT_ID) =>
-  doc(db, 'events', eventId, PROOF_STORAGE_DELETES, proofId);
+const rawProofStorageDelete = (proofId: string, eventId: string = EVENT_ID, database: Firestore = db) =>
+  doc(database, 'events', eventId, PROOF_STORAGE_DELETES, proofId);
 
 /** The three object extensions `uploadProofMedia` can produce (jpg / webm / m4a, #295). */
 const PROOF_MEDIA_EXTENSIONS = ['jpg', 'webm', 'm4a'];
@@ -133,8 +135,8 @@ function playerStatWrite(params: {
 // A per-Prompt Tally marker: events/{EVENT_ID}/tally/{itemId}/markers/{uid} (ADR
 // 0002) — the SAME path setMark's honor-Mark marker uses. Raw ref (converter-free),
 // matching the board/player/proof writes in these transactions and setMark's write.
-const rawMarker = (itemId: string, markerUid: string, eventId: string = EVENT_ID) =>
-  doc(db, 'events', eventId, 'tally', itemId, 'markers', markerUid);
+const rawMarker = (itemId: string, markerUid: string, eventId: string = EVENT_ID, database: Firestore = db) =>
+  doc(database, 'events', eventId, 'tally', itemId, 'markers', markerUid);
 
 export interface AttachProofArgs {
   uid: string;
@@ -180,14 +182,14 @@ export interface AttachProofArgs {
  * feed one broadcast helper. `bingo`/`blackout` are the STANDING state of the
  * folded board; the transitions are the rising EDGE this attach crossed
  * (no-win → win), computed against the LIVE prior cells the transaction read.
- * In `admin_confirmed` mode the attached cell goes `pending`, and the win mask
+ * For fresh credit in `admin_confirmed` the attached cell goes `pending`, and the win mask
  * (game/logic: `marked && status !== 'pending'`) excludes it — so an
  * admin-confirmed attach structurally crosses NO transition and broadcasts no
  * Moment at attach time. That is a decision, not an accident: a pending claim
  * can be REJECTED, and a Moment is IMMUTABLE (delete-only moderation) — an
  * attach-time broadcast would leave a permanent win announcement for a claim an
  * admin then rejects. The tally-marker analogy (which does publish at attach,
- * #87) does not carry: `rejectClaim` deletes the marker on rejection, but no
+ * #87) does not carry: `rejectClaim` deletes the marker on pending-credit rejection, but no
  * automatic cleanup path exists for a Moment. The admin-confirmed win (and its
  * Moment) materialize at admin confirm — the #41 deferral. `cells` is the folded
  * post-attach board, for fire-time revalidation in the drain.
@@ -213,8 +215,9 @@ export interface AttachProofResult {
 /**
  * Mark a square and attach a playful proof (ADR 0002: the Proof IS the Feed
  * entry — a bare Mark posts nothing, an attached Proof posts here). In
- * admin_confirmed mode the square goes pending (doesn't count) and a claim is
- * created for an admin/peer to confirm. A Proof is flavour, never enforcement
+ * admin_confirmed mode fresh credit goes pending (doesn't count), while an
+ * established Mark keeps its credit/time. New content always raises a Claim
+ * for an admin to review, separately from established credit. A Proof is flavour, never enforcement
  * (ADR 0001): it enriches the Feed, it does not make the Mark more trustworthy.
  *
  * Online-only, by design AND by rule (ADR 0006) — unlike a bare honor Mark
@@ -316,16 +319,19 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
     // sheet-opening snapshot — see `AttachProofResult.markTransition`'s doc
     // comment for why the caller's own `cell` prop cannot be trusted here.
     const markTransition = existingCell?.marked !== true;
-    // A confirmed Echo has already passed the original admin confirmation. Adding
-    // proof makes it a local mark, but must not create a second pending claim.
-    const pendingClaim = pending && !(existingCell?.echo === true && existingCell.status === 'confirmed');
+    // New content still needs review in admin mode. Its Claim is distinct
+    // from the already-confirmed Mark authority (including an Echo), which
+    // keeps its original credit and timestamp while the new Proof is pending.
+    const confirmedMark = existingCell?.marked === true && existingCell.status !== 'pending';
+    const pendingClaim = pending;
+    const pendingMark = pending && !confirmedMark;
     const next: Cell[] = liveCells.map((c) => {
       if (c.index !== cellIndex) return c;
       // A proof creates a durable artifact anchored to this card. It must turn
       // an Echo into a local Mark so the reshuffle gate cannot trade the card
       // away and strand that artifact.
       const { echo: _echo, echoOptOut: _echoOptOut, ...proofed } = c;
-      return { ...proofed, marked: true, markedAt: now, proofId, status: pendingClaim ? 'pending' : 'confirmed' };
+      return { ...proofed, marked: true, markedAt: confirmedMark ? c.markedAt : now, proofId, status: pendingMark ? 'pending' : 'confirmed' };
     });
 
     const bingoCount = completedLines(next).length;
@@ -369,6 +375,9 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
       // Admin-confirmed-mode proofs stay 'pending' (admin-only readable) until an admin
       // confirms the claim; otherwise the proof is public immediately.
       status: pendingClaim ? 'pending' : 'active',
+      // Content review can outlive its Claim. Keep the original-credit distinction
+      // on the durable Proof so later owner/admin deletion removes content only.
+      ...(pendingClaim && confirmedMark ? { contentOnly: true } : {}),
       visionFlag: null,
       // #190: stamp which affordance produced a photo so the Feed badges a
       // library pick 🖼️; null for audio/text and camera picks that pass none.
@@ -415,7 +424,7 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
     // Per-Prompt Tally (ADR 0002): a proofed Mark self-publishes the SAME attributed
     // marker a bare honor Mark does (setMark) — EVERY Mark, proofed or not, tallies.
     // The cell above is set marked:true in BOTH claim modes (proof_required →
-    // 'confirmed', admin_confirmed → 'pending'), so the marker publishes here under
+    // 'confirmed', admin_confirmed → fresh credit 'pending' or established 'confirmed'), so the marker publishes here under
     // the SAME condition as the cell becoming marked — exactly as setMark writes it
     // on `nextMarked` regardless of pending/confirmed status. The marker doc id IS
     // the marker uid so firestore.rules keeps a forged attribution out; the name is
@@ -462,6 +471,7 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
         itemText,
         proofId,
         status: 'pending',
+        ...(confirmedMark ? { contentOnly: true } : {}),
         createdAt: now,
         resolvedBy: null,
         // In daily mode the pending mark lives on the DAY-SCOPED board, so the
@@ -473,8 +483,8 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
     }
     // The verdict (see AttachProofResult): standing state from the fold, rising
     // edges against the LIVE prior cells this transaction read. In
-    // admin_confirmed the folded cell is `pending` and the win mask excludes it,
-    // so both transitions are structurally false — no Moment fires at attach.
+    // admin_confirmed fresh credit stays pending; established credit is unchanged.
+    // Neither case crosses a new win edge, so no Moment fires at attach.
     return {
       cells: next,
       bingo: bingoCount > 0,
@@ -539,13 +549,35 @@ export async function reportProof(id: string, expectedCreatedAt: number | undefi
 export class ProofBacksMarkWhileClosingError extends Error {
   constructor(readonly proofId: string) {
     super(
-      'This photo still backs a marked square. Reopen play first, then delete it—while play is closed the square cannot be unmarked.',
+      'This proof is attached to a marked square. Reopen play first, then delete it—while play is closed the square cannot be updated.',
     );
     this.name = 'ProofBacksMarkWhileClosingError';
   }
 }
 
-export async function deleteProof(
+/** Owner/gameplay deletion retains its existing durable Firestore path. */
+export function deleteProof(id: string, storagePath?: string | null, opts?: DeleteProofOptions): Promise<void> {
+  return deleteProofInDatabase(id, storagePath, opts, db, EVENT_ID);
+}
+
+/** Admin moderation reads moderation-only Proofs and related Board/Player state in the captured
+ * recovered memory session. Attribution must match that Auth incarnation. */
+export async function deleteProofAsAdmin(adminUid: string, id: string, storagePath?: string | null, opts?: DeleteProofOptions): Promise<void> {
+  const lease = capturePrivateFirestore();
+  if (adminUid !== lease.uid) throw new Error('Admin account changed.');
+  const eventId = EVENT_ID;
+  return lease.guard(() => deleteProofInDatabase(id, storagePath, opts, lease.db, eventId, lease));
+}
+
+interface DeleteProofOptions {
+  daily?: boolean;
+  dayIndexes?: number[];
+  tutorialDayIndexes?: number[];
+  ceremonialDayIndexes?: number[];
+  statsFrozen?: boolean | (() => boolean);
+}
+
+async function deleteProofInDatabase(
   id: string,
   // A HINT, NOT THE ANSWER (#1153, Phase 4b P2). Both call sites read it off a
   // Feed/queue snapshot that can be stale, and an authorized caller could pass
@@ -565,19 +597,15 @@ export async function deleteProof(
   // the only path available when the Proof document is already gone, which is
   // the re-run of a takedown whose Storage half failed.
   storagePath?: string | null,
-  // Daily-cards mode (#246): unmark the backing cell on the DAY-SCOPED board for
-  // the Proof's OWN `dayIndex` and fold the owner's stats into that Day's bucket,
+  // Daily mode (#246): ordinary proof-backed unmark/stat cleanup belongs to the
+  // Proof's OWN Day; content-only deletion clears the link without a stat fold,
   // mirroring `attachProof`. Absent/false keeps the pre-1.5 flat single-board
   // unmark. `tutorialDayIndexes` scopes the cruise-wide First-to-BINGO exclusion.
-  opts?: {
-    daily?: boolean;
-    dayIndexes?: number[];
-    tutorialDayIndexes?: number[];
-    ceremonialDayIndexes?: number[];
-    statsFrozen?: boolean | (() => boolean);
-  },
+  opts?: DeleteProofOptions,
+  database: Firestore = db,
+  eventId: string = EVENT_ID,
+  privateLease?: ReturnType<typeof capturePrivateFirestore>,
 ): Promise<void> {
-  const eventId = EVENT_ID;
   // COMMIT FIRST, THEN REVOKE THE MEDIA — for the owner and the Admin alike
   // (Codex P1, PR #1157).
   //
@@ -662,11 +690,17 @@ export async function deleteProof(
   // time rather than at sweep time, plus one saved server round trip.
   let generation: string | null = null;
   if (storagePath && proofMediaOwnerUid(storagePath, eventId, id)) {
-    generation = await proofMediaGeneration(storagePath);
+    generation = privateLease
+      ? await proofMediaGeneration(storagePath, privateLease.storage)
+      : await proofMediaGeneration(storagePath);
   }
 
-  await runTransaction(db, async (tx) => {
-    const proofRef = rawProof(id, eventId);
+  let committed = false;
+  const transaction = <T>(operation: (tx: Transaction) => Promise<T>) => privateLease
+    ? runPrivateTransaction(privateLease, operation, () => { committed = true; })
+    : runTransaction(database, operation);
+  await transaction(async (tx) => {
+    const proofRef = rawProof(id, eventId, database);
     // THE EVENT, READ INSIDE THE TRANSACTION THAT WRITES (#134, Codex P2 on PR
     // #1139). The moderation delete is an admin path the freeze deliberately
     // leaves open — a permanent record needs a takedown route (#808) — but the
@@ -696,7 +730,7 @@ export async function deleteProof(
     // close committing in the window aborts this attempt and the retry re-reads
     // the closed state, instead of a cleanup landing on a Board the freeze has
     // already shut.
-    const eventData = (await tx.get(rawEvent(eventId))).data() as Partial<EventDoc> | undefined;
+    const eventData = (await tx.get(rawEvent(eventId, database))).data() as Partial<EventDoc> | undefined;
     const archived = isEventArchived(eventData);
     const closing = !archived && isEventArchiving(eventData);
     const proofSnap = await tx.get(proofRef);
@@ -717,15 +751,15 @@ export async function deleteProof(
     // refusing. Reading the Board while closing costs one `get` on a document
     // no one may write in that state.
     if (proof && !archived) {
-      // A deleted proof must not leave its square marked-but-uncredited (in
-      // proof_required mode a marked cell is backed by this proof). Unmark the
-      // backing cell and recompute the owner's derived stats in the same txn.
+      // Ordinary proof-backed deletion unmarks and folds stats in this txn.
+      // A content-only attachment leaves established credit intact and only
+      // clears its projection; both paths read the live authoritative Proof.
       const daily = opts?.daily === true;
       const proofDayIndex = typeof proof.dayIndex === 'number' ? proof.dayIndex : 0;
       const boardRef = daily
-        ? rawDayBoard(proofDayIndex, proof.uid, eventId)
-        : rawBoard(proof.uid, eventId);
-      const playerRef = rawPlayer(proof.uid, eventId);
+        ? rawDayBoard(proofDayIndex, proof.uid, eventId, database)
+        : rawBoard(proof.uid, eventId, database);
+      const playerRef = rawPlayer(proof.uid, eventId, database);
       const boardSnap = await tx.get(boardRef);
       const boardData = boardSnap.data() as { cells?: unknown; seed?: number } | undefined;
       const normalized = cellsFromData(boardData?.cells);
@@ -749,7 +783,19 @@ export async function deleteProof(
       // doc's own `uid`/`cellIndex`, never solely from `cells[i].proofId` — see
       // `ProofFeed`/`useProofFeed`.
       const backing = cells?.find((c) => c.index === proof.cellIndex);
-      if (cells && backing && backing.proofId === id) {
+      if (cells && backing && backing.proofId === id && proof.contentOnly === true) {
+        // This attachment never created the established Mark's credit. Remove
+        // only its projection; leave timestamps, standing wins and Tally intact.
+        // Closing still refuses the Board cleanup, preserving the freeze contract.
+        if (closing) throw new ProofBacksMarkWhileClosingError(id);
+        const next = cells.map((cell) =>
+          cell.index === proof.cellIndex ? { ...cell, proofId: null } : cell,
+        );
+        tx.set(boardRef, ...cellsMergeSet(cellsPatch(changedCells(cells, next)), {
+          ...(typeof boardData?.seed === 'number' ? { markSeed: boardData.seed } : {}),
+        }));
+      }
+      if (cells && backing && backing.proofId === id && proof.contentOnly !== true) {
         // THE REFUSAL, and only for the reversible half of the freeze. Nothing
         // has been written yet — the throw aborts the transaction before the
         // Proof delete below, so the document, the Board and the media are all
@@ -765,7 +811,7 @@ export async function deleteProof(
             ? await Promise.all(
                 (opts?.dayIndexes ?? [])
                   .filter((dayIndex) => dayIndex !== proofDayIndex)
-                  .map((dayIndex) => tx.get(rawDayBoard(dayIndex, proof.uid, eventId))),
+                  .map((dayIndex) => tx.get(rawDayBoard(dayIndex, proof.uid, eventId, database))),
               )
             : [];
         // The stamp a deletion preserves belongs to the Day whose Board it is
@@ -785,7 +831,7 @@ export async function deleteProof(
         );
         const next: Cell[] = cells.map((c) => {
           if (c.index !== proof.cellIndex) return c;
-          // Deleting a proof unmarks the cell — mirror computeMark's manual
+          // Deleting an ordinary credit-backing proof unmarks — mirror computeMark's manual
           // unmark EXACTLY (Phase 4b P1 on #447): strip any echo flag and
           // persist `echoOptOut` on a non-free Prompt cell, so open-time
           // reconciliation cannot restore the Prompt from a standing sibling
@@ -812,7 +858,7 @@ export async function deleteProof(
             ...(typeof boardData?.seed === 'number' ? { markSeed: boardData.seed } : {}),
           }),
         );
-        // The standings freeze (#265): a post-freeze proof deletion unmarks the
+        // The standings freeze (#265): ordinary credit-backing deletion unmarks the
         // cell and updates its PER-DAY bucket only (symmetric with setMark's
         // bucket-only frozen write — Codex P2 on #278); the frozen ROOT
         // aggregates never unfold.
@@ -847,7 +893,7 @@ export async function deleteProof(
           ),
         );
         if (backing.itemId && !markedOnSibling) {
-          tx.delete(rawMarker(backing.itemId, proof.uid, eventId));
+          tx.delete(rawMarker(backing.itemId, proof.uid, eventId, database));
         }
       }
     }
@@ -857,9 +903,10 @@ export async function deleteProof(
     // stood in for). The Proof row, its `storagePath` and the retry control are
     // all gone the instant this transaction lands, so a Storage delete that
     // then fails — offline, a transient 5xx, a revoked token — leaves media
-    // that is still reachable through its download URL and still sitting in the
-    // `proof-media` cache, with nothing left anywhere that records it was
-    // supposed to go.
+    // that is still reachable through its download URL and may remain in a
+    // legacy worker's `proof-media` cache, with nothing left anywhere recording
+    // it was supposed to go. Upgraded workers use NetworkOnly and attempt to purge that
+    // legacy bucket on activation; neither change deletes the remote Storage object.
     //
     // So the pending revocation is written IN THE SAME COMMIT as the delete,
     // before the reference disappears. Same transaction, so there is no window
@@ -927,11 +974,16 @@ export async function deleteProof(
           // own transaction.
           ...(generation === null || storagePath !== revokePath ? {} : { generation }),
         };
-        tx.set(rawProofStorageDelete(id, eventId), tombstone);
+        tx.set(rawProofStorageDelete(id, eventId, database), tombstone);
       }
     }
 
     tx.delete(proofRef);
+  }).catch((error: unknown) => {
+    // Retirement after an actual SDK commit withholds acknowledgment and
+    // Storage work, but must still retire this device's legacy media copy.
+    if (committed) void purgeProofMediaFromCaches(resolveProofMediaUrl(mediaURL));
+    throw error;
   });
 
   // The commit already stood down the Proof, so this object is now an orphan
@@ -961,7 +1013,12 @@ export async function deleteProof(
     // The SAME object the tombstone names (#1153, Phase 4b P2) — the stored one
     // wherever the transaction could read the Proof, so the fast path and the
     // durable record can never target different blobs.
-    if (revokePath) await deleteStoragePath(revokePath);
+    privateLease?.assertCurrent();
+    if (revokePath) {
+      if (privateLease) await deleteStoragePath(revokePath, privateLease.storage);
+      else await deleteStoragePath(revokePath);
+    }
+    privateLease?.assertCurrent();
   } finally {
     // Fire-and-forget, AFTER commit (never inside the retryable transaction
     // callback above — a callback re-run on conflict would fire this on every

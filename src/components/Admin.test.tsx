@@ -57,6 +57,8 @@ const H = vi.hoisted(() => ({
   resnapshotDayNow: vi.fn(),
 }));
 
+vi.mock('../hooks/usePrivateFirestore', () => ({ usePrivateFirestore: () => ({ uid: H.user?.uid ?? null, db: {}, generation: 1, recoveryRequired: false, failed: false }) }));
+
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event', storage: {}, auth: {}, googleProvider: {}, analytics: null }));
 // #559: ReviewQueue now imports `track` (for `prompt_suggestion_approved`),
 // so the module graph reaches `../analytics` — mock it directly rather than
@@ -83,7 +85,8 @@ vi.mock('../hooks/useData', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../hooks/useData')>();
   return {
     ...actual,
-    useEventDoc: () => ({ data: H.event, loading: false, hasServerData: true }),
+    useEventDoc: () => ({ data: H.event, loading: false, hasServerData: true, fromCache: false, hasPendingWrites: false }),
+    useAdminEventDoc: () => ({ data: H.event, loading: false, hasServerData: true, fromCache: false, hasPendingWrites: false }),
     usePendingClaims: () => ({ claims: H.claims }),
     usePendingItems: () => ({ items: H.pendingItems, loading: false }),
     useReportedProofs: () => ({ flagged: H.flagged, loading: false }),
@@ -120,7 +123,7 @@ vi.mock('../data/admin', () => ({
   unlockDayNow: (...a: unknown[]) => H.unlockDayNow(...a),
   resnapshotDayNow: (...a: unknown[]) => H.resnapshotDayNow(...a),
 }));
-vi.mock('../data/proofs', () => ({ deleteProof: (...a: unknown[]) => H.deleteProof(...a) }));
+vi.mock('../data/proofs', () => ({ deleteProofAsAdmin: (...a: unknown[]) => H.deleteProof(...a) }));
 // The admin pickers read the EDITION-SCOPED list, not the registry (#555), so
 // the stub has to provide both. Both entries are in scope here, which keeps
 // every existing assertion about what the console offers exactly as it was.

@@ -53,12 +53,18 @@ vi.mock('firebase/storage', () => ({
   deleteObject: vi.fn(),
 }));
 
+const privateProfile = vi.hoisted(() => ({ uid: 'u1', generation: 0, recovered: true, db: {} }));
 vi.mock('../firebase', () => ({
-  db: {},
-  storage: {},
-  get EVENT_ID() {
-    return eventScope.eventId;
-  },
+  db: {}, storage: {}, auth: { get currentUser() { return { uid: authState.current.user?.uid ?? privateProfile.uid }; } },
+  get EVENT_ID() { return eventScope.eventId; },
+}));
+vi.mock('../privateFirestore', () => ({
+  awaitPrivateFirestore: vi.fn(async (uid: string) => {
+    const generation = privateProfile.generation;
+    const assertCurrent = () => { if (!privateProfile.recovered || uid !== (authState.current.user?.uid ?? privateProfile.uid) || generation !== privateProfile.generation) throw new Error('Private session expired or recovery required.'); };
+    assertCurrent();
+    return { db: privateProfile.db, uid, assertCurrent, guard: async <T,>(op: () => Promise<T>) => { assertCurrent(); const result = await op(); assertCurrent(); return result; } };
+  }),
 }));
 
 type AuthUser = { uid: string; displayName: string | null; photoURL: string | null } | null;
@@ -137,6 +143,7 @@ vi.mock('../hooks/useData', async () => {
 });
 
 function resetMocks() {
+  privateProfile.uid = 'u1'; privateProfile.generation = 0; privateProfile.recovered = true;
   eventScope.eventId = 'test-event';
   eventState.value = { status: 'active' };
   docMock.mockClear();
@@ -667,5 +674,30 @@ describe('ProfileEditor', () => {
     expect(trigger).toHaveClass('avatar-trigger');
     // …and the button's content is the player's avatar, not a separate icon.
     expect(within(trigger).getByRole('img')).toHaveAttribute('src', googlePhoto);
+  });
+});
+
+
+describe('private profile action lifetime (#1411)', () => {
+  beforeEach(() => { resetMocks(); authState.current = { user: null, loading: false }; });
+  it('saves users only through the recovered memory database', async () => {
+    await updateDisplayName('u1', 'Saved');
+    const call = docMock.mock.calls.find((entry) => entry[1] === 'users');
+    expect(call?.[0]).toBe(privateProfile.db);
+    const playerCall = docMock.mock.calls.find((entry) => entry[1] === 'events');
+    expect(playerCall?.[0]).not.toBe(privateProfile.db);
+  });
+  it('refuses profile edits during recovery before any storage or Firestore write', async () => {
+    privateProfile.recovered = false;
+    await expect(updateDisplayName('u1', 'Saved')).rejects.toThrow(/recovery/);
+    await expect(updateAvatar('u1', new Blob(['x']))).rejects.toThrow(/recovery/);
+    expect(setDocMock).not.toHaveBeenCalled();
+    expect(uploadBytesMock).not.toHaveBeenCalled();
+  });
+  it('cannot write an old UID profile after the avatar upload resumes under another account', async () => {
+    uploadBytesMock.mockImplementationOnce(async () => { privateProfile.uid = 'u2'; privateProfile.generation++; return {}; });
+    await expect(updateAvatar('u1', new Blob(['x']))).rejects.toThrow(/expired/);
+    expect(setDocMock).not.toHaveBeenCalled();
+    expect(updateDocMock).not.toHaveBeenCalled();
   });
 });

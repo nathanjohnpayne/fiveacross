@@ -1,4 +1,4 @@
-import { collection, doc } from 'firebase/firestore';
+import { collection, doc, type Firestore } from 'firebase/firestore';
 import { db, EVENT_ID } from '../firebase';
 import {
   eventConverter,
@@ -19,9 +19,9 @@ import {
 } from './converters';
 
 // Typed, converter-attached references for reads.
-export const eventRef = () => doc(db, 'events', EVENT_ID).withConverter(eventConverter);
-export const itemsCol = () =>
-  collection(db, 'events', EVENT_ID, 'items').withConverter(itemConverter);
+export const eventRef = (database: Firestore = db) => doc(database, 'events', EVENT_ID).withConverter(eventConverter);
+export const itemsCol = (database: Firestore = db) =>
+  collection(database, 'events', EVENT_ID, 'items').withConverter(itemConverter);
 export const boardRef = (uid: string, eventId: string = EVENT_ID) =>
   doc(db, 'events', eventId, 'boards', uid).withConverter(boardConverter);
 // A Player's Day Card: the day-scoped Board at
@@ -36,25 +36,25 @@ export const dayBoardRef = (dayIndex: number, uid: string, eventId: string = EVE
   );
 // One meta doc per Day (doc id IS the dayIndex): the write-once per-Day First
 // to BINGO honor (#212/#264). Same canonical-decimal segment rule as boards.
-export const dayMetaRef = (dayIndex: number, eventId: string = EVENT_ID) =>
-  doc(db, 'events', eventId, 'days', String(dayIndex), 'meta', String(dayIndex)).withConverter(
+export const dayMetaRef = (dayIndex: number, eventId: string = EVENT_ID, database: Firestore = db) =>
+  doc(database, 'events', eventId, 'days', String(dayIndex), 'meta', String(dayIndex)).withConverter(
     dayMetaConverter,
   );
 // The roster. `eventId` is a parameter for the same reason `dayMetaRef`'s is:
 // the archive's freeze writer takes several awaited reads in a row and must
 // address ONE Event across all of them, and `EVENT_ID` is a live binding a
 // hostname change can move underneath it (#1142 item 7).
-export const playersCol = (eventId: string = EVENT_ID) =>
-  collection(db, 'events', eventId, 'players').withConverter(playerConverter);
+export const playersCol = (eventId: string = EVENT_ID, database: Firestore = db) =>
+  collection(database, 'events', eventId, 'players').withConverter(playerConverter);
 export const playerRef = (uid: string) =>
   doc(db, 'events', EVENT_ID, 'players', uid).withConverter(playerConverter);
-export const userRef = (uid: string) => doc(db, 'users', uid).withConverter(userConverter);
-export const proofsCol = () =>
-  collection(db, 'events', EVENT_ID, 'proofs').withConverter(proofConverter);
+export const userRef = (uid: string, database: Firestore = db) => doc(database, 'users', uid).withConverter(userConverter);
+export const proofsCol = (database: Firestore = db) =>
+  collection(database, 'events', EVENT_ID, 'proofs').withConverter(proofConverter);
 export const proofRef = (id: string) =>
   doc(db, 'events', EVENT_ID, 'proofs', id).withConverter(proofConverter);
-export const claimsCol = () =>
-  collection(db, 'events', EVENT_ID, 'claims').withConverter(claimConverter);
+export const claimsCol = (database: Firestore = db) =>
+  collection(database, 'events', EVENT_ID, 'claims').withConverter(claimConverter);
 export const claimRef = (id: string) =>
   doc(db, 'events', EVENT_ID, 'claims', id).withConverter(claimConverter);
 // A Prompt's Tally markers: events/{EVENT_ID}/tally/{itemId}/markers/{uid} (ADR
@@ -102,14 +102,14 @@ export const heartRef = (id: string, eventId: string = EVENT_ID) =>
 // for the same reason `heartRef`'s is: a block write captures the acted
 // Event once and must keep addressing it after a hostname change moves
 // `EVENT_ID` underneath it.
-export const blocksCol = (eventId: string = EVENT_ID) =>
-  collection(db, 'events', eventId, 'blocks').withConverter(blockConverter);
-export const blockRef = (ownerUid: string, targetUid: string, eventId: string = EVENT_ID) =>
-  doc(db, 'events', eventId, 'blocks', `${ownerUid}_${targetUid}`).withConverter(blockConverter);
-export const blockPairsCol = (eventId: string = EVENT_ID) =>
-  collection(db, 'events', eventId, 'blockPairs').withConverter(blockPairConverter);
-export const blockPairRef = (a: string, b: string, eventId: string = EVENT_ID) =>
-  doc(db, 'events', eventId, 'blockPairs', blockPairId(a, b)).withConverter(blockPairConverter);
+export const blocksCol = (eventId: string = EVENT_ID, database: Firestore = db) =>
+  collection(database, 'events', eventId, 'blocks').withConverter(blockConverter);
+export const blockRef = (ownerUid: string, targetUid: string, eventId: string = EVENT_ID, database: Firestore = db) =>
+  doc(database, 'events', eventId, 'blocks', `${ownerUid}_${targetUid}`).withConverter(blockConverter);
+export const blockPairsCol = (eventId: string = EVENT_ID, database: Firestore = db) =>
+  collection(database, 'events', eventId, 'blockPairs').withConverter(blockPairConverter);
+export const blockPairRef = (a: string, b: string, eventId: string = EVENT_ID, database: Firestore = db) =>
+  doc(database, 'events', eventId, 'blockPairs', blockPairId(a, b)).withConverter(blockPairConverter);
 /** The pair id: the two uids in string order, `_`-joined — the same `<`
  * comparison the rules' `blockPairId` makes. Firebase uids are ASCII, so the
  * JS code-unit order and the rules' string order agree. */

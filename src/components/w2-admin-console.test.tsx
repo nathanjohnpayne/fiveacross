@@ -43,6 +43,8 @@ const H = vi.hoisted(() => ({
   unbanUser: vi.fn(),
 }));
 
+vi.mock('../hooks/usePrivateFirestore', () => ({ usePrivateFirestore: () => ({ uid: H.user?.uid ?? null, db: {}, generation: 1, recoveryRequired: false, failed: false }) }));
+
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event', storage: {}, auth: {}, googleProvider: {}, analytics: null }));
 // #559: ReviewQueue (mounted via Admin) now imports `track`, reaching
 // `../analytics` — mocked directly so the real module's own `../firebase`
@@ -69,7 +71,8 @@ vi.mock('../hooks/useData', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../hooks/useData')>();
   return {
     ...actual,
-    useEventDoc: () => ({ data: H.event, loading: false, hasServerData: true }),
+    useEventDoc: () => ({ data: H.event, loading: false, hasServerData: true, fromCache: false, hasPendingWrites: false }),
+    useAdminEventDoc: () => ({ data: H.event, loading: false, hasServerData: true, fromCache: false, hasPendingWrites: false }),
     usePendingClaims: () => ({ claims: H.claims }),
     useReportedProofs: () => ({ flagged: H.flagged, loading: false }),
     useAllItems: () => ({ items: H.items, loading: false }),
@@ -96,7 +99,7 @@ vi.mock('../data/admin', () => ({
   banUser: (...a: unknown[]) => H.banUser(...a),
   unbanUser: (...a: unknown[]) => H.unbanUser(...a),
 }));
-vi.mock('../data/proofs', () => ({ deleteProof: (...a: unknown[]) => H.deleteProof(...a) }));
+vi.mock('../data/proofs', () => ({ deleteProofAsAdmin: (...a: unknown[]) => H.deleteProof(...a) }));
 // Admin pickers read the EDITION-SCOPED list, not the registry (#555).
 vi.mock('../theme/themes', () => {
   const THEMES = [{ id: 'neon-playground', emoji: '🎉', label: 'Neon' }];
@@ -217,7 +220,7 @@ describe('Report queue (specs/w2-admin-console.md)', () => {
     fireEvent.click(within(queue()).getByTitle('Delete'));
     // #246: deleteProof now carries day-scoping opts. This fixture's Event has no
     // `days[]`, so the admin delete is legacy-mode (daily false, no tutorial set).
-    expect(H.deleteProof).toHaveBeenCalledWith('gone', 'proofs/e/u/gone.jpg', {
+    expect(H.deleteProof).toHaveBeenCalledWith('admin-uid', 'gone', 'proofs/e/u/gone.jpg', {
       daily: false,
       tutorialDayIndexes: undefined,
       // #265 (Codex P2 on #278 round 3): the admin delete threads the same
@@ -248,7 +251,7 @@ describe('Report queue (specs/w2-admin-console.md)', () => {
     fireEvent.click(q.getByRole('button', { name: 'Restore' }));
     expect(H.restoreProof).toHaveBeenCalledWith('half-lifted');
     fireEvent.click(q.getByTitle('Delete'));
-    expect(H.deleteProof).toHaveBeenCalledWith('half-lifted', 'proofs/e/u/half-lifted.jpg', {
+    expect(H.deleteProof).toHaveBeenCalledWith('admin-uid', 'half-lifted', 'proofs/e/u/half-lifted.jpg', {
       ceremonialDayIndexes: undefined,
       statsFrozen: expect.any(Function),
       daily: false,

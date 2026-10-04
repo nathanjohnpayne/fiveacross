@@ -358,7 +358,7 @@ describe('the entry seam stays free of anything that can read a URL', () => {
     }
   });
 
-  it('allows only the two inspected entry imports, both after credential capture', () => {
+  it('allows only the inspected application, handoff and cache-recovery imports after credential capture', () => {
     const src = readSource('src/entry.tsx');
     const imports = extractRuntimeModuleImports(src, 'src/entry.tsx');
     expect(
@@ -368,6 +368,7 @@ describe('the entry seam stays free of anything that can read a URL', () => {
     const dynamicImports = imports.filter((entry) => entry.kind === 'dynamic');
     expect(dynamicImports.map((entry) => entry.specifier)).toEqual([
       './auth/handoffReturn',
+      './auth/privateCacheRecoveryPage',
       './main',
     ]);
     const captureOffsets = callOffsets(src, 'src/entry.tsx', 'captureUrlCredentialsFromUrl');

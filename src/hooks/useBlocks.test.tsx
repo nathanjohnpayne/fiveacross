@@ -18,6 +18,7 @@ type Subscription = {
 
 const H = vi.hoisted(() => ({
   eventId: 'event-a',
+  session: { uid: 'bob' as string | null, db: { memory: true } as object | null, generation: 0, recoveryRequired: false, failed: false },
   subscriptions: [] as Subscription[],
   // Every server-only pair delete the reconciler sends, by document path.
   reconciled: [] as string[],
@@ -25,20 +26,29 @@ const H = vi.hoisted(() => ({
   repaired: [] as string[],
   ownListings: 0,
   ownTargets: [] as string[] | Error,
+  blockCommits: [] as Array<() => Promise<void>>,
 }));
 
 vi.mock('../firebase', () => ({
   db: {},
+  auth: { get currentUser() { return H.session.uid ? { uid: H.session.uid } : null; } },
   get EVENT_ID() {
     return H.eventId;
   },
 }));
+vi.mock('./usePrivateFirestore', () => ({ usePrivateFirestore: () => H.session }));
+vi.mock('../privateFirestore', () => {
+  const capture = () => {
+    const { uid, db, generation } = H.session;
+    const assertCurrent = () => { if (!db || uid !== H.session.uid || generation !== H.session.generation) throw new Error('Private session expired.'); };
+    return { uid, db, assertCurrent, guard: async <T,>(op: () => Promise<T>) => { assertCurrent(); const value = await op(); assertCurrent(); return value; } };
+  };
+  return { capturePrivateFirestore: capture, awaitPrivateFirestore: async (uid: string) => { const lease = capture(); if (lease.uid !== uid) throw new Error('Private account changed.'); lease.assertCurrent(); return lease; } };
+});
 vi.mock('firebase/firestore', () => ({
-  collection: (_db: unknown, ...segments: string[]) => ({ kind: 'collection', path: segments.join('/'), withConverter() { return this; } }),
+  collection: (_db: unknown, ...segments: string[]) => ({ database: _db, kind: 'collection', path: segments.join('/'), withConverter() { return this; } }),
   doc: (_db: unknown, ...segments: string[]) => ({ kind: 'doc', path: segments.join('/'), withConverter() { return this; } }),
-  writeBatch: () => {
-    throw new Error('the provider never writes a batch');
-  },
+  writeBatch: () => ({ set: vi.fn(), commit: () => (H.blockCommits.shift() ?? (() => Promise.resolve()))() }),
   runTransaction: async (
     _db: unknown,
     update: (tx: { delete: (ref: { path: string }) => void; set: (ref: { path: string }) => void }) => Promise<void>,
@@ -75,6 +85,8 @@ vi.mock('firebase/firestore', () => ({
   },
 }));
 
+import { blockPlayer, retirePendingBlocks, pendingBlockTargets } from '../data/blocks';
+
 import {
   HiddenUidsProvider,
   REPAIR_RETRY_ATTEMPTS,
@@ -94,11 +106,14 @@ const pathOf = (sub: Subscription) => ((sub.target as { args: unknown[] }).args[
 
 beforeEach(() => {
   H.eventId = 'event-a';
+  H.session = { uid: 'bob', db: { memory: true }, generation: 0, recoveryRequired: false, failed: false };
+  vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
   H.subscriptions = [];
   H.reconciled = [];
   H.repaired = [];
   H.ownListings = 0;
-  H.ownTargets = [];
+  H.ownTargets = []; H.blockCommits = [];
+  for (const uid of ['bob', 'carol']) for (const eventId of ['event-a', 'event-b']) retirePendingBlocks(uid, eventId);
   resetReconcileAttemptsForTests();
 });
 afterEach(() => {
@@ -356,12 +371,14 @@ describe('useHiddenUidsSubscription', () => {
     });
     const first = H.subscriptions[0];
     act(() => first.listener(pairs([['alice', 'bob']])));
+    H.session = { ...H.session, uid: 'carol', generation: 1 };
     view.rerender({ uid: 'carol' });
     expect(first.unsubscribe).toHaveBeenCalledTimes(1);
     expect(view.result.current).toEqual({ hidden: new Set(), ready: false });
     expect(whereOf(H.subscriptions[1])).toEqual({ kind: 'where', args: ['uids', 'array-contains', 'carol'] });
     act(() => first.listener(pairs([['alice', 'bob']])));
     expect(view.result.current.hidden.size).toBe(0);
+    H.session = { ...H.session, uid: null, generation: 2 };
     view.rerender({ uid: null });
     expect(H.subscriptions[1].unsubscribe).toHaveBeenCalledTimes(1);
     expect(view.result.current).toEqual({ hidden: new Set(), ready: true });
@@ -375,7 +392,139 @@ describe('useHiddenUidsSubscription', () => {
     expect(pathOf(H.subscriptions[1])).toBe('events/event-b/blockPairs');
   });
 
-  it('a listener error logs, resolves ready, and keeps the last set rather than blanking the app', () => {
+
+
+  it('a newly queued offline block hides immediately only for an already confirmed viewer', async () => {
+    const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+    act(() => H.subscriptions[0].listener(pairs([])));
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    H.session = { ...H.session, db: null, generation: 1 }; view.rerender();
+    let release!: () => void;
+    H.blockCommits = [() => new Promise<void>((resolve) => { release = resolve; })];
+    let commit!: Promise<void>;
+    act(() => { commit = blockPlayer({ me: 'bob', target: 'alice' }); });
+    expect(view.result.current).toEqual({ hidden: new Set(['alice']), ready: true });
+    // Durable ACK alone cannot reveal the target before named-memory observes it.
+    await act(async () => { release(); await commit; });
+    expect(view.result.current.hidden.has('alice')).toBe(true);
+    view.unmount();
+    const cold = renderHook(() => useHiddenUidsSubscription('bob', true));
+    expect(cold.result.current).toEqual({ hidden: new Set(), ready: false });
+  });
+
+  it('pending block intent never grants a cold online first answer and rejection removes only its overlay', async () => {
+    const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+    let reject!: (error: Error) => void;
+    H.blockCommits = [() => new Promise<void>((_, fail) => { reject = fail; })];
+    let commit!: Promise<void>;
+    act(() => { commit = blockPlayer({ me: 'bob', target: 'carol' }); });
+    expect(view.result.current.ready).toBe(false);
+    act(() => H.subscriptions[0].listener(pairs([['alice', 'bob']])));
+    expect(view.result.current.hidden).toEqual(new Set(['alice', 'carol']));
+    const denied = new Error('permission-denied');
+    const result = expect(commit).rejects.toBe(denied);
+    await act(async () => { reject(denied); await result; });
+    expect(view.result.current).toEqual({ hidden: new Set(['alice']), ready: true });
+  });
+
+  it.each(['ack-first', 'snapshot-first'] as const)('block %s retains visibility until both memory observation and ACK', async (order) => {
+    const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+    const sub = H.subscriptions[0]; act(() => sub.listener(pairs([])));
+    let release!: () => void;
+    H.blockCommits = [() => new Promise<void>((resolve) => { release = resolve; })];
+    let commit!: Promise<void>;
+    act(() => { commit = blockPlayer({ me: 'bob', target: 'alice' }); });
+    if (order === 'ack-first') await act(async () => { release(); await commit; });
+    expect(pendingBlockTargets('bob', H.eventId).has('alice')).toBe(true);
+    act(() => sub.listener(pairs([['alice', 'bob']])));
+    if (order === 'snapshot-first') {
+      expect(pendingBlockTargets('bob', H.eventId).has('alice')).toBe(true);
+      await act(async () => { release(); await commit; });
+    }
+    expect(pendingBlockTargets('bob', H.eventId).size).toBe(0);
+    expect(view.result.current.hidden.has('alice')).toBe(true);
+    act(() => sub.listener(pairs([])));
+    expect(view.result.current.hidden.size).toBe(0);
+  });
+
+  it('account switches retire pending relay tokens and an old ACK cannot transfer intent back', async () => {
+    const view = renderHook(({ uid }) => useHiddenUidsSubscription(uid, true), { initialProps: { uid: 'bob' } });
+    act(() => H.subscriptions[0].listener(pairs([])));
+    let release!: () => void;
+    H.blockCommits = [() => new Promise<void>((resolve) => { release = resolve; })];
+    let commit!: Promise<void>;
+    act(() => { commit = blockPlayer({ me: 'bob', target: 'alice' }); });
+    H.session = { ...H.session, uid: 'carol', generation: 1 }; view.rerender({ uid: 'carol' });
+    expect(pendingBlockTargets('bob', H.eventId).size).toBe(0);
+    await act(async () => { release(); await commit; });
+    H.session = { ...H.session, uid: 'bob', generation: 2 }; view.rerender({ uid: 'bob' });
+    act(() => H.subscriptions[2].listener(pairs([])));
+    expect(view.result.current).toEqual({ hidden: new Set(), ready: true });
+  });
+  it('routes pair reads to memory and withholds a cold cache-only or denied answer', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+    const sub = H.subscriptions[0];
+    expect((sub.target as { args: Array<{ database: unknown }> }).args[0].database).toBe(H.session.db);
+    act(() => sub.listener({ ...pairs([]), metadata: { fromCache: true, hasPendingWrites: false } }));
+    expect(view.result.current.ready).toBe(false);
+    act(() => sub.onError(new Error('permission-denied')));
+    expect(view.result.current).toEqual({ hidden: new Set(), ready: false });
+  });
+
+  it('cold offline starts and reloads never infer an empty confirmed set', () => {
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    H.session = { ...H.session, db: null, generation: 1 };
+    const first = renderHook(() => useHiddenUidsSubscription('bob', true));
+    expect(first.result.current).toEqual({ hidden: new Set(), ready: false });
+    first.unmount();
+    const reload = renderHook(() => useHiddenUidsSubscription('bob', true));
+    expect(reload.result.current.ready).toBe(false);
+    expect(H.subscriptions).toHaveLength(0);
+  });
+
+  it('mid-use offline keeps only its confirmed scope and reconnect denial cannot reveal it', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+    const old = H.subscriptions[0];
+    act(() => old.listener(pairs([['alice', 'bob']])));
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    H.session = { ...H.session, db: null, generation: 1 };
+    view.rerender();
+    expect(old.unsubscribe).toHaveBeenCalledOnce();
+    expect(view.result.current).toEqual({ hidden: new Set(['alice']), ready: true });
+    act(() => old.listener(pairs([])));
+    expect([...view.result.current.hidden]).toEqual(['alice']);
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
+    H.session = { ...H.session, db: { memory: true }, generation: 2 };
+    view.rerender();
+    const fresh = H.subscriptions[1];
+    act(() => fresh.listener({ ...pairs([]), metadata: { fromCache: true, hasPendingWrites: false } }));
+    act(() => fresh.onError(new Error('permission-denied')));
+    expect(view.result.current).toEqual({ hidden: new Set(['alice']), ready: true });
+    act(() => fresh.listener(pairs([])));
+    expect(view.result.current).toEqual({ hidden: new Set(), ready: true });
+  });
+
+  it.each(['account', 'Event'] as const)('offline %s changes retire the confirmed visibility witness', (scope) => {
+    const view = renderHook(({ uid }) => useHiddenUidsSubscription(uid, true), { initialProps: { uid: 'bob' } });
+    act(() => H.subscriptions[0].listener(pairs([['alice', 'bob']])));
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    H.session = { ...H.session, db: null, generation: 1, uid: scope === 'account' ? 'carol' : 'bob' };
+    if (scope === 'Event') H.eventId = 'event-b';
+    view.rerender({ uid: H.session.uid! });
+    expect(view.result.current).toEqual({ hidden: new Set(), ready: false });
+  });
+
+  it('legacy recovery withholds private visibility despite a previously confirmed answer', () => {
+    const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+    act(() => H.subscriptions[0].listener(pairs([['alice', 'bob']])));
+    H.session = { ...H.session, recoveryRequired: true, generation: 1 };
+    view.rerender();
+    expect(view.result.current).toEqual({ hidden: new Set(), ready: false });
+    expect(H.subscriptions[0].unsubscribe).toHaveBeenCalledOnce();
+  });
+  it('a listener error keeps a confirmed set and withholds an unknown cold set', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const view = renderHook(() => useHiddenUidsSubscription('bob', true));
     const sub = H.subscriptions[0];
@@ -433,6 +582,35 @@ describe('useMyBlocks', () => {
     expect(view.result.current).toEqual({ data: [row], loading: false, error: false, confirmed: true, pendingTargets: new Set() });
   });
 
+
+
+  it('own panel relays pending target identity without synthesizing direction records', async () => {
+    const view = renderHook(() => useMyBlocks('bob'));
+    act(() => H.subscriptions[0].listener(own([{ row: direction('alice') }])));
+    let reject!: (error: Error) => void;
+    H.blockCommits = [() => new Promise<void>((_, fail) => { reject = fail; })];
+    let commit!: Promise<void>;
+    act(() => { commit = blockPlayer({ me: 'bob', target: 'carol' }); });
+    expect(view.result.current.data.map((row) => row.targetUid)).toEqual(['alice']);
+    expect(view.result.current.pendingTargets.has('carol')).toBe(true);
+    const rejected = expect(commit).rejects.toThrow('denied');
+    await act(async () => { reject(new Error('denied')); await rejected; });
+    expect(view.result.current.pendingTargets.size).toBe(0);
+    expect(view.result.current.data.map((row) => row.targetUid)).toEqual(['alice']);
+  });
+  it('own directions are memory-only and disappear on retirement/recovery', () => {
+    const view = renderHook(() => useMyBlocks('bob'));
+    const sub = H.subscriptions[0];
+    expect((sub.target as { args: Array<{ database: unknown }> }).args[0].database).toBe(H.session.db);
+    act(() => sub.listener(own([{ row: direction('alice') }])));
+    H.session = { ...H.session, recoveryRequired: true, generation: 1 };
+    view.rerender();
+    expect(view.result.current.data).toEqual([]);
+    expect(view.result.current.confirmed).toBe(false);
+    expect(sub.unsubscribe).toHaveBeenCalledOnce();
+    act(() => sub.listener(own([{ row: direction('alice') }])));
+    expect(view.result.current.data).toEqual([]);
+  });
   it('an empty cache-only snapshot is not confirmed; the first server snapshot latches it', () => {
     const view = renderHook(() => useMyBlocks('bob'));
     const sub = H.subscriptions[0];
@@ -440,7 +618,7 @@ describe('useMyBlocks', () => {
     expect(view.result.current).toMatchObject({ data: [], loading: false, confirmed: false });
     act(() => sub.listener(own([], false)));
     expect(view.result.current.confirmed).toBe(true);
-    // Going offline afterwards serves the same list from cache; the server already answered.
+    // A later memory-cache answer within this admitted listener retains its confirmation.
     act(() => sub.listener(own([], true)));
     expect(view.result.current.confirmed).toBe(true);
   });

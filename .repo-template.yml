@@ -10,6 +10,21 @@
 # Used by check_spec_test_alignment when the default filename search
 # wouldn't find the test.
 spec_test_map:
+  private-cache-isolation:
+    - tests/offline/private-cache-auth.test.ts
+    - src/auth/privateCacheRecovery.test.ts
+    - src/auth/privateCacheRecoveryPage.test.ts
+    - src/auth/offlineAttestationWitness.test.ts
+    - src/entry-private-cache.test.ts
+    - src/hooks/useData-private.test.ts
+    - src/hooks/useBlocks.test.tsx
+    - src/data/private-admin-session.test.ts
+    - src/auth/privateFirestoreSession.test.ts
+    - src/privateFirestore.test.ts
+    - src/data/private-proof-moderation.test.ts
+    - src/data/private-proof-storage.test.ts
+    - src/components/player-blocking-feed.test.tsx
+    - src/components/Board.test.tsx
   # event-scoped-client-state spans the shared key primitive, manual listener
   # lifecycles, Moment/retraction registries, and the two cross-tab intents; none
   # shares the spec basename, so map the contract's primary isolation suites.

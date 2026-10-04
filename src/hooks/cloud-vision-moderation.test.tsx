@@ -12,6 +12,11 @@ import { renderHook, act } from '@testing-library/react';
 
 const H = vi.hoisted(() => ({ onSnapshot: vi.fn() }));
 
+// Private queue fixtures use an authenticated, recovered memory session.
+vi.mock('./usePrivateFirestore', () => ({ usePrivateFirestore: () => ({
+  uid: 'admin', db: { name: 'private-memory' }, generation: 1, recoveryRequired: false, failed: false,
+}) }));
+
 vi.mock('../firebase', () => ({
   db: {},
   EVENT_ID: 'test-event',

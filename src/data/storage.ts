@@ -1,4 +1,4 @@
-import { ref, uploadBytes, getDownloadURL, deleteObject, getMetadata } from 'firebase/storage';
+import { ref, uploadBytes, getDownloadURL, deleteObject, getMetadata, type FirebaseStorage } from 'firebase/storage';
 import { storage, EVENT_ID } from '../firebase';
 import { PROOF_MEDIA_CACHE_CONTROL } from './proofMediaCache';
 import { canonicalizeProofMediaUrl } from './proofMediaUrl';
@@ -69,11 +69,8 @@ export async function uploadProofMedia(
     kind === 'photo' ? { ext: 'jpg', contentType: 'image/jpeg' } : audioExtAndContentType(payload.type);
   const path = `proofs/${eventId}/${uid}/${proofId}.${ext}`;
   const r = ref(storage, path);
-  // #363: without an explicit cacheControl, Firebase Storage serves media as
-  // `private, max-age=0` and the Feed refetches every photo on every visit.
-  // Proof objects are immutable (path unique per proofId, never overwritten),
-  // so the long-lived immutable policy is safe. Avatars below deliberately do
-  // NOT get this: avatars/{uid}.jpg is overwritten in place on profile edits.
+  // #1410: new sensitive proof media must not enter shared or browser HTTP
+  // caches. This changes new uploads only, not metadata on existing objects.
   await uploadBytes(r, payload, { contentType, cacheControl: PROOF_MEDIA_CACHE_CONTROL });
   // #335: identity in every real build. Under the Playwright e2e build ONLY, the
   // Storage emulator hands back its own origin (`http://127.0.0.1:9199/v0/b/…`),
@@ -119,18 +116,18 @@ export async function uploadAvatar(uid: string, blob: Blob): Promise<string> {
  * round trip and a binding to the object as it stood at DELETE time rather than
  * at sweep time — not the protection itself.
  */
-export async function proofMediaGeneration(path: string): Promise<string | null> {
+export async function proofMediaGeneration(path: string, client: FirebaseStorage = storage): Promise<string | null> {
   try {
-    const generation = (await getMetadata(ref(storage, path))).generation;
+    const generation = (await getMetadata(ref(client, path))).generation;
     return typeof generation === 'string' && generation.length > 0 ? generation : null;
   } catch {
     return null;
   }
 }
 
-export async function deleteStoragePath(path: string): Promise<void> {
+export async function deleteStoragePath(path: string, client: FirebaseStorage = storage): Promise<void> {
   try {
-    await deleteObject(ref(storage, path));
+    await deleteObject(ref(client, path));
   } catch (err) {
     // Only swallow "already gone"; surface real failures (permission, network)
     // so callers don't delete the referencing doc and orphan the media.

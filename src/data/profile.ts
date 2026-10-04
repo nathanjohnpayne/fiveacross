@@ -1,12 +1,13 @@
-import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
-import { db, EVENT_ID } from '../firebase';
+import { doc, getDoc, setDoc, updateDoc, type Firestore } from 'firebase/firestore';
+import { db, EVENT_ID, auth } from '../firebase';
+import { awaitPrivateFirestore } from '../privateFirestore';
 import { uploadAvatar } from './storage';
 import { isEventArchived, isEventArchiving } from './eventArchive';
 import type { EventDoc } from '../types';
 
 // Raw (converter-free) ref for writes — mirrors the private `rawUser` each
 // writing data module keeps locally (see data/api.ts).
-const rawUser = (uid: string) => doc(db, 'users', uid);
+const rawUser = (uid: string, database: Firestore) => doc(database, 'users', uid);
 const rawEvent = (eventId: string = EVENT_ID) => doc(db, 'events', eventId);
 const rawPlayer = (uid: string, eventId: string = EVENT_ID) =>
   doc(db, 'events', eventId, 'players', uid);
@@ -29,8 +30,11 @@ export async function updateDisplayName(uid: string, displayName: string): Promi
   // Event-local. Capture the acted Event before the global write can yield so a
   // late Event A save never refreshes Event B's Player row.
   const eventId = EVENT_ID;
-  await setDoc(rawUser(uid), { displayName: trimmed }, { merge: true });
-  await updateExistingPlayer(uid, { displayName: trimmed }, eventId);
+  if (auth.currentUser?.uid !== uid) throw new Error('Private account changed.');
+  const lease = await awaitPrivateFirestore(uid);
+  lease.assertCurrent();
+  await lease.guard(() => setDoc(rawUser(uid, lease.db), { displayName: trimmed }, { merge: true }));
+  await updateExistingPlayer(uid, { displayName: trimmed }, eventId, lease);
 }
 
 /**
@@ -39,9 +43,12 @@ export async function updateDisplayName(uid: string, displayName: string): Promi
  */
 export async function updateAvatar(uid: string, blob: Blob): Promise<string> {
   const eventId = EVENT_ID;
-  const url = await uploadAvatar(uid, blob);
-  await setDoc(rawUser(uid), { photoURL: url, customPhoto: true }, { merge: true });
-  await updateExistingPlayer(uid, { photoURL: url }, eventId);
+  if (auth.currentUser?.uid !== uid) throw new Error('Private account changed.');
+  const lease = await awaitPrivateFirestore(uid);
+  lease.assertCurrent();
+  const url = await lease.guard(() => uploadAvatar(uid, blob));
+  await lease.guard(() => setDoc(rawUser(uid, lease.db), { photoURL: url, customPhoto: true }, { merge: true }));
+  await updateExistingPlayer(uid, { photoURL: url }, eventId, lease);
   return url;
 }
 
@@ -71,6 +78,7 @@ async function updateExistingPlayer(
   uid: string,
   patch: { displayName?: string; photoURL?: string },
   eventId: string,
+  lease: Awaited<ReturnType<typeof awaitPrivateFirestore>>,
 ): Promise<void> {
   // An UNREADABLE Event reads as open and the write is attempted, which is
   // exactly what this function did before the read existed: the status decides
@@ -85,7 +93,7 @@ async function updateExistingPlayer(
   // reads as open here and the write is attempted: if the freeze still holds,
   // the `permission-denied` catch below is the skip, one round trip later, and
   // if it was lifted the mirror lands when the device reconnects.
-  const closed = await getDoc(rawEvent(eventId)).then(
+  const closed = await lease.guard(() => getDoc(rawEvent(eventId))).then(
     (snap) => {
       // A pending local close is not authoritative either (Phase 4b P2 on PR
       // #1157, run 3): `fromCache` and `hasPendingWrites` describe different
@@ -94,12 +102,14 @@ async function updateExistingPlayer(
       const event = snap.data() as Partial<EventDoc> | undefined;
       return isEventArchived(event) || isEventArchiving(event);
     },
-    () => false,
+    () => { lease.assertCurrent(); return false; },
   );
+  lease.assertCurrent();
   if (closed) return;
   try {
-    await updateDoc(rawPlayer(uid, eventId), patch);
+    await lease.guard(() => updateDoc(rawPlayer(uid, eventId), patch));
   } catch (err) {
+    lease.assertCurrent();
     const code = typeof err === 'object' && err !== null && 'code' in err ? err.code : null;
     // `not-found`: the Player never joined this Event, so there is no mirror to
     // refresh. `permission-denied`: the freeze landed between the read above and

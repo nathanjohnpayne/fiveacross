@@ -30,6 +30,8 @@ const H = vi.hoisted(() => ({
   deleteProof: vi.fn(),
 }));
 
+vi.mock('../hooks/usePrivateFirestore', () => ({ usePrivateFirestore: () => ({ uid: H.user?.uid ?? null, db: {}, generation: 1, recoveryRequired: false, failed: false }) }));
+
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event', storage: {}, auth: {}, googleProvider: {}, analytics: null }));
 // #559: ReviewQueue (mounted via Admin) now imports `track`, reaching
 // `../analytics` — mocked directly so the real module's own `../firebase`
@@ -53,7 +55,8 @@ vi.mock('../hooks/useData', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../hooks/useData')>();
   return {
     ...actual,
-    useEventDoc: () => ({ data: H.event, loading: false, hasServerData: true }),
+    useEventDoc: () => ({ data: H.event, loading: false, hasServerData: true, fromCache: false, hasPendingWrites: false }),
+    useAdminEventDoc: () => ({ data: H.event, loading: false, hasServerData: true, fromCache: false, hasPendingWrites: false }),
     usePendingClaims: () => ({ claims: H.claims }),
     usePendingItems: () => ({ items: H.pendingItems, loading: false }),
     useReportedProofs: () => ({ flagged: H.flagged, loading: false }),
@@ -97,7 +100,7 @@ vi.mock('../data/proofs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../data/proofs')>();
   return {
     ProofBacksMarkWhileClosingError: actual.ProofBacksMarkWhileClosingError,
-    deleteProof: (...a: unknown[]) => H.deleteProof(...a),
+    deleteProofAsAdmin: (...a: unknown[]) => H.deleteProof(...a),
   };
 });
 // Admin pickers read the EDITION-SCOPED list, not the registry (#555).

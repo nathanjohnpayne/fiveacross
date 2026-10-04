@@ -1,7 +1,8 @@
 import { useLocation, useNavigate } from 'react-router';
+import { usePrivateFirestore } from '../hooks/usePrivateFirestore';
 import { useAuth } from '../auth/AuthContext';
 import {
-  useEventDoc,
+  useAdminEventDoc,
   usePendingClaims,
   usePendingItems,
   useReportedProofs,
@@ -27,7 +28,7 @@ import MessagesPanel from './admin/MessagesPanel';
  * pending-approvals query the old Approvals tab opened), derives the badge
  * math once, resolves the section from the URL, and renders the matching
  * section inside the shared `AdminSheet` chrome. The sections live in
- * `./admin/*` and keep every write path exactly as built (UI-only re-housing).
+ * `./admin/*` and use the captured private-session Admin write paths.
  */
 
 const SECTION_TITLES: Record<AdminSection, string> = {
@@ -40,7 +41,7 @@ const SECTION_TITLES: Record<AdminSection, string> = {
 };
 
 /**
- * The admin gate shell. Only the event doc (readable by any signed-in player)
+ * The admin gate shell. Only the current server Event doc through the memory-only private session
  * is subscribed HERE — the admin-only queue/item/proof/claim subscriptions
  * live in `AdminConsole`, which mounts only once `isAdmin` holds. A non-admin
  * deep link therefore gets the dismissible "Admins only." sheet without ever
@@ -58,11 +59,18 @@ export default function Admin() {
   // redirect — the `hasServerData` LATCH, plus this snapshot's own `fromCache`
   // and `hasPendingWrites` — because an Admin's own optimistic `archiving: true`
   // is emitted server-backed but undecided, and a refusal rolls it back.
-  const { data: event, hasServerData, fromCache, hasPendingWrites } = useEventDoc();
+  const { data: event, hasServerData, fromCache, hasPendingWrites } = useAdminEventDoc();
   const eventConfirmed = hasServerData && !fromCache && !hasPendingWrites;
   const navigate = useNavigate();
+  const session = usePrivateFirestore();
+  if (user && session.recoveryRequired) {
+    return <AdminSheet title="Admin" onDone={() => navigate('/more', { replace: true })}>
+      <p>Private views require attended device recovery. Recover and verify every account’s queued Marks online first.</p>
+      <a href="#device-cache-recovery">Finish device recovery</a>
+    </AdminSheet>;
+  }
 
-  const isAdmin = !!(user && event?.admins?.includes(user.uid));
+  const isAdmin = !!(eventConfirmed && user && session.uid === user.uid && event?.admins?.includes(user.uid));
   if (!isAdmin || !user) {
     return (
       <AdminSheet title="Admin" onDone={() => navigate('/more', { replace: true })}>
@@ -79,7 +87,7 @@ function AdminConsole({
   eventConfirmed,
 }: {
   userUid: string;
-  event: ReturnType<typeof useEventDoc>['data'];
+  event: ReturnType<typeof useAdminEventDoc>['data'];
   /** Whether THIS Event snapshot is fully server-committed — threaded straight
    *  through to `ArchiveEvent`, whose arming gate (#1151) needs it. */
   eventConfirmed: boolean;

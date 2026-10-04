@@ -84,6 +84,8 @@ import SquareText from './SquareText';
  */
 function TallyBadge({ itemId, onOpen }: { itemId: string; onOpen: () => void }) {
   const { count } = useTally(itemId);
+  const { ready: blockSetReady } = useHiddenUids();
+  if (!blockSetReady && !navigator.onLine) return <span className="tally-badge" role="status" title="Reconnect to see the Tally">Reconnect for Tally</span>;
   if (count <= 0) return null;
   return (
     <button
@@ -224,6 +226,7 @@ function TallySheet({
   onClose: () => void;
 }) {
   const { markers, loading } = useTally(itemId);
+  const { ready: blockSetReady } = useHiddenUids();
   // `meUid` is the signed-in viewer — pass it so the ban own-content exception holds
   // in the sheet too (#122 round 2): a banned viewer still sees Doubts against
   // themselves, while Doubts against a banned OTHER marker stay hidden.
@@ -297,7 +300,9 @@ function TallySheet({
             )}
           </p>
         )}
-        {loading && markers.length === 0 ? (
+        {!blockSetReady && !navigator.onLine ? (
+          <p className="muted tally-empty" role="status">Reconnect to see the Tally.</p>
+        ) : loading && markers.length === 0 ? (
           <p className="muted tally-empty">Loading…</p>
         ) : markers.length === 0 ? (
           <p className="muted tally-empty">No one has marked this yet.</p>

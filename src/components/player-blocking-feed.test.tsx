@@ -327,6 +327,27 @@ describe('the Feed hides a blocked counterpart everywhere (#689)', () => {
     expect(document.body.textContent).not.toContain('Blocked Bea');
   });
 
+  it('shows an explicit reconnect state after an offline cold start, never an empty Feed', () => {
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    try {
+      H.blocks = { hidden: new Set(), ready: false };
+      mount({ proofs: [proof('p-blocked', 'blocked', 'Blocked Bea', 20)] });
+      expect(screen.getByRole('status').textContent).toBe('Reconnect to see the Feed.');
+      expect(screen.queryByText(/Blocked Bea/)).toBeNull();
+      expect(screen.queryByText('Loading…')).toBeNull();
+    } finally { vi.restoreAllMocks(); }
+  });
+
+  it('continues rendering through the confirmed memory set when a session goes offline', () => {
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    try {
+      mount({ proofs: [proof('p-blocked', 'blocked', 'Blocked Bea', 20), proof('p-friend', 'friend', 'Friend Fin', 10)] });
+      expect(screen.getByText(/Friend Fin wrote this/)).toBeTruthy();
+      expect(screen.queryByText(/Blocked Bea/)).toBeNull();
+      expect(screen.queryByText('Reconnect to see the Feed.')).toBeNull();
+    } finally { vi.restoreAllMocks(); }
+  });
+
   it('renders nothing but the loading state until the hidden set is ready', () => {
     H.blocks = { hidden: new Set(), ready: false };
     mount({ proofs: [proof('p-blocked', 'blocked', 'Blocked Bea', 20)] });
