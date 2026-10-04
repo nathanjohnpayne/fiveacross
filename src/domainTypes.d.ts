@@ -786,7 +786,53 @@ export interface HostnameDoc {
    * write arm exists, and none is added.
    */
   preview?: EventPreview;
+  /**
+   * Path capability on a SERVING host (specs/path-addressing-and-root.md § D3):
+   * the Namespace apex whose `hostnames/{slug}.{pathNamespace}` documents a
+   * `/<slug>` on this host addresses. Optional and fail-closed: absent, or any
+   * value that is not a Namespace apex, means no path addressing. Read but not
+   * acted on until the path chain (#1389/#1390) consumes it.
+   */
+  pathNamespace?: string;
+  /**
+   * The per-Event apex-path opt-in on a TARGET mapping (§ D8). Only a literal
+   * `true` is read; anything else is absent. Read but not acted on yet.
+   */
+  apexPath?: boolean;
+  /** Never set on an Event mapping: a `root` discriminator belongs to
+   *  {@link HostnameRootMarker} only, and a document naming an `eventId` is
+   *  read as an Event mapping whatever else it carries. */
+  root?: undefined;
 }
+
+/**
+ * A ROOT-SHAPED `hostnames/{host}` document (specs/path-addressing-and-root.md
+ * § D1): no `eventId`, and an explicit `root` discriminator. `doorway` serves
+ * the host's Edition doorway at `/`; `not-found` keeps the host's path
+ * capability while `/` is not-found. Written only by the lifecycle helper
+ * (`scripts/event-router-registry/hostname-lifecycle.mjs`), which removes
+ * `eventId`, `status` and `slug` when it converts a route into a marker.
+ *
+ * Coerced, never assumed: a document without `eventId` and without a valid
+ * `root` is malformed and reads as no mapping at all. The Event-scoped fields a
+ * conversion leaves behind (`adultContent`, `preview`, `canonicalHost`,
+ * `isCanonical`) are deliberately not carried — the marker names no Event.
+ */
+export interface HostnameRootMarker {
+  root: 'doorway' | 'not-found';
+  edition: string;
+  /** Same field and same fail-closed reading as {@link HostnameDoc.pathNamespace}. */
+  pathNamespace?: string;
+  eventId?: undefined;
+  status?: undefined;
+  slug?: undefined;
+  adultContent?: undefined;
+  preview?: undefined;
+  apexPath?: undefined;
+}
+
+/** Either shape a `hostnames/{host}` document may coerce to. */
+export type RoutingDoc = HostnameDoc | HostnameRootMarker;
 
 /** One Day of the pre-auth preview schedule — enough to render "Day 1: The
  *  Birds Have Entered the Chat" without reading the rules-gated Event doc. */

@@ -21,7 +21,7 @@ import { enforceBuildFloor } from './shellRecovery';
 import { armUncontrolledUpdateReload, postClientBuild } from './swClientBridge';
 import { watchPostUpdateReload } from './postUpdateDeal';
 import { bootstrapEventResolution } from './data/hostnames';
-import { shouldMountOnBootstrapFailure } from './eventResolution';
+import { bootNotFound, shouldMountOnBootstrapFailure } from './eventResolution';
 import { parseAuthOrigin, resolveSignInStrategy } from './auth/authMode';
 import { HANDOFF_AUTH_PATH } from './auth/handoffClient';
 import { isUrlSafeForTelemetry } from './handoffBoot';
@@ -350,11 +350,16 @@ if (atCentralAuthOrigin) {
         return;
       }
 
-      if (resolution.kind === 'not-found') phSetAuthState(null);
+      // Only an Event mounts the app. A root marker (the third outcome,
+      // specs/path-addressing-and-root.md § D1) renders this same not-found
+      // screen until the doorway ships (#1392) — exactly what the same
+      // `eventId`-less document rendered before it could be read.
+      const notFound = bootNotFound(resolution);
+      if (notFound) phSetAuthState(null);
       root.render(
-        resolution.kind === 'not-found' ? (
+        notFound ? (
           <React.StrictMode>
-            <EventNotFound hostname={resolution.hostname} reason={resolution.reason} />
+            <EventNotFound hostname={notFound.hostname} reason={notFound.reason} />
             {/* The 18+ analytics disclosure has to survive this branch too. GA4
                 loads on `firebase.ts` import, and PostHog startup plus its
                 explicit signed-out baseline have already been requested for

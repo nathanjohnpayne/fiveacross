@@ -19,13 +19,28 @@ This ticket owns the collection and its rules only. Consuming it at startup—pa
 
 | Field | Type | Meaning |
 |---|---|---|
-| `eventId` | string | The Event this address resolves to |
+| `eventId` | string (absent on a root-shaped document) | The Event this address resolves to |
 | `canonicalHost` | string | The address this Event is actually served from; equals `{host}` on the canonical document |
 | `edition` | string | Which Edition dresses this address—the only source available early enough to style the sign-in screen |
-| `status` | string | `active` \| `disabled` \| `archived` |
-| `slug` | string | The first label, denormalised for the edge router |
+| `status` | string (absent on a root-shaped document) | `active` \| `disabled` \| `archived` |
+| `slug` | string (absent on a root-shaped document) | The first label, denormalised for the edge router |
 | `isCanonical` | bool | Whether this document is the canonical address or an alias |
 | `preview` | map (optional) | The sign-in gate's Event-preview slice (#647): `{ eventName, dateRange?, hostedBy?, days?: [{date, title, emoji?}] }`—display copy only, read fail-soft (`coerceEventPreview`, src/eventPreview.ts); absent means the gate draws no card |
+| `root` | string (root-shaped document only) | `doorway` \| `not-found`—the discriminator of the root-shaped variant below |
+| `pathNamespace` | string (optional, serving host) | The Namespace apex a `/<slug>` on this host addresses ([`path-addressing-and-root`](path-addressing-and-root.md) § D3). Absent means no path addressing |
+| `apexPath` | bool (optional, target Event mapping) | The archive transaction's per-Event apex-path opt-in (§ D8). Only a literal `true` counts; absent means not addressable by apex path |
+
+### The root-shaped variant
+
+A `hostnames/{host}` document with **no `eventId`** is valid only as a **root-shaped document** ([`path-addressing-and-root`](path-addressing-and-root.md) § D1): it carries `edition`, an optional `pathNamespace`, and a required `root` discriminator. `root: 'doorway'` mounts the host's Edition doorway at `/`; `root: 'not-found'` keeps the host's path capability while `/` is not-found. The client reads it deliberately, through the one coercion every seam shares (`coerceRoutingDoc`, `src/eventResolution.ts`; the Firestore seam, its live watcher and the cache reader all call it):
+
+- **`eventId` alone decides the shape.** A document naming an `eventId` is an Event mapping, read exactly as before—explicit recognised `status` required—and a stray `root` on it is ignored, so it is never a doorway.
+- **A missing or unknown discriminator stays malformed and fail-closed.** An `eventId`-less document without `root: 'doorway' | 'not-found'` reads as no mapping, exactly as every such document did before the variant existed. A root-shaped document carrying the route-only `status` or `slug` is malformed too, matching the registry derivation (`deriveCanonicalProjection`, `scripts/event-router-registry/hostname-projection.mjs`).
+- **The Event-scoped fields a conversion leaves behind are not read.** `adultContent`, `preview`, `canonicalHost` and `isCanonical` survive a route-to-root conversion (§ Who writes a hostname document), but the coerced marker names no Event and carries none of them.
+
+**`pathNamespace` is read fail-closed.** It may name only an apex that issues Event subdomains—`fiveacross.app` or `vacaybingo.com`, the same set as `PATH_NAMESPACES` in the registry derivation and `NAMESPACES` in `worker/src/host.ts`, pinned equal by `src/eventResolution.test.ts`. Any other value, `gaycruisebingo.com` included, reads as absent: no path addressing. **`apexPath`** sits on a different document for a different question—`pathNamespace` says a host *can* address by path, `apexPath` says an Event *may be* addressed that way on an apex—and conflating them is what would alias every live Event onto the shared origin. Both are read today and acted on by nothing until the path chain (#1389/#1390) lands, so reading them changes no host's behaviour.
+
+**Neither addition changes the rules contract below.** It is still `allow get: if true; allow list: if false`, still no client writes; nothing here is rules-gated, so the disclosure posture is unchanged.
 
 `edition` rides here rather than on the Event document for the reason ADR 0009 gives: `events/{eventId}` requires `signedIn()`, so an Edition read from it arrives after the surface that most needs it has already rendered. `preview` (#647) rides here for the same reason: the wireframes' Join frame draws the Event's name, dates, host and Day line on the sign-in screen itself, which renders before any authenticated read is possible.
 
@@ -109,7 +124,9 @@ Merge the reviewed migration code before applying it. Keep the script afterward 
 - **Given** any client, authenticated or not, **when** it queries the `hostnames` collection, **then** the read is denied. (Test: list-denied.)
 - **Given** an unknown hostname, **when** a client `get`s it, **then** the read succeeds and the document does not exist—a not-found path, never an error. (Test: unknown-host.)
 - **Given** any client, **when** it attempts to create, update, or delete a hostname document, **then** the write is denied—including a signed-in user and an Event admin. (Test: writes-denied, admin-write-denied.)
+- **Given** a document with no `eventId` and `root: 'doorway'` or `root: 'not-found'`, **when** the client coerces it, **then** it reads as a root marker; **given** no `eventId` and no valid `root`, or a marker carrying `status` or `slug`, **then** it reads as no mapping. (Test: `src/eventResolution.test.ts` § coerceRoutingDoc.)
+- **Given** a document naming an `eventId`, **when** the client coerces it, **then** it is an Event mapping whatever `root`, `pathNamespace` or `apexPath` it also carries, and `pathNamespace` outside the Namespace apexes or a non-`true` `apexPath` reads as absent. (Test: same.)
 
 ## Test coverage
 
-`tests/rules/hostnames-lookup.test.ts` (rules emulator, `npm run test:rules`)—its own `projectId` so `clearFirestore()` cannot race the other rules suites under Vitest's file parallelism, matching the convention in `w1-attestation.test.ts`. Seeds fixture documents through `withSecurityRulesDisabled` (the Admin-SDK stand-in), then exercises each arm above.
+`tests/rules/hostnames-lookup.test.ts` (rules emulator, `npm run test:rules`)—its own `projectId` so `clearFirestore()` cannot race the other rules suites under Vitest's file parallelism, matching the convention in `w1-attestation.test.ts`. Seeds fixture documents through `withSecurityRulesDisabled` (the Admin-SDK stand-in), then exercises each arm above. The client reading of the root-shaped variant, `pathNamespace` and `apexPath` is covered by `src/eventResolution.test.ts` (the pure `coerceRoutingDoc`, plus the `PATH_NAMESPACES` parity with the registry and the edge) and `src/data/hostnames.test.ts` (the Firestore seam reading a marker through the same coercion).

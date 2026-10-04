@@ -7,7 +7,7 @@ import {
   resetAdultContentForTests,
   setActiveAdultContent,
 } from './adultContent';
-import { readCache, resolveEvent, writeCache, type StorageLike } from './eventResolution';
+import { CACHE_VERSION, readCache, resolveEvent, writeCache, type StorageLike } from './eventResolution';
 import { isExplicitWithheld } from './data/moderation';
 import type { HostnameDoc } from './types';
 
@@ -73,12 +73,14 @@ describe('the network and cache paths agree about the same bytes', () => {
     expect(readCache(storage, HOST, 1000)?.doc.adultContent).toBe(false);
   });
 
-  // The reason CACHE_VERSION is deliberately NOT bumped for this field: a bump
+  // The reason CACHE_VERSION was deliberately NOT bumped for this field: a bump
   // evicts every stored mapping, and the entries it would evict are exactly the
   // ones an offline cold boot depends on. Coercion gets the same answer without
-  // trading a correct default for a not-found screen.
+  // trading a correct default for a not-found screen. (The version later moved
+  // for the path-capability barrier, #1388; an entry without the field at the
+  // CURRENT version must still read gated.)
   it('reads a pre-#608 cache entry as gated rather than as a miss', () => {
-    const legacy = { v: 1, fetchedAt: 1000, doc: { ...DOC, adultContent: undefined } };
+    const legacy = { v: CACHE_VERSION, fetchedAt: 1000, doc: { ...DOC, adultContent: undefined } };
     const storage = fakeStorage({ [`fa:hostname:${HOST}`]: JSON.stringify(legacy) });
     const read = readCache(storage, HOST, 1000);
     expect(read, 'a legacy entry must still be a HIT').not.toBeNull();

@@ -86,6 +86,22 @@ describe('fetchHostnameDoc — the read must reach the server', () => {
     }
   });
 
+  // #1388: the root-shaped document (specs/path-addressing-and-root.md § D1)
+  // is read deliberately, through the same coercion the cache reader runs.
+  it('reads a root marker as a marker, and an eventId-less document without one as null', async () => {
+    const marker = { root: 'doorway', edition: 'fiveacross', pathNamespace: 'fiveacross.app', adultContent: false };
+    mocks.getDocFromServer.mockResolvedValue(snap(marker));
+    expect(await fetchHostnameDoc('fiveacross.app')).toEqual({
+      root: 'doorway',
+      edition: 'fiveacross',
+      pathNamespace: 'fiveacross.app',
+    });
+    for (const data of [{ edition: 'fiveacross' }, { ...marker, root: 'landing' }, { ...marker, status: 'active' }]) {
+      mocks.getDocFromServer.mockResolvedValue(snap(data));
+      expect(await fetchHostnameDoc('fiveacross.app'), JSON.stringify(data)).toBeNull();
+    }
+  });
+
   it('lets a server failure THROW, so the resolver can serve its stale entry', async () => {
     // Swallowing this into `null` would be wrong: null means "no mapping here"
     // and drops the cache, which is the opposite of what offline should do.
@@ -161,6 +177,30 @@ describe('bootstrapEventResolution — installs everything the shell needs', () 
     expect(mocks.applyResolvedEventId).not.toHaveBeenCalled();
     expect(activeEdition()).toBe(DEFAULT_EDITION);
     expect(mocks.applyResolvedCanonicalHost).not.toHaveBeenCalled();
+  });
+
+  // #1388: the third outcome mounts no Event, so it must install nothing that
+  // belongs to one. Until the doorway ships (#1392) `src/main.tsx` renders it
+  // as the not-found screen this same document produced before.
+  it('a doorway marker resolves `kind: root` and installs no Event, Edition or host', async () => {
+    mocks.getDocFromServer.mockResolvedValue(
+      snap({ root: 'doorway', edition: 'fiveacross', pathNamespace: 'fiveacross.app' }),
+    );
+    const r = await bootstrapEventResolution('fiveacross.app');
+    expect(r).toMatchObject({ kind: 'root', edition: 'fiveacross', pathNamespace: 'fiveacross.app' });
+    expect(mocks.applyResolvedEventId).not.toHaveBeenCalled();
+    expect(mocks.setCardCacheEventId).not.toHaveBeenCalled();
+    expect(mocks.applyResolvedCanonicalHost).not.toHaveBeenCalled();
+    expect(activeEdition()).toBe(DEFAULT_EDITION);
+  });
+
+  it('installs an Event mapping that carries pathNamespace exactly as one without it', async () => {
+    mocks.getDocFromServer.mockResolvedValue(snap({ ...DOC, pathNamespace: 'vacaybingo.com' }));
+    const r = await bootstrapEventResolution('bodega-bay.vacaybingo.com');
+    expect(r).toMatchObject({ kind: 'event', eventId: 'bodega-bay-2026' });
+    expect(r).not.toHaveProperty('pathNamespace');
+    expect(mocks.applyResolvedEventId).toHaveBeenCalledWith('bodega-bay-2026');
+    expect(activeEdition()).toBe('vacay');
   });
 
   it('resolves when localStorage is unavailable — private mode, embedded webviews', async () => {
@@ -248,6 +288,11 @@ describe('checkSlugAvailability — the setup wizard address step (#790)', () =>
     // The far end of the same case: an empty object still exists, so the
     // label is still occupied.
     mocks.getDocFromServer.mockResolvedValue(snap({}));
+    expect(await checkSlugAvailability('h.fiveacross.app')).toBe('taken');
+  });
+
+  it('reads "taken" for a root marker, which names no Event but occupies its id', async () => {
+    mocks.getDocFromServer.mockResolvedValue(snap({ root: 'not-found', edition: 'vacay' }));
     expect(await checkSlugAvailability('h.fiveacross.app')).toBe('taken');
   });
 

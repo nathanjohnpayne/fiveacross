@@ -1,19 +1,26 @@
 import { doc, getDocFromServer, onSnapshot } from 'firebase/firestore';
 import { db, applyResolvedEventId } from '../firebase';
-import { dropCache, isServable, readCache, resolveEvent, writeCache, type Resolution } from '../eventResolution';
-import type { HostnameDoc } from '../types';
+import {
+  coerceRoutingDoc,
+  dropCache,
+  isRootMarker,
+  isServable,
+  readCache,
+  resolveEvent,
+  writeCache,
+  type Resolution,
+} from '../eventResolution';
+import type { RoutingDoc } from '../types';
 import { setCardCacheEventId } from './cardCache';
 import { setActiveEdition, applyEditionDocumentIdentity, CANONICAL_NAMESPACE_APEX } from '../editions';
 import { coerceAdultContent, setActiveAdultContent } from '../adultContent';
 import { applyResolvedCanonicalHost } from '../canonicalHost';
-import { activeEventPreview, applyResolvedEventPreview, coerceEventPreview } from '../eventPreview';
+import { activeEventPreview, applyResolvedEventPreview } from '../eventPreview';
 import { hostnameKey } from '../hostnameKey';
 
 // The Firestore seam for hostname resolution (#543, ADR 0009). Kept apart from
 // `eventResolution.ts` so the decision table stays pure and unit-testable; this
 // module is the only part that touches the network.
-
-const VALID_STATUS = new Set(['active', 'disabled', 'archived']);
 
 /** A root dot names the same DNS resource but serializes as a distinct browser
  * origin. Keep that distinction ahead of every lookup path, including direct
@@ -56,40 +63,20 @@ let bootstrappedEventId: string | null = null;
  * opts in, and would make this path disagree with the cache reader, which
  * rejects the same shape (Codex on #576). Null means "no usable mapping here",
  * which the resolver renders as not-found rather than as a failed read.
+ *
+ * The reading itself is `coerceRoutingDoc` (`src/eventResolution.ts`), shared
+ * with the live watcher below and the cache reader, so three seams reading one
+ * document cannot disagree about what a usable mapping is. It answers an Event
+ * mapping or a root marker (specs/path-addressing-and-root.md § D1); an
+ * `eventId`-less document without a valid `root` is still malformed.
  */
-export async function fetchHostnameDoc(hostname: string): Promise<HostnameDoc | null> {
+export async function fetchHostnameDoc(hostname: string): Promise<RoutingDoc | null> {
   if (hasTrailingRootDot(hostname)) return null;
   const snap = await getDocFromServer(doc(db, 'hostnames', hostnameKey(hostname)));
   if (!snap.exists()) return null;
-  return coerceHostnameDoc(snap.data() as Partial<HostnameDoc>, hostname);
+  return coerceRoutingDoc(snap.data(), hostname);
 }
 
-/** The one reading of a raw `hostnames/{host}` payload into the contract shape
- *  — extracted from `fetchHostnameDoc` (verbatim semantics) so the live
- *  watcher below can validate its snapshots identically before caching them.
- *  Two seams reading the same document must not disagree about what a usable
- *  mapping is. */
-function coerceHostnameDoc(d: Partial<HostnameDoc> | undefined, hostname: string): HostnameDoc | null {
-  if (typeof d?.eventId !== 'string' || !d.eventId) return null;
-  if (typeof d.status !== 'string' || !VALID_STATUS.has(d.status)) return null;
-  return {
-    eventId: d.eventId,
-    canonicalHost: typeof d.canonicalHost === 'string' ? d.canonicalHost : hostname,
-    edition: typeof d.edition === 'string' ? d.edition : '',
-    status: d.status as HostnameDoc['status'],
-    // The 18+ posture (#608). Validated field-by-field like everything else
-    // here, but it does NOT join the two null-returning guards above: a missing
-    // or malformed `adultContent` is not a malformed routing record, it is an
-    // Event that predates the field. Coercing it to `true` gates the Event;
-    // rejecting the whole document would take the Event off the air.
-    adultContent: coerceAdultContent(d.adultContent),
-    slug: typeof d.slug === 'string' ? d.slug : undefined,
-    isCanonical: typeof d.isCanonical === 'boolean' ? d.isCanonical : undefined,
-    // The sign-in postcard's preview slice (#647). Optional and fail-soft like
-    // `slug`: a malformed or absent slice costs the card, never the Event.
-    preview: coerceEventPreview(d.preview),
-  };
-}
 
 /**
  * Resolve this origin's Event and install it, once, at startup.
@@ -191,7 +178,9 @@ export async function bootstrapEventResolution(
       // entry) must not borrow its postcard while the listener catches up.
       const cachedMapping = readCache(storage, hostname)?.doc;
       if (
-        cachedMapping?.eventId === resolution.eventId &&
+        cachedMapping &&
+        !isRootMarker(cachedMapping) &&
+        cachedMapping.eventId === resolution.eventId &&
         isServable(cachedMapping)
       ) {
         preview = cachedMapping.preview ?? null;
@@ -207,7 +196,7 @@ export async function bootstrapEventResolution(
  * claimable, for the setup wizard's address step (#790).
  *
  * EXISTENCE, not servability. This deliberately does NOT go through
- * `fetchHostnameDoc`: that helper runs `coerceHostnameDoc`, which returns
+ * `fetchHostnameDoc`: that helper runs `coerceRoutingDoc`, which returns
  * `null` for a document whose `eventId` or `status` is missing or invalid — so
  * routing it through there reported an EXISTING but half-written record as a
  * free address (Codex P1, PR #911). A malformed record still occupies its
@@ -369,7 +358,7 @@ export function watchAdultContent(
         setActiveAdultContent(true, { proven: false });
         return;
       }
-      const data = snap.data() as Partial<HostnameDoc> | undefined;
+      const data = snap.data() as { adultContent?: unknown } | undefined;
       // The sign-in postcard's preview slice rides THIS listener too (#647
       // follow-up): an env-pinned build's resolution never reads the routing
       // document, so this shared snapshot — already streaming for the 18+
@@ -390,7 +379,11 @@ export function watchAdultContent(
       // the listener remains alive after the posture latches because it is also
       // the preview's update channel; the adult-content store itself refuses to
       // lower a proven adult state.
-      const mapping = coerceHostnameDoc(data, hostname);
+      // A root marker is never a servable mapping here: it names no Event, so
+      // an open Event whose host converts to one reads it like a retired
+      // mapping (no card, cache dropped) and never as a doorway.
+      const coerced = coerceRoutingDoc(data, hostname);
+      const mapping = coerced === null || isRootMarker(coerced) ? null : coerced;
       const servable = mapping !== null && isServable(mapping);
       // The watcher is a display/update channel, never an Event switch. It must
       // agree with the Event resolved before mount: an env-pinned bundle that
