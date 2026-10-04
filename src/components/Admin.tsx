@@ -150,6 +150,14 @@ function AdminConsole({
   const queueStatus = queueFailed || queueWaitExpired ? 'unavailable' : queueConfirmed ? 'ready' : 'loading';
   const queueMessage = queueStatus === 'unavailable'
     ? 'Review queue is unavailable. Reload and try again.' : 'Loading review queue…';
+  // Pool availability depends only on its authoritative item answer, not the
+  // unrelated review sources. Unknown rows neither count as empty nor open writes.
+  const itemWaitKey = !itemState.failed && !itemState.hasServerData
+    ? JSON.stringify([eventKey, userUid, session.generation, 'pool']) : null;
+  const itemWaitExpired = useBoundedPrivateWait(itemWaitKey);
+  const itemStatus = itemState.failed || itemWaitExpired ? 'unavailable' : itemState.hasServerData ? 'ready' : 'loading';
+  const itemMessage = itemStatus === 'unavailable'
+    ? 'Prompt pool is unavailable. Reload and try again.' : 'Loading Prompt pool…';
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -227,6 +235,7 @@ function AdminConsole({
       {section === 'hub' && (
         <AdminHub
           queueStatus={queueStatus}
+          itemStatus={itemStatus}
           event={event}
           reportCount={reports.length}
           approvalCount={pendingItems.length}
@@ -255,8 +264,9 @@ function AdminConsole({
         />
       )}
       {section === 'schedule' && <SchedulePanel days={event?.days ?? []} />}
-      {section === 'pool' && (
-        <PromptPool
+      {section === 'pool' && (itemStatus !== 'ready'
+        ? <p className="center muted" role="status">{itemMessage}</p>
+        : <PromptPool
           items={items}
           threshold={threshold}
           pendingCount={pendingCount}

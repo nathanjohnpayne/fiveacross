@@ -15,6 +15,7 @@ import type { EventDoc } from '../../types';
  */
 export default function AdminHub({
   queueStatus,
+  itemStatus,
   event,
   reportCount,
   approvalCount,
@@ -24,6 +25,7 @@ export default function AdminHub({
   onOpen,
 }: {
   queueStatus: 'ready' | 'loading' | 'unavailable';
+  itemStatus: 'ready' | 'loading' | 'unavailable';
   event: EventDoc | null | undefined;
   reportCount: number;
   approvalCount: number;
@@ -87,8 +89,10 @@ export default function AdminHub({
       <MoreRow
         icon={Lightbulb}
         title="Prompt pool"
-        sub={`${itemCount} prompts · curated add${pendingCount ? ` · ${pendingCount} pending` : ''}`}
-        badge={pendingCount > 0 ? pendingCount : undefined}
+        sub={itemStatus === 'unavailable' ? 'Prompt pool is unavailable. Reload and try again.'
+          : itemStatus === 'loading' ? 'Loading Prompt pool…'
+          : `${itemCount} prompts · curated add${pendingCount ? ` · ${pendingCount} pending` : ''}`}
+        badge={itemStatus === 'ready' && pendingCount > 0 ? pendingCount : undefined}
         onClick={() => onOpen('pool')}
       />
       <MoreRow

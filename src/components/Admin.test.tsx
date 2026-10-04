@@ -1156,6 +1156,71 @@ describe('Admin Game settings (specs/d15-admin-proof-claims.md rows, re-housed a
   });
 });
 
+describe('Admin Prompt-pool availability', () => {
+  it.each(['unknown', 'failed'] as const)('withholds pool counts and actions for %s item data', (posture) => {
+    H.queueState.items = { hasServerData: false, failed: posture === 'failed' };
+    renderAdmin();
+    expect(screen.getByRole('button', { name: /Prompt pool/ })).toHaveTextContent(
+      posture === 'failed' ? 'Prompt pool is unavailable. Reload and try again.' : 'Loading Prompt pool…',
+    );
+    expect(screen.queryByText(/0 prompts · curated add/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Prompt pool/ }));
+    expect(screen.queryByText('Prompts (0)')).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'New prompt text' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add' })).not.toBeInTheDocument();
+    expect(H.adminAddItem).not.toHaveBeenCalled();
+  });
+
+  it('bounds an unknown pool wait independently and permits a later confirmed empty pool', () => {
+    vi.useFakeTimers();
+    H.queueState.items = { hasServerData: false, failed: false };
+    const view = renderAdmin('/more/admin/pool');
+    expect(screen.getByText('Loading Prompt pool…')).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(9_999));
+    expect(screen.getByText('Loading Prompt pool…')).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByText('Prompt pool is unavailable. Reload and try again.')).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'New prompt text' })).not.toBeInTheDocument();
+    H.queueState.items = { hasServerData: true, failed: false };
+    H.queueState.claims = { hasServerData: false, failed: true };
+    view.rerender(<MemoryRouter initialEntries={['/more/admin/pool']}><Admin /></MemoryRouter>);
+    expect(screen.getByText('Prompts (0)')).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'New prompt text' })).toBeInTheDocument();
+    expect(screen.queryByText('Prompt pool is unavailable. Reload and try again.')).not.toBeInTheDocument();
+  });
+
+  it.each(['UID', 'Event', 'private generation'] as const)('retires an expired item wait on %s change', (scope) => {
+    vi.useFakeTimers();
+    H.queueState.items = { hasServerData: false, failed: false };
+    const view = renderAdmin('/more/admin/pool');
+    act(() => vi.advanceTimersByTime(10_000));
+    expect(screen.getByText('Prompt pool is unavailable. Reload and try again.')).toBeInTheDocument();
+    if (scope === 'UID') { H.user = { uid: 'new-admin' }; H.event = { ...H.event, admins: ['new-admin'] }; }
+    if (scope === 'Event') H.eventScope = 'other-event';
+    if (scope === 'private generation') H.privateGeneration += 1;
+    view.rerender(<MemoryRouter initialEntries={['/more/admin/pool']}><Admin /></MemoryRouter>);
+    expect(screen.getByText('Loading Prompt pool…')).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(9_999));
+    expect(screen.getByText('Loading Prompt pool…')).toBeInTheDocument();
+    H.queueState.items = { hasServerData: true, failed: false };
+    view.rerender(<MemoryRouter initialEntries={['/more/admin/pool']}><Admin /></MemoryRouter>);
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByText('Prompts (0)')).toBeInTheDocument();
+    expect(screen.queryByText('Prompt pool is unavailable. Reload and try again.')).not.toBeInTheDocument();
+  });
+
+  it('keeps confirmed pool editing available when another review source fails', () => {
+    H.queueState.claims = { hasServerData: false, failed: true };
+    renderAdmin();
+    expect(screen.getByText('Review queue is unavailable. Reload and try again.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Prompt pool/ })).toHaveTextContent('0 prompts · curated add');
+    fireEvent.click(screen.getByRole('button', { name: /Prompt pool/ }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'New prompt text' }), { target: { value: 'A real prompt' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    expect(H.adminAddItem).toHaveBeenCalledWith('admin-uid', 'A real prompt', false, 'main');
+  });
+});
+
 describe('Admin curated pools (#269, at /more/admin/pool)', () => {
   it('the add form writes an active prompt into the chosen pool via adminAddItem', async () => {
     renderAdmin('/more/admin/pool');
