@@ -350,8 +350,8 @@ function ProofCard({
             className="iconbtn"
             title="Delete"
             onClick={() =>
-              // Daily-cards mode (#246): unmark the backing cell on the Proof's OWN
-              // day-scoped Board + fold the owner's stats into that Day's bucket.
+              // Daily mode (#246): ordinary proof-backed unmark/stat cleanup belongs
+              // to the Proof's own Day; content-only deletion just clears its link.
               // `days` present ⇒ daily; the Proof carries its own `dayIndex`.
               deleteProof(proof.id, proof.storagePath, {
                 daily: !!days?.length,

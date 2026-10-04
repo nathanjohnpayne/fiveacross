@@ -179,9 +179,9 @@ export async function originReachable(fetchImpl: typeof fetch = fetch, timeoutMs
 
 /**
  * Tear down the cached shell: unregister every service worker and delete the
- * workbox PRECACHE. Deliberately leaves the `proof-media` runtime cache alone
- * (src/data/proofMediaCache.ts) — those are immutable Storage objects, are
- * expensive to refetch mid-cruise, and are not what "the shell is broken" means.
+ * workbox PRECACHE. Shell recovery leaves the legacy `proof-media` bucket
+ * alone; the upgraded worker removes it during activation (#1410) and uses
+ * network-only media. This helper never clears Firestore or queued Marks.
  * Never throws; a partial teardown still helps, since the reload that follows
  * re-fetches `index.html` (served `no-cache`, firebase.json) uncontrolled.
  */
