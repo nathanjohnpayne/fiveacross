@@ -88,8 +88,9 @@ interface CacheEnvelope {
   v: number;
   fetchedAt: number;
   /** Written only after this build has checked the optional preview slice.
-   *  Caches from before #647 lack it and need one network attempt so a newly
-   *  seeded postcard does not stay invisible for the routing TTL. */
+   *  An accepted Version 2 envelope without this flag needs one network attempt
+   *  so a newly seeded postcard does not stay invisible for the routing TTL.
+   *  Historical Version 1 envelopes are rejected before that fallback. */
   previewValidated: boolean;
   doc: HostnameDoc;
 }
@@ -112,8 +113,9 @@ export interface CacheRead {
   doc: HostnameDoc;
   fetchedAt: number;
   stale: boolean;
-  /** A pre-preview cache remains a routing fallback, but cannot short-circuit
-   *  its first post-upgrade network read. */
+  /** An accepted public Version 2 cache without preview validation remains a
+   *  routing fallback, but cannot short-circuit its first network attempt.
+   *  Version 1 canonical envelopes are always misses. */
   requiresPreviewRevalidation: boolean;
 }
 
@@ -147,19 +149,15 @@ export function readCache(
         canonicalHost: typeof d.canonicalHost === 'string' ? d.canonicalHost : hostname,
         edition: typeof d.edition === 'string' ? d.edition : '',
         status: d.status,
-        // Coerced, not version-gated. Adding a field to the cached shape would
-        // normally argue for a CACHE_VERSION bump, but a bump invalidates every
-        // stored mapping — and the entries this would evict are exactly the ones
-        // an offline cold boot depends on (step 3 below), so it would trade a
-        // correct fail-closed default for a not-found screen. `undefined` here
-        // reads as `true`, which IS the safe direction, so an entry written
-        // before #608 is already correct.
+        // Within an accepted public Version 2 envelope, a missing posture
+        // still defaults to true, preserving the safe additive behavior from
+        // #608. The version guard above already rejects all canonical V1 data.
         adultContent: coerceAdultContent(d.adultContent),
         slug: typeof d.slug === 'string' ? d.slug : undefined,
         isCanonical: typeof d.isCanonical === 'boolean' ? d.isCanonical : undefined,
-        // Same non-version-gated posture as `adultContent` above: additive,
-        // optional, and absent-is-no-card, so an entry written before #647
-        // needs no CACHE_VERSION bump to read correctly.
+        // Optional preview data within accepted Version 2 remains additive:
+        // absent means no card, with one revalidation attempt below. This does
+        // not admit historical pre-#647 canonical Version 1 envelopes.
         preview: coerceEventPreview(d.preview),
       },
       fetchedAt: env.fetchedAt,
