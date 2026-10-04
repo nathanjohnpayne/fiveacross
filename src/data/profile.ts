@@ -39,6 +39,8 @@ export async function updateDisplayName(uid: string, displayName: string): Promi
 
 /**
  * Reuse `uploadAvatar` (storage.ts) — no new upload path — then flip `UserDoc.customPhoto` so Avatar prefers it.
+ * The captured private Storage client and lease checks fence each upload await;
+ * image preparation cannot resume into another account's Storage session.
  * Merge `setDoc` for the same missing-doc recovery reason as `updateDisplayName` above.
  */
 export async function updateAvatar(uid: string, blob: Blob): Promise<string> {
@@ -46,7 +48,7 @@ export async function updateAvatar(uid: string, blob: Blob): Promise<string> {
   if (auth.currentUser?.uid !== uid) throw new Error('Private account changed.');
   const lease = await awaitPrivateFirestore(uid);
   lease.assertCurrent();
-  const url = await lease.guard(() => uploadAvatar(uid, blob));
+  const url = await lease.guard(() => uploadAvatar(uid, blob, lease.storage, lease.assertCurrent));
   await lease.guard(() => setDoc(rawUser(uid, lease.db), { photoURL: url, customPhoto: true }, { merge: true }));
   await updateExistingPlayer(uid, { photoURL: url }, eventId, lease);
   return url;

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, within, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { UserDoc } from '../types';
@@ -41,19 +41,20 @@ vi.mock('firebase/firestore', () => ({
   updateDoc: updateDocMock,
 }));
 
-const { refMock, uploadBytesMock } = vi.hoisted(() => ({
+const { refMock, uploadBytesMock, getDownloadURLMock } = vi.hoisted(() => ({
   refMock: vi.fn((_storage: unknown, path: string) => ({ path })),
   uploadBytesMock: vi.fn(async () => ({})),
+  getDownloadURLMock: vi.fn(async (r: { path: string }) =>
+    `https://firebasestorage.googleapis.com/v0/b/fiveacross.firebasestorage.app/o/${encodeURIComponent(r.path)}?alt=media`),
 }));
 vi.mock('firebase/storage', () => ({
   ref: refMock,
   uploadBytes: uploadBytesMock,
-  getDownloadURL: async (r: { path: string }) =>
-    `https://firebasestorage.googleapis.com/v0/b/fiveacross.firebasestorage.app/o/${encodeURIComponent(r.path)}?alt=media`,
+  getDownloadURL: getDownloadURLMock,
   deleteObject: vi.fn(),
 }));
 
-const privateProfile = vi.hoisted(() => ({ uid: 'u1', generation: 0, recovered: true, db: {} }));
+const privateProfile = vi.hoisted(() => ({ uid: 'u1', generation: 0, recovered: true, db: {}, storage: { privateSession: true } }));
 vi.mock('../firebase', () => ({
   db: {}, storage: {}, auth: { get currentUser() { return { uid: authState.current.user?.uid ?? privateProfile.uid }; } },
   get EVENT_ID() { return eventScope.eventId; },
@@ -63,7 +64,7 @@ vi.mock('../privateFirestore', () => ({
     const generation = privateProfile.generation;
     const assertCurrent = () => { if (!privateProfile.recovered || uid !== (authState.current.user?.uid ?? privateProfile.uid) || generation !== privateProfile.generation) throw new Error('Private session expired or recovery required.'); };
     assertCurrent();
-    return { db: privateProfile.db, uid, assertCurrent, guard: async <T,>(op: () => Promise<T>) => { assertCurrent(); const result = await op(); assertCurrent(); return result; } };
+    return { db: privateProfile.db, storage: privateProfile.storage, uid, assertCurrent, guard: async <T,>(op: () => Promise<T>) => { assertCurrent(); const result = await op(); assertCurrent(); return result; } };
   }),
 }));
 
@@ -152,6 +153,7 @@ function resetMocks() {
   updateDocMock.mockClear();
   refMock.mockClear();
   uploadBytesMock.mockClear();
+  getDownloadURLMock.mockClear();
 }
 
 describe('Avatar prefers a custom photo over src', () => {
@@ -280,7 +282,7 @@ describe('data/profile.ts — persists to users/{uid}, reusing storage.ts', () =
 
   it('reuses uploadAvatar (avatars/{uid}.jpg, image/jpeg) then flips customPhoto + photoURL', async () => {
     const url = await updateAvatar('u1', new Blob(['x'], { type: 'image/png' }));
-    expect(refMock).toHaveBeenCalledWith({}, 'avatars/u1.jpg');
+    expect(refMock).toHaveBeenCalledWith(privateProfile.storage, 'avatars/u1.jpg');
     expect(uploadBytesMock).toHaveBeenCalledWith({ path: 'avatars/u1.jpg' }, expect.any(Blob), { contentType: 'image/jpeg' });
     expect(setDocMock).toHaveBeenCalledWith({ path: 'users/u1' }, { photoURL: url, customPhoto: true }, { merge: true });
     expect(updateDocMock).toHaveBeenCalledWith(
@@ -680,6 +682,41 @@ describe('ProfileEditor', () => {
 
 describe('private profile action lifetime (#1411)', () => {
   beforeEach(() => { resetMocks(); authState.current = { user: null, loading: false }; });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each(['another account', 'same UID refresh'])('refuses an avatar write when image preparation resumes after %s', async (retirement) => {
+    let finishDecode!: () => void;
+    const decode = vi.fn(() => new Promise<never>((_resolve, reject) => {
+      finishDecode = () => reject(new Error('decode fallback'));
+    }));
+    vi.stubGlobal('createImageBitmap', decode);
+    const pending = updateAvatar('u1', new Blob(['x']));
+    const rejected = expect(pending).rejects.toThrow(/expired/);
+    await waitFor(() => expect(decode).toHaveBeenCalledTimes(1));
+    if (retirement === 'another account') privateProfile.uid = 'u2';
+    privateProfile.generation++;
+    finishDecode();
+    await rejected;
+    expect(refMock).not.toHaveBeenCalled();
+    expect(uploadBytesMock).not.toHaveBeenCalled();
+    expect(getDownloadURLMock).not.toHaveBeenCalled();
+    expect(setDocMock).not.toHaveBeenCalled();
+    expect(updateDocMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps the captured private Storage client after slow image preparation in a current session', async () => {
+    let finishDecode!: () => void;
+    const decode = vi.fn(() => new Promise<never>((_resolve, reject) => {
+      finishDecode = () => reject(new Error('decode fallback'));
+    }));
+    vi.stubGlobal('createImageBitmap', decode);
+    const pending = updateAvatar('u1', new Blob(['x']));
+    await waitFor(() => expect(decode).toHaveBeenCalledTimes(1));
+    finishDecode();
+    const url = await pending;
+    expect(refMock).toHaveBeenCalledWith(privateProfile.storage, 'avatars/u1.jpg');
+    expect(setDocMock).toHaveBeenCalledWith({ path: 'users/u1' }, { photoURL: url, customPhoto: true }, { merge: true });
+  });
   it('saves users only through the recovered memory database', async () => {
     await updateDisplayName('u1', 'Saved');
     const call = docMock.mock.calls.find((entry) => entry[1] === 'users');
@@ -697,6 +734,7 @@ describe('private profile action lifetime (#1411)', () => {
   it('cannot write an old UID profile after the avatar upload resumes under another account', async () => {
     uploadBytesMock.mockImplementationOnce(async () => { privateProfile.uid = 'u2'; privateProfile.generation++; return {}; });
     await expect(updateAvatar('u1', new Blob(['x']))).rejects.toThrow(/expired/);
+    expect(getDownloadURLMock).not.toHaveBeenCalled();
     expect(setDocMock).not.toHaveBeenCalled();
     expect(updateDocMock).not.toHaveBeenCalled();
   });

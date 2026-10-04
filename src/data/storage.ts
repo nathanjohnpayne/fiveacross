@@ -84,15 +84,28 @@ export async function uploadProofMedia(
   return { path, url };
 }
 
-export async function uploadAvatar(uid: string, blob: Blob): Promise<string> {
+export async function uploadAvatar(
+  uid: string,
+  blob: Blob,
+  client: FirebaseStorage,
+  assertCurrent: () => void,
+): Promise<string> {
+  // Profile media shares the captured private Auth incarnation. Image decoding
+  // may yield long enough for that incarnation to retire: check again before
+  // creating the reference or beginning any write, and after each SDK await.
+  assertCurrent();
   const small = await downscaleImage(blob, 400, 0.85);
-  const r = ref(storage, `avatars/${uid}.jpg`);
+  assertCurrent();
+  const r = ref(client, `avatars/${uid}.jpg`);
   await uploadBytes(r, small, { contentType: 'image/jpeg' });
+  assertCurrent();
   // Identity in every real build. Under the e2e emulator build the download URL
   // is rewritten to its production-shaped twin, because `firestore.rules`'
   // `photoUrlOk` pins stored avatars to the production Storage host just as the
   // proof-create rule pins `mediaURL`; `Avatar` resolves it back to render.
-  return canonicalizeProofMediaUrl(await getDownloadURL(r));
+  const url = await getDownloadURL(r);
+  assertCurrent();
+  return canonicalizeProofMediaUrl(url);
 }
 
 /**
