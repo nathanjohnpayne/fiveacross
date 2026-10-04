@@ -1,4 +1,5 @@
 import { projectPublicHostname } from './publicHostnameFields';
+import { isDeepStrictEqual } from 'node:util';
 /**
  * Server-side derivation of an Event's 18+ posture (#608).
  *
@@ -32,8 +33,9 @@ import { projectPublicHostname } from './publicHostnameFields';
  * crossing, and the Event stays un-gated forever. Answering on the after-state
  * means every subsequent write to that item is another attempt. Each matching
  * hostname is reread transactionally: its canonical stamp changes only when
- * needed, while its strict public projection is replaced even when the stamp
- * is already `true`, repairing a missing or stale public copy.
+ * needed. Its public projection is read in the same transaction and replaced
+ * only for a new stamp or a missing/stale copy; matching stamped pairs incur
+ * no writes.
  *
  * The paired writes land on `hostnames/*` and `publicHostnames/*`, never on `events/*` — so neither trigger can
  * re-fire itself, and no loop guard is needed.
@@ -113,8 +115,9 @@ export interface AdultFirestore {
   }) => Promise<T>): Promise<T>;
 }
 
-/** Re-read canonical state inside the transaction; a repoint races safely.
- * Replace the public document, so private extras can never survive a merge. */
+/** Read both canonical and public state inside the transaction; a repoint or
+ * projection edit retries safely. Matching stamped pairs need no writes; repair
+ * replaces the public document so private extras cannot survive a merge. */
 export async function stampAdultHostname(db: AdultFirestore, host: string, expectedEventId?: string): Promise<boolean> {
   const canonical = db.doc(`hostnames/${host}`);
   const projection = db.doc(`publicHostnames/${host}`);
@@ -123,9 +126,13 @@ export async function stampAdultHostname(db: AdultFirestore, host: string, expec
     if (!snapshot.exists) return false;
     const data = snapshot.data();
     if (!data || (expectedEventId !== undefined && data.eventId !== expectedEventId)) return false;
+    const publicSnapshot = await transaction.get(projection);
+    const desired = projectPublicHostname({ ...data, adultContent: true });
     const changed = data.adultContent !== true;
     if (changed) transaction.update(canonical, { adultContent: true });
-    transaction.set(projection, projectPublicHostname({ ...data, adultContent: true }));
+    if (changed || !publicSnapshot.exists || !isDeepStrictEqual(publicSnapshot.data(), desired)) {
+      transaction.set(projection, desired);
+    }
     return changed;
   });
 }
@@ -154,7 +161,8 @@ async function adminFirestore(): Promise<AdultFirestore> {
  * no guaranteed second attempt: the derived flag is a fail-closed security
  * posture, and "logged and forgotten" is not a fail direction it can afford.
  * Retrying is safe: already-stamped canonical rows retain their value, while
- * their public projection is replaced to repair a missing or stale copy.
+ * their public projection is transactionally compared and replaced only to
+ * repair a missing or stale copy.
  *
  * Returns how many documents it stamped.
  */
@@ -222,7 +230,8 @@ export async function applyItemAdultContent(
  * same retry reason as the item path: a crossing test would otherwise leave an
  * Event an admin explicitly marked adult serving an un-gated shell until the
  * flag was toggled off and on again. Admin config writes are rare, and the raise
- * skips already-stamped documents, so re-checking is nearly free.
+ * skips writes for already-stamped, matching canonical/public pairs. A
+ * re-check still reads both documents transactionally for every queried alias.
  *
  * Throws on a failed stamp, for the platform retry — see `applyItemAdultContent`.
  */

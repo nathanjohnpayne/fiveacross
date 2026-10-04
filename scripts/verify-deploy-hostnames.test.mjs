@@ -181,6 +181,58 @@ describe('Five Across deploy hostname verification', () => {
     await expect(verifyBodegaHostnameDocuments({ projectId: 'fiveacross', accessToken: 'test-access-token', fetchImpl })).rejects.toThrow(host);
   });
 
+  it.each(['adultContent', 'edition', 'canonicalHost', 'preview', 'missing-field', 'extra-approved-field'])('refuses a public %s value that differs from the authoritative canonical projection', async (failure) => {
+    const fetchImpl = vi.fn(async (url) => {
+      const host = decodeURIComponent(new URL(url).pathname.split('/').at(-1));
+      const row = routingDocument(host);
+      Object.assign(row.fields, {
+        adultContent: { booleanValue: true }, edition: { stringValue: 'fiveacross' },
+        canonicalHost: { stringValue: 'bodega-bay.fiveacross.app' },
+        preview: { mapValue: { fields: { eventName: { stringValue: 'Bodega' }, days: { arrayValue: { values: [{ mapValue: { fields: { futureDisplayMetadata: { stringValue: 'preserved' } } } }] } } } } },
+      });
+      if (url.includes('/publicHostnames/')) {
+        row.name = row.name.replace('/hostnames/', '/publicHostnames/');
+        if (failure === 'adultContent') row.fields.adultContent.booleanValue = false;
+        if (failure === 'edition') row.fields.edition.stringValue = 'vacay';
+        if (failure === 'canonicalHost') row.fields.canonicalHost.stringValue = 'wrong.example';
+        if (failure === 'preview') row.fields.preview.mapValue.fields.eventName.stringValue = 'Stale';
+        if (failure === 'missing-field') delete row.fields.adultContent;
+        if (failure === 'extra-approved-field') row.fields.slug = { stringValue: 'invented' };
+      } else {
+        row.fields.privateRecovery = { stringValue: 'secret' };
+        row.fields.preview.mapValue.fields.internalNote = { stringValue: 'secret' };
+      }
+      return Response.json(row);
+    });
+    await expect(verifyBodegaHostnameDocuments({ projectId: 'fiveacross', accessToken: 'test-access-token', fetchImpl })).rejects.toThrow(/projection.*match/i);
+  });
+
+  it('accepts exact full projections with reordered map keys and unchanged nested days values', async () => {
+    const fetchImpl = vi.fn(async url => {
+      const host = decodeURIComponent(new URL(url).pathname.split('/').at(-1));
+      const row = routingDocument(host);
+      Object.assign(row.fields, {
+        canonicalHost: { stringValue: 'bodega-bay.fiveacross.app' }, edition: { stringValue: 'fiveacross' },
+        adultContent: { booleanValue: true }, slug: { stringValue: 'bodega-bay' }, isCanonical: { booleanValue: false },
+        preview: { mapValue: { fields: {
+          eventName: { stringValue: 'Quoted “Bodega”\nBay' }, dateRange: { stringValue: 'Aug 7–9' }, hostedBy: { stringValue: 'Kim' },
+          days: { arrayValue: { values: [{ mapValue: { fields: { index: { integerValue: '3' }, optionalLabel: { nullValue: null }, observedAt: { timestampValue: '2026-08-07T06:00:00.000000001Z' }, futureDisplayMetadata: { mapValue: { fields: { label: { stringValue: 'preserved' } } } } } } }] } },
+        } } },
+      });
+      if (url.includes('/publicHostnames/')) {
+        row.name = row.name.replace('/hostnames/', '/publicHostnames/');
+        row.fields = Object.fromEntries(Object.entries(row.fields).reverse());
+        row.fields.preview.mapValue.fields = Object.fromEntries(Object.entries(row.fields.preview.mapValue.fields).reverse());
+      } else {
+        row.fields.pathNamespace = { stringValue: 'fiveacross.app' };
+        row.fields.preview.mapValue.fields.internalNote = { stringValue: 'private' };
+      }
+      return Response.json(row);
+    });
+    await expect(verifyBodegaHostnameDocuments({ projectId: 'fiveacross', accessToken: 'test-access-token', fetchImpl })).resolves.toEqual(BODEGA_PREVIEW_HOSTS);
+    expect(fetchImpl.mock.calls.every(([url]) => !new URL(url).search)).toBe(true);
+  });
+
   it('reads every serving Bodega host in canonical inventory order', async () => {
     const fetchImpl = vi.fn(async (url, options) => {
       const host = BODEGA_PREVIEW_HOSTS[Math.floor((fetchImpl.mock.calls.length - 1) / 2)];
@@ -190,9 +242,9 @@ describe('Five Across deploy hostname verification', () => {
       });
       expect(options.signal).toBeInstanceOf(AbortSignal);
       const row = routingDocument(host);
+      row.fields.preview = { mapValue: { fields: { eventName: { stringValue: 'Bodega' }, days: { arrayValue: { values: [] } } } } };
       if (url.includes('/publicHostnames/')) {
         row.name = row.name.replace('/hostnames/', '/publicHostnames/');
-        row.fields.preview = { mapValue: { fields: { eventName: { stringValue: 'Bodega' }, days: { arrayValue: { values: [] } } } } };
       }
       return new Response(JSON.stringify(row), {
         status: 200,
@@ -210,7 +262,7 @@ describe('Five Across deploy hostname verification', () => {
 
     expect(fetchImpl.mock.calls.map(([url]) => decodeURIComponent(url))).toEqual(
       BODEGA_PREVIEW_HOSTS.flatMap((host) => [
-        `https://firestore.googleapis.com/v1/projects/fiveacross/databases/(default)/documents/hostnames/${host}?mask.fieldPaths=eventId&mask.fieldPaths=status`,
+        `https://firestore.googleapis.com/v1/projects/fiveacross/databases/(default)/documents/hostnames/${host}`,
         `https://firestore.googleapis.com/v1/projects/fiveacross/databases/(default)/documents/publicHostnames/${host}`,
       ]),
     );

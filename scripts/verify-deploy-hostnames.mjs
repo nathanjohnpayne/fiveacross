@@ -1,10 +1,10 @@
-import { hasOnlyPublicHostnameFields } from '../functions/src/publicHostnameFields.ts';
+import { hasOnlyPublicHostnameFields, projectPublicHostname } from '../functions/src/publicHostnameFields.ts';
 import { GoogleAuth } from 'google-auth-library';
 import { writeSync } from 'node:fs';
+import { isDeepStrictEqual } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { BODEGA_EVENT_ID, BODEGA_PREVIEW_HOSTS, BODEGA_PROJECT_ID } from './provision-bodega-preview.mjs';
 
-const fieldMask = '?mask.fieldPaths=eventId&mask.fieldPaths=status';
 const datastoreScopes = Object.freeze(['https://www.googleapis.com/auth/datastore']);
 const applicationDefaultAccessTokenTimeoutMs = 10_000;
 
@@ -51,14 +51,29 @@ export async function getApplicationDefaultAccessToken(
   return accessToken;
 }
 
+// Preserve Firestore's typed scalar/array values intact for equality; only
+// expose the existing preview map's fields to the shared 7+4 projection. No
+// recursive preview.days whitelist or lossy value decoding is introduced.
+function comparableHostnameFields(fields) {
+  const result = { ...fields };
+  if (Object.prototype.hasOwnProperty.call(result, 'preview')) {
+    const map = result.preview?.mapValue;
+    result.preview = map && typeof map === 'object' && !Array.isArray(map)
+      ? (Object.prototype.hasOwnProperty.call(map, 'fields') ? map.fields : {})
+      : null;
+  }
+  return result;
+}
+
 export async function verifyBodegaHostnameDocuments({ projectId, accessToken, fetchImpl = fetch }) {
   assertFiveAcrossProject(projectId);
   for (const host of BODEGA_PREVIEW_HOSTS) {
+    let canonicalProjection;
     for (const collection of ['hostnames', 'publicHostnames']) {
       const label = collection === 'hostnames' ? 'Hostname' : 'Public hostname';
       const url =
         `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}` +
-        `/databases/(default)/documents/${collection}/${encodeURIComponent(host)}${collection === 'hostnames' ? fieldMask : ''}`;
+        `/databases/(default)/documents/${collection}/${encodeURIComponent(host)}`;
       let response;
       try {
         response = await fetchImpl(url, {
@@ -91,14 +106,14 @@ export async function verifyBodegaHostnameDocuments({ projectId, accessToken, fe
       if (collection === 'publicHostnames') {
         // Read the full public document: a REST field mask would hide extras and
         // approve a copy that whole-document Firestore Rules deny anonymously.
-        const fields = { ...document.fields };
-        if (Object.prototype.hasOwnProperty.call(fields, 'preview')) {
-          const map = fields.preview?.mapValue;
-          fields.preview = map && typeof map === 'object' && !Array.isArray(map)
-            ? (Object.prototype.hasOwnProperty.call(map, 'fields') ? map.fields : {})
-            : null;
-        }
+        const fields = comparableHostnameFields(document.fields);
         if (!hasOnlyPublicHostnameFields(fields)) throw new Error(`${label} document has unapproved fields for ${host}.`);
+        if (!isDeepStrictEqual(fields, canonicalProjection)) throw new Error(`${label} projection does not match canonical state for ${host}.`);
+      } else {
+        // Read canonical values in full: eventId/status alone cannot establish
+        // public posture, Edition, address or preview parity. Private fields
+        // are discarded only by the owner-approved shared projection.
+        canonicalProjection = projectPublicHostname(comparableHostnameFields(document.fields));
       }
       if (document.fields.status.stringValue !== 'active') {
         throw new Error(`${label} document is not active for ${host}.`);

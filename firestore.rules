@@ -1538,7 +1538,8 @@ service cloud.firestore {
     // Strict public hostname projection (ADR 0009, specs/hostnames-lookup.md).
     //
     // One document per public address, keyed by the FULL hostname:
-    //   { eventId, canonicalHost, edition, status, slug, isCanonical }
+    //   { eventId, canonicalHost, edition, status, adultContent, slug, isCanonical,
+    //     preview: { eventName, dateRange, days, hostedBy } }
     //
     // This is the deliberately public, field-allowlisted collection in a schema whose
     // whole posture is membership isolation, so the reasoning matters:

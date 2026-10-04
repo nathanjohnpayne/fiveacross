@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { createRequire } from 'node:module';
 import {
   applyEventAdultContent,
   applyItemAdultContent,
@@ -11,6 +12,9 @@ import {
   stampAdultHostname,
   type AdultFirestore,
 } from '../../functions/src/adultContent';
+
+// Resolve the actual Admin SDK from Functions' existing dependency graph.
+const { Timestamp } = createRequire(new URL('../../functions/package.json', import.meta.url))('firebase-admin/firestore') as typeof import('firebase-admin/firestore');
 
 // Covers the server-side derivation of an Event's 18+ posture (#608).
 //
@@ -90,6 +94,7 @@ function fakeDb(
   const updates: Record<string, Record<string, unknown>> = {};
   const values = { ...Object.fromEntries(Object.entries(hosts).map(([host, data]) => [`hostnames/${host}`, data])), ...docs };
   const pathByRef = new WeakMap<object, string>();
+  const transactionReads: string[] = [];
   const db: AdultFirestore = {
     doc: (path: string) => {
       const ref = { get: async () => ({ exists: path in values, data: () => values[path] }) };
@@ -99,7 +104,11 @@ function fakeDb(
     async runTransaction(work) {
       const staged: Array<[string, Record<string, unknown>, boolean]> = [];
       const result = await work({
-        get: ref => ref.get(),
+        get: ref => {
+          if (staged.length) throw new Error('transaction reads must precede writes');
+          transactionReads.push(pathByRef.get(ref)!);
+          return ref.get();
+        },
         update: (ref, data) => { staged.push([pathByRef.get(ref)!, data, false]); },
         set: (ref, data) => { staged.push([pathByRef.get(ref)!, data, true]); },
       });
@@ -123,7 +132,7 @@ function fakeDb(
       }),
     }),
   };
-  return { db, updates };
+  return { db, updates, values, transactionReads };
 }
 
 describe('the stamp: every routing document for the Event', () => {
@@ -169,6 +178,44 @@ describe('the stamp: every routing document for the Event', () => {
 });
 
 describe('paired adult projection fence', () => {
+  it('does not write an already-stamped canonical row and matching public projection', async () => {
+    const canonical = { eventId: 'e1', adultContent: true, edition: 'fiveacross', preview: { eventName: 'Public', days: [{ futureDisplayMetadata: 'retained', optionalLabel: null, observedAt: new Timestamp(1_786_082_400, 1) }] }, privateEmail: 'secret' };
+    const projection = { preview: { days: [{ futureDisplayMetadata: 'retained', optionalLabel: null, observedAt: new Timestamp(1_786_082_400, 1) }], eventName: 'Public' }, edition: 'fiveacross', adultContent: true, eventId: 'e1' };
+    const { db, updates, transactionReads } = fakeDb({}, { 'hostnames/a.example.com': canonical, 'publicHostnames/a.example.com': projection });
+    expect(await stampAdultHostname(db, 'a.example.com', 'e1')).toBe(false);
+    expect(updates).toEqual({});
+    expect(transactionReads).toEqual(['hostnames/a.example.com', 'publicHostnames/a.example.com']);
+  });
+
+  it.each(['missing', 'adultContent', 'edition', 'preview', 'private-extra'])('repairs an already-stamped %s public copy with a full replacement', async failure => {
+    const canonical = { eventId: 'e1', adultContent: true, edition: 'fiveacross', canonicalHost: 'a.example.com', preview: { eventName: 'Public', days: [{ futureDisplayMetadata: 'retained' }] } };
+    const stale: Record<string, unknown> = { ...canonical };
+    if (failure === 'adultContent') stale.adultContent = false;
+    if (failure === 'edition') stale.edition = 'vacay';
+    if (failure === 'preview') stale.preview = { eventName: 'Stale' };
+    if (failure === 'private-extra') stale.privateEmail = 'secret';
+    const docs = { 'hostnames/a.example.com': canonical, ...(failure === 'missing' ? {} : { 'publicHostnames/a.example.com': stale }) };
+    const { db, updates, transactionReads } = fakeDb({}, docs);
+    expect(await stampAdultHostname(db, 'a.example.com', 'e1')).toBe(false);
+    expect(updates).toEqual({ 'publicHostnames/a.example.com': canonical });
+    expect(transactionReads).toEqual(['hostnames/a.example.com', 'publicHostnames/a.example.com']);
+  });
+
+  it('rereads a projection changed after a no-write attempt when the transaction retries', async () => {
+    const canonical = { eventId: 'e1', adultContent: true, edition: 'fiveacross' };
+    const { db, values, updates, transactionReads } = fakeDb({}, { 'hostnames/a.example.com': canonical, 'publicHostnames/a.example.com': { ...canonical } });
+    const attempt = db.runTransaction.bind(db);
+    db.runTransaction = async work => {
+      await attempt(work); // First read-set was current; a concurrent edit forces a retry.
+      expect(updates).toEqual({});
+      values['publicHostnames/a.example.com'] = { ...canonical, adultContent: false };
+      return attempt(work);
+    };
+    expect(await stampAdultHostname(db, 'a.example.com', 'e1')).toBe(false);
+    expect(updates).toEqual({ 'publicHostnames/a.example.com': canonical });
+    expect(transactionReads).toEqual(['hostnames/a.example.com', 'publicHostnames/a.example.com', 'hostnames/a.example.com', 'publicHostnames/a.example.com']);
+  });
+
   it('refuses a hostname repointed after the Event query', async () => {
     const { db, updates } = fakeDb({ 'a.example.com': { eventId: 'old' } }, { 'hostnames/a.example.com': { eventId: 'new', adultContent: false } });
     expect(await raiseAdultContentForEvent(db, 'old')).toBe(0);

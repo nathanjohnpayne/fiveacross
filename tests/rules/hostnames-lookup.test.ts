@@ -184,6 +184,28 @@ describe('firestore.rules — publicHostnames/{host} pre-auth lookup (hostnames-
     );
   });
 
+  // Both collections are global operator-owned mappings. Event admin status
+  // grants neither canonical namespace mutation nor public projection mutation.
+  describe.each(['hostnames', 'publicHostnames'] as const)('%s mutation boundary', (collectionName) => {
+    beforeEach(async () => {
+      await testEnv.withSecurityRulesDisabled(async (ctx) => {
+        await setDoc(doc(ctx.firestore(), 'events/bodega-bay-2026'), {
+          name: 'Bodega Bay', admins: ['kim'], status: 'active',
+        });
+      });
+    });
+
+    it.each([['alice', 'ordinary client'], ['kim', 'Event admin']] as const)('denies UPDATE by %s (%s)', async (uid) => {
+      await assertFails(updateDoc(doc(authed(uid), `${collectionName}/${CANONICAL}`), {
+        eventId: 'some-other-event',
+      }));
+    });
+
+    it.each([['alice', 'ordinary client'], ['kim', 'Event admin']] as const)('denies DELETE by %s (%s)', async (uid) => {
+      await assertFails(deleteDoc(doc(authed(uid), `${collectionName}/${CANONICAL}`)));
+    });
+  });
+
   it('client UPDATE is denied — a writable mapping could repoint a live address', async () => {
     await assertFails(
       updateDoc(doc(authed('alice'), `publicHostnames/${CANONICAL}`), { eventId: 'some-other-event' }),
