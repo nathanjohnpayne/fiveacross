@@ -226,9 +226,15 @@ describe('bounded private bridge retries', () => {
     expect(sessions.capture().uid).toBe('alice');
     expect(sessions.getSnapshot().authGeneration).toBeGreaterThan(priorAuth);
     expect(() => old.assertCurrent()).toThrow(/expired/);
-    try { old.assertCurrent(); } catch (error) { expect(error).toMatchObject({ code: 'unavailable' }); }
+    let sameAccountError: unknown;
+    try { old.assertCurrent(); } catch (error) { sameAccountError = error; }
+    expect(sameAccountError).toBeInstanceOf(Error);
+    expect(sameAccountError).toMatchObject({ code: 'unavailable' });
     H.primary.currentUser = { uid: 'bob', token: 'changed' };
-    try { old.assertCurrent(); } catch (error) { expect(error).not.toHaveProperty('code'); }
+    let changedAccountError: unknown;
+    try { old.assertCurrent(); } catch (error) { changedAccountError = error; }
+    expect(changedAccountError).toBeInstanceOf(Error);
+    expect(changedAccountError).not.toHaveProperty('code');
   });
 
   it.each(['account', 'offline', 'stop'] as const)('cancels a pending retry on %s retirement', async (reason) => {
