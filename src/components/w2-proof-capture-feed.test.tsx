@@ -17,7 +17,7 @@ import type { ProofDoc } from '../types';
 // of the Feed. Moments are delivered EMPTY here (this is the proof half); the
 // merged Proofs+Moments ordering lives in src/components/w2-feed-moments.test.tsx.
 
-const H = vi.hoisted(() => ({ onSnapshot: vi.fn(), reportProof: vi.fn(), deleteProof: vi.fn() }));
+const H = vi.hoisted(() => ({ onSnapshot: vi.fn(), reportProof: vi.fn(), deleteProof: vi.fn(), viewerUid: 'viewer' as string | undefined }));
 
 vi.mock('../firebase', () => ({
   db: {},
@@ -49,7 +49,7 @@ vi.mock('../analytics', () => ({ track: vi.fn() }));
 // ProofFeed navigates to the Card tab from Tally Card actions (#261); mock
 // the router hook so these router-free renders keep working.
 vi.mock('react-router', () => ({ useNavigate: () => vi.fn() }));
-vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: { uid: 'viewer' } }) }));
+vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: H.viewerUid ? { uid: H.viewerUid } : null }) }));
 
 import ProofFeed from './ProofFeed';
 import { track } from '../analytics';
@@ -87,6 +87,7 @@ function captureOnNext(): { fire: (proofs: unknown, moments?: unknown, event?: u
       captured.tally = onNext;
     }
     else if (kind === 'query' && querySource?.args?.includes('items')) captured.prompts = onNext;
+    else if (kind === 'query' && (args[0] as { args?: unknown[] })?.args?.[3] === 'hearts') onNext(colSnap([]));
     else if (kind === 'query') captured.proofs = onNext;
     // #262: useAllDoubts' moderation read opens a SECOND event-doc sub — feed
     // them all so none starves the feed's loading gates.
@@ -95,7 +96,7 @@ function captureOnNext(): { fire: (proofs: unknown, moments?: unknown, event?: u
     // over the markers collection group, routed above so it cannot clobber proofs.
     // #262: the Feed's flat doubts subscription, routed by its path segment.
     else if (args[3] === 'doubts') captured.doubtsAll = onNext;
-    // specs/feed-hearts.md: the flat hearts stream, routed by segment so it
+    // specs/feed-hearts.md: scoped Hearts queries are routed above so they
     // never clobbers the moments slot; fed empty below.
     else if (args[3] === 'hearts') captured.heartsAll = onNext;
     // specs/admin-messages.md: useFeed's fourth stream (useNotices) is a flat
@@ -149,6 +150,7 @@ const colSnap = (docs: ProofDoc[]) => ({
 });
 
 beforeEach(() => {
+  H.viewerUid = 'viewer';
   vi.mocked(track).mockClear();
   H.onSnapshot.mockReset();
   H.onSnapshot.mockReturnValue(() => {});
@@ -167,7 +169,7 @@ describe('ProofFeed — the Proof IS the Feed entry (ADR 0002)', () => {
     sub.fire(colSnap([proof({ id: 'reported', createdAt: 123 })]));
     const button = screen.getByTitle('Report');
     fireEvent.click(button);
-    expect(H.reportProof).toHaveBeenCalledWith('reported', 123);
+    expect(H.reportProof).toHaveBeenCalledWith('reported', 123, 'viewer');
     expect(button).toBeDisabled();
     expect(track).not.toHaveBeenCalledWith('report_item');
     await act(async () => { if (outcome === 'accepted') resolve(); else reject(new Error('offline or rate denied')); });
@@ -178,6 +180,19 @@ describe('ProofFeed — the Proof IS the Feed entry (ADR 0002)', () => {
       expect(track).not.toHaveBeenCalledWith('report_item');
     }
   });
+  it('does not borrow a newer account for an old signed-out report control', async () => {
+    H.viewerUid = undefined;
+    const sub = captureOnNext();
+    render(<ProofFeed />);
+    sub.fire(colSnap([proof({ id: 'reported', createdAt: 123 })]));
+    H.viewerUid = 'new-viewer';
+    fireEvent.click(screen.getByTitle('Report'));
+    await act(async () => {});
+    expect(H.reportProof).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent('Report not sent');
+    expect(track).not.toHaveBeenCalledWith('report_item');
+  });
+
   it('renders proofs newest-first with the Player name and the Prompt text', () => {
     const sub = captureOnNext();
     render(<ProofFeed />);

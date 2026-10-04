@@ -293,6 +293,60 @@ describe('local bug-report export', () => {
   const ISSUE_200 = 'https://github.com/nathanjohnpayne/fiveacross/issues/200';
   const ISSUE_200_OLD_SLUG = 'https://github.com/nathanjohnpayne/gaycruisebingo/issues/200';
 
+  it.each([
+    '9'.repeat(40), // Original audit reproduction: unsafe exponential ledger value.
+    '9'.repeat(400), // Number conversion yields Infinity.
+    String(Number.MAX_SAFE_INTEGER + 1),
+    '0',
+    '-1',
+    '1.5',
+    'Infinity',
+    'NaN',
+    '1e3',
+  ])('rejects invalid archive issue %s without changing inbox, imported receipts or ledger bytes', async (issue) => {
+    await exportReports({ reports: [report('report_prior')], downloadScreenshot: async () => PNG, root });
+    await archiveReport({ reportId: 'report_prior', issueUrl: ISSUE_200, root });
+    await exportReports({ reports: [report()], downloadScreenshot: async () => PNG, root });
+    const files = ['inbox/report_123/report.json', 'inbox/report_123/description.md', 'inbox/report_123/screenshot.png', 'imported/report_prior/github-issue.json', LEDGER];
+    const before = await Promise.all(files.map(file => readFile(path.join(root, file))));
+
+    await expect(archiveReport({ reportId: 'report_123', issueUrl: `https://github.com/nathanjohnpayne/fiveacross/issues/${issue}`, root })).rejects.toThrow('Issue URL');
+
+    expect(await Promise.all(files.map(file => readFile(path.join(root, file))))).toEqual(before);
+    await expect(stat(path.join(root, 'inbox/report_123/github-issue.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(stat(path.join(root, 'imported/report_123'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(exportReports({ reports: [], downloadScreenshot: async () => PNG, root })).resolves.toEqual({ exported: [], skipped: [], failed: [] });
+  });
+
+  it.each([
+    'https://github.com/other-owner/fiveacross/issues/200',
+    'https://example.com/nathanjohnpayne/fiveacross/issues/200',
+    'https://github.com/nathanjohnpayne/fiveacross/issues/200?unsafe=1',
+  ])('rejects a noncanonical archive URL while preserving a pre-existing inbox receipt: %s', async issueUrl => {
+    await exportReports({ reports: [report()], downloadScreenshot: async () => PNG, root });
+    const receiptPath = path.join(root, 'inbox/report_123/github-issue.json');
+    const receipt = JSON.stringify({ reportId: 'report_123', issue: 200, url: ISSUE_200, importedAt: '2026-07-10T00:00:00.000Z' }, null, 4) + '\n';
+    await writeFile(receiptPath, receipt);
+    const bytes = await readFile(receiptPath);
+    await expect(archiveReport({ reportId: 'report_123', issueUrl, root })).rejects.toThrow('Issue URL');
+    expect(await readFile(receiptPath)).toEqual(bytes);
+    await expect(stat(path.join(root, LEDGER))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(stat(path.join(root, 'imported/report_123'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('archives the safe positive integer boundary and retains import replay/export dedupe', async () => {
+    await exportReports({ reports: [report()], downloadScreenshot: async () => PNG, root });
+    const issueUrl = `https://github.com/nathanjohnpayne/fiveacross/issues/${Number.MAX_SAFE_INTEGER}`;
+    const receipt = await archiveReport({ reportId: 'report_123', issueUrl, root });
+    expect(receipt.issue).toBe(Number.MAX_SAFE_INTEGER);
+    const ledger = await readFile(path.join(root, LEDGER));
+    await expect(archiveReport({ reportId: 'report_123', issueUrl, root })).resolves.toEqual(receipt);
+    expect(await readFile(path.join(root, LEDGER))).toEqual(ledger);
+    const exported = await exportReports({ reports: [report()], downloadScreenshot: async () => PNG, root });
+    expect(exported.skipped).toEqual(['report_123']);
+    expect(exported.failed).toEqual([]);
+  });
+
   it('durable dedupe: skips a report recorded in the committed ledger even with no local inbox/imported tree', async () => {
     // Simulate a fresh clone or deleted worktree: only the committed ledger
     // survives, with no local inbox/imported directory for the report.

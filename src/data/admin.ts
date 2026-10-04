@@ -337,8 +337,11 @@ export function bulkApproveItems(
  * retry). An admin who clicks it there is agreeing with the AI screen, not
  * overriding it — but a bare `status: 'hidden'` moves the doc OUT of the state
  * the trigger's hide arm looks for while leaving no marker behind, and
- * `safetyHideStands` then reads the result as a PLAIN hide: a later Confirm on
- * the same Proof publishes the media the admin had just taken down.
+ * `safetyHideStands` then reads the result as a PLAIN hide. A current console
+ * never publishes a `'hidden'` Proof on Confirm, but a cached pre-gate console
+ * does, directly — and without the marker the server's `'rehide'` arm (which
+ * fires on `safetyHide: true`) cannot take it back down, so the media the admin
+ * had just taken down would stay public.
  *
  * So the hide carries the hold forward. `safetyHideStands` (./moderation) is the
  * same predicate `confirmClaim` gates on, read here against the LIVE doc inside a
@@ -379,8 +382,9 @@ export function hideProof(id: string, eventId: string = EVENT_ID): Promise<void>
  * fact, the same reason `visionFlag` itself is left in place: the row keeps its
  * `AI screen: …` pill, and the queue keeps the Proof (`useReportedProofs` queues
  * on the verdict), so the decision stays visible and re-hideable instead of
- * vanishing. A fresh scan that re-flags the Proof takes it back to `'flagged'`,
- * which the trigger owns again — the override is a lift, not immunity.
+ * vanishing. The override is a lift, not immunity: an admin can hide the Proof
+ * again. (No later scan re-flags it — its object is create-only and admits one
+ * recorded scan, and a re-upload creates a separate Proof, scanned on its own.)
  *
  * It restores to the state the Proof came FROM, not unconditionally to `'active'`
  * (#133, Codex P1 round 2). In admin_confirmed claim mode a Proof is created
@@ -2081,11 +2085,11 @@ async function resolve(
     // can be flagged and hidden BEFORE its claim is ever reviewed. Publishing it
     // unconditionally would write `status: 'active'`, and active Proofs are
     // outside `qualifiesForVisionHide` — so extreme/illegal media would go back
-    // in front of every Player and the trigger would never hide it again, lifted
-    // by a control that shows only the submitter and the Prompt. This is NOT the
-    // warned, explicit moderation Restore (ReviewQueue), which is the one place
-    // an admin may override an AI verdict, having been told what they are
-    // lifting. So the claim still resolves and the Mark is still confirmed —
+    // in front of every Player (the re-hide arm takes it back down only while
+    // the marker stands, and only after the exposure), lifted by Confirm — a
+    // claim control, NOT the warned, explicit moderation Restore (ReviewQueue),
+    // which is the one place an admin may override an AI verdict, having been
+    // told what they are lifting. So the claim still resolves and the Mark is still confirmed —
     // only the media stays hidden, and the queue row says so on the claim.
     //
     // `safetyHideStands` reads the SERVER's own record — `hideProofOnVisionFlag`'s
@@ -2107,11 +2111,11 @@ async function resolve(
     // steer it. The publication gate leaves every other status as it stands: another Player's
     // Proof (a hidden or pending one must not reach the Feed through somebody
     // else's Claim), an already-active one (publishing it would be a no-op), a
-    // report- or admin-hidden one (its lift is `Clear reports` / `Restore`, not
-    // a confirm), and a missing one (a merge `set` would CREATE a ghost Proof
-    // carrying nothing but a status). The Claim still resolves; matched fresh
-    // credit confirms its Mark, and content-only review preserves established
-    // credit. Bound deletion classification is independent of publication.
+    // report- or admin-hidden one (its lift is `Restore`, never a confirm), and a
+    // missing one (a merge `set` would CREATE a ghost Proof carrying nothing but
+    // a status). The Claim still resolves; matched fresh credit confirms its
+    // Mark, and content-only review preserves established credit. Bound
+    // deletion classification is independent of publication.
     if (claimProofRef) {
       const liveProof = claimProofSnap?.exists()
         ? (claimProofSnap.data() as Partial<ProofDoc> | undefined)

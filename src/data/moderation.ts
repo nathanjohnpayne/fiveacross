@@ -184,11 +184,13 @@ export interface SafetyHideState {
  *
  * The `'flagged'` arm is kept for the interval that stamping closed but cannot
  * un-write: a Proof flagged by a PRE-#1143 Functions build carries the verdict
- * and no marker until the hide arm reaches it, and this gate is the only thing
- * standing between that doc and a Confirm that would publish it. It also covers
- * a verdict outside the auto-hide allowlist, which is deliberately marker-less
- * and never auto-hidden (ADR 0004) but is still an unreviewed AI flag that
- * Confirm should not publish out from under the admin queue.
+ * and no marker until the hide arm reaches it. A current Confirm already leaves
+ * that doc unpublished on status alone (it publishes only a still-`'pending'`
+ * Proof); the flagged arm is what makes the console treat it as held — the
+ * queue row's annotation and the marker an admin Hide carries forward. It also
+ * covers a verdict outside the auto-hide allowlist, which is deliberately
+ * marker-less and never auto-hidden (ADR 0004) but is still an unreviewed AI
+ * flag the console should not treat as cleared.
  *
  * It reads no verdict and holds no allowlist, and that is the whole point (Codex
  * P1 on #133). The verdict strings live in `AUTO_HIDE_VISION_FLAGS`
@@ -204,16 +206,21 @@ export interface SafetyHideState {
  * The one caller is `confirmClaim` (./admin), which publishes an admin_confirmed
  * claim's `'pending'` Proof by writing `status: 'active'`. Active Proofs sit
  * OUTSIDE `qualifiesForVisionHide`, so without this gate confirming the Mark
- * would put extreme/illegal media back in front of every Player and the trigger
- * would never hide it again — from a control whose row shows only the submitter
- * and the Prompt, and which is emphatically NOT the warned, explicit moderation
- * Restore. The claim still resolves and the Mark is still confirmed; only the
+ * would put extreme/illegal media back in front of every Player. The server's
+ * re-hide arm takes such a publish back down only while the marker stands, and
+ * only after the exposure, so this gate is what prevents the exposure — from a
+ * control whose row shows only the submitter and the Prompt, and which is
+ * emphatically NOT the warned, explicit moderation Restore. The claim still resolves and the Mark is still confirmed; only the
  * media stays hidden, and the queue row says so.
  *
- * A `'hidden'` Proof carrying NO marker is deliberately publishable: it was
+ * A `'hidden'` Proof carrying NO marker is deliberately NOT held here: it was
  * hidden by an admin's own Hide or by the report-count threshold, each of which
- * has its own console lift (`Restore`, `Clear reports`) and neither of which
- * confirm's behaviour has ever withheld. This closes the SAFETY hole ADR 0004
+ * has its own console lift. A Confirm never publishes it, because
+ * `confirmClaim` publishes only the claimant's own still-`'pending'` Proof; it
+ * returns to the Feed only through the console's Restore (directly, or back to
+ * `'pending'` for an owner claim still undecided, which a Confirm then
+ * publishes); Restore also sets `reportHideSuppressed`, so a report-threshold
+ * hide needs no Clear reports. This predicate closes the SAFETY hole ADR 0004
  * exists for, and nothing else.
  */
 export function safetyHideStands(proof: SafetyHideState | undefined): boolean {

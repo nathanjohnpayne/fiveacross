@@ -96,7 +96,7 @@ describe('useReportedProofs — the AI-screened Proof stays reachable for its wh
     ]);
   });
 
-  it('queues a Proof carrying a non-auto-hide verdict too — raciness is reviewable, just never auto-hidden', () => {
+  it('queues a Proof carrying a non-auto-hide verdict too (racy as a synthetic stand-in) — reviewable, never auto-hidden', () => {
     const fire = capture();
     const { result } = renderHook(() => useReportedProofs());
 

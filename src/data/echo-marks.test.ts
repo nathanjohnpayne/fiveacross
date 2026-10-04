@@ -1578,6 +1578,54 @@ describe('reshuffleBoard — the post-Reshuffle re-deal echo (spec § Reshuffle 
     expect(cells.find((c) => c.itemId === 's0')).toMatchObject({ marked: false });
   });
 
+  it('uses the transaction Event when echoes were disabled after preflight', async () => {
+    seedShuffle({ day0Overrides: { 0: { marked: true, markedAt: 1, status: 'confirmed' } } });
+    H.transactionRunner = async (fn, tx) => {
+      H.event = { ...H.event, settings: { spicyRatio: 0.4, echoMarks: false } };
+      return fn(tx);
+    };
+    await reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 });
+    const board = H.txSet.mock.calls.find((c) => isDayBoardWrite(c, 1))![1] as { cells: unknown };
+    expect(cellsFromData(board.cells).some((cell) => cell.echo)).toBe(false);
+    expect(H.txSet.mock.calls.find(isPlayerWrite)![1]).toEqual({ reshufflesUsed: 1 });
+  });
+
+  it('does not write stats when standings freeze after preflight on a competitive Day', async () => {
+    seedShuffle({ day0Overrides: { 0: { marked: true, markedAt: 1, status: 'confirmed' } } });
+    H.transactionRunner = async (fn, tx) => {
+      H.event = { ...H.event, frozenAt: 1 };
+      return fn(tx);
+    };
+    await reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 });
+    expect(H.txSet.mock.calls.find(isPlayerWrite)![1]).toEqual({ reshufflesUsed: 1 });
+  });
+
+  it.each(['tutorial', 'ceremonial', 'frozen-ceremonial'] as const)('uses transaction scoring policy after preflight changes to %s', async (policy) => {
+    const confirmed: Partial<Record<number, Partial<Cell>>> = {};
+    for (let index = 0; index < 25; index++) confirmed[index] = { marked: true, markedAt: 1, status: 'confirmed' };
+    seedShuffle({ day0Overrides: confirmed });
+    H.event = { ...H.event, standingsFreezeAt: Date.now() + 3_600_000 };
+    H.transactionRunner = async (fn, tx) => {
+      const current = (H.event!.days as DayDef[]).map((d) => d.index !== 1 ? d : {
+        ...d, ...(policy === 'tutorial' ? { tutorial: true } : { scoring: 'ceremonial' as const }),
+      });
+      H.event = { ...H.event, days: current, ...(policy === 'frozen-ceremonial' ? { frozenAt: 1 } : {}) };
+      return fn(tx);
+    };
+    await reshuffleBoard({ uid: 'u1', dayIndex: 1, expectedSeed: 111 });
+    const player = H.txSet.mock.calls.find(isPlayerWrite)![1] as {
+      dayStats: Record<number, { firstBingoAt: number | null; squaresMarked: number }>;
+      firstBingoAt?: number | null; squaresMarked?: number;
+    };
+    expect(player.dayStats[1].squaresMarked).toBe(24);
+    expect(player.dayStats[1].firstBingoAt).toEqual(expect.any(Number));
+    if (policy === 'tutorial') expect(player.firstBingoAt).toBeNull();
+    else if (policy === 'ceremonial') {
+      expect(player.squaresMarked).toBe(0);
+      expect(player.firstBingoAt).toBeNull();
+    } else expect(Object.keys(player).sort()).toEqual(['dayStats', 'reshufflesUsed']);
+  });
+
   it('a reshuffle that echoes a genuinely new Prompt stamps a server-observed transition', async () => {
     seedShuffle({
       // The Day-1 card is pristine and UNMARKED — no echo to trade away.

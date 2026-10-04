@@ -107,7 +107,16 @@ service cloud.firestore {
     function heartTargetAccepts(eventId, data) {
       let target = heartTargetData(eventId, data);
       return target.createdAt == data.targetCreatedAt
+        && (data.targetKind != 'proof' || target.status == 'active')
         && !exists(blockPairDoc(eventId, request.auth.uid, target.get('uid', '')));
+    }
+    // Match the target's public read boundary. Admins can inspect stale slots;
+    // ordinary readers need an existing active Proof/current incarnation.
+    function heartTargetReadable(eventId, data) {
+      let target = heartTargetData(eventId, data);
+      return data.targetKind in ['proof', 'moment']
+        && target.createdAt == data.targetCreatedAt
+        && (data.targetKind != 'proof' || target.status == 'active');
     }
     // Canonical transitional Decision D-A predicate (#801/#802/#804/#1079).
     // Keeping the Event data threaded makes the enforcement switch and Admin
@@ -2544,12 +2553,14 @@ service cloud.firestore {
         // immutability pattern: `create` is allowed once (no prior doc) by the
         // achieving Player (firstBingo.uid == auth.uid — own-attributed, "written
         // via the same client path that posts first-bingo Moments today") OR by an
-        // admin resolving an admin_confirmed claim for that Player. There is NO
+        // trusted admin attributing a ceremony to another Player (normal writers
+        // resolve claims or repair the pin). Rules do not bind a Claim or profile.
+        // There is NO
         // `update` path at all. A second write to the SAME day-meta doc is therefore
         // a doc-exists update, denied for EVERYONE including admins — the per-day
         // honor cannot be reassigned once claimed, exactly like the deny-all update
-        // on a Moment. Public read (the honor is pinned on that day's view); delete
-        // stays admin-only for moderation.
+        // on a Moment. Reads require Event admission (the honor is pinned on that
+        // day's view); delete stays admin-only for moderation.
         //
         // The honor doc id is BOUND to its Day: `metaId == dayIndex` (Codex P2).
         // The type contract (src/types.ts) fixes the single canonical doc at
@@ -2574,11 +2585,23 @@ service cloud.firestore {
             && metaId == dayIndex
             && isCanonicalDay(dayIndex)
             && request.time.toMillis() >= get(/databases/$(database)/documents/events/$(eventId)).data.days[int(dayIndex)].unlockAt
+            // A ceremony, not verified achievement: bound the persisted payload
+            // without requiring a Board/profile or expiring an old queued win.
+            && request.resource.data.keys().hasOnly(['firstBingo'])
+            && request.resource.data.firstBingo is map
+            && request.resource.data.firstBingo.keys().hasOnly(['uid', 'displayName', 'at'])
+            && request.resource.data.firstBingo.uid is string
+            && request.resource.data.firstBingo.uid.size() > 0
+            && request.resource.data.firstBingo.uid.size() <= 128
             && (request.resource.data.firstBingo.uid == request.auth.uid || isAdmin(eventId))
             && request.resource.data.firstBingo.displayName is string
             && request.resource.data.firstBingo.displayName.size() > 0
             && request.resource.data.firstBingo.displayName.size() <= 100
-            && request.resource.data.firstBingo.at is number;
+            && request.resource.data.firstBingo.at is number
+            // Both comparisons reject NaN/infinities. No age or unlock-time floor:
+            // Admin/offline repair preserves the original win's timestamp.
+            && request.resource.data.firstBingo.at >= 0
+            && request.resource.data.firstBingo.at <= request.time.toMillis() + 60000;
           // Held still for the length of the quiesce, for the same reason the
           // Player row above is (#134, Codex P2 on PR #1139): this pin is the
           // other document the frozen record is built from, and the freeze's
@@ -3311,7 +3334,8 @@ service cloud.firestore {
       // #425 — Moment ids are deterministic and a deleted Moment can come
       // back at the same id). Toggle-off is the owner's delete.
       match /hearts/{heartId} {
-        allow read: if admitted(eventId);
+        allow read: if admitted(eventId)
+          && (isAdmin(eventId) || heartTargetReadable(eventId, resource.data));
         allow create, update: if admitted(eventId)
           // #134: hearts are Feed activity, and an archived Feed is a record
           // rather than a live surface — the frozen Most-Loved Photo award
@@ -3323,7 +3347,18 @@ service cloud.firestore {
           // their own auth uid, so the two can never meet on a foreign doc).
           && request.resource.data.uid == request.auth.uid
           // Exactly the contract's fields, no extras riding along.
-          && request.resource.data.keys().hasOnly(['uid', 'targetKind', 'targetId', 'targetCreatedAt', 'createdAt'])
+          && request.resource.data.keys().hasOnly(['uid', 'targetKind', 'targetId', 'targetCreatedAt', 'createdAt', 'bindingCommittedAt'])
+          // Old queued clients can remain fieldless. Once stamped, a binding
+          // keeps its native time on retries and a real rebinding must reset it.
+          && (!('bindingCommittedAt' in request.resource.data)
+              ? (resource == null
+                  || !('bindingCommittedAt' in resource.data))
+              : (request.resource.data.bindingCommittedAt is timestamp
+                  && ((resource == null
+                        || !('bindingCommittedAt' in resource.data)
+                        || request.resource.data.targetCreatedAt != resource.data.targetCreatedAt)
+                    ? request.resource.data.bindingCommittedAt == request.time
+                    : request.resource.data.bindingCommittedAt == resource.data.bindingCommittedAt)))
           && request.resource.data.targetKind in ['proof', 'moment']
           && request.resource.data.targetId is string
           && request.resource.data.targetId.size() > 0
@@ -3359,11 +3394,19 @@ service cloud.firestore {
 
       // Moments (ADR 0002): a broadcast of a big social beat (BINGO / Blackout /
       // First to BINGO) posted to the Feed. A bare Mark broadcasts nothing here.
-      // Own-beat create only (a forged uid is denied); public read; fully immutable
-      // (no update path); deletable by owner or admin.
+      // Own-beat create only (a forged uid is denied); reads require Event admission.
+      // Fully immutable (no update path); deletable by owner or admin.
       match /moments/{momentId} {
         allow read: if admitted(eventId);
         allow create: if admitted(eventId)
+          // Client ceremonies contain no evidence or server finale payload.
+          // photoURL/dayIndex remain optional for older and single-Board writers.
+          && request.resource.data.keys().hasOnly(['kind', 'uid', 'displayName', 'photoURL', 'createdAt', 'dayIndex'])
+          && request.resource.data.uid is string
+          && request.resource.data.uid.size() > 0
+          && request.resource.data.uid.size() <= 128
+          && (!('dayIndex' in request.resource.data)
+              || (request.resource.data.dayIndex is int && request.resource.data.dayIndex >= 0))
           && isOwner(request.resource.data.uid)
           // #134: no new ceremony after the freeze. The Event-wide `first_bingo`
           // singleton in particular is the honour the archive has already
@@ -3398,7 +3441,7 @@ service cloud.firestore {
                         && request.resource.data.dayIndex is int
                         // Bound the Day to the Event's real schedule (Codex P2 on
                         // #277): without it an owner could mint unbounded
-                        // publicly-readable junk docs (…-blackout-d999999). A
+                        // Event-readable junk docs (…-blackout-d999999). A
                         // legacy Event with no `days` errors the get() access —
                         // which DENIES (the safe default): no schedule, no
                         // day-scoped ids.
@@ -3558,8 +3601,8 @@ service cloud.firestore {
       // admin-only — the moderation escape hatch for a genuine mis-retraction,
       // mirroring the write-once honor doc at days/{dayIndex}/meta/{dayIndex}.
       //
-      // Read is public like the Feed it describes: nothing renders it today, but a
-      // signed-in client may want to know a win is spent before optimistically
+      // Reads require Event admission like the Feed: nothing renders it today, but an
+      // admitted client may want to know a win is spent before optimistically
       // re-posting it (src/data/moments.ts consults its LOCAL cache copy for
       // exactly that), and it carries no information a Moment did not already
       // publish.
@@ -3569,18 +3612,15 @@ service cloud.firestore {
           && isOwner(request.resource.data.uid)
           // #134: no tombstone after the freeze — see the moments delete above.
           && eventOpenForPlay(eventId)
-          // Exactly the contract's fields, no extras riding along. Deliberately
-          // STRICTER than the moments create rule (which has no hasOnly and so
-          // accepts stray fields — the honesty pin in the spec): a tombstone is
-          // pure bookkeeping nothing renders, so there is no legitimate payload to
-          // grow into and no reason to accept publicly-readable junk.
+          // Exactly the bookkeeping fields, like client Moments: a tombstone
+          // carries no renderable payload to grow into.
           && request.resource.data.keys().hasOnly(['uid', 'kind', 'dayIndex', 'createdAt'])
           && request.resource.data.kind in ['bingo', 'blackout']
           // A day-less id may carry a `dayIndex` stamp — since round 2 the writer
           // DOES mint this (the legacy tombstone of a daily-Event retraction
           // records WHICH Day spent the legacy slot; pure provenance, nothing
           // reads it back). When present it must still be a real scheduled Day —
-          // hasOnly alone would otherwise admit junk into a publicly-readable doc.
+          // hasOnly alone would otherwise admit junk into an Event-readable doc.
           && (momentId == request.resource.data.uid + '-' + request.resource.data.kind
                 ? (!request.resource.data.keys().hasAny(['dayIndex'])
                     || (request.resource.data.dayIndex is int
@@ -3592,7 +3632,7 @@ service cloud.firestore {
                     && momentId == request.resource.data.uid + '-' + request.resource.data.kind + '-d' + string(request.resource.data.dayIndex)))
           // Same near-now window as moments/proofs/hearts. The stamp is provenance
           // only (nothing sorts by it), but an unbounded client-set number in a
-          // publicly-readable doc buys nothing, so it carries the house bound.
+          // Event-readable doc buys nothing, so it carries the house bound.
           && request.resource.data.createdAt is number
           && request.resource.data.createdAt <= request.time.toMillis() + 60000
           && request.resource.data.createdAt >= request.time.toMillis() - 86400000;

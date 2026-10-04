@@ -1,21 +1,22 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, it, expect } from 'vitest';
 import {
   assertFails,
   assertSucceeds,
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { deleteDoc, doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
+import { deleteDoc, doc, getDoc, setDoc, updateDoc, serverTimestamp, Timestamp, collection, getDocs, query, where } from 'firebase/firestore';
 
 // specs/feed-hearts.md — the Hearts rules contract. A Heart is one Player's
 // like on a Feed post (a Proof or a Moment): the Doubt slot's structure
 // without the accusation. Pinned invariants:
-//   - create/update: OWN uid only, exactly the contract's five fields, a
+//   - create/update: OWN uid only, the contract's five fields plus optional server binding time, a
 //     real targetKind, the doc id BOUND to `${uid}_${targetKind}_${targetId}`
 //     (no squatting another Player's slot), the hearted post must EXIST as
 //     its declared kind WITH a matching `targetCreatedAt` incarnation stamp
+//     and a Proof must be active
 //     (Codex P2 on #425 — a recreated post must never inherit old hearts),
 //     and createdAt sits in the shared +60s/-24h window.
 //   - once-only: the SLOT ID is the guarantee — one doc per (Player, post),
@@ -24,7 +25,8 @@ import { deleteDoc, doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
 //     still yields exactly one doc.
 //   - toggle: the owner (or an admin) deletes; unheart-then-reheart is
 //     delete + fresh create.
-//   - read: public (the group sees the love).
+//   - read: ordinary admitted readers need the current active target and
+//     incarnation; Admins can inspect retained stale slots.
 
 const RULES_PATH = fileURLToPath(new URL('../../firestore.rules', import.meta.url));
 const EVENT = 'cruise';
@@ -173,5 +175,63 @@ describe('firestore.rules — Hearts (specs/feed-hearts.md)', () => {
   it('hearts are publicly readable to signed-in Players, never to signed-out', async () => {
     await assertSucceeds(getDoc(doc(db(ALICE), slot(BOB, 'proof', PROOF))));
     await assertFails(getDoc(doc(testEnv.unauthenticatedContext().firestore(), slot(BOB, 'proof', PROOF))));
+  });
+});
+
+
+describe('server-owned binding timestamp', () => {
+  it('allows old fieldless queued writes, but forbids forged stamps and removal of an existing binding', async () => {
+    const ref = doc(db(ALICE), slot(ALICE, 'proof', PROOF));
+    await assertFails(setDoc(ref, { ...heart(ALICE, 'proof', PROOF), bindingCommittedAt: Timestamp.fromMillis(NOW() - 1000) }));
+    await assertSucceeds(setDoc(ref, { ...heart(ALICE, 'proof', PROOF), bindingCommittedAt: serverTimestamp() }));
+    const stamp = (await getDoc(ref)).data()?.bindingCommittedAt;
+    await assertSucceeds(setDoc(ref, heart(ALICE, 'proof', PROOF), { merge: true }));
+    expect((await getDoc(ref)).data()?.bindingCommittedAt).toEqual(stamp);
+    await assertFails(setDoc(ref, heart(ALICE, 'proof', PROOF)));
+    await assertFails(updateDoc(ref, { bindingCommittedAt: serverTimestamp() }));
+  });
+  it('requires a fresh server-owned stamp for actual incarnation rebinding', async () => {
+    const ref = doc(db(ALICE), slot(ALICE, 'proof', PROOF));
+    await assertSucceeds(setDoc(ref, { ...heart(ALICE, 'proof', PROOF), bindingCommittedAt: serverTimestamp() }));
+    const stamp = (await getDoc(ref)).data()?.bindingCommittedAt;
+    const newAt = PROOF_AT + 1;
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await updateDoc(doc(ctx.firestore(), at(`proofs/${PROOF}`)), { createdAt: newAt });
+    });
+    await assertFails(setDoc(ref, { ...heart(ALICE, 'proof', PROOF), targetCreatedAt: newAt, bindingCommittedAt: stamp }));
+    await assertSucceeds(setDoc(ref, { ...heart(ALICE, 'proof', PROOF), targetCreatedAt: newAt, bindingCommittedAt: serverTimestamp() }));
+  });
+});
+
+describe('active target Heart read boundary', () => {
+  const mine = () => doc(db(ALICE), slot(ALICE, 'proof', PROOF));
+  const scoped = () => query(collection(db(ALICE), at('hearts')), where('targetKind', '==', 'proof'), where('targetId', '==', PROOF), where('targetCreatedAt', '==', PROOF_AT));
+  it.each(['hidden', 'pending', 'flagged'])('denies creating and reading references to a %s Proof', async status => {
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await updateDoc(doc(ctx.firestore(), at(`proofs/${PROOF}`)), { status });
+    });
+    await assertFails(setDoc(mine(), heart(ALICE, 'proof', PROOF)));
+    await assertFails(getDoc(doc(db(ALICE), slot(BOB, 'proof', PROOF))));
+    await assertFails(getDocs(scoped()));
+    await assertSucceeds(getDoc(doc(db(ADMIN), slot(BOB, 'proof', PROOF))));
+  });
+  it('admits the visible target query while denying the flat collection, then denies stale rows after deletion', async () => {
+    await assertSucceeds(getDocs(scoped()));
+    await assertFails(getDocs(collection(db(ALICE), at('hearts'))));
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await deleteDoc(doc(ctx.firestore(), at(`proofs/${PROOF}`)));
+    });
+    await assertFails(getDoc(doc(db(ALICE), slot(BOB, 'proof', PROOF))));
+    await assertFails(getDocs(scoped()));
+    await assertSucceeds(getDoc(doc(db(ADMIN), slot(BOB, 'proof', PROOF))));
+  });
+  it('cannot resurrect a stale Heart by recreating a target ID under a different incarnation', async () => {
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await updateDoc(doc(ctx.firestore(), at(`proofs/${PROOF}`)), { createdAt: PROOF_AT + 1 });
+    });
+    await assertFails(getDoc(doc(db(ALICE), slot(BOB, 'proof', PROOF))));
+    await assertFails(getDocs(scoped()));
+    await assertSucceeds(setDoc(mine(), { ...heart(ALICE, 'proof', PROOF), targetCreatedAt: PROOF_AT + 1 }));
+    await assertSucceeds(getDocs(query(collection(db(ALICE), at('hearts')), where('targetKind', '==', 'proof'), where('targetId', '==', PROOF), where('targetCreatedAt', '==', PROOF_AT + 1))));
   });
 });

@@ -50,6 +50,14 @@ export function shareCardAppName(): string {
   return editionBrand().appName;
 }
 
+/** Bound before emoji segmentation and DOM construction, including legacy names. */
+function boundedShareText(value: unknown, max = 256): string {
+  if (typeof value !== 'string') return '';
+  const text = value.slice(0, max);
+  // Avoid leaving half a surrogate pair at the truncation boundary.
+  return /[\uD800-\uDBFF]$/.test(text) ? text.slice(0, -1) : text;
+}
+
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   className?: string,
@@ -57,7 +65,7 @@ function el<K extends keyof HTMLElementTagNameMap>(
 ): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
   if (className) node.className = className;
-  if (text !== undefined) appendEmojiIsolatedText(node, text);
+  if (text !== undefined) appendEmojiIsolatedText(node, boundedShareText(text));
   return node;
 }
 
@@ -187,7 +195,7 @@ function buildBingoCardNode(data: BingoShareCardData): HTMLDivElement {
   card.style.height = `${CARD_HEIGHT}px`;
   card.append(el('div', 'share-card-event', data.contextLine ?? data.eventName));
   card.append(el('div', 'share-card-title', data.kind === 'blackout' ? 'BLACKOUT' : 'BINGO!'));
-  card.append(el('div', 'share-card-player', data.playerName));
+  card.append(el('div', 'share-card-player', boundedShareText(data.playerName, 100)));
   const grid = el('div', 'share-card-grid');
   // The winning-line glow marks only the NEWEST completed line (see
   // newestLineCells). Blackout lights the whole grid, so a single-line
@@ -279,7 +287,7 @@ const PIN_LABEL = '★ First BINGO';
 function buildLeaderboardRow(r: LeaderboardShareRow): HTMLDivElement {
   const row = el('div', 'share-card-row' + (r.firstToBingo ? ' pinned' : ''));
   row.append(el('span', 'share-card-rank', String(r.rank)));
-  row.append(el('span', 'share-card-name', r.displayName));
+  row.append(el('span', 'share-card-name', boundedShareText(r.displayName, 100)));
   const subText =
     `${r.bingoCount} bingo${r.bingoCount === 1 ? '' : 's'} · ${r.squaresMarked} sq` +
     (r.blackout ? ' · BLACKOUT' : '');
@@ -294,7 +302,7 @@ function buildLeaderboardRow(r: LeaderboardShareRow): HTMLDivElement {
 function buildPodiumColumn(r: LeaderboardShareRow): HTMLDivElement {
   const col = el('div', `share-card-col rank-${r.rank}` + (r.firstToBingo ? ' pinned' : ''));
   if (r.firstToBingo) col.append(el('span', 'share-card-pin', PIN_LABEL));
-  col.append(el('span', 'share-card-name', r.displayName));
+  col.append(el('span', 'share-card-name', boundedShareText(r.displayName, 100)));
   col.append(el('span', 'share-card-bc', `${r.bingoCount} bingo${r.bingoCount === 1 ? '' : 's'}`));
   col.append(el('div', 'share-card-bar', String(r.rank)));
   return col;
@@ -397,7 +405,7 @@ function buildHonoree(
 ): HTMLDivElement {
   const block = el('div', 'share-card-honoree');
   block.append(el('span', 'share-card-honoree-role', role));
-  block.append(el('span', 'share-card-honoree-name', name));
+  block.append(el('span', 'share-card-honoree-name', boundedShareText(name, 100)));
   if (stat) block.append(el('span', 'share-card-honoree-stat', stat));
   return block;
 }
@@ -412,7 +420,7 @@ function buildMostLovedRow(opts: {
 }): HTMLDivElement {
   const row = el('div', 'share-card-ml-row' + (opts.champ ? ' champ' : ''));
   row.append(el('span', 'share-card-ml-rank', opts.rank));
-  row.append(el('span', 'share-card-ml-name', opts.name));
+  row.append(el('span', 'share-card-ml-name', boundedShareText(opts.name, 100)));
   if (opts.role) row.append(el('span', 'share-card-ml-role', opts.role));
   if (opts.stat) row.append(el('span', 'share-card-ml-stat', opts.stat));
   return row;
@@ -513,7 +521,7 @@ function buildFarewellCardNode(data: FarewellShareCardData): HTMLDivElement {
       for (const h of data.honors) {
         const row = el('div', 'share-card-honor-row');
         row.append(el('span', 'share-card-honor-day', h.dayLabel));
-        row.append(el('span', 'share-card-honor-name', h.displayName));
+        row.append(el('span', 'share-card-honor-name', boundedShareText(h.displayName, 100)));
         honors.append(row);
       }
       card.append(honors);
