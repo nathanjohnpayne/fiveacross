@@ -3640,8 +3640,8 @@ service cloud.firestore {
       }
 
       // Notices (specs/admin-messages.md): admin-authored broadcasts — title +
-      // body, optionally pinned — that render at the top of the shared Feed. Any
-      // signed-in Player READS them (the delivery surface everyone watches); only
+      // body, optionally pinned — that render at the top of the shared Feed. Reads
+      // require Event admission (the delivery surface everyone watches); only
       // an admin creates, updates (pin/unpin), or deletes them. Unlike a Moment, a
       // Notice IS mutable — the pin toggle is an admin update — so create AND update
       // both revalidate the title/body caps and the boolean `pinned`. There is no
@@ -3650,10 +3650,15 @@ service cloud.firestore {
       match /notices/{noticeId} {
         allow read: if admitted(eventId);
         allow create: if isAdmittedAdmin(eventId)
-          // Bind attribution to the authenticated admin (Codex P2, PR #440) so a
-          // Notice's public "📌 Nathan" byline cannot be forged as another admin —
-          // the same isOwner-of-uid discipline markers/moments/proofs use.
+          // Bind the new label to the exact bounded ID-token name (#1426). A
+          // renamed Google account may label future Notices differently; the
+          // immutable UID remains the stable Admin-history attribution.
           && request.resource.data.uid == request.auth.uid
+          && request.resource.data.displayName is string
+          && request.resource.data.displayName.size() > 0
+          && request.resource.data.displayName.size() <= 100
+          && request.auth.token.name is string
+          && request.resource.data.displayName == request.auth.token.name
           && request.resource.data.title is string
           && request.resource.data.title.size() <= 60
           && request.resource.data.body is string
