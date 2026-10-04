@@ -1226,6 +1226,68 @@ describe('buildDailyEmailModel', () => {
     expect(model.subject).toBe('Day 1 · The Birds Have Entered the Chat 🐦—your card is live');
   });
 
+  // #1344: "The group lands in <place> today" is a claim about ARRIVAL, and a
+  // trip usually stays put. The Vacay register picks its morning line from
+  // whether the Day's Place differs from the previous Day's.
+  describe('the Vacay morning line only claims arrival on a change of Place (#1344)', () => {
+    const bodegaModel = (dayIndex: number) =>
+      buildDailyEmailModel({
+        event: { name: BODEGA_SEED.name, timezone: BODEGA_SEED.timezone, days: BODEGA_SEED.days },
+        day: BODEGA_SEED.days[dayIndex],
+        players: [{ uid: 'dev', displayName: 'Devon', bingoCount: 0, squaresMarked: 0, firstBingoAt: null }],
+        recipient: { uid: 'dev', displayName: 'Devon' },
+        edition: 'vacay',
+        feedUrl: 'https://bodega-bay.fiveacross.app/feed',
+        unsubscribeUrl: 'https://example.com/u',
+        preferencesUrl: 'https://example.com/u?a=preferences',
+      });
+
+    it('says the group lands on Day 1, the arrival Day', () => {
+      expect(bodegaModel(0).nudgeLine).toContain('The group lands in Bodega Bay today');
+    });
+
+    it('says the group is still there on Days 2 and 3, which share Day 1\'s Place', () => {
+      for (const i of [1, 2]) {
+        const { nudgeLine } = bodegaModel(i);
+        expect(nudgeLine).toContain('Morning, Devon. The group is still in Bodega Bay today—');
+        expect(nudgeLine).not.toContain('lands');
+      }
+    });
+
+    it('says the group lands again when the Place changes between Days', () => {
+      const days: EmailDay[] = [
+        { index: 0, place: 'Lisbon', unlockAt: 0 },
+        { index: 1, place: 'lisbon ', unlockAt: 1 },
+        { index: 2, place: 'Porto', unlockAt: 2 },
+      ];
+      const at = (i: number) => build({ event: { name: 'Iberia', timezone: 'UTC', days }, day: days[i], edition: 'vacay' });
+      expect(at(1).nudgeLine).toContain('The group is still in lisbon today');
+      expect(at(2).nudgeLine).toContain('The group lands in Porto today');
+    });
+
+    it('treats a previous Day that names no readable Place as an arrival', () => {
+      const days = [{ index: 0, place: '', unlockAt: 0 }, { index: 1, place: 42, unlockAt: 1 }, { index: 2, place: 'Porto', unlockAt: 2 }, { index: 3, place: 'Porto', unlockAt: 3 }] as unknown as EmailDay[];
+      const at = (i: number) => build({ event: { name: 'Iberia', timezone: 'UTC', days }, day: days[i], edition: 'vacay' });
+      expect(at(2).nudgeLine).toContain('The group lands in Porto today');
+      expect(at(3).nudgeLine).toContain('The group is still in Porto today');
+    });
+
+    it('leaves the cruise register alone: the boat docks again even in the same port', () => {
+      const days: EmailDay[] = [
+        { index: 0, place: 'Valletta', unlockAt: 0 },
+        { index: 1, place: 'Valletta', unlockAt: 1 },
+      ];
+      const model = build({ event: { name: 'Med', timezone: 'UTC', days }, day: days[1], edition: 'gcb' });
+      expect(model.nudgeLine).toContain('The boat docks in Valletta today');
+    });
+
+    it('carries the stay line into both the HTML and the text part', () => {
+      const model = bodegaModel(1);
+      expect(renderDailyEmailHtml(model)).toContain('The group is still in Bodega Bay today');
+      expect(renderDailyEmailText(model)).toContain('The group is still in Bodega Bay today');
+    });
+  });
+
   it('drops the Place from the context line and the morning line when a Day names none', () => {
     const atSea = { ...gcbDay4, place: '', placeEmoji: '' };
     const model = build({ day: atSea });

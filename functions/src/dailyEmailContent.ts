@@ -123,6 +123,11 @@ export interface EditionRegister {
   arrivalLine: (place: string) => string;
   /** The morning line when the Day names no Place. */
   arrivalLineNoPlace: string;
+  /** The morning line for a Day that stays in the PREVIOUS Day's Place (#1344).
+   *  Optional: a register whose `arrivalLine` is true every Day, because the
+   *  Place changes daily (the cruise's port), leaves it unset and always uses
+   *  `arrivalLine`. A trip usually stays put, so "lands in" on Day 2 is false. */
+  stayLine?: (place: string) => string;
   /** Photos module: the emphasised lead clause. */
   photosLead: string;
   /** Photos module: the rest of the nudge, in this Edition's register. */
@@ -168,6 +173,7 @@ const REGISTERS: Record<string, EditionRegister> = {
     subjectTailDayOne: 'your card is live',
     arrivalLine: (place) => `The group lands in ${place} today`,
     arrivalLineNoPlace: 'The group is together today',
+    stayLine: (place) => `The group is still in ${place} today`,
     photosLead: 'Got BINGO? Post a photo with it.',
     photosRest: 'Every claim is a photo op, and the group chat wants receipts.',
     whyYouGotThis: (eventName) => `You're getting this because you're on the ${eventName} trip.`,
@@ -924,7 +930,18 @@ export function buildDailyEmailModel(args: BuildDailyEmailArgs): DailyEmailModel
   // The arrival line names the Place WITHOUT its flag emoji: the flag rides the
   // context line, and a flag mid-sentence reads as decoration rather than data.
   const arrivalPlace = placeName(day);
-  const arrival = arrivalPlace ? register.arrivalLine(arrivalPlace) : register.arrivalLineNoPlace;
+  // Arrival copy claims the group just got somewhere, so a register that has a
+  // `stayLine` uses it when the PREVIOUS Day named the same Place (#1344). The
+  // opening Day, and a previous Day naming no readable Place, still arrive.
+  const previous = days[day.index - 1];
+  const previousPlace =
+    previous !== null && typeof previous === 'object' ? placeName(previous).toLowerCase() : '';
+  const staysPut = arrivalPlace !== '' && previousPlace === arrivalPlace.toLowerCase();
+  const arrival = !arrivalPlace
+    ? register.arrivalLineNoPlace
+    : staysPut && register.stayLine
+      ? register.stayLine(arrivalPlace)
+      : register.arrivalLine(arrivalPlace);
   // The opening Day of an Event that uses the open sentinel has no unlock hour
   // to promise — it is already live — so the copy says so rather than quoting
   // the epoch (#723).
