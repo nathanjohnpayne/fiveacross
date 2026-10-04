@@ -14,6 +14,7 @@ spec_test_map:
     - tests/offline/private-cache-auth.test.ts
     - src/auth/privateCacheRecovery.test.ts
     - src/auth/privateCacheRecoveryPage.test.ts
+    - src/auth/privateCacheRecoveryNavigation.test.ts
     - src/auth/offlineAttestationWitness.test.ts
     - src/entry-private-cache.test.ts
     - src/hooks/useData-private.test.ts

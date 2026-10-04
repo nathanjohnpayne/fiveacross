@@ -216,8 +216,14 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
       (err) => {
         if (!active) return;
         try { lease.assertCurrent(); } catch { return; }
+        // A denial retires the visibility witness. Only a connection loss
+        // may carry a confirmed same-scope set; an unreadable listener cannot
+        // qualify this session (including a later offline transition).
+        confirmed.current = null;
+        serverBacked = false;
+        clearRetry();
         console.error('[blocks] hidden-set listener failed; withholding until a confirmed answer is available', err);
-        setState((prev) => ({ key, hidden: prev.key === key ? prev.hidden : EMPTY, ready: confirmed.current?.key === key }));
+        setState({ key, hidden: EMPTY, ready: false });
       },
     );
     return () => {

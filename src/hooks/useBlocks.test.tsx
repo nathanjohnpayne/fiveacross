@@ -501,7 +501,7 @@ describe('useHiddenUidsSubscription', () => {
     const fresh = H.subscriptions[1];
     act(() => fresh.listener({ ...pairs([]), metadata: { fromCache: true, hasPendingWrites: false } }));
     act(() => fresh.onError(new Error('permission-denied')));
-    expect(view.result.current).toEqual({ hidden: new Set(['alice']), ready: true });
+    expect(view.result.current).toEqual({ hidden: new Set(), ready: false });
     act(() => fresh.listener(pairs([])));
     expect(view.result.current).toEqual({ hidden: new Set(), ready: true });
   });
@@ -524,14 +524,17 @@ describe('useHiddenUidsSubscription', () => {
     expect(view.result.current).toEqual({ hidden: new Set(), ready: false });
     expect(H.subscriptions[0].unsubscribe).toHaveBeenCalledOnce();
   });
-  it('a listener error keeps a confirmed set and withholds an unknown cold set', () => {
+  it('a listener denial retires readiness and cannot carry into an offline session', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const view = renderHook(() => useHiddenUidsSubscription('bob', true));
     const sub = H.subscriptions[0];
     act(() => sub.listener(pairs([['alice', 'bob']])));
     act(() => sub.onError(new Error('permission-denied')));
-    expect(view.result.current.ready).toBe(true);
-    expect([...view.result.current.hidden]).toEqual(['alice']);
+    expect(view.result.current).toEqual({ hidden: new Set(), ready: false });
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    H.session = { ...H.session, db: null, generation: 1 };
+    view.rerender();
+    expect(view.result.current).toEqual({ hidden: new Set(), ready: false });
     expect(error).toHaveBeenCalledTimes(1);
   });
 });

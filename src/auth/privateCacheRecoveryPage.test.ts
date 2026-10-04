@@ -38,7 +38,7 @@ beforeEach(() => {
   vi.stubGlobal('window', new Proxy(browserWindow, {
     get(target, key) {
       return key === 'location'
-        ? { href: 'https://event.example/#device-cache-recovery', replace: H.replace }
+        ? { href: 'https://event.example/more?keep=visible&device-cache-recovery=1#old-panel', replace: H.replace }
         : Reflect.get(target, key, target);
     },
   }));
@@ -62,7 +62,7 @@ describe('attended recovery document DOM (#1411)', () => {
     expect(finish).toBeDisabled(); finish.click();
     expect(H.clear).not.toHaveBeenCalled();
     fireEvent.click(screen.getAllByRole('checkbox')[1]); finish.click();
-    await waitFor(() => expect(H.replace).toHaveBeenCalledWith('https://event.example/'));
+    await waitFor(() => expect(H.replace).toHaveBeenCalledWith('https://event.example/more?keep=visible'));
     expect(H.order).toEqual(['initialize', 'server', 'drain', 'terminate', 'clear']);
     expect(H.server).toHaveBeenCalledWith({ collection: 'users', uid: 'alice' });
     expect(privateCacheRecovered(project)).toBe(true);
@@ -76,7 +76,7 @@ describe('attended recovery document DOM (#1411)', () => {
     expect(screen.getAllByRole('checkbox').every(box => (box as HTMLInputElement).disabled)).toBe(true);
     expect(H.replace).not.toHaveBeenCalled();
     screen.getByRole('button', { name: 'Return to the app' }).click();
-    expect(H.replace).toHaveBeenCalledWith('https://event.example/');
+    expect(H.replace).toHaveBeenCalledWith('https://event.example/more?keep=visible');
     // A new document starts from unchecked consent, never an in-place clear retry.
     renderPrivateCacheRecovery();
     expect(screen.getAllByRole('checkbox').every(box => !(box as HTMLInputElement).checked)).toBe(true);

@@ -55,9 +55,10 @@ const H = vi.hoisted(() => ({
   unbanUser: vi.fn(),
   unlockDayNow: vi.fn(),
   resnapshotDayNow: vi.fn(),
+  recoveryRequired: false,
 }));
 
-vi.mock('../hooks/usePrivateFirestore', () => ({ usePrivateFirestore: () => ({ uid: H.user?.uid ?? null, db: {}, generation: 1, recoveryRequired: false, failed: false }) }));
+vi.mock('../hooks/usePrivateFirestore', () => ({ usePrivateFirestore: () => ({ uid: H.user?.uid ?? null, db: {}, generation: 1, recoveryRequired: H.recoveryRequired, failed: false }) }));
 
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event', storage: {}, auth: {}, googleProvider: {}, analytics: null }));
 // #559: ReviewQueue now imports `track` (for `prompt_suggestion_approved`),
@@ -177,6 +178,7 @@ const dayDef = (over: Partial<DayDef> = {}): DayDef => ({
 });
 
 beforeEach(() => {
+  H.recoveryRequired = false;
   vi.clearAllMocks();
   H.user = { uid: 'admin-uid' };
   H.event = {
@@ -192,6 +194,15 @@ beforeEach(() => {
 });
 
 describe('Admin Approvals group (specs/d15-approvals.md, re-housed in the Review queue)', () => {
+  it('loads a separate document for the attended recovery link', () => {
+    H.recoveryRequired = true;
+    render(<MemoryRouter initialEntries={['/more/admin']}><Admin /></MemoryRouter>);
+    const link = screen.getByRole('link', { name: 'Finish device recovery' });
+    const target = new URL(link.getAttribute('href')!, window.location.href);
+    expect(target.searchParams.get('device-cache-recovery')).toBe('1');
+    expect(target.hash).toBe('');
+    expect(target.pathname + target.search).not.toBe(window.location.pathname + window.location.search);
+  });
   it('is not on the hub; the hub card opens the Review queue where the pending row lists', () => {
     H.pendingItems = [pendingItem('p1', { text: 'Awaiting review', createdBy: 'alice' })];
     renderAdmin('/more/admin');

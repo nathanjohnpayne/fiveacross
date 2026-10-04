@@ -43,13 +43,21 @@ afterEach(() => { vi.restoreAllMocks(); window.history.replaceState(null, '', '/
 
 describe('credential-safe dedicated recovery entry (#1411)', () => {
   it('captures first, loads the actual recovery document, and never opens the gameplay or analytics graph', async () => {
-    window.history.replaceState(null, '', '/#device-cache-recovery');
+    window.history.replaceState(null, '', '/?device-cache-recovery=1');
     await import('./entry');
     await waitFor(() => expect(document.querySelector('h1')).toHaveTextContent('Finish device recovery'));
     expect(H.order).toEqual(['credentials-captured', 'firebase-core']);
     expect(H.main).not.toHaveBeenCalled(); expect(H.forbidden).not.toHaveBeenCalled();
     expect(H.firestore).not.toHaveBeenCalled(); expect(H.clear).not.toHaveBeenCalled();
     expect(H.drain).not.toHaveBeenCalled();
+  });
+  it('captures a credential before selecting the query recovery document', async () => {
+    window.history.replaceState(null, '', `/?device-cache-recovery=1#fa_handoff=${'C'.repeat(43)}`);
+    await import('./entry');
+    await waitFor(() => expect(document.querySelector('h1')).toHaveTextContent('Finish device recovery'));
+    expect(H.order).toEqual(['credentials-captured', 'handoff', 'firebase-core']);
+    expect(window.location.hash).toBe('');
+    expect(H.main).not.toHaveBeenCalled(); expect(H.forbidden).not.toHaveBeenCalled();
   });
   it('removes a real URL handoff credential before deferred handoff and main evaluation', async () => {
     const code = 'C'.repeat(43);

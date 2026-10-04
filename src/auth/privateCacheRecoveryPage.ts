@@ -5,6 +5,7 @@ import {
 } from 'firebase/firestore';
 import { app, firebaseConfig, firebaseEmulatorsEnabled } from '../firebaseCore';
 import { auth } from '../firebaseAuth';
+import { applicationAfterRecoveryHref } from './privateCacheRecoveryNavigation';
 import { recordPrivateCacheRecovery } from './privateCacheRecoveryMarker';
 import { completeLegacyCacheRecovery } from './privateCacheRecovery';
 
@@ -38,9 +39,7 @@ export function renderPrivateCacheRecovery(): void {
   const status = document.createElement('p');
   status.setAttribute('role', 'status');
   const returnToApp = () => {
-    const url = new URL(window.location.href);
-    url.hash = '';
-    window.location.replace(url.href);
+    window.location.replace(applicationAfterRecoveryHref(window.location.href));
   };
   back.addEventListener('click', returnToApp);
   const changed = () => { finish.disabled = !allAccounts.checked || !tabsClosed.checked; };

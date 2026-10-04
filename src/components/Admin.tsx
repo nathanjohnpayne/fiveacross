@@ -1,3 +1,4 @@
+import { privateCacheRecoveryHref } from '../auth/privateCacheRecoveryNavigation';
 import { useLocation, useNavigate } from 'react-router';
 import { usePrivateFirestore } from '../hooks/usePrivateFirestore';
 import { useAuth } from '../auth/AuthContext';
@@ -66,7 +67,7 @@ export default function Admin() {
   if (user && session.recoveryRequired) {
     return <AdminSheet title="Admin" onDone={() => navigate('/more', { replace: true })}>
       <p>Private views require attended device recovery. Recover and verify every account’s queued Marks online first.</p>
-      <a href="#device-cache-recovery">Finish device recovery</a>
+      <a href={privateCacheRecoveryHref(window.location.href)}>Finish device recovery</a>
     </AdminSheet>;
   }
 
