@@ -35,7 +35,9 @@ export type HostRejection =
   /** More than one label above the apex — `a.b.fiveacross.app`. Never a valid
    *  Event address, and outside the wildcard certificate besides. */
   | 'nested-label'
-  /** A reserved infrastructure label (`admin`, `d`, …). */
+  /** A reserved label from either floor of `RESERVED_SLUGS` (`src/slug.ts`):
+   *  an infrastructure label (`admin`, `d`, …) or a path-segment word (`feed`,
+   *  `setup`, …, #1387), or an `r2-` label outside the two rehearsal classes. */
   | 'reserved-label'
   /** Shaped wrong for a Slug; `detail` carries which rule it broke. */
   | 'invalid-slug';

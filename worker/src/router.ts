@@ -4,7 +4,8 @@
 // so a new Event needs no DNS record, no Hosting custom domain, no certificate
 // and no Worker route of its own. It does six things and refuses a seventh:
 //
-//   1. guards the Namespace and the reserved infrastructure labels (`host.ts`)
+//   1. guards the Namespace and the reserved labels, infrastructure and
+//      path-segment floors alike (`host.ts`)
 //   2. resolves the address through the named lookup-only registry entrypoint
 //      (`resolve.ts`)
 //   3. fails CLOSED on anything that is not an explicit, active, matching
