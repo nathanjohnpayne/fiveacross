@@ -192,8 +192,9 @@ describe('BlockPlayerButton', () => {
     trigger.focus();
     fireEvent.click(trigger);
     fireEvent.click(screen.getByRole('button', { name: 'Block' }));
-    // The pair listener has not rendered the optimistic hide yet when the
-    // zero-delay check runs: the trigger is still there and keeps focus.
+    // The host has not rendered the relay-driven optimistic hide yet when the
+    // zero-delay check runs: the trigger is still there and keeps focus. This
+    // focus test models the later hide with the Host rerender below.
     await act(async () => {
       await new Promise((r) => setTimeout(r, 0));
     });
