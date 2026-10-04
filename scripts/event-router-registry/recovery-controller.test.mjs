@@ -174,7 +174,7 @@ function controlReadbacks(overrides = {}) {
         serviceAccountEmail: QUARANTINED_EMAIL,
         oidcSubject: QUARANTINED_SUB,
         policyEtag: 'old-sa-etag',
-        tokenCreatorMembers: [],
+        tokenCreatorMembers: [], inheritedPoliciesComplete: true,
         responseDigest: 'a'.repeat(64),
       },
       {
@@ -182,7 +182,7 @@ function controlReadbacks(overrides = {}) {
         serviceAccountEmail: REPLACEMENT_EMAIL,
         oidcSubject: REPLACEMENT_SUB,
         policyEtag: 'next-sa-etag',
-        tokenCreatorMembers: [],
+        tokenCreatorMembers: [], inheritedPoliciesComplete: true,
         responseDigest: 'b'.repeat(64),
       },
     ],
@@ -379,7 +379,7 @@ describe('operator recovery evidence controller', () => {
       ISSUED_AT,
     ]);
     expect(result.signatureInputs.publisherControl?.split('\n')[4]).toBe(
-      '4ba4fa60823e1356f7b674f75e35aa6e513868c320c824e482acdd0e66c46aee',
+      'bd97e32f508f9aa54d6d33b481048b6d7b32b2d336bfbbc81410167958fe9a69',
     );
 
     const control = result.request.action.publisherReplacement.controlEvidence;
@@ -611,6 +611,77 @@ describe('operator recovery evidence controller', () => {
     });
     await expect(buildRecoveryArtifacts(recoveryInput(), deps)).rejects.toBeInstanceOf(Error);
     expect(deps.obtainSourceAttestorSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'user:operator@example.com',
+    'serviceAccount:firebase-adminsdk-fbsvc@fiveacross.iam.gserviceaccount.com',
+    'serviceAccount:unapproved-runtime@fiveacross.iam.gserviceaccount.com',
+    'serviceAccount:service-999999@gcp-sa-pubsub.iam.gserviceaccount.com',
+    'serviceAccount:service-999999@gcf-admin-robot.iam.gserviceaccount.com',
+    'serviceAccount:service-999999@serverless-robot-prod.iam.gserviceaccount.com',
+    'serviceAccount:service-999999@gcp-sa-eventarc.iam.gserviceaccount.com',
+    'serviceAccount:service-999999@gcp-sa-cloudbuild.iam.gserviceaccount.com',
+    'serviceAccount:service-5297095641@gcp-sa-cloudscheduler.iam.gserviceaccount.com',
+    'serviceAccount:service-5297095641@gcp-sa-firebasemods.iam.gserviceaccount.com',
+    'principal://iam.googleapis.com/unapproved-subject',
+    'group:operators@example.com',
+    'domain:example.com',
+    'allUsers',
+    'allAuthenticatedUsers',
+    OLD_MEMBER,
+  ])('rejects unapproved replacement Token Creator %s before signing', async (member) => {
+    const readback = controlReadbacks();
+    readback.serviceAccountAccess[1].tokenCreatorMembers = [member];
+    const deps = dependencies({ readPublisherControlReadbacks: vi.fn(async () => readback) });
+    await expect(buildRecoveryArtifacts(recoveryInput(), deps)).rejects.toMatchObject({
+      code: 'service-account-readback-mismatch',
+    });
+    expect(deps.obtainSourceAttestorSession).not.toHaveBeenCalled();
+  });
+
+  it('rejects a cross-project replacement with no effective token creators before signing', async () => {
+    const foreignEmail = 'router-publisher-next@foreign-project.iam.gserviceaccount.com';
+    const replace = value => JSON.parse(JSON.stringify(value)
+      .replaceAll(REPLACEMENT_EMAIL, foreignEmail)
+      .replaceAll(`projects/fiveacross/serviceAccounts/${foreignEmail}`, `projects/foreign-project/serviceAccounts/${foreignEmail}`));
+    const input = replace(recoveryInput());
+    const readback = replace(controlReadbacks());
+    expect(readback.serviceAccountAccess[1].tokenCreatorMembers).toEqual([]);
+    const deps = dependencies({ readPublisherControlReadbacks: vi.fn(async () => readback) });
+    await expect(buildRecoveryArtifacts(input, deps)).rejects.toMatchObject({ code: 'service-account-readback-mismatch' });
+    expect(deps.obtainSourceAttestorSession).not.toHaveBeenCalled();
+  });
+
+  it.each([false, undefined, 'true', 'UNKNOWN'])('refuses incomplete inherited IAM %s before signing', async (complete) => {
+    const readback = controlReadbacks();
+    readback.serviceAccountAccess[1].inheritedPoliciesComplete = complete;
+    const deps = dependencies({ readPublisherControlReadbacks: vi.fn(async () => readback) });
+    await expect(buildRecoveryArtifacts(recoveryInput(), deps)).rejects.toMatchObject({ code: 'service-account-readback-mismatch' });
+    expect(deps.obtainSourceAttestorSession).not.toHaveBeenCalled();
+  });
+
+  it('refuses omitted inherited IAM completeness before signing', async () => {
+    const readback = controlReadbacks();
+    delete readback.serviceAccountAccess[1].inheritedPoliciesComplete;
+    const deps = dependencies({ readPublisherControlReadbacks: vi.fn(async () => readback) });
+    await expect(buildRecoveryArtifacts(recoveryInput(), deps)).rejects.toMatchObject({ code: 'malformed-service-account-readback' });
+    expect(deps.obtainSourceAttestorSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'gcp-sa-pubsub', 'gcp-sa-eventarc', 'gcf-admin-robot',
+    'serverless-robot-prod', 'gcp-sa-cloudbuild',
+  ])('admits the verified project-bound %s agent and retries unchanged evidence', async (agent) => {
+    const readback = controlReadbacks();
+    readback.serviceAccountAccess[1].tokenCreatorMembers = [`serviceAccount:service-5297095641@${agent}.iam.gserviceaccount.com`];
+    const deps = dependencies({ readPublisherControlReadbacks: vi.fn(async () => readback) });
+    const first = await buildRecoveryArtifacts(recoveryInput(), deps);
+    const retry = await buildRecoveryArtifacts(recoveryInput(), deps);
+    expect(retry.request).toEqual(first.request);
+    expect(first.request.action.publisherReplacement.controlEvidence.serviceAccountAccess[1]).toMatchObject({
+      tokenCreatorMembers: readback.serviceAccountAccess[1].tokenCreatorMembers, inheritedPoliciesComplete: true,
+    });
   });
 
   it('requires fresh provider readbacks and a short-lived human-impersonated attestor session', async () => {
