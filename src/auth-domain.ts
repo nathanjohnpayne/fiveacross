@@ -36,8 +36,8 @@ const FIRST_PARTY_AUTH_HOSTS = new Set([
   // authorized domains and the `fiveacross` Google OAuth web client, not
   // gaycruisebingo's. `vercel.json`'s FIRST rewrite is host-conditional on this
   // exact hostname and proxies `/__/auth/*` to `fiveacross.firebaseapp.com`, so
-  // pinning here is what keeps that helper same-origin — a plain `.com` build
-  // would proxy to the wrong Firebase project.
+  // pinning here keeps that helper same-origin even if the baked Auth domain
+  // names a different production host.
   //
   // A production alias, not a branch URL, on purpose: the gcb project's preview
   // deployments historically sat behind Vercel Standard Protection; current

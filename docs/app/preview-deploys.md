@@ -30,7 +30,7 @@ It exists because a Five Across Event served only from Firebase Hosting has no f
 
 **A separate Vercel project, not a branch on the existing one.** A branch URL on the `gaycruisebingo` project historically sat behind Vercel Standard Protection (historically described in ADR 0007; current protection remains an owner inventory task)—a vercel.com login wall, which is disqualifying for a host players are meant to open on their phones. Only a *production* deployment is public, a project has exactly one production branch, and `gaycruisebingo`'s is already `main` serving the gcb env. So the mirror needs its own project.
 
-**One `vercel.json` on `main`, not a mirror branch.** The repository's `/__/auth/:path*` rewrite targets `gaycruisebingo.firebaseapp.com`, which is the wrong Firebase project for a fiveacross build. That conflict is resolved by a **host-conditional rewrite** placed first in `vercel.json`:
+**One `vercel.json` on `main`, not a mirror branch.** The Gay Cruise Bingo mirror's exact-host `/__/auth/:path*` rule targets `gaycruisebingo.firebaseapp.com`. Each Five Across-family mirror instead has its own exact-host rule targeting `fiveacross.firebaseapp.com`, ahead of the SPA catch-all:
 
 ```json
 {
@@ -40,7 +40,7 @@ It exists because a Five Across Event served only from Firebase Hosting has no f
 }
 ```
 
-Rewrites match in array order, so requests on the mirror host take this rule and every other host falls through to the unchanged Gay Cruise Bingo rule. The `{ eq }` object form is required: a bare string `value` is an unanchored regex to Vercel and would also match `fiveacross.vercel.app.evil.example`. Guarded by `src/vercel-auth-proxy.test.ts`; the reasoning lives in [`specs/vercel-auth-proxy.md`](../../specs/vercel-auth-proxy.md).
+For `/__/auth/:path*`, the three production mirror hosts match their respective exact-host Auth rules. Every other host matches no Auth rule and falls through to the SPA catch-all. The `{ eq }` object form is required: a bare string `value` is an unanchored regex to Vercel and would also match `fiveacross.vercel.app.evil.example`. Guarded by `src/vercel-auth-proxy.test.ts`; the reasoning lives in [`specs/vercel-auth-proxy.md`](../../specs/vercel-auth-proxy.md).
 
 The two alternatives the ticket floated were both worse. A **long-lived mirror branch** carrying its own `vercel.json` makes the backup host a permanent fork of `main` that has to be re-synced by hand—and a backup host quietly serving stale code is precisely the failure it exists to prevent, discovered at the worst possible moment. **Build-time templating** cannot work at all: Vercel reads `vercel.json` from the source before the build command runs, so a `vercel.json` written during the build is never read. (Generating `.vercel/output/config.json` via the Build Output API would work, but it means hand-rolling what the Vite framework preset does for free, on both projects.)
 
