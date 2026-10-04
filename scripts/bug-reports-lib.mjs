@@ -338,13 +338,15 @@ export async function exportReports({ reports, downloadScreenshot, root }) {
 
 export async function archiveReport({ reportId, issueUrl, root, now = new Date() }) {
   if (!REPORT_ID.test(reportId)) throw new Error('Invalid report id');
-  const match = ISSUE_URL.exec(issueUrl);
+  const match = typeof issueUrl === 'string' ? ISSUE_URL.exec(issueUrl) : null;
   if (!match) throw new Error('Issue URL must point to nathanjohnpayne/fiveacross');
+  const issue = Number(match[1]);
+  if (!Number.isSafeInteger(issue) || issue <= 0) throw new Error('Issue URL must contain a safe positive integer');
   const source = path.join(root, 'inbox', reportId);
   const destination = path.join(root, 'imported', reportId);
   const requested = {
     reportId,
-    issue: Number(match[1]),
+    issue,
     url: issueUrl,
   };
   const ledgerReceipt = (await readLedger(root)).find((entry) => entry.reportId === reportId);

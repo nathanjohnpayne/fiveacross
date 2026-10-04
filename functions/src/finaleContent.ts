@@ -870,6 +870,8 @@ export function buildPodiumPayload(
 
 /** The subset of a `ProofDoc` the award computation reads (local minimal shape,
  *  package-decoupled like every other input in this file). */
+export interface AwardTimestamp { seconds: number; nanoseconds: number }
+
 export interface MostLovedProofLike {
   id: string;
   uid: string;
@@ -881,6 +883,9 @@ export interface MostLovedProofLike {
   createdAt: number;
   itemText: string;
   dayIndex?: number | null;
+  /** Native server birth metadata; scheduler always supplies the cutoff value. */
+  serverCreatedAt?: number;
+  serverCreatedTimestamp?: AwardTimestamp;
 }
 
 /** The subset of a `HeartDoc` the award computation reads. */
@@ -890,10 +895,11 @@ export interface MostLovedHeartLike {
   targetId: string;
   targetCreatedAt: number;
   createdAt: number;
-  /** Firestore's server-assigned document creation instant. Optional only so
+  /** Native binding instant (or legacy latest updateTime). Optional only so
    *  the client parity fixture can model the same pure rule without importing
    *  Admin SDK snapshot types; scheduler input always supplies it. */
   serverCreatedAt?: number;
+  serverBindingTimestamp?: AwardTimestamp;
 }
 
 /**
@@ -938,7 +944,7 @@ function mostLovedBanned(uid: string | undefined, bannedUids: readonly string[] 
  *   - an eligible HEART targets that proof (`targetKind === 'proof'`,
  *     `targetId`), matches its incarnation (`targetCreatedAt ===
  *     proof.createdAt`, the `heartState` rule), was committed at or before the
- *     freeze cutoff (Firestore `createTime <= cutoff` — the SCHEDULED instant, never the run
+ *     freeze cutoff (server-owned binding time <= cutoff — the SCHEDULED instant, never the run
  *     clock), is NOT the owner's own heart (`h.uid !== proof.uid` — new logic:
  *     `heartState` deliberately counts self-hearts for display and that stays
  *     unchanged), and is NOT from a banned Player — UNCONDITIONALLY:
@@ -973,6 +979,8 @@ export function buildMostLovedPhotoAward(
 ): MostLovedPhotoAward {
   const eligible = proofs.filter(
     (p) =>
+      Number.isFinite(p.serverCreatedAt ?? p.createdAt) &&
+      (p.serverCreatedAt ?? p.createdAt) <= opts.cutoff &&
       p.type === 'photo' &&
       p.status === 'active' &&
       !mostLovedReportHidden(p.reportCount, opts.reportHideThreshold, p.reportHideSuppressed) &&
@@ -989,13 +997,19 @@ export function buildMostLovedPhotoAward(
     const p = byId.get(h.targetId);
     if (!p) continue;
     if (h.targetCreatedAt !== p.createdAt) continue; // another incarnation's heart
-    // Firestore's server creation time, not the client-set `createdAt`, is the
-    // freeze boundary. Rules allow a bounded clock-skew window for createdAt,
-    // so a delayed sweep could otherwise accept a post-freeze heart backdated
-    // into that window. The pure client fixture has no Admin snapshot metadata
-    // and falls back to createdAt; scheduler input always carries serverCreatedAt.
+    // Server-owned binding time, never Feed ordering createdAt. Scheduler
+    // legacy rows use latest native updateTime; stamped retries retain binding.
+    // The metadata-free client fixture alone falls back to createdAt.
     const heartAt = h.serverCreatedAt ?? h.createdAt;
     if (!Number.isFinite(heartAt) || heartAt > opts.cutoff) continue;
+    // Exact native precision prevents an old binding adopting a same-id Proof
+    // born later within the same millisecond, even if its client stamp is forged.
+    if (p.serverCreatedTimestamp) {
+      const binding = h.serverBindingTimestamp;
+      const birth = p.serverCreatedTimestamp;
+      if (!binding || binding.seconds < birth.seconds ||
+          (binding.seconds === birth.seconds && binding.nanoseconds < birth.nanoseconds)) continue;
+    }
     if (h.uid === p.uid) continue; // own heart on own proof does NOT count
     if (mostLovedBanned(h.uid, opts.bannedUids)) continue; // no own-content exception here
     heartUids.get(p.id)!.add(h.uid);

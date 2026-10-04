@@ -347,7 +347,7 @@ describe('confirmClaim — a Vision safety hide survives the claim confirm (spec
     expect(setPayload('/claims/')).toMatchObject({ status: 'confirmed' });
   });
 
-  it('leaves a plain hidden Proof carrying NO marker as it stands — its lift is Clear reports / Restore', async () => {
+  it('leaves a plain hidden Proof carrying NO marker as it stands — its lift is Restore, not a confirm', async () => {
     // An extreme verdict alone is not a safety hide, but a confirm publishes only
     // a still-`pending` Proof (specs/sec-rules-shape-hardening.md): a doc hidden
     // by the #43 threshold or an admin's own Hide keeps its own console lift.
@@ -426,8 +426,10 @@ describe('confirmClaim — a Vision safety hide survives the claim confirm (spec
 // retried on the next write). An admin clicking Hide there AGREES with the AI
 // screen. A bare `status: 'hidden'` would nonetheless move the doc out of the
 // state the trigger's hide arm looks for while leaving no marker behind, and
-// `safetyHideStands` reads that as a PLAIN hide — so a later Confirm would
-// publish the media the admin had just taken down (Codex P1 on #1143).
+// `safetyHideStands` reads that as a PLAIN hide. A current console never
+// publishes a 'hidden' Proof on Confirm, but a cached pre-gate console does,
+// directly — and without the marker the server's 'rehide' arm cannot take it
+// back down (Codex P1 on #1143).
 
 describe('hideProof — an admin Hide preserves a standing safety hold (#1143)', () => {
   it('carries the hold onto the hidden doc when one stands on the Proof', async () => {

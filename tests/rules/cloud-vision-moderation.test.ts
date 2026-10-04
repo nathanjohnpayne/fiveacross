@@ -28,9 +28,11 @@ import {
 //      AI screen has flagged or already hidden.
 //   2. A non-admin cannot forge, change, or CLEAR `visionFlag` — the audit record
 //      an admin's Restore deliberately leaves behind is not client-erasable.
-//   3. Nor the `safetyHide` marker the trigger stamps beside the status, which is
-//      the ONE fact `confirmClaim` gates the claim-confirm publish on: a client
-//      that could forge or scrub it could hold or release any Proof it liked.
+//   3. Nor the `safetyHide` marker the trigger stamps beside the status, which
+//      `confirmClaim` gates the claim-confirm publish on (alongside requiring the
+//      claimant's own still-`pending` Proof) and the server's re-hide arm keys
+//      on: a client that could forge or scrub it could hold or release any Proof
+//      it liked.
 //   4. `flagged` and Vision-`hidden` Proofs stay admin-only reads, so the hide is
 //      authoritative for the Feed rather than presentational.
 //   5. The admin console's Restore, and the community report path, both still work
@@ -113,9 +115,10 @@ describe('firestore.rules — the Vision hide needs no client write surface (spe
   });
 
   it('a non-admin cannot forge, flip, or SCRUB the safetyHide marker the confirm gate reads', async () => {
-    // `confirmClaim` publishes a claim's Proof unless this marker stands, so a
-    // client able to write it could release any Proof the AI screen hid — or hold
-    // any Proof it liked. `hasOnly(['reportCount'])` is what forbids all four.
+    // `confirmClaim` publishes only the claimant's own still-`pending` Proof, and
+    // holds even that one while this marker stands; the re-hide arm keys on it
+    // too. So a client able to write it could release any Proof the AI screen
+    // held — or hold any Proof it liked. `hasOnly(['reportCount'])` is what forbids all four.
     await assertFails(updateDoc(doc(db(ALICE), at('proofs/pVisionHidden')), { safetyHide: false })); // scrub the hold
     await assertFails(updateDoc(doc(db(BOB), at('proofs/pVisionHidden')), { safetyHide: false }));
     await assertFails(updateDoc(doc(db(ALICE), at('proofs/pActive')), { safetyHide: true })); // forge a hold
