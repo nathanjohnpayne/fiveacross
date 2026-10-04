@@ -2,6 +2,16 @@ import { useLayoutEffect, useRef, useState } from 'react';
 import { useTextSize } from '../hooks/useTextSize';
 import { fitTextSize, shrinkToWholeWords } from '../game/fitText';
 
+type InsetKey =
+  | 'paddingLeft'
+  | 'paddingRight'
+  | 'paddingTop'
+  | 'paddingBottom'
+  | 'borderLeftWidth'
+  | 'borderRightWidth'
+  | 'borderTopWidth'
+  | 'borderBottomWidth';
+
 /**
  * #1345: verify the estimate against the real rendered glyphs and keep
  * shrinking while any single word is wider than the Square (which `.cell`'s
@@ -25,28 +35,41 @@ import { fitTextSize, shrinkToWholeWords } from '../game/fitText';
  * does not reject a size for a word the flat average glyph width merely
  * GUESSES is too wide — so real measurement decides the whole-word question:
  * a token of narrow glyphs, or one that may wrap after a hyphen, keeps the
- * largest size it actually fits at. A host with no layout yet (width 0,
+ * largest size it actually fits at. Each probe also checks the rendered
+ * block's HEIGHT against the host's usable height, so the real line breaks
+ * (not the estimator's guess at them) decide whether the block fits and
+ * nothing is clipped. A host with no layout yet (width 0,
  * pre-first-paint or jsdom) has nothing to measure against, so the
  * whole-word `estimated` size stands with the overrides off.
  */
 function keepWordsWhole(el: HTMLElement, host: HTMLElement, estimated: number, heightBound: number): number {
   clearWholeWordOverrides(el);
   const hostStyle = window.getComputedStyle(host);
-  const insets = ['paddingLeft', 'paddingRight', 'borderLeftWidth', 'borderRightWidth'] as const;
-  const inset = insets.reduce((sum, key) => sum + (parseFloat(hostStyle[key]) || 0), 0);
-  const usableWidth = host.getBoundingClientRect().width - inset;
+  const inset = (keys: readonly InsetKey[]) => keys.reduce((sum, key) => sum + (parseFloat(hostStyle[key]) || 0), 0);
+  const hostRect = host.getBoundingClientRect();
+  const usableWidth = hostRect.width - inset(['paddingLeft', 'paddingRight', 'borderLeftWidth', 'borderRightWidth']);
+  const usableHeight = hostRect.height - inset(['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth']);
   if (!(usableWidth > 0)) return estimated;
   el.style.wordBreak = 'normal';
   el.style.overflowWrap = 'normal';
   el.style.hyphens = 'manual';
-  // Layout widths are multiples of 1/64px, so any real overflow clears this
-  // tolerance; it only absorbs float noise in the subtraction above.
-  const overflows = (size: number) => {
+  // Layout sizes are multiples of 1/64px, so any real overflow clears this
+  // tolerance; it only absorbs float noise in the subtractions above.
+  const EPSILON = 0.005;
+  const rectAt = (size: number) => {
     el.style.fontSize = `${size}px`;
-    return el.getBoundingClientRect().width > usableWidth + 0.005;
+    return el.getBoundingClientRect();
   };
-  const fitted = shrinkToWholeWords(heightBound, overflows);
-  if (overflows(fitted)) clearWholeWordOverrides(el);
+  const tooWide = (rect: DOMRect) => rect.width > usableWidth + EPSILON;
+  // The rendered block must also fit the height: the estimator's line count
+  // is only an approximation of where the browser actually breaks (e.g. a
+  // compound that may only wrap at its hyphens), and `.cell` clips overflow.
+  const tooTall = (rect: DOMRect) => usableHeight > 0 && rect.height > usableHeight + EPSILON;
+  const fitted = shrinkToWholeWords(heightBound, (size) => {
+    const rect = rectAt(size);
+    return tooWide(rect) || tooTall(rect);
+  });
+  if (tooWide(rectAt(fitted))) clearWholeWordOverrides(el);
   return fitted;
 }
 

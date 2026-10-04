@@ -16,11 +16,13 @@ const USABLE = CELL - 2 * HOST_PADDING_PX;
 const CEILING_PX = 12;
 const REAL_CHAR_EM = 0.6;
 
-function rect(width: number): DOMRect {
-  return { width, height: CELL, top: 0, left: 0, right: width, bottom: CELL, x: 0, y: 0, toJSON: () => ({}) };
+function rect(width: number, height = CELL): DOMRect {
+  return { width, height, top: 0, left: 0, right: width, bottom: height, x: 0, y: 0, toJSON: () => ({}) };
 }
 
-function stubLayout(realCharEm = REAL_CHAR_EM) {
+// `renderedLines` is how many lines the browser actually wraps the prompt to;
+// the span's rendered height is that many lines at `.cell`'s 1.05 line-height.
+function stubLayout(realCharEm = REAL_CHAR_EM, renderedLines = 2) {
   const realGetComputedStyle = window.getComputedStyle;
   vi.spyOn(window, 'getComputedStyle').mockImplementation((el: Element, pseudo?: string | null) => {
     if (el instanceof HTMLElement && el.classList.contains('cell-text')) {
@@ -30,8 +32,12 @@ function stubLayout(realCharEm = REAL_CHAR_EM) {
       return {
         paddingLeft: `${HOST_PADDING_PX}px`,
         paddingRight: `${HOST_PADDING_PX}px`,
+        paddingTop: `${HOST_PADDING_PX}px`,
+        paddingBottom: `${HOST_PADDING_PX}px`,
         borderLeftWidth: '0px',
         borderRightWidth: '0px',
+        borderTopWidth: '0px',
+        borderBottomWidth: '0px',
       } as CSSStyleDeclaration;
     }
     return realGetComputedStyle.call(window, el, pseudo ?? undefined);
@@ -39,10 +45,12 @@ function stubLayout(realCharEm = REAL_CHAR_EM) {
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
     if (!this.classList.contains('cell-text')) return rect(CELL);
     const size = parseFloat(this.style.fontSize);
-    const longest = Math.max(...(this.textContent ?? '').split(/\s+/).map((w) => w.length));
+    // The widest unbreakable run: CSS may wrap at whitespace or after a hyphen.
+    const longest = Math.max(...(this.textContent ?? '').split(/\s+|(?<=-)/).map((w) => w.length));
     const unbrokenWidth = longest * size * realCharEm;
     // With mid-word breaking allowed the word wraps inside the box instead.
-    return rect(this.style.wordBreak === 'normal' ? unbrokenWidth : Math.min(unbrokenWidth, USABLE));
+    const height = renderedLines * size * 1.05;
+    return rect(this.style.wordBreak === 'normal' ? unbrokenWidth : Math.min(unbrokenWidth, USABLE), height);
   });
 }
 
@@ -86,6 +94,17 @@ describe('SquareText keeps words whole (#1345)', () => {
     stubLayout(0.4);
     const target = renderedSpan('Illimitables');
     expect(parseFloat(target.style.fontSize)).toBe(CEILING_PX);
+  });
+
+  it('shrinks until the rendered block fits the height when the real line breaks need more lines than estimated', () => {
+    // "WWWWW-WWWWW-WWWWW" may only wrap at its hyphens: the browser needs 6
+    // lines here, which at the 12px ceiling is 75.6px against 62px usable.
+    // The largest 0.5px step that fits is 9.5px (59.85px).
+    stubLayout(0.4, 6);
+    const target = renderedSpan('WWWWW-WWWWW-WWWWW');
+    expect(parseFloat(target.style.fontSize)).toBe(9.5);
+    // Words still fit whole, so the no-break overrides stay on.
+    expect(target.style.wordBreak).toBe('normal');
   });
 
   it('keeps the no-mid-word-break overrides on the span once every word fits whole', () => {
