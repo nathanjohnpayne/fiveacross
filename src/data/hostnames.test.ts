@@ -275,8 +275,9 @@ describe('checkSlugAvailability — the setup wizard address step (#790)', () =>
     // The assertion used to read `'available'` here while the test's own name
     // and comment said the opposite (Codex P1, PR #911) — it passed, and so
     // read as coverage OF the contract it actually inverted. The cause was
-    // routing through `fetchHostnameDoc`, which runs `coerceHostnameDoc` and
-    // returns null for a document whose `eventId` or `status` is invalid.
+    // routing through `fetchHostnameDoc`, whose coercion (then
+    // `coerceHostnameDoc`, now `coerceRoutingDoc`) returns null for a document
+    // whose `eventId` or `status` is invalid.
     // A half-written record still occupies its label: the provisioner claims
     // by document id (#793) and will refuse it, so reporting "available" only
     // moves the refusal to the end of the wizard.
