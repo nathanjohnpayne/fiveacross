@@ -42,7 +42,7 @@ describe('minimal offline render witness (#1411)', () => {
     // Reload before the original process gets any chance to retry its tombstone.
     vi.resetModules();
     const freshProcess = await import('./offlineAttestationWitness');
-    // This is a documented unresolved persistence limit, not a repaired reload.
+    // This is the owner-accepted persistence limit, not a repaired reload.
     expect(freshProcess.hasOfflineAttestation('all-refused-project', 'alice')).toBe(true);
     expect(hasOfflineAttestation('all-refused-project', 'alice')).toBe(false);
     expect(freshProcess.hasOfflineAttestation('all-refused-project', 'alice')).toBe(false);

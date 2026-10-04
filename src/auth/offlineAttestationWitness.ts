@@ -4,7 +4,8 @@ const key = (projectId: string, uid: string) => `fiveacross:${projectId}:offline
 
 // A failed persistent revocation still retires the witness in this process.
 // If every write is refused, a fresh process cannot learn that revocation from
-// unchanged disk; the owner must choose the documented reload tradeoff.
+// unchanged disk. The owner accepts that narrow fresh-process render residual;
+// it grants neither a deal nor server-read authority (specs/private-cache-isolation.md).
 const revoked = new Set<string>();
 
 export function recordOfflineAttestation(projectId: string, uid: string, attested: boolean): void {

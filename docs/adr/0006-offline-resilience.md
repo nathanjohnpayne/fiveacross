@@ -12,7 +12,7 @@ The owner amended the offline Feed/Tally guarantee alongside the memory-only blo
 
 ## Consequences
 
-- [Private-cache isolation](../../specs/private-cache-isolation.md) (#1411) narrows the persistent store to gameplay. Private profiles and Admin reads use a separate memory-only client; queued Marks remain durable. The offline 18+ render gate retains only the owner's approved UID-scoped boolean, never a cached whole profile or deal authority. Historical private cache bytes remain quarantined until attended recovery verifies every account's queued Marks before supported clearing.
+- [Private-cache isolation](../../specs/private-cache-isolation.md) (#1411) narrows the persistent store to gameplay. Private profiles and Admin reads use a separate memory-only client; queued Marks remain durable. The offline 18+ render gate retains only the owner's approved UID-scoped boolean, never a cached whole profile or deal/server-read authority. Server revocation blocks the current session and retries failed persistence; the owner accepts that, if both deletion and false overwrite fail, a fresh process after storage recovers may render an existing cached Board before a successful retry. Historical private cache bytes remain quarantined until attended recovery verifies every account's queued Marks before supported clearing.
 
 - Without this, the "the live listener reconciles when back online" behavior ([Board.tsx](../../src/components/Board.tsx)) is false across a reload—offline writes live only in memory and are lost on app restart.
 - Offline reads are **stale**—a Player won't see others' new marks until reconnecting. Acceptable for a party game.
