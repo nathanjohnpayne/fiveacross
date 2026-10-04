@@ -24,6 +24,7 @@ const H = vi.hoisted(() => ({
   setMark: vi.fn(),
   attachProof: vi.fn(),
   track: vi.fn(),
+  pledgeCallback: undefined as (() => void) | undefined,
 }));
 
 vi.mock('../hooks/useData', () => ({
@@ -103,6 +104,15 @@ vi.mock('../auth/AuthContext', () => ({
 // CoachOverlay (#214) imports EVENT_ID from '../firebase' — mocked so
 // mounting Board here never touches the real Firebase app init.
 vi.mock('../firebase', () => ({ EVENT_ID: 'test-event' }));
+
+vi.mock('./ProofSheet', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./ProofSheet')>();
+  const Sheet = actual.default;
+  return { ...actual, default: (props: Parameters<typeof Sheet>[0]) => {
+    H.pledgeCallback = props.onPledge;
+    return <Sheet {...props} />;
+  } };
+});
 
 import Board from './Board';
 
@@ -429,9 +439,27 @@ describe('stricter modes — the pledge is a disabled teaser', () => {
 
       const pledge = screen.getByRole('button', { name: PLEDGE });
       expect(pledge).toBeDisabled();
+      expect(H.pledgeCallback).toBeUndefined();
       fireEvent.click(pledge); // a disabled control swallows the click
       expect(H.setMark).not.toHaveBeenCalled();
       expect(screen.getByText(/proof for/i)).toBeInTheDocument(); // still open
+    },
+  );
+});
+
+describe('pledge callback current-mode guard (#1422)', () => {
+  it.each(['proof_required', 'admin_confirmed'] as const)(
+    'a saved honor callback cannot bare-Mark after the Event switches to %s', async (mode) => {
+      const view = render(<Board />);
+      clickCell(0);
+      await screen.findByText(/proof for/i);
+      const savedHonorCallback = H.pledgeCallback;
+      expect(savedHonorCallback).toBeTypeOf('function');
+      H.event = { claimMode: mode } as EventDoc;
+      view.rerender(<Board />);
+      savedHonorCallback?.(); // direct invocation bypasses disabled presentation
+      expect(H.setMark).not.toHaveBeenCalled();
+      expect(screen.getByText(/proof for/i)).toBeInTheDocument();
     },
   );
 });
