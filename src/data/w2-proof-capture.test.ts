@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Cell } from '../types';
+import { completedLines } from '../game/logic';
 
 // w2-proof-capture, data layer. Drives the REAL attachProof / deleteProof write
 // paths (src/data/proofs.ts) with Firestore stubbed to inspectable spies — no
@@ -345,6 +346,7 @@ describe('attachProof — posts an active Proof to the Feed and marks the cell (
 
     const proof = setPayload('/proofs/')!;
     expect(proof.status).toBe('pending'); // NOT publicly visible until an admin confirms
+    expect(proof).not.toHaveProperty('contentOnly'); // this Proof creates fresh credit
 
     const board = setPayload('/boards/') as { cells: Cell[] };
     expect(board.cells[5].status).toBe('pending');
@@ -355,6 +357,19 @@ describe('attachProof — posts an active Proof to the Feed and marks the cell (
     const claim = setPayload('/claims/')!;
     expect(claim).toMatchObject({ uid: 'u1', cellIndex: 5, status: 'pending' });
     expect(typeof claim.proofId).toBe('string');
+  });
+
+  it.each([false, true])('queues new content on a confirmed Mark without revoking its credit (Echo: %s)', async echo => {
+    const cells = baseArgs.cells.map(c => ({ ...c }));
+    cells[5] = { ...cells[5], marked: true, markedAt: 999, status: 'confirmed', ...(echo ? { echo: true } : {}) };
+    boardState = { cells };
+    await attachProof({ ...baseArgs, cells, claimMode: 'admin_confirmed', proof: { type: 'text', text: 'new content needs review' } });
+    expect(setPayload('/proofs/')).toMatchObject({ status: 'pending', contentOnly: true });
+    expect(setPayload('/claims/')).toMatchObject({ status: 'pending', cellIndex: 5, contentOnly: true, proofId: expect.any(String) });
+    const board = setPayload('/boards/') as { cells: Cell[] };
+    expect(board.cells[5]).toMatchObject({ marked: true, markedAt: 999, status: 'confirmed' });
+    expect(board.cells[5]).not.toHaveProperty('echo');
+    expect(setPayload('/players/')).toMatchObject({ squaresMarked: 1 });
   });
 
   it('folds onto the LIVE board inside the transaction so a concurrent mark is not clobbered', async () => {
@@ -975,6 +990,38 @@ describe('per-Prompt Tally marker — every proofed Mark publishes too (ADR 0002
 });
 
 describe('deleteProof — resolves the backing cell by the proof doc cellIndex (PR #75)', () => {
+  it.each(['active', 'flagged'])('deletes %s reviewed content while preserving the established line, timestamp and Tally', async status => {
+    const cells = dealt();
+    for (const index of [0, 1, 2, 3, 4]) cells[index] = { ...cells[index], marked: true, markedAt: 9, status: 'confirmed' };
+    cells[4].proofId = 'P';
+    boardState = { cells };
+    playerState = { bingoCount: 1, squaresMarked: 5, firstBingoAt: 9,
+      dayStats: { 0: { bingoCount: 1, squaresMarked: 5, firstBingoAt: 9 } } };
+    proofState = { uid: 'u1', cellIndex: 4, dayIndex: 0, status, contentOnly: true, storagePath: `proofs/${EVENT_ID}/u1/P.jpg` };
+    await deleteProof('P', `proofs/${EVENT_ID}/u1/P.jpg`, { daily: true, dayIndexes: [0, 1] });
+    const patch = (setPayload('/boards/') as { cells: Record<number, Cell> }).cells;
+    const next = cells.map(cell => patch[cell.index] ?? cell);
+    expect(next[4]).toMatchObject({ marked: true, markedAt: 9, status: 'confirmed', proofId: null });
+    expect(next[4]).not.toHaveProperty('echoOptOut');
+    expect(completedLines(next)).toHaveLength(1);
+    expect(setPayload('/players/')).toBeUndefined();
+    expect(txDelete.mock.calls.some(([ref]) => (ref as Ref).path.includes('/tally/'))).toBe(false);
+    expect(txDelete.mock.calls.some(([ref]) => (ref as Ref).path.endsWith('/proofs/P'))).toBe(true);
+    expect(deleteStorageSpy).toHaveBeenCalledWith(`proofs/${EVENT_ID}/u1/P.jpg`);
+  });
+
+  it('content-only deletion leaves a newer attachment projection and credit intact', async () => {
+    proofState = { uid: 'u1', cellIndex: 5, contentOnly: true, storagePath: null };
+    const cells = dealt();
+    cells[5] = { ...cells[5], marked: true, markedAt: 9, proofId: 'newer', status: 'confirmed' };
+    boardState = { cells };
+    await deleteProof('P');
+    expect(setPayload('/boards/')).toBeUndefined();
+    expect(setPayload('/players/')).toBeUndefined();
+    expect(txDelete.mock.calls.some(([ref]) => (ref as Ref).path.includes('/tally/'))).toBe(false);
+    expect(txDelete.mock.calls.some(([ref]) => (ref as Ref).path.endsWith('/proofs/P'))).toBe(true);
+  });
+
   it('keeps a delete that waits on Event A storage cleanup under Event A', async () => {
     let releaseStorageDelete!: () => void;
     deleteStorageSpy.mockImplementationOnce(
@@ -1087,7 +1134,7 @@ describe('deleteProof — resolves the backing cell by the proof doc cellIndex (
 
 // #373 (follow-up to #369): deleteProof's Storage delete is the authoritative
 // revocation, but the deleting device may itself have the proof's media sitting
-// in the `proof-media` service-worker cache. deleteProof purges that local copy
+// in an old worker's legacy `proof-media` cache. deleteProof retains that purge
 // AFTER the transaction commits — never from inside the retryable callback,
 // and never in a way a purge rejection could fail the delete.
 // #134 (specs/post-sailing-archive.md § "Moderation is not a gameplay write"):
@@ -1341,7 +1388,7 @@ describe('deleteProof — the media revocation outlives the commit that removes 
   it('still purges this device’s cache when the revocation rejects (#1148)', async () => {
     // The commit is what the purge follows, not the blob delete: the Proof is
     // gone from the Feed either way, so this device must stop serving the photo
-    // out of its own CacheFirst copy whichever half failed (#373, #1142 item
+    // out of its legacy CacheFirst copy whichever half failed (#373, #1142 item
     // 12). The purge sits in a `finally`, and the Storage error still leaves.
     proofState = {
       uid: 'u1',

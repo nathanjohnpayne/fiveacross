@@ -9,7 +9,7 @@ status: accepted
 
 ## Claim Mode is a friction/vibe knob, not a trust level (ADR 0001)
 
-The three Claim Modes are a friction/vibe hierarchy, never a trust hierarchy. The mode formerly named `verified` is renamed `admin_confirmed` so the word "verified" stops implying an integrity guarantee the honor-system model does not make. `admin_confirmed` starts a Mark pending until an Admin resolves its Claim—a dispute/ceremony tool, not anti-cheat.
+The three Claim Modes are a friction/vibe hierarchy, never a trust hierarchy. The mode formerly named `verified` is renamed `admin_confirmed` so the word "verified" stops implying an integrity guarantee the honor-system model does not make. `admin_confirmed` starts fresh Mark credit pending until an Admin resolves its Claim—a dispute/ceremony tool, not anti-cheat.
 
 - The `ClaimMode` union is `'honor' | 'proof_required' | 'admin_confirmed'`; no source or comment names the mode "verified". (Enforced by `npm run typecheck` across the type and all seven call sites: `Board.tsx`, `ProofSheet.tsx`, `Admin.tsx`, `data/api.ts`, `data/proofs.ts`, `data/admin.ts`, `game/logic.test.ts`.)
 

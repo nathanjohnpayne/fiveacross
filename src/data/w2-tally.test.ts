@@ -174,6 +174,7 @@ describe('rejectClaim / confirmClaim — the admin resolve keeps the marker symm
       fn({ get: txGet, set: txSet, delete: txDelete } as never),
     );
     txGet.mockImplementation((ref: { path: string }): Promise<FakeSnap> => {
+      if (ref.path.includes('/claims/')) return Promise.resolve({ exists: () => true, data: () => claim() });
       if (ref.path.includes('/boards/'))
         return Promise.resolve({ exists: () => true, data: () => ({ cells }) });
       if (ref.path.includes('/players/'))

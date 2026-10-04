@@ -26,8 +26,8 @@ vi.mock('firebase/storage', () => ({
 import { uploadProofMedia } from './storage';
 import { PROOF_MEDIA_CACHE_CONTROL } from './proofMediaCache';
 
-// #363: every proof upload also stamps the immutable Cache-Control (proof
-// objects are never rewritten), so the browser stops refetching Feed media.
+// #1410: every proof upload stamps the no-store Cache-Control; path
+// immutability does not make retained sensitive bytes safe after deletion.
 // The exact-metadata assertions below carry it alongside the #295 contentType
 // mapping. (Avatars keep NO cacheControl — their path is overwritten in place;
 // src/components/w1-profile-avatar.test.tsx pins that metadata exactly.)
