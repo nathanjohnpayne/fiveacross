@@ -356,13 +356,13 @@ export async function resolveEvent(opts: ResolveOptions): Promise<Resolution> {
   // evidence is precisely the fail-open the whole design is built to refuse.
   //
   // The offline cost is real and is paid deliberately. Two things bound it: an
-  // Event that has ALREADY flipped caches `true` and short-circuits normally, so
+  // Event that has ALREADY flipped caches `true` and, with a validated preview, short-circuits normally, so
   // this only touches the never-yet-adult case; and the gate is provisional, not
   // latched (`setActiveAdultContent(..., { proven: false })`), so the first
   // successful revalidation lowers it again. It is a gate until we can ask, not
   // a gate forever.
   //
-  // A cached `true` still short-circuits, so the gated path — every Gay Cruise
+  // A preview-validated cached `true` still short-circuits, so the gated path — every Gay Cruise
   // Bingo host, and every Event that has already flipped — keeps the pure
   // offline-first cold boot ADR 0006 specifies, at no cost.
   const cacheMayUnGate = cached?.doc.adultContent === false;

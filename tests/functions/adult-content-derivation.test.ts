@@ -379,18 +379,85 @@ describe('reconcileHostnameAdultContent', () => {
     expect(stampHost).not.toHaveBeenCalled();
   });
 
-  // This is the ONE trigger whose own writes land on the collection it observes,
-  // so the early return is the loop guard — and it must cost no read.
-  it('returns before any read on an already-gated document (the loop guard)', async () => {
-    const eventIsAdultFn = vi.fn(async () => true);
-    expect(
-      await reconcileHostnameAdultContent(
-        'a.example.com',
-        { eventId: 'e1', adultContent: true },
-        { eventIsAdult: eventIsAdultFn, stampHost: async () => {} },
-      ),
-    ).toBe(false);
+  // The canonical trigger still rereads the pair when already stamped; its
+  // idempotent no-write transaction prevents another canonical trigger event.
+  it('reads but does not rewrite an already-gated matching pair or rederive its Event', async () => {
+    const canonical = { eventId: 'e1', adultContent: true, edition: 'fiveacross' };
+    const { db, updates, transactionReads } = fakeDb({}, { 'hostnames/a.example.com': canonical, 'publicHostnames/a.example.com': { ...canonical } });
+    const eventIsAdultFn = vi.fn(async () => false);
+    expect(await reconcileHostnameAdultContent('a.example.com', canonical, {
+      eventIsAdult: eventIsAdultFn, stampHost: (host, eventId, mode) => stampAdultHostname(db, host, eventId, mode),
+    })).toBe(false);
     expect(eventIsAdultFn).not.toHaveBeenCalled();
+    expect(updates).toEqual({});
+    expect(transactionReads).toEqual(['hostnames/a.example.com', 'publicHostnames/a.example.com']);
+  });
+
+  it.each(['missing', 'stale-false'])('repairs a %s public copy from an already-gated canonical trigger', async failure => {
+    const canonical = { eventId: 'e1', adultContent: true, edition: 'fiveacross', preview: { eventName: 'Public' } };
+    const { db, updates, transactionReads } = fakeDb({}, {
+      'hostnames/a.example.com': canonical,
+      ...(failure === 'missing' ? {} : { 'publicHostnames/a.example.com': { ...canonical, adultContent: false } }),
+    });
+    const eventIsAdultFn = vi.fn(async () => false); // Monotone stamp survives content retraction.
+    expect(await reconcileHostnameAdultContent('a.example.com', canonical, {
+      eventIsAdult: eventIsAdultFn, stampHost: (host, eventId, mode) => stampAdultHostname(db, host, eventId, mode),
+    })).toBe(false); // Return counts new canonical stamps, not repaired projections.
+    expect(eventIsAdultFn).not.toHaveBeenCalled();
+    expect(updates).toEqual({ 'publicHostnames/a.example.com': canonical });
+    expect(transactionReads).toEqual(['hostnames/a.example.com', 'publicHostnames/a.example.com']);
+  });
+
+  it('keeps a different live Event untouched when an already-gated trigger is stale', async () => {
+    const current = { eventId: 'new', adultContent: false };
+    const { db, updates, transactionReads } = fakeDb({}, { 'hostnames/a.example.com': current, 'publicHostnames/a.example.com': { ...current } });
+    expect(await reconcileHostnameAdultContent('a.example.com', { eventId: 'old', adultContent: true }, {
+      eventIsAdult: async () => true, stampHost: (host, eventId, mode) => stampAdultHostname(db, host, eventId, mode),
+    })).toBe(false);
+    expect(updates).toEqual({});
+    expect(transactionReads).toEqual(['hostnames/a.example.com']);
+  });
+
+  it('does not re-raise a deliberately lowered same-Event canonical from an old true trigger', async () => {
+    const current = { eventId: 'e1', adultContent: false };
+    const { db, updates, transactionReads } = fakeDb({}, { 'hostnames/a.example.com': current, 'publicHostnames/a.example.com': { ...current } });
+    expect(await reconcileHostnameAdultContent('a.example.com', { eventId: 'e1', adultContent: true }, {
+      eventIsAdult: async () => true, stampHost: (host, eventId, mode) => stampAdultHostname(db, host, eventId, mode),
+    })).toBe(false);
+    expect(updates).toEqual({});
+    expect(transactionReads).toEqual(['hostnames/a.example.com']);
+  });
+
+  it('rechecks the live stamp on retry rather than replaying an earlier repair plan', async () => {
+    const canonical = { eventId: 'e1', adultContent: true };
+    const { db, updates, values, transactionReads } = fakeDb({}, { 'hostnames/a.example.com': canonical, 'publicHostnames/a.example.com': { ...canonical } });
+    const attempt = db.runTransaction.bind(db);
+    db.runTransaction = async work => {
+      await attempt(work); // An initially matching read-set loses its live stamp before retry.
+      expect(updates).toEqual({});
+      values['hostnames/a.example.com'] = { ...canonical, adultContent: false };
+      values['publicHostnames/a.example.com'] = { ...canonical, adultContent: false };
+      return attempt(work);
+    };
+    expect(await reconcileHostnameAdultContent('a.example.com', canonical, {
+      stampHost: (host, eventId, mode) => stampAdultHostname(db, host, eventId, mode),
+    })).toBe(false);
+    expect(updates).toEqual({});
+    expect(transactionReads).toEqual(['hostnames/a.example.com', 'publicHostnames/a.example.com', 'hostnames/a.example.com']);
+  });
+
+  it('propagates failed public repair from an already-gated trigger, then safely retries', async () => {
+    const canonical = { eventId: 'e1', adultContent: true };
+    const { db, updates, values } = fakeDb({}, { 'hostnames/a.example.com': canonical }, [], 'publicHostnames/a.example.com');
+    const deps = { eventIsAdult: async () => false, stampHost: (host: string, eventId: string, mode?: 'raise' | 'repair-stamped') => stampAdultHostname(db, host, eventId, mode) };
+    await expect(reconcileHostnameAdultContent('a.example.com', canonical, deps)).rejects.toThrow('nope');
+    expect(updates).toEqual({});
+    expect(values['publicHostnames/a.example.com']).toBeUndefined();
+    const retry = fakeDb({}, { 'hostnames/a.example.com': canonical });
+    expect(await reconcileHostnameAdultContent('a.example.com', canonical, {
+      ...deps, stampHost: (host, eventId, mode) => stampAdultHostname(retry.db, host, eventId, mode),
+    })).toBe(false);
+    expect(retry.updates).toEqual({ 'publicHostnames/a.example.com': canonical });
   });
 
   it('ignores a delete and a document that routes nowhere', async () => {

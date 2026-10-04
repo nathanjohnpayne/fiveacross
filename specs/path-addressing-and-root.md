@@ -227,7 +227,7 @@ Read off the three answers #799 asks for:
 
 **The cache does not carry that flip promptly, and the interlock must not pretend it does.** An earlier draft of this decision claimed the cache-drop makes an installed client stop on its next boot. That is wrong, and the correction matters because #134 would otherwise ship believing archival takes effect immediately:
 
-- A **fresh** entry—inside the 12-hour TTL and `active`—resolves with **no network read at all** (`specs/event-resolution.md` step 2). A client holding one never learns about the flip. The drop-not-expire behaviour applies to an entry that is *revalidated*, so it is reached only once the entry has already gone stale.
+- A **fresh**, active Version 2 entry with `adultContent !== false` and `previewValidated === true` resolves with **no network read at all** (`specs/event-resolution.md` step 2). A client taking that cache path never learns about the flip. The drop-not-expire behaviour applies to an entry that is *revalidated*: stale entries attempt it, and fresh entries with an unproven opt-out or missing preview validation also attempt it. None supplies a prompt archival guarantee for every fresh cached session.
 - Worse on cold boot: the cached Event mounts first and the entry is dropped only on the subsequent revalidation, so a naive implementation needs **two** boots to reach the archived state.
 - The live watcher drops the cache but does not itself re-resolve or unmount, so an open session keeps running the retired Event.
 

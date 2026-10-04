@@ -13,7 +13,7 @@ Deriving the answer in the client would either require exposing the Prompt pool 
 
 ## Decision
 
-Cloud Functions derive `adultContent = settings.forceAdult || any active spicy Prompt in a dealable pool` and publish `adultContent: true` onto every canonical `hostnames/{host}` routing document and its paired strict `publicHostnames/{host}` projection in one transaction per hostname for the Event. The value is monotone: automatic code never lowers it. Item writes, Event override writes, and hostname writes each have a dedicated idempotent trigger so an approval, a force-adult change, or a later alias all converge on the same invariant. Trigger failures throw so the platform retries them.
+Cloud Functions derive `adultContent = settings.forceAdult || any active spicy Prompt in a dealable pool` and publish `adultContent: true` onto every canonical `hostnames/{host}` routing document and its paired strict `publicHostnames/{host}` projection in one transaction per hostname for the Event. The value is monotone: automatic code never lowers it. Item writes, Event override writes, and hostname writes each have a dedicated idempotent trigger so an approval, a force-adult change, or a later alias all converge on the same invariant. Trigger failures throw so the platform retries them. A hostname already stamped `true` also compares its public projection and repairs a missing or stale copy without lowering canonical posture. The transaction writes only when canonical or public state differs; an exact pair terminates the trigger chain without another write. An already-true historical trigger snapshot may repair only a still-true live canonical record for the same Event; it cannot undo an operator reduction or follow a repoint.
 
 The routing field remains public on allowlisted hostname documents under ADR 0009's `get`-yes / `list`-no boundary. It discloses only the posture needed to render the public gate; it does not expose Prompts, membership, or an enumerable Event directory.
 
@@ -24,6 +24,7 @@ A single-Event build may seed the initial posture with `VITE_ADULT_CONTENT=false
 ## Consequences
 
 - The Functions deployment owns a security-relevant derived-data invariant and must include all three triggers.
+- Item and Event reconciliation query matching aliases and read both canonical and public records in one transaction per alias, including already-stamped aliases. An already-adult hostname write likewise reads that pair. Budget this read cost by alias count and trigger volume; unchanged pairs produce no writes, and the hostname trigger performs no Event/pool query for an already-adult record.
 - Hostname provisioning must write `eventId` correctly; a late canonical host or alias is reconciled from the Event and Prompt sources.
 - Once an Event becomes 18+, removing the last explicit Prompt does not un-gate it automatically. An operator must make any exceptional correction deliberately.
 - `attestedAdultAt` remains a global, cross-Event self-attestation, so it may be written only from an acknowledgement the Player actually supplied.
