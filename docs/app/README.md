@@ -137,7 +137,7 @@ This configuration is Vercel-only. Firebase Hosting builds continue to use `VITE
 
 The two Five Across mirrors, `vacaybingo.vercel.app` and `fiveacross.vercel.app`, are provisioned the same way from their own Vercel projects' Production environment ([`preview-deploys.md`](preview-deploys.md) § The brand mirrors), though their authorized-domain and OAuth redirect registrations are still outstanding (`preview-deploys.md` § Current state rows 5-6), so sign-in does not work on them yet. Because that environment, not `scripts/build-target.mjs`, supplies their `VITE_EVENT_ID`, they stay single-Event builds pinned by that value even though the Five Across Firebase target itself is hostname-resolved; [`deploy-targets.md`](deploy-targets.md) § The targets use different Event modes states the mode of every serving surface and what a mirror must satisfy before it can follow the primary.
 
-Vercel **preview** deploys get the same rewrites, but sign-in additionally needs the preview host in the two allowlists above—which only works if the host is stable. See [`preview-deploys.md`](preview-deploys.md) for the fixed preview alias, its one-time console setup, and how to push a branch onto it.
+Vercel preview hosts have no production Auth trust (#1420). Production helper rewrites match only the three exact mirror hosts, and preview builds fail closed until an isolated test Firebase Auth/data configuration is reviewed. See [`preview-deploys.md`](preview-deploys.md) for owner configuration, inventory and separately authorized rollout requirements.
 
 ## 8. Configuration knobs
 

@@ -1,109 +1,24 @@
-# Vercel hosts—preview deploys, and the Five Across mirror
+# Vercel hosts: isolated test previews and production mirrors
 
-Runbook for the decision in [`docs/adr/0007-preview-auth-stable-vercel-alias.md`](../adr/0007-preview-auth-stable-vercel-alias.md): previews are served from **one fixed hostname**, so Google sign-in can be registered for it once instead of once per deployment. Parts 1–4 cover that. The last section covers the Five Across backup host (#585), which is the same machinery pointed at a different Firebase project.
+The owner [selected isolated test Firebase Auth/data for previews](https://github.com/nathanjohnpayne/fiveacross/issues/1420#issuecomment-5975979267) and [confirmed the decision](https://github.com/nathanjohnpayne/fiveacross/issues/1420#issuecomment-5975991119). This supersedes the production-backed stable-preview runbook in [ADR 0007](../adr/0007-preview-auth-stable-vercel-alias.md). **No preview host has production sign-in trust**, including the former `gaycruisebingo-git-preview-nathanjohnpaynes-projects.vercel.app` alias.
 
-The preview alias is:
+## Preview readiness and required owner actions
 
-```
-gaycruisebingo-git-preview-nathanjohnpaynes-projects.vercel.app
-```
+Previews are currently disabled at the build boundary: `vite.config.ts` calls `assertPreviewFirebaseIsolation` before loading Firebase configuration and refuses `VERCEL_ENV=preview`. This includes populated production configurations, named-target builds and generic CI builds. No isolated project ID or configuration is invented here, and changing only `VITE_EVENT_ID` within a production project is insufficient.
 
-It is the Vercel branch URL of a dedicated `preview` branch, and it always serves that branch's most recent deployment.
+Before a preview can be enabled, the owner must select an isolated test Firebase project/web app and authorize its provisioning, test-only Auth/OAuth configuration, data and deployment. A reviewed source follow-up must validate the complete project/web-app configuration and its Auth helper or handoff routing before replacing the refusal. Preview `VITE_FIREBASE_*`, storage and any handoff endpoint must belong to that isolated environment. Neither production Firebase project, its credentials nor its central Auth origin may back a preview.
 
-## Which Vercel hosts can sign in, and why
+The shared `vercel.json` gives only the three exact production mirror hosts a production `/__/auth/*` proxy. Preview hosts fall through to the SPA; this does not implement a working test Auth proxy. No force-push to `preview`, added production authorized domain or production OAuth redirect registration enables a supported sign-in flow.
 
-Every host meant to complete sign-in needs Google sign-in registered by exact hostname in Firebase Authentication's authorized domains and as an authorized redirect URI on a Google OAuth web client—self-pinning does not exempt either of those, and neither accepts a wildcard. That excludes per-deployment and per-branch preview hosts by design (last table row): their hostname changes on every push, so there is nothing stable to register, and `isSignInReachableOnHost()` (`src/auth-domain.ts`) correctly leaves them on the `auth-unconfigured` screen rather than a broken sign-in button. The third registration, `FIRST_PARTY_AUTH_HOSTS` (`src/auth-domain.ts`), is the one ADR 0010's same-origin escape hatch removes: a host whose auth domain is self-pinned to itself (see the single-Event custom-domain row below) needs no cross-origin allowlist entry, so it completes only the first two. Every registrable host whose auth domain is NOT self-pinned still needs all three—which is the whole reason this page exists.
+The build checks the platform's `process.env.VERCEL_ENV`, not a browser `VITE_*` flag. [Vercel documents that system variables are available at build time when system-variable access is enabled](https://vercel.com/docs/environment-variables/system-environment-variables). Verify that exposure and the actual preview value in the project configuration before any authorized rollout; a build outside that platform context is not proof of hosted isolation.
 
-| Host | Signs in? | Why |
-|---|---|---|
-| `gaycruisebingo.com`, `gaycruisebingo.vercel.app`, `gaycruisebingo.firebaseapp.com` | Yes | Production, registered on the `gaycruisebingo` project. |
-| `gaycruisebingo-git-preview-…vercel.app` | Yes | The stable preview alias—one branch URL, registered once (Parts 1–4). |
-| `fiveacross.vercel.app` | Yes† | The Five Across mirror, registered on the `fiveacross` project (last section). |
-| `vacaybingo.vercel.app` | Yes† | The Vacay Bingo mirror—also registered on the `fiveacross` project; Vacay is an Edition of it, not its own project. |
-| A single-Event Firebase custom domain, e.g. `bodega-bay.vacaybingo.com` | Yes | Its build pins `authDomain` to itself (`VITE_FIREBASE_AUTH_DOMAIN=bodega-bay.vacaybingo.com`, `scripts/build-target.mjs:39`)—ADR 0010's same-origin escape hatch. |
-| `fiveacross.app`, `bodega-bay.fiveacross.app` | Yes‡ | **Not** self-pinned—do not treat these as the same case as the row above. The `fiveacross` target's build bakes `VITE_FIREBASE_AUTH_DOMAIN=bodega-bay.vacaybingo.com` (the row above's host), a FOREIGN `authDomain` on these two hosts. They sign in only because both are explicitly listed in `FIRST_PARTY_AUTH_HOSTS` (`src/auth-domain.ts:63-67`); omitting either entry there darks sign-in on that host with no other symptom. |
-| Any per-deployment or per-branch preview host, `…-<hash>-…vercel.app` | **No, and never** | The hostname changes per push, so there is nothing stable to register. |
+The owner will provide the Google OAuth redirect-URI export and Vercel protection/branch-permission visibility separately. The historical audit found the former stable alias absent from both production Firebase authorized-domain lists; Google OAuth registrations and current Vercel protection remain unverified. Existing deployed preview artifacts or registrations are not removed by a source commit. Inventory and any removal require a separately authorized configuration rollout and readback.
 
-† Both mirrors are provisioned and serving, but their console registrations are **outstanding**—see § The brand mirrors → Current state. Until those land they render a Google button that fails, so neither URL should be handed out yet.
+## Preview acceptance after separately authorized rollout
 
-‡ The `fiveacross`/`bodega-bay.fiveacross.app` pair looks like another instance of the self-pinned row above—same Event, same Firebase project—but its build was set up with `bodega-bay.vacaybingo.com` as the one true `authDomain`; the `.fiveacross.app` hosts ride the explicit allowlist instead. Confirmed by `src/auth-domain.test.ts:169-173` (`isSignInReachableOnHost` only resolves on these hosts because of the allowlist entries, not same-origin pinning).
+Verify the deployed test project/web-app configuration, test-only redirect registrations, Vercel protection and push permissions. Complete sign-in on the intended device, inspect Auth/Firestore/Storage network routing and prove no production endpoint or data mutation occurs. Source tests cover the current fail-closed build, host and proxy boundaries; they do not complete these deployed acceptance checks.
 
-A per-deployment preview host therefore renders the `auth-unconfigured` screen—"This address is not open yet". That screen is the gate working as designed, not a regression: before #576 those hosts showed a Google button that silently dead-ended, which was strictly worse. On a `*.vercel.app` hostname the screen now adds a developer note pointing back here (#585, `src/components/EventNotFound.tsx`), because the person reading it on that host is by construction someone who just pushed a branch.
-
-The long-term fix is #530 / [ADR 0010](../adr/0010-centralised-auth-origin-with-handoff.md): a central auth origin plus a single-use handoff abolishes per-host registration entirely, and when it lands both arbitrary preview hosts and wildcard Event hostnames get working sign-in. Until then, every registration on this page is the escape-hatch baseline.
-
----
-
-## Part 1—one-time setup (human only)
-
-Steps 2 and 3 are console configuration. An agent must not attempt them; leave them for a human and do them in order. Until all three are done, sign-in on the preview alias fails with `auth/unauthorized-domain` or `redirect_uri_mismatch` even though the code is already in place.
-
-### 1. Create the `preview` branch
-
-```bash
-git push origin origin/main:refs/heads/preview
-```
-
-Vercel builds it and the branch URL above starts resolving (before this, it returns `DEPLOYMENT_NOT_FOUND`). Do **not** protect this branch—it is force-pushed constantly and nothing merges from it.
-
-### 2. Firebase Authentication → authorized domains
-
-Console: **Firebase console → Authentication → Settings → Authorized domains → Add domain**, and add
-
-```
-gaycruisebingo-git-preview-nathanjohnpaynes-projects.vercel.app
-```
-
-This one has an API path if you prefer it (same one the custom-domain runbook in [`README.md` §6](README.md) uses): read `GET https://identitytoolkit.googleapis.com/admin/v2/projects/gaycruisebingo/config`, append the host to `authorizedDomains`, and `PATCH` it back with `?updateMask=authorizedDomains`. Send the **whole** list—the field is replaced, not merged, so a PATCH that omits `gaycruisebingo.com`, `gaycruisebingo.vercel.app`, `gaycruisebingo.firebaseapp.com`, `gaycruisebingo.web.app`, or `localhost` takes production sign-in down with it.
-
-### 3. Google OAuth web client → authorized redirect URI
-
-Console only—there is no API for this. **Google Cloud console → APIs & Services → Credentials**, open the auto-created **Web client** (the one whose client id ends `-9m43`; this project has more than one OAuth client and only that one is what Firebase Auth uses), and under **Authorized redirect URIs** add
-
-```
-https://gaycruisebingo-git-preview-nathanjohnpaynes-projects.vercel.app/__/auth/handler
-```
-
-Save. Google's own note applies: a change here can take five minutes to a few hours to take effect, so a `redirect_uri_mismatch` immediately after saving is not necessarily a mistake—wait and retry before changing anything.
-
-### 4. Optional—keep preview play out of the live event
-
-A preview build uses the Vercel **Preview** environment's `VITE_FIREBASE_*`, which point at the production Firebase project, so anything you mark while testing lands in the real `med-2026` event. If that becomes a nuisance, set `VITE_EVENT_ID` on the Preview environment (Vercel → Settings → Environment Variables → Preview) to a throwaway event id. The schema is event-scoped, so this isolates cleanly, but the throwaway event needs seeding before a preview can deal a card.
-
-`VITE_EVENT_ID` is **baked into the bundle at build time** (`src/firebase.ts` reads it into `EVENT_ID`), so changing it in the dashboard does nothing to a deployment that already exists—including the one step 1 just created. Push to `preview` again to force a rebuild, and confirm the new deployment finished before you test, or you will still be writing to the live event while believing you are isolated.
-
----
-
-## Part 2—previewing a branch
-
-From the branch you want to look at:
-
-```bash
-git push --force origin HEAD:preview
-```
-
-Then open the preview alias on the device. Vercel takes roughly a minute to build, and the URL serves the previous deployment until the new one is ready.
-
-**A plain reload is not enough to pick up the new build.** The app runs `vite-plugin-pwa` with `registerType: 'prompt'`, so a fresh deployment's service worker installs and *waits* while the old precache keeps serving—reloading a page you have already visited on this alias can render the previous branch, which is the worst possible failure here because it looks like your change simply did not work. Use the in-app **Reload** banner when it appears, or pull down to refresh (both activate the waiting worker before reloading—see [`specs/app-update-reload-prompt.md`](../../specs/app-update-reload-prompt.md) and [`specs/pull-to-refresh.md`](../../specs/pull-to-refresh.md)). On a device you have not visited the alias from before, there is no cached worker and an ordinary load is fine.
-
-The alias holds **one** branch at a time. If two people (or two agent lanes) want a device check at once, take turns. A second slot is possible but is **not** console-only: a `preview2` branch would need Part 1's two registrations *and* its hostname added to `FIRST_PARTY_AUTH_HOSTS` in `src/auth-domain.ts` (with its test and spec updates, merged and deployed), because that list is an exact match by design and every other branch URL deliberately falls back to the configured domain. Branch names are also capped at 18 characters inside this URL shape before Vercel truncates the host, so keep any additional slot names short.
-
-## Part 3—the Vercel login wall
-
-The project runs Vercel's **Standard Protection**, so every preview URL—including the proxied `/__/auth/*` paths—is gated behind a Vercel session. The production host `gaycruisebingo.vercel.app` is unaffected and stays public.
-
-In practice: sign in to `vercel.com` once in the browser you are testing with (Safari on the phone, most likely), then open the preview alias. The SSO round trip is automatic after that. Because the gate also covers the auth helper, load the preview page **first** and sign in to Google **second**—starting the OAuth flow in a browser with no Vercel session lands the popup on Vercel's login page instead of Firebase's handler, and the sign-in silently does nothing.
-
-If a sign-in attempt fails oddly after a long idle, reload the preview URL to refresh the Vercel session and try again—an expired session mid-OAuth swallows the callback's query string.
-
-## Part 4—verifying it works
-
-1. The alias loads the app (after the Vercel SSO round trip).
-2. In the browser's network panel, the auth iframe request is to `https://gaycruisebingo-git-preview-…vercel.app/__/auth/iframe`—the **preview** origin, not `firebaseapp.com`. That is the same-origin guarantee from [`specs/vercel-auth-proxy.md`](../../specs/vercel-auth-proxy.md); if it points at `firebaseapp.com`, step 2 or the `FIRST_PARTY_AUTH_HOSTS` entry in `src/auth-domain.ts` is wrong.
-3. Google sign-in completes and the board deals.
-4. On iOS Safari it completes as a **top-level redirect**, not a popup—that is the behavior the alias exists to let you test.
-
----
+For layout-only local checks, `npm run dev -- --host` can serve the Mac's LAN address. Local development is outside the Vercel preview-publication guard; it does not prove isolated hosted sign-in. When a supported preview is eventually deployed, use the waiting-service-worker Reload banner or pull-to-refresh before assessing a new build.
 
 ## The brand mirrors
 
@@ -113,9 +28,9 @@ It exists because a Five Across Event served only from Firebase Hosting has no f
 
 ### Why this shape
 
-**A separate Vercel project, not a branch on the existing one.** A branch URL on the `gaycruisebingo` project sits behind Vercel Standard Protection ([ADR 0007](../adr/0007-preview-auth-stable-vercel-alias.md) § Consequences, and Part 3 above)—a vercel.com login wall, which is disqualifying for a host players are meant to open on their phones. Only a *production* deployment is public, a project has exactly one production branch, and `gaycruisebingo`'s is already `main` serving the gcb env. So the mirror needs its own project.
+**A separate Vercel project, not a branch on the existing one.** A branch URL on the `gaycruisebingo` project historically sat behind Vercel Standard Protection (historically described in ADR 0007; current protection remains an owner inventory task)—a vercel.com login wall, which is disqualifying for a host players are meant to open on their phones. Only a *production* deployment is public, a project has exactly one production branch, and `gaycruisebingo`'s is already `main` serving the gcb env. So the mirror needs its own project.
 
-**One `vercel.json` on `main`, not a mirror branch.** The repository's `/__/auth/:path*` rewrite targets `gaycruisebingo.firebaseapp.com`, which is the wrong Firebase project for a fiveacross build. That conflict is resolved by a **host-conditional rewrite** placed first in `vercel.json`:
+**One `vercel.json` on `main`, not a mirror branch.** The Gay Cruise Bingo mirror's exact-host `/__/auth/:path*` rule targets `gaycruisebingo.firebaseapp.com`. Each Five Across-family mirror instead has its own exact-host rule targeting `fiveacross.firebaseapp.com`, ahead of the SPA catch-all:
 
 ```json
 {
@@ -125,7 +40,7 @@ It exists because a Five Across Event served only from Firebase Hosting has no f
 }
 ```
 
-Rewrites match in array order, so requests on the mirror host take this rule and every other host falls through to the unchanged Gay Cruise Bingo rule. The `{ eq }` object form is required: a bare string `value` is an unanchored regex to Vercel and would also match `fiveacross.vercel.app.evil.example`. Guarded by `src/vercel-auth-proxy.test.ts`; the reasoning lives in [`specs/vercel-auth-proxy.md`](../../specs/vercel-auth-proxy.md).
+For `/__/auth/:path*`, the three production mirror hosts match their respective exact-host Auth rules. Every other host matches no Auth rule and falls through to the SPA catch-all. The `{ eq }` object form is required: a bare string `value` is an unanchored regex to Vercel and would also match `fiveacross.vercel.app.evil.example`. Guarded by `src/vercel-auth-proxy.test.ts`; the reasoning lives in [`specs/vercel-auth-proxy.md`](../../specs/vercel-auth-proxy.md).
 
 The two alternatives the ticket floated were both worse. A **long-lived mirror branch** carrying its own `vercel.json` makes the backup host a permanent fork of `main` that has to be re-synced by hand—and a backup host quietly serving stale code is precisely the failure it exists to prevent, discovered at the worst possible moment. **Build-time templating** cannot work at all: Vercel reads `vercel.json` from the source before the build command runs, so a `vercel.json` written during the build is never read. (Generating `.vercel/output/config.json` via the Build Output API would work, but it means hand-rolling what the Vite framework preset does for free, on both projects.)
 
@@ -141,7 +56,7 @@ The two alternatives the ticket floated were both worse. A **long-lived mirror b
 | 5. Firebase authorized domain | **Outstanding** | **Outstanding** |
 | 6. Google OAuth redirect URI | **Outstanding—console-only** | **Outstanding—console-only** |
 
-Step 0 is not optional and not merely cosmetic. A mirror host whose `vercel.json` rule is missing falls through to the **Gay Cruise Bingo** rule, so its OAuth helper runs against the wrong Firebase project—a failure that survives both console registrations and reads as an inexplicable auth bug. Never provision a mirror host before its rule is on `main`.
+Step 0 is not optional and not merely cosmetic. A mirror host whose `vercel.json` rule is missing falls through to the SPA, so its OAuth helper is unavailable—a failure that survives both console registrations and reads as an inexplicable auth bug. Never provision a mirror host before its rule is on `main`.
 
 Both mirrors are live and serve the Bodega Event with Vacay branding. Since #676 they **do not rebuild on a merge**—see § Operating it. **Neither can complete sign-in yet**—step 6 is outstanding on both.
 
@@ -159,7 +74,7 @@ Steps 1–4 are Vercel work and step 6 is console-only. Step 5 has an API path b
 
    `vercel link` also writes a `.env.local` holding a `VERCEL_OIDC_TOKEN` **and appends `.vercel` + `.env*` to `.gitignore`.** In this repo both are unwanted—`.gitignore` is tracked and already covers what it needs to. Revert the `.gitignore` edit and delete the generated `.env.local` before committing anything.
 
-2. **Confirm the minted production host is exactly `fiveacross.vercel.app`.** This is the load-bearing check of the whole runbook. ✅ *Confirmed on provisioning—`vercel project ls` and `vercel inspect` both report `https://fiveacross.vercel.app` as the production alias.* Vercel assigns `<project>.vercel.app` when that subdomain is free and falls back to `<project>-<scope>.vercel.app` when it is not; `fiveacross.vercel.app` was unclaimed when this was written, but the `.vercel.app` namespace is global and shared with every other Vercel user. If Vercel mints anything else, **stop**: `vercel.json`'s `has` condition and `FIRST_PARTY_AUTH_HOSTS` in `src/auth-domain.ts` both hard-code this literal string, and a mismatch means the mirror's auth helper proxies to the wrong Firebase project. Fix the two constants in a follow-up PR before doing steps 5 and 6. (You can also add the alias explicitly under **Settings → Domains** if the project minted a longer default but the short name is free.)
+2. **Confirm the minted production host is exactly `fiveacross.vercel.app`.** This is the load-bearing check of the whole runbook. ✅ *Confirmed on provisioning—`vercel project ls` and `vercel inspect` both report `https://fiveacross.vercel.app` as the production alias.* Vercel assigns `<project>.vercel.app` when that subdomain is free and falls back to `<project>-<scope>.vercel.app` when it is not; `fiveacross.vercel.app` was unclaimed when this was written, but the `.vercel.app` namespace is global and shared with every other Vercel user. If Vercel mints anything else, **stop**: `vercel.json`'s `has` condition and `FIRST_PARTY_AUTH_HOSTS` in `src/auth-domain.ts` both hard-code this literal string, and a mismatch leaves the mirror without its production Auth proxy. Fix the two constants in a follow-up PR before doing steps 5 and 6. (You can also add the alias explicitly under **Settings → Domains** if the project minted a longer default but the short name is free.)
 
 3. **Set Production environment variables** (Settings → Environment Variables, **Production** scope only). Take the `VITE_FIREBASE_*` values from the `fiveacross` console (Project settings → General → Your apps → Web app), **not** from the gcb project:
 
@@ -176,7 +91,7 @@ Steps 1–4 are Vercel work and step 6 is console-only. Step 5 has an API path b
    | `VITE_POSTHOG_KEY` | same as the primary Bodega build |
    | `VITE_POSTHOG_HOST` | **leave unset** (#612)—the client walks the in-code failover chain (`POSTHOG_INGEST_HOSTS`); setting a host outside that chain silently disables the failover |
 
-   `VITE_FIREBASE_AUTH_DOMAIN` is belt-and-braces—`resolveAuthDomain` pins the mirror host in code regardless of what the dashboard holds, deliberately, for the reason ADR 0007 § "The host is pinned in code" gives. Setting it correctly anyway keeps the dashboard from documenting a lie.
+   `VITE_FIREBASE_AUTH_DOMAIN` is belt-and-braces—`resolveAuthDomain` pins the mirror host in code regardless of what the dashboard holds, deliberately, as required by the production same-origin policy. Setting it correctly anyway keeps the dashboard from documenting a lie.
 
    `VITE_EVENT_ID` makes this a **single-Event build**: the bundle serves exactly the Bodega Event and never consults the `publicHostnames/{host}` lookup, which is what makes a `.vercel.app` host servable at all (ADR 0010's same-origin escape hatch, ADR 0009's build-mode switch). It is baked in at build time, so changing it later needs a redeploy, not just an edit. `VITE_EDITION` must be set together with it and must **match the primary build**—a mismatch ships the backup host under different branding and chrome than the host it is backing up.
 
@@ -190,28 +105,16 @@ Steps 1–4 are Vercel work and step 6 is console-only. Step 5 has an API path b
 
    **`**`, not `*`.** Vercel matches these with [minimatch](https://github.com/isaacs/minimatch), where `*` does not cross a `/` — and every working branch here is `claude/…`, so a `*` rule matches none of them and the setting would look applied while changing nothing. Verified twice: against minimatch 10.2.5 locally, then against Vercel itself — with `**` in place a branch push creates **no deployment record at all**, where the same branch shape created three (one per project) an hour earlier.
 
-   **`preview: true` is the one exception**, because the stable alias is a *Git* deployment like any other and a blanket `false` would kill Part 2. Vercel's documented precedence is that a branch matching several rules deploys if **any** matched rule is `true`.
+   **`preview: true` is the historical Git exception**; the source build now refuses preview publication until isolated configuration is reviewed. Vercel's documented precedence is that a branch matching several rules deploys if **any** matched rule is `true`.
 
    **Do not "fix" this by re-enabling automatic deployments.** Every escalation of Vercel build volume on this repo has ended the same way, and it has now happened twice at different scales:
 
    - **Previews (the first incident).** A per-project Ignored Build Step (`[ "$VERCEL_ENV" != "production" ]`) was briefly removed from both mirrors on the theory that skipping builds risked a silently stale backup host. Within minutes, preview builds from the two mirror projects—on top of `gaycruisebingo`, all three now building on every branch push—exhausted the **account-wide build rate limit**, and Vercel began refusing deployments across the whole team with *"Deployment rate limited—retry in 24 hours."* That takes out `gaycruisebingo.vercel.app`, the brand's own ship-network fallback, for a day.
    - **Production merges (why #676 went further).** Even with previews skipped, three projects × every merge to `main` is three builds nobody asked for, most of them rebuilding a mirror whose content did not change.
 
-   Those preview builds were pure waste besides: no `VITE_*` values are set on the mirror projects' **Preview** environment, so every one of them fails the Vite blank-API-key guard, and the resulting red `Vercel – <project>` check lands on unrelated pull requests. That is also why the three `Vercel – *` contexts on a PR read *"Canceled by Ignored Build Step"* rather than passing on merit.
+   Those preview builds were pure waste besides: no `VITE_*` values are set on the mirror projects' **Preview** environment, so historical builds failed the Vite blank-API-key guard, and the resulting red `Vercel – <project>` check lands on unrelated pull requests. That is also why the three `Vercel – *` contexts on a PR read *"Canceled by Ignored Build Step"* rather than passing on merit.
 
-   **⚠️ The per-project Ignored Build Step now cancels the `preview` flow, and has since 2026-08-06.** A live defect, independent of #680 — recorded rather than fixed here, because it is a per-project console setting and not a repo file.
-
-   `[ "$VERCEL_ENV" != "production" ]` exits `0` (skip) for **any** non-production deployment, and a `preview`-branch build is `VERCEL_ENV=preview`. The deployment history dates the changeover precisely: branch deployments were `READY` up to 2026-08-05 23:50Z, and every one from 2026-08-06 01:29Z onward is `CANCELED`. Nobody noticed because there have been **zero** `preview`-branch pushes in that window.
-
-   So `preview: true` above restores the *deployment*; the ignore step still cancels its *build*. **Part 2's device-testing flow does not work until that setting changes — on the `gaycruisebingo` project only:**
-
-   ```bash
-   [ "$VERCEL_ENV" != "production" ] && [ "$VERCEL_GIT_COMMIT_REF" != "preview" ]
-   ```
-
-   **Leave the two mirror projects' ignore step exactly as it is**, and do not remove it anywhere. `vercel.json` is shared, so `preview: true` enables a `preview` deployment on all three projects — but the alias is a `gaycruisebingo` concept, and the mirrors have no `VITE_*` values on their Preview environment, so a mirror preview build fails the Vite blank-key guard and lands a red `Vercel – <project>` check on unrelated pull requests. On the mirrors the ignore step is the only thing stopping that, which makes it load-bearing there and obsolete only on `gaycruisebingo`.
-
-   Until that one setting changes, treat the preview alias as out of service.
+   **Do not narrow the Ignored Build Step to enable production-backed previews.** The historical preview flow was canceled by `[ "$VERCEL_ENV" != "production" ]`; current Vercel protection/ignore settings require owner inventory. Even if a console setting permits a preview build, the source isolation guard refuses it. Leave production mirror deployment settings unchanged; configure a test-only preview path only through a separately authorized reviewed rollout.
 
    **And do not reach for the Ignored Build Step as the manual-deploy switch**—Vercel does not document whether that step also runs for CLI deployments, so setting it to always-skip risks silently cancelling the deploy you just typed. `git.deploymentEnabled` is scoped to commits by definition and has no such ambiguity.
 
@@ -310,19 +213,10 @@ Handing a mirror to players is a manual decision: it is a backup URL to give out
 
 ## Troubleshooting
 
-| Symptom | Cause |
-|---|---|
-| `DEPLOYMENT_NOT_FOUND` | No `preview` branch yet, or its last build failed. Check Vercel's deployments list. |
-| Redirected to `vercel.com/login` | Expected—Part 3. Sign in to Vercel in that browser. |
-| `auth/unauthorized-domain` | Part 1 step 2 not done, or the host was typed differently. |
-| `redirect_uri_mismatch` | Part 1 step 3 not done, still propagating, or added to the wrong OAuth client. |
-| "Unable to process request due to missing initial state" | The auth handler resolved cross-origin. The host is missing from `FIRST_PARTY_AUTH_HOSTS`, or `vercel.json`'s `/__/auth/:path*` rewrite lost its priority over the SPA catch-all. |
-| Sign-in works but the board is someone else's | You are on the live event. Part 1 step 4—and it needs a rebuild, not just an env-var edit. |
-| Your change is missing but the build succeeded | A waiting service worker; the old precache is still serving. Use the Reload banner or pull-to-refresh, not a plain reload. |
-| "This address is not open yet" on a `*.vercel.app` host | Expected on any per-deployment host—they can never sign in. Use the stable preview alias (Part 2). |
-| The mirror serves the Gay Cruise Bingo event | The mirror project's Production env vars point at `gaycruisebingo`, or `VITE_EVENT_ID` was changed without a redeploy. Mirror runbook step 3. |
-| The mirror's auth iframe loads from `gaycruisebingo.firebaseapp.com` | The minted host is not exactly `fiveacross.vercel.app`, so `vercel.json`'s `has` condition never matches. Mirror runbook step 2. |
+Production mirror failures still require the exact host rewrite, corresponding production Firebase authorized domain and OAuth redirect registration, and matching Production-scoped build configuration. Check the mirror's minted hostname against its exact rule; never broaden it to a suffix or preview pattern.
 
-## Not doing this at all
+A preview build refused with the isolated-configuration message is the intended current boundary. An old preview displaying an app or Google button is not evidence of approved isolation: stop testing against production and request the owner configuration inventory. Do not add its hostname to `FIRST_PARTY_AUTH_HOSTS` or either production project's consoles.
 
-For a pure visual check—layout, type, theme, motion—`npm run dev -- --host` and the Mac's LAN address on the phone is cheaper than any of the above and needs no setup. It cannot cover sign-in: a raw LAN IP is neither a Firebase authorized domain nor a legal Google redirect URI. Reach for the preview alias when the thing you need to see is behind sign-in, or when sign-in itself is the thing you need to see.
+A successful deployment can still display a waiting service worker's old bundle. Use the app's Reload banner or pull-to-refresh before comparing versions; a reload alone does not establish which source/configuration is running.
+
+The build also refuses `VERCEL=1` with missing or unknown `VERCEL_ENV`. If all platform system variables are disabled, source alone cannot identify a Vercel build; verifying system-variable exposure remains a deployed configuration prerequisite, not a proven live state.

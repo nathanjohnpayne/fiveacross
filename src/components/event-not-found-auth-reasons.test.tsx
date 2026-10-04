@@ -63,10 +63,11 @@ describe('EventNotFound — the #549 sign-in route failures', () => {
     expect(screen.getByText(HOST)).toBeInTheDocument();
   });
 
-  // The pre-existing preview hint belongs to `auth-unconfigured` alone; the new
-  // reasons must not have stolen it.
-  it('leaves the vercel preview hint on auth-unconfigured', () => {
+  // Isolated-preview guidance belongs to `auth-unconfigured` alone; the
+  // sign-in route failures above retain their own configuration guidance.
+  it('leaves isolated Firebase preview guidance on auth-unconfigured', () => {
     render(<EventNotFound hostname="gcb-abc123-x.vercel.app" reason="auth-unconfigured" />);
-    expect(screen.getByText(/per-deployment preview hosts/i)).toBeInTheDocument();
+    expect(screen.getByText(/isolated test Firebase Auth\/data/i)).toBeInTheDocument();
+    expect(screen.queryByText(/force.push|production sign.in setup/i)).toBeNull();
   });
 });
