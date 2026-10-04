@@ -1,4 +1,4 @@
-import { isAllowedPublisherTokenCreator } from '../../../scripts/event-router-registry/publisher-impersonation.mjs';
+import { isAllowedPublisherReplacementAccount, isAllowedPublisherTokenCreator } from '../../../scripts/event-router-registry/publisher-impersonation.mjs';
 import { parseSyncRequest, projectionDigest } from './contracts';
 import { isKmsCryptoKeyVersion, isSha256Hex } from './identifiers';
 import type { ConsumedProbeEvidence } from './probe';
@@ -343,6 +343,10 @@ function validatePublisherReplacement(value: unknown): void {
   if (!Array.isArray(control.serviceAccountAccess) || control.serviceAccountAccess.length !== 2) {
     throw new Error('service account access');
   }
+  const completenessCount = control.serviceAccountAccess.filter((entry) =>
+    isRecord(entry) && Object.hasOwn(entry, 'inheritedPoliciesComplete'),
+  ).length;
+  if (completenessCount !== 0 && completenessCount !== 2) throw new Error('mixed service account policy schema');
   control.serviceAccountAccess.forEach((entry) => {
     // Retain signed pre-#1427 audit history without upgrading it into current
     // recovery authority. New request parsing and validation require true.
@@ -513,6 +517,8 @@ function validatePublisherReplacement(value: unknown): void {
         readback.serviceAccountEmail !== runtime.serviceAccountEmail ||
         readback.iamMember !== runtime.iamMember ||
         readback.fullResourceName !== canonicalServiceAccountResource(runtime.serviceAccountEmail) ||
+        (readback.inheritedPoliciesComplete === true && runtime === replacementRuntime &&
+          !isAllowedPublisherReplacementAccount(runtime.serviceAccountEmail)) ||
         readback.tokenCreatorMembers.length > 16 ||
         readback.tokenCreatorMembers.some((member) =>
           broadMember(member) || oldPrincipals.has(member) ||

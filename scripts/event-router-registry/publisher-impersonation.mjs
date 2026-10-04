@@ -13,6 +13,10 @@ const PUBLISHER_TOKEN_CREATORS = new Set([
   'serviceAccount:service-5297095641@gcp-sa-cloudbuild.iam.gserviceaccount.com',
 ]);
 
+export function isAllowedPublisherReplacementAccount(serviceAccountEmail) {
+  return serviceAccountEmail.endsWith('@fiveacross.iam.gserviceaccount.com');
+}
+
 export function isAllowedPublisherTokenCreator(serviceAccountEmail, member) {
-  return serviceAccountEmail.endsWith('@fiveacross.iam.gserviceaccount.com') && PUBLISHER_TOKEN_CREATORS.has(member);
+  return isAllowedPublisherReplacementAccount(serviceAccountEmail) && PUBLISHER_TOKEN_CREATORS.has(member);
 }

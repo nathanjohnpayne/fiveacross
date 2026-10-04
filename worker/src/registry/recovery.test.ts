@@ -678,6 +678,15 @@ describe('source-attested recovery', () => {
       });
     }
 
+    const foreignEmail = 'next@foreign-project.iam.gserviceaccount.com';
+    const foreign = JSON.parse(JSON.stringify(replacement)
+      .replaceAll(replacementEmail, foreignEmail)
+      .replaceAll(`projects/fiveacross/serviceAccounts/${foreignEmail}`, `projects/foreign-project/serviceAccounts/${foreignEmail}`)) as NonNullable<PublisherReplacement>;
+    expect(foreign.controlEvidence.serviceAccountAccess[1].tokenCreatorMembers).toEqual([]);
+    await expect(applyRecovery(acquired.state,
+      await request(acquired.state, { kind: 'apply', lockId: 'lock-1', publisherReplacement: foreign }, sourceAudit('2')),
+      replacementContext)).rejects.toThrow('replacement service-account policy');
+
     const applied = await applyRecovery(acquired.state, strictRequest, replacementContext);
     expect(applied.state.minimumPublisherEpoch).toBe('8');
     expect(applied.state.highestQuarantinedPublisherEpoch).toBe('7');

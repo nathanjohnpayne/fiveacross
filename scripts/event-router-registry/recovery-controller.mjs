@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { isAllowedPublisherTokenCreator } from './publisher-impersonation.mjs';
+import { isAllowedPublisherReplacementAccount, isAllowedPublisherTokenCreator } from './publisher-impersonation.mjs';
 import { REGISTRY_R0_CONTRACT } from './r0-contract.mjs';
 import { normalizeTimestamp } from './hostname-projection.mjs';
 
@@ -626,6 +626,7 @@ function validateControlReadbacks(plan, readbacks, now) {
       !SHA256.test(account.responseDigest) ||
       !Array.isArray(account.tokenCreatorMembers) ||
       account.inheritedPoliciesComplete !== true ||
+      (entity === plan.replacement && !isAllowedPublisherReplacementAccount(entity.serviceAccountEmail)) ||
       account.tokenCreatorMembers.length > 16 ||
       account.tokenCreatorMembers.some(
         (member) =>

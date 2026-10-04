@@ -1,4 +1,4 @@
-import { isAllowedPublisherTokenCreator } from '../../../scripts/event-router-registry/publisher-impersonation.mjs';
+import { isAllowedPublisherReplacementAccount, isAllowedPublisherTokenCreator } from '../../../scripts/event-router-registry/publisher-impersonation.mjs';
 import {
   projectionDigest,
   type CommittedReplica,
@@ -697,6 +697,9 @@ function validateReplacement(
     }
   }
   if (!replacementSigningGrant) throw new Error('replacement subject lacks a direct signing grant');
+  if (!isAllowedPublisherReplacementAccount(control.replacementRuntime.serviceAccountEmail)) {
+    throw new Error('replacement service-account policy targets another project');
+  }
   for (const readback of control.serviceAccountAccess) {
     if (
       readback.inheritedPoliciesComplete !== true ||

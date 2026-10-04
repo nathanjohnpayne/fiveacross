@@ -640,6 +640,19 @@ describe('operator recovery evidence controller', () => {
     expect(deps.obtainSourceAttestorSession).not.toHaveBeenCalled();
   });
 
+  it('rejects a cross-project replacement with no effective token creators before signing', async () => {
+    const foreignEmail = 'router-publisher-next@foreign-project.iam.gserviceaccount.com';
+    const replace = value => JSON.parse(JSON.stringify(value)
+      .replaceAll(REPLACEMENT_EMAIL, foreignEmail)
+      .replaceAll(`projects/fiveacross/serviceAccounts/${foreignEmail}`, `projects/foreign-project/serviceAccounts/${foreignEmail}`));
+    const input = replace(recoveryInput());
+    const readback = replace(controlReadbacks());
+    expect(readback.serviceAccountAccess[1].tokenCreatorMembers).toEqual([]);
+    const deps = dependencies({ readPublisherControlReadbacks: vi.fn(async () => readback) });
+    await expect(buildRecoveryArtifacts(input, deps)).rejects.toMatchObject({ code: 'service-account-readback-mismatch' });
+    expect(deps.obtainSourceAttestorSession).not.toHaveBeenCalled();
+  });
+
   it.each([false, undefined, 'true', 'UNKNOWN'])('refuses incomplete inherited IAM %s before signing', async (complete) => {
     const readback = controlReadbacks();
     readback.serviceAccountAccess[1].inheritedPoliciesComplete = complete;
