@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState } from 'react';
 import { useTextSize } from '../hooks/useTextSize';
-import { fitTextSize } from '../game/fitText';
+import { fitTextSize, shrinkToWholeWords } from '../game/fitText';
 
 /**
  * A non-free Square's prompt text (#215, specs/d15-text-size.md): the S/M/L
@@ -25,6 +25,35 @@ import { fitTextSize } from '../game/fitText';
  * long prompt at the Large text setting — Firebase-free deps only, so it stays
  * out of the fallback's (and this module's) import graph.
  */
+/**
+ * #1345: verify the estimate against the real rendered glyphs and keep
+ * shrinking while any single word is wider than the Square (which `.cell`'s
+ * `word-break: break-word` would otherwise split mid-word, "Grandparent / s").
+ * Each probe applies the size with mid-word breaking and hyphenation switched
+ * off, so a too-long word makes the span (a flex item) as wide as that word
+ * instead of wrapping; its `offsetWidth` then exceeds the host's usable width.
+ * The overrides are removed again before returning. A host with no layout yet
+ * (width 0, pre-first-paint or jsdom) has nothing to measure against, so the
+ * estimate stands.
+ */
+function keepWordsWhole(el: HTMLElement, host: HTMLElement, estimated: number, hostPadding: number): number {
+  const usableWidth = host.clientWidth - hostPadding;
+  if (usableWidth <= 0) return estimated;
+  el.style.wordBreak = 'normal';
+  el.style.overflowWrap = 'normal';
+  el.style.hyphens = 'manual';
+  try {
+    return shrinkToWholeWords(estimated, (size) => {
+      el.style.fontSize = `${size}px`;
+      return el.offsetWidth > usableWidth;
+    });
+  } finally {
+    el.style.wordBreak = '';
+    el.style.overflowWrap = '';
+    el.style.hyphens = '';
+  }
+}
+
 export default function SquareText({ text }: { text: string }) {
   // Not read directly below — its only job is to make this effect re-run
   // when the Player's S/M/L pick changes, since the ceiling itself is read
@@ -66,8 +95,9 @@ export default function SquareText({ text }: { text: string }) {
         width: Math.max(0, hostRect.width - HOST_PADDING),
         height: Math.max(0, hostRect.height - HOST_PADDING),
       };
-      const fitted = fitTextSize(text, box, { baseSize });
-      if (fitted != null) el.style.fontSize = `${fitted}px`;
+      const estimated = fitTextSize(text, box, { baseSize });
+      const fitted = keepWordsWhole(el, host, estimated, HOST_PADDING);
+      el.style.fontSize = `${fitted}px`;
       setFontSize(fitted);
     };
 
