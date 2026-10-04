@@ -10,6 +10,7 @@ import {
   isReservedLabel,
   normalizeSlug,
   RESERVED_LABELS,
+  RESERVED_SLUGS,
   SLUG_MAX_LENGTH,
   SLUG_MIN_LENGTH,
   validateSlug,
@@ -151,24 +152,32 @@ describe('reserved-label mirrors in separately deployed programs', () => {
     const open = src.indexOf('[', start);
     const close = src.indexOf(']', open);
     if (open === -1 || close === -1) throw new Error(`${constName} literal unparsable in ${path}`);
-    return [...src.slice(open, close).matchAll(/'([a-z0-9-]+)'/g)].map((m) => m[1]);
+    // `_` admits the path-segment floor's `__` (#1387).
+    return [...src.slice(open, close).matchAll(/'([a-z0-9_-]+)'/g)].map((m) => m[1]);
   };
 
-  const expected = [...RESERVED_LABELS].sort();
+  // The mirrors copy the UNION of both floors (`specs/path-addressing-and-root.md`
+  // § Reserved paths, #1387), not just the hostname-label floor: a slug the
+  // edge refuses as a path segment must be refused by every publisher too.
+  const expected = [...RESERVED_SLUGS].sort();
 
-  it('router-publisher/src/runtime.ts mirrors RESERVED_LABELS exactly', () => {
+  it('pins a non-trivial union, so an empty parse cannot pass vacuously', () => {
+    expect(expected.length).toBeGreaterThan(RESERVED_LABELS.length);
+  });
+
+  it('router-publisher/src/runtime.ts mirrors RESERVED_SLUGS exactly', () => {
     expect(parseSet('router-publisher/src/runtime.ts', 'RESERVED_EVENT_SLUGS').sort()).toEqual(
       expected,
     );
   });
 
-  it('scripts/event-router-registry/recovery-controller.mjs mirrors RESERVED_LABELS exactly', () => {
+  it('scripts/event-router-registry/recovery-controller.mjs mirrors RESERVED_SLUGS exactly', () => {
     expect(
       parseSet('scripts/event-router-registry/recovery-controller.mjs', 'RESERVED_SLUGS').sort(),
     ).toEqual(expected);
   });
 
-  it('scripts/event-router-registry/hostname-projection.mjs mirrors RESERVED_LABELS exactly', () => {
+  it('scripts/event-router-registry/hostname-projection.mjs mirrors RESERVED_SLUGS exactly', () => {
     expect(
       parseSet('scripts/event-router-registry/hostname-projection.mjs', 'RESERVED_SLUGS').sort(),
     ).toEqual(expected);
