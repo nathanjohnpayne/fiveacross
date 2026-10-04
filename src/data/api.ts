@@ -85,8 +85,8 @@ async function ownProfileLease(uid: string) {
   return lease;
 }
 
-function rememberAttestation(uid: string, attested: boolean): void {
-  try { recordOfflineAttestation(firebaseConfig.projectId, uid, attested); } catch {
+async function rememberAttestation(uid: string, attested: boolean, assertCurrent: () => void): Promise<void> {
+  try { await recordOfflineAttestation(firebaseConfig.projectId, uid, attested, assertCurrent); } catch {
     // Failed storage writes retire a revoked witness in this process, but cannot
     // convey revocation to a fresh process if every persistent write is refused.
     // A committed server result still stands when this render-only hint fails.
@@ -324,7 +324,7 @@ export async function attestAdult(u: User, now: number = Date.now()): Promise<vo
     if (typeof existing === 'number') return; // keep the FIRST attestation, never overwrite
     tx.set(ref, { attestedAdultAt: now }, { merge: true });
   }));
-  rememberAttestation(u.uid, true);
+  await lease.guard(() => rememberAttestation(u.uid, true, lease.assertCurrent));
 }
 
 /**
@@ -356,8 +356,13 @@ export async function readAdultAttestationFromCache(uid: string): Promise<number
   const eventId = EVENT_ID;
   const projectId = firebaseConfig.projectId;
   const cached = await hasCachedCard(uid, eventId);
-  if (auth.currentUser?.uid !== uid || firebaseConfig.projectId !== projectId) throw new Error('Private account changed.');
-  return cached && hasOfflineAttestation(projectId, uid) ? 1 : null;
+  const assertCurrent = () => {
+    if (auth.currentUser?.uid !== uid || firebaseConfig.projectId !== projectId || EVENT_ID !== eventId) throw new Error('Private account changed.');
+  };
+  assertCurrent();
+  const witnessed = cached && await hasOfflineAttestation(projectId, uid, assertCurrent);
+  assertCurrent();
+  return witnessed ? 1 : null;
 }
 
 /**
@@ -379,7 +384,7 @@ export async function readAdultAttestationFromServer(uid: string): Promise<numbe
   const lease = await ownProfileLease(uid);
   const snap = await lease.guard(() => getDocFromServer(rawUser(uid, lease.db)));
   const v = snap.exists() ? (snap.data() as Partial<UserDoc>).attestedAdultAt : undefined;
-  rememberAttestation(uid, typeof v === 'number');
+  await lease.guard(() => rememberAttestation(uid, typeof v === 'number', lease.assertCurrent));
   return typeof v === 'number' ? v : null;
 }
 
