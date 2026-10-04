@@ -59,6 +59,20 @@ const CLAIM_MODES = new Set(['honor', 'proof_required', 'admin_confirmed']);
 const DIRECT_SOURCES = new Set(['pledge', 'proof', 'admin_confirm']);
 const ECHO_TRIGGERS = new Set(['deal', 'reshuffle', 'mark', 'open_reconcile', 'admin_confirm']);
 
+/** Preserve valid IDs verbatim, but never interpret an identity as a path. */
+function isAnalyticsPathSegment(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    Buffer.byteLength(value, 'utf8') <= 1_500 &&
+    Buffer.from(value, 'utf8').toString('utf8') === value &&
+    !value.includes('/') &&
+    value !== '.' &&
+    value !== '..' &&
+    !/^__[\s\S]*__$/.test(value)
+  );
+}
+
 /**
  * Firestore document versions carry seconds and nanoseconds. A fixed-width
  * encoding sorts lexicographically in the same order as those committed
@@ -92,6 +106,7 @@ export function directMarkAnalyticsForWrite(params: {
   const request = params.after?.directAnalyticsRequest;
   const beforeRequest = params.before?.directAnalyticsRequest;
   if (
+    !isAnalyticsPathSegment(params.transitionId) ||
     !request ||
     typeof request.id !== 'string' ||
     request.id.length === 0 ||
@@ -157,8 +172,7 @@ export function echoAnalyticsForWrite(params: {
       afterCell.marked !== true ||
       beforeCell?.marked === true ||
       afterCell.echo !== true ||
-      typeof id !== 'string' ||
-      id.length === 0 ||
+      !isAnalyticsPathSegment(id) ||
       typeof trigger !== 'string' ||
       !ECHO_TRIGGERS.has(trigger)
     ) {
@@ -203,6 +217,9 @@ export async function recordDirectMarkAnalytics(
   store: DirectMarkAnalyticsStore,
   params: Parameters<typeof boardAnalyticsForWrite>[0] & { eventId: string },
 ): Promise<void> {
+  // Malformed persisted identities are terminal, even on retrying triggers.
+  // Real service failures below still propagate so valid rows can retry.
+  if (!isAnalyticsPathSegment(params.eventId) || !isAnalyticsPathSegment(params.uid)) return;
   for (const transition of boardAnalyticsForWrite(params)) {
     try {
       await store

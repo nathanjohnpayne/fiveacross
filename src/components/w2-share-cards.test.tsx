@@ -3268,3 +3268,33 @@ describe('FarewellPodium — photo-hero share (#534/#561)', () => {
     );
   });
 });
+
+// #1413: bounded DOM construction precedes html-to-image's rasterization.
+describe('ShareCard — legacy oversized text', () => {
+  it('bounds emoji-heavy names and copy before building leaderboard DOM', async () => {
+    const name = '😀'.repeat(100_000);
+    await renderLeaderboardShareCard({ eventName: 'X'.repeat(100_000), rows: [
+      { uid: 'u', rank: 1, displayName: name, bingoCount: 2, squaresMarked: 9, blackout: false, firstToBingo: true },
+      { uid: 'v', rank: 2, displayName: 'Ordinary', bingoCount: 1, squaresMarked: 5, blackout: false, firstToBingo: false },
+    ] });
+    const node = toBlobNode();
+    expect(node.querySelector('.share-card-name')?.textContent).toBe('😀'.repeat(50));
+    expect(node.querySelector('.share-card-event')?.textContent).toHaveLength(256);
+    expect(node.querySelectorAll('.emoji-run').length).toBeLessThan(60);
+    expect(node.textContent).toContain('Ordinary');
+    expect(node.isConnected).toBe(false);
+  });
+
+  it('bounds farewell honors and champion names without splitting surrogates', async () => {
+    const name = 'A'.repeat(99) + '😀' + 'B'.repeat(100_000);
+    await renderFarewellShareCard({ eventName: 'Event',
+      champion: { displayName: name, bingoCount: 1, squaresMarked: 5 },
+      firstBingo: { displayName: name }, honors: [{ dayLabel: 'Day 1', displayName: name }],
+    });
+    const nodes = toBlobNode().querySelectorAll('.share-card-honoree-name, .share-card-honor-name');
+    expect(nodes).toHaveLength(3);
+    for (const node of nodes) {
+      expect(node.textContent).toBe('A'.repeat(99));
+    }
+  });
+});

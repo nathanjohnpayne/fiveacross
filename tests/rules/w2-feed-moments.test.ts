@@ -7,7 +7,7 @@ import {
   initializeTestEnvironment,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { deleteDoc, doc, getDoc, setDoc, writeBatch, type Firestore } from 'firebase/firestore';
+import { deleteDoc, disableNetwork, doc, enableNetwork, getDoc, setDoc, writeBatch, type Firestore } from 'firebase/firestore';
 
 // specs/w2-feed-moments.md — the Moments rules contract (ADR 0002). Pinned against
 // the block that shipped from #16/#18, was TIGHTENED in PR #99 (Codex P2) — the
@@ -16,7 +16,7 @@ import { deleteDoc, doc, getDoc, setDoc, writeBatch, type Firestore } from 'fire
 // to bind the doc id to the payload kind. A Moment is an own-beat, self-published
 // broadcast: a Player may create ONLY a Moment carrying their own uid (a forged uid is
 // denied), at the deterministic id its kind implies (issue #103), with a valid kind +
-// non-empty ≤100 displayName + a numeric, near-now createdAt; reads are public; a
+// non-empty ≤100 displayName + a numeric, near-now createdAt; reads require Event admission; a
 // Moment is fully immutable (no update path); deletable by its owner or an admin.
 //
 // Two design-critical facts this suite PINS honestly (see the spec):
@@ -28,11 +28,9 @@ import { deleteDoc, doc, getDoc, setDoc, writeBatch, type Firestore } from 'fire
 //      so the once-only dedup is STRUCTURAL — and the id can no longer be squatted with
 //      a mismatched kind (the first_bingo denial-of-ceremony hole #103 closes). This is
 //      the strongest dedup the rules allow.
-//   2. The create rule has NO hasOnly/keys() constraint, so it does NOT reject a
-//      Moment carrying extra media/proofId fields. The ADR 0002 "a Moment carries
-//      no evidence" guarantee is therefore a WRITER + TYPE contract (moments.ts
-//      writes exactly the MomentDoc fields; MomentDoc has no media/proofId), NOT a
-//      rules-layer one — pinned here so no one mistakes the rule for enforcing it.
+//   2. The create rule bounds the exact client ceremony fields. Evidence and
+//      server finale fields are rejected; optional legacy photoURL/dayIndex remain
+//      accepted. No completed Board or Player profile is required (ADR 0001).
 // The PERMISSION_DENIED lines the SDK logs are the expected assertFails denials.
 
 const RULES_PATH = fileURLToPath(new URL('../../firestore.rules', import.meta.url));
@@ -68,7 +66,7 @@ afterAll(async () => {
 });
 
 // Each test starts clean with a canonical Event and a foreign Moment (Carol's) so
-// the public-read + owner/admin-delete invariants have something to read against.
+// the admitted-read + owner/admin-delete invariants have something to read against.
 beforeEach(async () => {
   await testEnv.clearFirestore();
   await testEnv.withSecurityRulesDisabled(async (ctx) => {
@@ -244,22 +242,69 @@ describe('firestore.rules — Feed Moments (specs/w2-feed-moments.md)', () => {
     await assertSucceeds(setDoc(p(`${ALICE}-bingo`), moment(ALICE, { createdAt: now }))); // near-now: accepted
   });
 
-  it('does NOT reject extra media/proofId fields — no-evidence is a writer/type contract, not a rules one', async () => {
-    // The create rule has no hasOnly()/keys() constraint, so extra fields pass.
-    // The ADR 0002 guarantee that a Moment carries no evidence is enforced by
-    // moments.ts (writes only the MomentDoc fields) and the MomentDoc type — the
-    // unit test src/data/w2-feed-moments.test.ts pins the writer side.
-    await assertSucceeds(
-      // Canonical id (`${uid}-bingo`, kind bingo) — the id↔kind binding (#103) still
-      // does not gate extra fields; that stays a writer/type contract, not a rules one.
-      setDoc(doc(db(ALICE), momentPath(`${ALICE}-bingo`)), moment(ALICE, {
-        mediaURL: 'https://firebasestorage.example/x.jpg',
-        proofId: 'p1',
-      })),
-    );
+  it.each(['mediaURL', 'proofId', 'standings', 'podium', 'status'])('DENIES extra client Moment field %s', async (key) => {
+    await assertFails(setDoc(doc(db(ALICE), momentPath(`${ALICE}-bingo`)), moment(ALICE, { [key]: 'extra' })));
+    expect((await getDoc(doc(db(ALICE), momentPath(`${ALICE}-bingo`)))).exists()).toBe(false);
   });
 
-  it('Moment reads are public — the Feed everyone watches (ADR 0002)', async () => {
+  it.each([null, '0', -1, 0.5, NaN, Infinity])('DENIES malformed optional legacy dayIndex %s', async (dayIndex) => {
+    await assertFails(setDoc(doc(db(ALICE), momentPath(`${ALICE}-bingo`)), moment(ALICE, { dayIndex })));
+  });
+
+  it.each([
+    ['map', { url: 'https://lh3.googleusercontent.com/avatar' }],
+    ['array', ['https://lh3.googleusercontent.com/avatar']],
+    ['number', 1],
+    ['boolean', true],
+    ['oversized allowed host', 'https://lh3.googleusercontent.com/' + 'x'.repeat(1025)],
+  ])('Moment avatar DENIES %s through the create-rule photoUrlOk guard', async (_label, photoURL) => {
+    await assertFails(setDoc(doc(db(ALICE), momentPath(`${ALICE}-bingo`)), moment(ALICE, { photoURL })));
+    expect((await getDoc(doc(db(ALICE), momentPath(`${ALICE}-bingo`)))).exists()).toBe(false);
+  });
+
+  it('Moment avatar accepts the 1024-character allowed-host boundary', async () => {
+    const prefix = 'https://lh3.googleusercontent.com/';
+    await assertSucceeds(setDoc(doc(db(ALICE), momentPath(`${ALICE}-bingo`)), moment(ALICE, {
+      photoURL: prefix + 'x'.repeat(1024 - prefix.length),
+    })));
+  });
+
+  it('DENIES an oversized authenticated UID even at its canonical Moment id', async () => {
+    const uid = 'x'.repeat(129);
+    await assertFails(setDoc(doc(db(uid), momentPath(`${uid}-bingo`)), moment(uid)));
+  });
+
+  it('preserves omitted legacy optional fields and typed legacy Day stamps without adding a schedule requirement', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), `events/${EVENT}`), { status: 'active', admins: [ADMIN] });
+    });
+    await assertSucceeds(setDoc(doc(db(ALICE), momentPath(`${ALICE}-bingo`)), {
+      kind: 'bingo', uid: ALICE, displayName: 'Alice', createdAt: NOW(),
+    }));
+    // Legacy IDs have always carried payload-only Day stamps; only -dN IDs bind the schedule.
+    await assertSucceeds(setDoc(doc(db(BOB), momentPath(`${BOB}-bingo`)), moment(BOB, { dayIndex: 99 })));
+    await assertSucceeds(setDoc(doc(db(ALICE), momentPath('first_bingo')), moment(ALICE, { kind: 'first_bingo', dayIndex: 0 })));
+  });
+
+  it('drains a queued near-now ceremony and preserves its original stamp', async () => {
+    const alice = db(ALICE);
+    const createdAt = NOW() - 3600000;
+    await disableNetwork(alice);
+    const queued = setDoc(doc(alice, momentPath(`${ALICE}-bingo`)), moment(ALICE, { createdAt }));
+    await enableNetwork(alice);
+    await assertSucceeds(queued);
+    expect((await getDoc(doc(alice, momentPath(`${ALICE}-bingo`)))).data()?.createdAt).toBe(createdAt);
+  });
+
+  it('admits exactly one concurrent first-broadcast singleton without checking achievement', async () => {
+    const results = await Promise.allSettled([ALICE, BOB].map((uid) =>
+      setDoc(doc(db(uid), momentPath('first_bingo')), moment(uid, { kind: 'first_bingo' }))));
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
+    expect([ALICE, BOB]).toContain((await getDoc(doc(db(ALICE), momentPath('first_bingo')))).data()?.uid);
+  });
+
+  it('Event admission permits reading another Player’s Moment (ADR 0002)', async () => {
     await assertSucceeds(getDoc(doc(db(BOB), momentPath(`${CAROL}-bingo`)))); // Bob reads Carol's beat
   });
 
@@ -511,7 +556,7 @@ describe('firestore.rules — retraction tombstones (#377, specs/w2-feed-moments
     await assertFails(loser.commit());
     // Nothing half-landed: the Day-5 Moment survived, its tombstone was not
     // minted, and the retry's fresh-probe batch lands. Assert EXISTENCE, not
-    // just read permission — Moment reads are public, so a bare assertSucceeds
+    // just read permission — Event admission permits this read, so a bare assertSucceeds
     // would pass either way (CodeRabbit on PR #494).
     const survivor = await assertSucceeds(getDoc(doc(alice, momentPath(`${ALICE}-bingo-d5`))));
     expect(survivor.exists()).toBe(true);
@@ -583,9 +628,8 @@ describe('firestore.rules — retraction tombstones (#377, specs/w2-feed-moments
     await assertFails(setDoc(t(`${ALICE}-bingo-d4`), tombstone(ALICE, { kind: 'blackout', dayIndex: 4 })));
     // An arbitrary id is denied — the tombstone is not a free-form doc.
     await assertFails(setDoc(t('spoof'), tombstone(ALICE)));
-    // Extra fields are denied (hasOnly) — DELIBERATELY stricter than the moments
-    // create rule, which accepts them (the honesty pin above). A tombstone is pure
-    // bookkeeping nothing renders, so there is no payload to grow into.
+    // Extra fields are denied (hasOnly), like client Moments. A tombstone is
+    // pure bookkeeping nothing renders, so there is no payload to grow into.
     await assertFails(setDoc(t(`${ALICE}-bingo-d4`), tombstone(ALICE, { dayIndex: 4, note: 'oops' })));
     // createdAt carries the house near-now bound.
     await assertFails(setDoc(t(`${ALICE}-bingo-d4`), tombstone(ALICE, { dayIndex: 4, createdAt: NOW() + 3600000 })));
@@ -597,7 +641,7 @@ describe('firestore.rules — retraction tombstones (#377, specs/w2-feed-moments
     // daily-Event retraction records WHICH Day spent the legacy slot.
     await assertSucceeds(setDoc(t(`${ALICE}-bingo`), tombstone(ALICE, { dayIndex: 2 })));
     // ... but when present it must still be a real scheduled Day — hasOnly alone
-    // would otherwise admit junk into a publicly-readable doc.
+    // would otherwise admit junk into an Event-readable doc.
     await assertFails(setDoc(t(`${ALICE}-blackout`), tombstone(ALICE, { kind: 'blackout', dayIndex: '2' })));
     await assertFails(setDoc(t(`${ALICE}-blackout`), tombstone(ALICE, { kind: 'blackout', dayIndex: 99 })));
     await assertFails(setDoc(t(`${ALICE}-blackout`), tombstone(ALICE, { kind: 'blackout', dayIndex: -1 })));
@@ -630,7 +674,7 @@ describe('firestore.rules — retraction tombstones (#377, specs/w2-feed-moments
     await assertSucceeds(setDoc(doc(db(ALICE), momentPath(id)), moment(ALICE, { dayIndex: 3 })));
   });
 
-  it('tombstone reads are public, like the Feed they describe', async () => {
+  it('Event admission permits reading another Player’s tombstone', async () => {
     await assertSucceeds(setDoc(doc(db(ALICE), tombstonePath(`${ALICE}-bingo-d3`)), tombstone(ALICE, { dayIndex: 3 })));
     await assertSucceeds(getDoc(doc(db(BOB), tombstonePath(`${ALICE}-bingo-d3`))));
   });

@@ -18,6 +18,8 @@ import {
   where,
   writeBatch,
   type Firestore,
+  type DocumentSnapshot,
+  type Transaction,
 } from 'firebase/firestore';
 import type { User } from 'firebase/auth';
 import { httpsCallable } from 'firebase/functions';
@@ -176,6 +178,41 @@ export function seedFromUid(uid: string): number {
 function sameStringArray(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
   if (!a || !b || a.length !== b.length) return false;
   return a.every((value, index) => value === b[index]);
+}
+
+/** Compare every Day field used to hydrate or construct this attempted card. */
+function sameHydratedDay(current: DayDef | null | undefined, hydrated: DayDef, snapshotIds: readonly string[]): boolean {
+  return current != null
+    && current.index === hydrated.index
+    && current.pool === hydrated.pool
+    && current.freeText === hydrated.freeText
+    && current.unlockAt === hydrated.unlockAt
+    && current.snapshotEasyMixRatio === hydrated.snapshotEasyMixRatio
+    && sameStringArray(current.snapshotItemIds, snapshotIds);
+}
+
+/** Bind every hydrated member to a current transaction read before publishing. */
+async function assertHydratedPromptsCurrent(
+  tx: Transaction,
+  eventId: string,
+  snapshotIds: readonly string[],
+  hydrated: readonly (DocumentSnapshot | null)[],
+): Promise<void> {
+  // A native read-set makes a later hide/delete/edit retry or reject this
+  // transaction. Comparing every consumed field also refuses changes that
+  // already landed after preflight, before these authoritative reads. Rules
+  // remain the read authority; no status exemption or smaller pool is used.
+  const current = await Promise.all(snapshotIds.map((id) => tx.get(rawItem(id, eventId)))).catch(() => null);
+  const fields = ['text', 'spicy', 'isFreeSpace', 'pool', 'targetDayIndex', 'createdBy'] as const;
+  if (!current || current.some((snapshot, index) => {
+    const prior = hydrated[index];
+    if (!snapshot.exists() || !prior?.exists()) return true;
+    const data = snapshot.data() as Partial<ItemDoc>;
+    const original = prior.data() as Partial<ItemDoc>;
+    return fields.some((field) => data[field] !== original[field]);
+  })) {
+    throw new Error("This Day's frozen prompts changed or are unavailable. Try again once they are available.");
+  }
 }
 
 function eventEasyMixRatio(eventData: Partial<EventDoc> | null | undefined): number {
@@ -779,10 +816,18 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
   // Resolve the frozen snapshot ids to their Prompt text/spicy by reading those
   // specific item docs — NOT a live `status: 'active'` collection query. Pool
   // MEMBERSHIP is the snapshot alone; this only hydrates the text/spicy the deal
-  // needs. A snapshot id whose doc is missing or is the free space is dropped.
+  // needs. An unreadable or missing member rejects the whole attempt: silently
+  // dropping it would change the frozen pool for later Players (#1406). The
+  // existing Retry surface handles this without granting hidden-content reads.
+  // The transaction also re-reads every member and checks its consumed fields,
+  // so lost read access, deletion, or a consumed-field edit cannot publish
+  // stale hydrated content.
   const itemSnaps = await Promise.all(
     snapshotIds.map((id) => getDoc(rawItem(id, eventId)).catch(() => null)),
   );
+  if (itemSnaps.some((snap) => !snap || !snap.exists())) {
+    throw new Error("This Day's frozen prompts are unavailable. Try again once they are available.");
+  }
   // The Day Snapshot freezes membership, but it must not bypass the same
   // approval→hostname-stamp race guard as the legacy deal. Capture the posture
   // once: false→true while these reads run may withhold extra Prompts for this
@@ -947,14 +992,10 @@ export async function dealDayCard(u: User, dayIndex: number): Promise<boolean> {
     const latestEventData = latestEventSnap.exists() ? (latestEventSnap.data() as Partial<EventDoc>) : null;
     const latestDays = Array.isArray(latestEventData?.days) ? (latestEventData.days as DayDef[]) : [];
     const latestDay = latestDays[dayIndex];
-    if (
-      !latestDay ||
-      latestDay.unlockAt !== day.unlockAt ||
-      latestDay.snapshotEasyMixRatio !== day.snapshotEasyMixRatio ||
-      !sameStringArray(latestDay.snapshotItemIds, snapshotIds)
-    ) {
+    if (!sameHydratedDay(latestDay, day, snapshotIds)) {
       return false;
     }
+    await assertHydratedPromptsCurrent(tx, eventId, snapshotIds, itemSnaps);
 
     const now = Date.now();
     // Echo Marks: pre-mark every dealt Prompt the Player has already achieved
@@ -1131,16 +1172,13 @@ export function reshuffleSeed(
  * Trade a PRISTINE Day Card for a fresh deal from the SAME Day Snapshot (#378,
  * specs/reshuffle.md). Returns the resulting spend (1..3).
  *
- * The whole transaction is two writes: replace the Day's Board doc with a fresh
- * stratified deal, and increment the Player's cruise-wide `reshufflesUsed`.
- * Nothing else — and that is the point of the pristine constraint, not an
- * omission. A card with zero Marks has produced nothing: no Tally entries to
- * retract, no Proofs to pull from the Feed, no Doubts to dissolve, no stats to
- * re-fold, no Moments at risk. So there is deliberately NO cascade code here. A
- * Player who wants out of a card they HAVE marked unmarks it themselves through
- * the existing, tested Mark path (which already removes its Tally entries), which
- * returns the card to pristine — the cascade performed by the player, visibly,
- * through mechanics that already exist.
+ * The baseline transaction replaces the Day's Board, merges the Player's
+ * cruise-wide `reshufflesUsed`, and creates its per-spend marker. Artifact-free
+ * confirmed Echoes are also pristine: the replacement re-echoes from the
+ * transaction's peer/Event reads, re-derives its eligible Day stats and removes
+ * orphaned Echo markers under the existing Echo contract. There is no manual
+ * Mark cascade here. A Player who wants out of a card they HAVE marked unmarks
+ * it themselves through the existing Mark path, returning it to pristine.
  *
  * ONLINE-ONLY, unlike every other write in this file — and enforced by
  * `runTransaction`, NOT by the `online` gate on the chip and NOT by awaiting a
@@ -1181,11 +1219,10 @@ export async function reshuffleBoard(params: {
 }): Promise<number> {
   const { uid, dayIndex, expectedSeed } = params;
   const eventId = EVENT_ID;
-  // The Event schedule and the Day Snapshot's items are read outside: neither is
-  // written here, and neither changes under a retry, so re-reading them per attempt
-  // would cost a round trip and buy nothing. Everything that CAN change — this
-  // Board, the counter, and the peer cards the exclusion set is built from — is
-  // read inside.
+  // Hydrate outside, then bind the Event and every Prompt to transaction reads
+  // on each attempt: re-snapshot or unreadable/changed content refuses the
+  // draw. The Board, counter, and peer cards are also read inside so retries
+  // re-decide.
   const eventSnap = await getDoc(rawEvent(eventId));
   const eventData = eventSnap.exists() ? (eventSnap.data() as Partial<EventDoc>) : null;
   const days = Array.isArray(eventData?.days) ? (eventData.days as DayDef[]) : [];
@@ -1214,6 +1251,9 @@ export async function reshuffleBoard(params: {
   const itemSnaps = await Promise.all(
     snapshotIds.map((id) => getDoc(rawItem(id, eventId)).catch(() => null)),
   );
+  if (itemSnaps.some((snapshot) => !snapshot || !snapshot.exists())) {
+    throw new Error("This Day's frozen prompts are unavailable. Try again once they are available.");
+  }
   // A reshuffle is another frozen-card publish path. During the asynchronous
   // window between approving the first explicit Prompt and publishing the 18+
   // hostname posture, it must fail closed exactly like the first Day deal.
@@ -1288,11 +1328,20 @@ export async function reshuffleBoard(params: {
     // re-runs on a retry — which is the point: a retry must re-decide from
     // committed state, never re-fire a verdict formed against a snapshot that has
     // since lost a race.
-    const [boardSnap, playerSnap, ...peerSnaps] = await Promise.all([
+    const [latestEventSnap, boardSnap, playerSnap, ...peerSnaps] = await Promise.all([
+      tx.get(rawEvent(eventId)),
       tx.get(boardRef),
       tx.get(playerRef),
       ...peerRefs.map((ref) => tx.get(ref)),
     ]);
+
+    const latestEventData = latestEventSnap.exists() ? (latestEventSnap.data() as Partial<EventDoc>) : null;
+    const latestDays = Array.isArray(latestEventData?.days) ? (latestEventData.days as DayDef[]) : [];
+    const latestDay = latestDays[dayIndex];
+    if (!sameHydratedDay(latestDay, day, snapshotIds)) {
+      throw new Error('This Day changed while reshuffling. Try again.');
+    }
+    await assertHydratedPromptsCurrent(tx, eventId, snapshotIds, itemSnaps);
 
     if (!boardSnap.exists()) throw new Error('reshuffleBoard: no Day Card to reshuffle.');
     const board = boardSnap.data() as {
@@ -1370,10 +1419,13 @@ export async function reshuffleBoard(params: {
     // Marks), so its stat bucket may be non-zero; the replacement's bucket is
     // re-derived from the re-echoed cells so a traded-away echo bingo never
     // survives as a phantom stat. A no-echo reshuffle (empty achieved set,
-    // zeroed prior bucket) keeps the exact two-write shape of today.
+    // zeroed prior bucket) keeps a bare Player counter write alongside the
+    // Board and spend marker.
     const now = Date.now();
-    // Echo switched off (#1360): the replacement card re-echoes nothing.
-    const achieved = echoMarksEnabled(eventData?.settings)
+    // Credit decisions use this attempt’s authoritative Event and schedule;
+    // deterministic draw inputs above remain preflight-scoped. Echo switched
+    // off (#1360): the replacement card re-echoes nothing.
+    const achieved = echoMarksEnabled(latestEventData?.settings)
       ? achievedItemIds(
           peerSnaps.filter((s) => s.exists()).map((s) => cellsFromData((s.data() as { cells?: unknown }).cells)),
         )
@@ -1391,10 +1443,10 @@ export async function reshuffleBoard(params: {
     const rawEchoRes = applyEchoes(cells, achieved, now);
     const statsAllowed =
       !standingsFrozen({
-        frozenAt: eventData?.frozenAt,
-        standingsFreezeAt: eventData?.standingsFreezeAt,
-        days,
-      }) || ceremonialDayIndexSet(days).has(dayIndex);
+        frozenAt: latestEventData?.frozenAt,
+        standingsFreezeAt: latestEventData?.standingsFreezeAt,
+        days: latestDays,
+      }) || ceremonialDayIndexSet(latestDays).has(dayIndex);
     const savedName = typeof player?.displayName === 'string' ? player.displayName : undefined;
     // Net-new echo count (#721, Codex round 1 finding 4): `echoRes` is derived
     // against the freshly-dealt REPLACEMENT card, so `echoedItemIds` is every
@@ -1465,8 +1517,8 @@ export async function reshuffleBoard(params: {
     const bucketDirty =
       priorBucket != null &&
       (priorBucket.bingoCount > 0 || priorBucket.squaresMarked > 0 || priorBucket.firstBingoAt != null);
-    const tutorialSet = tutorialDayIndexSet(days);
-    const ceremonialSet = ceremonialDayIndexSet(days);
+    const tutorialSet = tutorialDayIndexSet(latestDays);
+    const ceremonialSet = ceremonialDayIndexSet(latestDays);
     const statWrite =
       (echoRes.changed || bucketDirty) && statsAllowed
         ? foldEchoStats({
@@ -1524,9 +1576,9 @@ export async function reshuffleBoard(params: {
     const frozenNarrowed =
       statWrite &&
       standingsFrozen({
-        frozenAt: eventData?.frozenAt,
-        standingsFreezeAt: eventData?.standingsFreezeAt,
-        days,
+        frozenAt: latestEventData?.frozenAt,
+        standingsFreezeAt: latestEventData?.standingsFreezeAt,
+        days: latestDays,
       })
         ? { dayStats: { [dayIndex]: statWrite.dayStats[dayIndex] } }
         : statWrite;
@@ -3340,11 +3392,11 @@ export async function addItem(
 }
 
 /**
- * Report one live Prompt incarnation through the rules-paired receipt/counter.
+ * Report the displayed account's live Prompt incarnation through the paired receipt/counter.
  * Rules enforce the reporter's server-clock cadence in addition to the UI throttle.
  */
-export async function reportItem(id: string, eventId: string = EVENT_ID, expectedCreatedAt?: number): Promise<void> {
-  await reportContent('items', id, eventId, expectedCreatedAt);
+export async function reportItem(id: string, eventId: string, expectedCreatedAt: number | undefined, expectedUid: string): Promise<void> {
+  await reportContent('items', id, eventId, expectedCreatedAt, expectedUid);
 }
 
 /** Let a player set a display theme preference on their player row. */
