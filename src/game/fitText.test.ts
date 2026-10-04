@@ -92,9 +92,14 @@ describe('fitTextSize keeps words whole (#1345)', () => {
     expect(size).toBe(14);
   });
 
-  it('with keepWordsWhole: false, fits on height alone (the upper bound SquareText verifies against real glyphs)', () => {
-    const size = fitTextSize('Grandparents on the dance floor', { width: 60, height: 200 }, { baseSize: 14, keepWordsWhole: false });
-    expect(size).toBe(14);
+  it('breaks after an en dash too, but keeps each dash-delimited segment (dash included) whole', () => {
+    const width = 60;
+    // "sun–deck–party" splits into "sun–", "deck–", "party" (5 chars at most): fits at 14px (7 per line).
+    expect(fitTextSize('sun–deck–party', { width, height: 200 }, { baseSize: 14 })).toBe(14);
+    // "Grandparents-" (13 chars, hyphen included) must still fit on one line.
+    const size = fitTextSize('Grandparents-in-law', { width, height: 200 }, { baseSize: 14 });
+    expect(size).toBeLessThan(14);
+    expect(wordFitsOnOneLine('Grandparents-', width, size)).toBe(true);
   });
 
   it('still keeps the Latin segment of a mixed-script token whole', () => {

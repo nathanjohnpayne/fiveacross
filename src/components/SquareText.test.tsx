@@ -46,7 +46,7 @@ function stubLayout(realCharEm = REAL_CHAR_EM, renderedLines = 2) {
     if (!this.classList.contains('cell-text')) return rect(CELL);
     const size = parseFloat(this.style.fontSize);
     // The widest unbreakable run: CSS may wrap at whitespace or after a hyphen.
-    const longest = Math.max(...(this.textContent ?? '').split(/\s+|(?<=-)/).map((w) => w.length));
+    const longest = Math.max(...((this.textContent ?? '').match(/[^\s-]*-|[^\s-]+/g) ?? []).map((w) => w.length));
     const unbrokenWidth = longest * size * realCharEm;
     // With mid-word breaking allowed the word wraps inside the box instead.
     const height = renderedLines * size * 1.05;
@@ -93,6 +93,15 @@ describe('SquareText keeps words whole (#1345)', () => {
     // glyphs really measure 0.4 em: 57.6px, a fit.
     stubLayout(0.4);
     const target = renderedSpan('Illimitables');
+    expect(parseFloat(target.style.fontSize)).toBe(CEILING_PX);
+  });
+
+  it('keeps the ceiling when the real block fits, even though the estimator would shrink it on height', () => {
+    // 10 narrow-glyph words: the flat 0.55 em estimate wraps them to 5 lines
+    // at 12px (63px, over the 62px usable height) and would shrink, but the
+    // browser renders them in 2 lines (25.2px) at 0.3 em.
+    stubLayout(0.3, 2);
+    const target = renderedSpan('iii iii iii iii iii iii iii iii iii iii');
     expect(parseFloat(target.style.fontSize)).toBe(CEILING_PX);
   });
 

@@ -1920,23 +1920,27 @@ describe('Text size auto-fit guard (specs/d15-text-size.md)', () => {
 
   function stubMeasurement() {
     const realGetComputedStyle = window.getComputedStyle;
-    // Only the Square's box is modelled here. The `.cell-text` span itself
-    // reports no width, so SquareText's real-glyph whole-word probe (#1345,
-    // covered by SquareText.test.tsx) never sees an overflow and these tests
-    // exercise the estimate alone.
+    // The Square is a fixed box. The `.cell-text` span, which SquareText's
+    // real-glyph probe (#1345, covered in detail by SquareText.test.tsx)
+    // measures, reports no width (no word overflows) and a rendered height of
+    // the text's wrapped line count at the applied size: 0.55 em per character
+    // over ~62px of usable width, at `.cell`'s 1.05 line-height.
+    const rect = (width: number, height: number) => ({
+      width,
+      height,
+      top: 0,
+      left: 0,
+      right: width,
+      bottom: height,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
-      const size = this.classList.contains('cell-text') ? 0 : REALISTIC_CELL_SIZE;
-      return {
-        width: size,
-        height: size,
-        top: 0,
-        left: 0,
-        right: size,
-        bottom: size,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      };
+      if (!this.classList.contains('cell-text')) return rect(REALISTIC_CELL_SIZE, REALISTIC_CELL_SIZE);
+      const size = parseFloat(this.style.fontSize) || CEILING_PX;
+      const lines = Math.ceil(((this.textContent ?? '').length * size * 0.55) / (REALISTIC_CELL_SIZE - 8));
+      return rect(0, lines * size * 1.05);
     });
     vi.spyOn(window, 'getComputedStyle').mockImplementation((el: Element, pseudo?: string | null) => {
       if (el instanceof HTMLElement && el.classList.contains('cell-text')) {

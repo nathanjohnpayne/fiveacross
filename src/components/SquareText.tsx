@@ -31,18 +31,18 @@ type InsetKey =
  * the longest word, where `.cell`'s mid-word breaking is the last-resort
  * fallback.
  *
- * The probe starts from `heightBound` — the estimator's height-only fit, which
- * does not reject a size for a word the flat average glyph width merely
- * GUESSES is too wide — so real measurement decides the whole-word question:
- * a token of narrow glyphs, or one that may wrap after a hyphen, keeps the
- * largest size it actually fits at. Each probe also checks the rendered
- * block's HEIGHT against the host's usable height, so the real line breaks
- * (not the estimator's guess at them) decide whether the block fits and
- * nothing is clipped. A host with no layout yet (width 0,
- * pre-first-paint or jsdom) has nothing to measure against, so the
- * whole-word `estimated` size stands with the overrides off.
+ * Whenever the host has layout, the probe starts from the CSS ceiling
+ * (`baseSize`), not from the estimate: the flat average glyph width can
+ * over-shrink both ways (a word of narrow glyphs it GUESSES is too wide, a
+ * block it guesses needs more lines than it does), and a probe that only
+ * steps down could never win that size back. Each probe checks the rendered
+ * span's width (every word whole) AND height (the real line breaks fit the
+ * host's usable height, so `.cell`'s `overflow: hidden` clips nothing), so
+ * real measurement alone picks the largest fitting size. A host with no
+ * layout yet (width 0, pre-first-paint or jsdom) has nothing to measure
+ * against, so the whole-word `estimated` size stands with the overrides off.
  */
-function keepWordsWhole(el: HTMLElement, host: HTMLElement, estimated: number, heightBound: number): number {
+function keepWordsWhole(el: HTMLElement, host: HTMLElement, estimated: number, baseSize: number): number {
   clearWholeWordOverrides(el);
   const hostStyle = window.getComputedStyle(host);
   const inset = (keys: readonly InsetKey[]) => keys.reduce((sum, key) => sum + (parseFloat(hostStyle[key]) || 0), 0);
@@ -61,11 +61,8 @@ function keepWordsWhole(el: HTMLElement, host: HTMLElement, estimated: number, h
     return el.getBoundingClientRect();
   };
   const tooWide = (rect: DOMRect) => rect.width > usableWidth + EPSILON;
-  // The rendered block must also fit the height: the estimator's line count
-  // is only an approximation of where the browser actually breaks (e.g. a
-  // compound that may only wrap at its hyphens), and `.cell` clips overflow.
   const tooTall = (rect: DOMRect) => usableHeight > 0 && rect.height > usableHeight + EPSILON;
-  const fitted = shrinkToWholeWords(heightBound, (size) => {
+  const fitted = shrinkToWholeWords(baseSize, (size) => {
     const rect = rectAt(size);
     return tooWide(rect) || tooTall(rect);
   });
@@ -144,8 +141,7 @@ export default function SquareText({ text }: { text: string }) {
         height: Math.max(0, hostRect.height - HOST_PADDING),
       };
       const estimated = fitTextSize(text, box, { baseSize });
-      const heightBound = fitTextSize(text, box, { baseSize, keepWordsWhole: false });
-      const fitted = keepWordsWhole(el, host, estimated, heightBound);
+      const fitted = keepWordsWhole(el, host, estimated, baseSize);
       el.style.fontSize = `${fitted}px`;
       setFontSize(fitted);
     };

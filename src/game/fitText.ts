@@ -43,12 +43,6 @@ export interface FitTextOptions {
   lineHeight?: number;
   /** The font-size step (px) the guard decrements by per iteration. */
   step?: number;
-  /** Require every word to fit on one line at the estimated glyph width
-   *  before accepting a size (#1345). Default true. `SquareText` passes
-   *  false to get the height-only upper bound it then verifies against the
-   *  REAL glyphs, so a narrow-glyph word the flat average over-estimates is
-   *  not shrunk below the size it actually fits at. */
-  keepWordsWhole?: boolean;
 }
 
 const DEFAULT_MIN_SIZE = 6;
@@ -74,10 +68,15 @@ const DEFAULT_STEP = 0.5;
  */
 const INTRA_WORD_BREAK_RUNS =
   /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]+/u;
-const BREAK_AFTER_DASH = /(?<=[-‐–—])/u;
+// Each match is one segment ending just after a hyphen/dash, or the trailing
+// remainder. Deliberately no lookbehind: RegExp lookbehind throws at module
+// evaluation on Safari before 16.4, and this module loads with the Board.
+const SEGMENTS_BREAKING_AFTER_DASH = /[^\-‐–—]*[\-‐–—]|[^\-‐–—]+/gu;
 
 function longestUnbreakableSegment(word: string): number {
-  const segments = word.split(INTRA_WORD_BREAK_RUNS).flatMap((run) => run.split(BREAK_AFTER_DASH));
+  const segments = word
+    .split(INTRA_WORD_BREAK_RUNS)
+    .flatMap((run) => run.match(SEGMENTS_BREAKING_AFTER_DASH) ?? []);
   return Math.max(0, ...segments.map((segment) => segment.length));
 }
 
@@ -139,7 +138,6 @@ export function fitTextSize(text: string, box: FitTextBox, options: FitTextOptio
     charWidthRatio = DEFAULT_CHAR_WIDTH_RATIO,
     lineHeight = DEFAULT_LINE_HEIGHT,
     step = DEFAULT_STEP,
-    keepWordsWhole = true,
   } = options;
 
   if (!text.trim() || box.width <= 0 || box.height <= 0 || baseSize <= 0) return baseSize;
@@ -148,7 +146,7 @@ export function fitTextSize(text: string, box: FitTextBox, options: FitTextOptio
   for (let size = baseSize; size >= floor; size -= step) {
     const { lines, wordsStayWhole } = estimateLineCount(text, box.width, size, charWidthRatio);
     const blockHeight = lines * size * lineHeight;
-    if ((wordsStayWhole || !keepWordsWhole) && blockHeight <= box.height) return size;
+    if (wordsStayWhole && blockHeight <= box.height) return size;
   }
   return floor;
 }
