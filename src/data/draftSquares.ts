@@ -115,8 +115,11 @@ function reindex(days: readonly DraftDayDef[]): DraftDayDef[] {
  * No-op transforms deliberately do NOT come through here — they return the
  * original draft by identity, because nothing was edited and a refusal should
  * not quietly rewrite the draft it refused.
+ *
+ * Exported for Step 4's transforms (`draftLook.ts`, #1377), which return
+ * through this same function rather than restating it.
  */
-function normalizeDraft(draft: EventDraft): EventDraft {
+export function normalizeDraft(draft: EventDraft): EventDraft {
   return {
     ...draft,
     days: reindex(denseDays(draft)),
