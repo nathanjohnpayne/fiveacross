@@ -476,7 +476,7 @@ function withTimeout<T>(work: Promise<T>, timeoutMs: number, label = 'Auth boots
 // late REJECTION used to be dropped on the floor. That is fine for a late
 // 'connection'-class rejection — the in-time timeout already published that exact
 // classification — but bootstrapUser's failure arm provisionally lifts the render
-// gate from a cached stamp FOR THAT CLASS ONLY (#521), on the bet that the failure
+// gate from a scoped render witness FOR THAT CLASS ONLY (#521), on the bet that the failure
 // is transient. If the underlying read then rejects with a PERMANENT cause instead
 // (permission-denied, schema, unknown-coded), the bet was wrong and nothing ever
 // revoked the lift or corrected `dealErrorReason` — contradicting the invariant
@@ -526,7 +526,7 @@ interface AuthContextValue {
   // is still UNKNOWN during load can't flash the prompt.
   needsAttestation: boolean;
   // True only after this session has proof that Event content may render:
-  // a cached offline stamp, a server-confirmed stamp, or a same-session attest.
+  // a offline boolean witness plus a cached Board, a server-confirmed stamp, or a same-session attest.
   // Consumers that bypass Board's normal render path (the durable card fallback)
   // must check this instead of inferring permission from a saved snapshot.
   canRenderEventContent: boolean;
@@ -754,7 +754,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // the same batch as the identity change, so the FIRST render of the shell
   // already carries `held` when the origin holds an invitation. Classification
   // needs no authority and no network; only redemption does. Without it a
-  // cached render permission (an offline cold boot with a cached 18+ stamp)
+  // cached render permission (an offline cold boot with a boolean witness plus a cached Board)
   // would release Board, Nav and their subscriptions to a visit whose
   // invitation had never been checked at all.
   const classifyAdmission = useCallback((uid: string, ownedEventId: string) => {
@@ -787,8 +787,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Reactive connectivity, mirrored from the browser online/offline events (#115).
   // A REACT STATE (not just the imperative `isOnline()` probe) so the deal effect's
   // deps actually CHANGE on reconnect: a globally-attested User who cold-boots
-  // offline onto a FRESH Event (no cached board) settles `attested === true` from
-  // cache but must not deal until online — and the deferred deal has to FIRE on
+  // offline with an existing cached Board may lift render from the boolean
+  // witness, but must not deal until online authority returns — and the deferred deal has to FIRE on
   // reconnect, which only happens if `online` flipping true re-runs that effect.
   const [online, setOnline] = useState(isOnline());
   const signInAttemptRef = useRef<Promise<void> | null>(null);
@@ -1056,14 +1056,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [updateDealStateFor]);
 
   // The connectivity-aware profile/attestation bootstrap, run OFF the render path
-  // (#115). The cache lifts the gate PROVISIONALLY offline; the server read is
+  // (#115). The scoped boolean plus cached Board lifts render PROVISIONALLY;
+  // the server read is
   // AUTHORITATIVE when it arrives. Two mutually-exclusive branches:
   //
   //   OFFLINE — settle the 18+ gate CACHE-FIRST, no network, then DEFER the rest.
-  //     A cached stamp (or a same-session optimistic attest, #112 Finding 3) is
-  //     PROOF of 18+: it lifts the gate AND releases the "Loading…" hold so a
+  //     A boolean witness plus an existing cached Board (or a same-session
+  //     optimistic attest, #112 Finding 3) is provisional RENDER permission:
+  //     it lifts the gate AND releases the "Loading…" hold so a
   //     returning User renders their cached Board offline (the #115 cold-boot). A
-  //     cache miss or a definite-unstamped row is UNKNOWN: it never lifts `true`
+  //     missing/refused witness or missing cached Board is UNKNOWN: it never lifts `true`
   //     (cache-first can't fail the age gate open) and it does NOT render — it
   //     HOLDS on "Loading…" (finding B) until reconnect settles the authoritative
   //     read, because offline can't re-prompt (the attest transaction needs the
@@ -1094,8 +1096,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // avoid rendering the Board without proof-of-18+; an Event whose pool holds
       // no adult content never asked for that proof, so holding "Loading…" until
       // reconnect would strand an offline Player on a spinner over a question
-      // nobody posed. Released BEFORE the IndexedDB read, which would only ever
-      // answer about a stamp this Event does not want.
+      // nobody posed. Released BEFORE the offline witness/Board probe, which would only
+      // answer about an attestation this Event does not require.
       if (!adultContentRequired()) {
         if (profileAttemptRef.current !== attempt) return;
         setLoading(false);
@@ -1103,10 +1105,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
       // OFFLINE: settle the gate CACHE-FIRST and RELEASE the render only with
-      // PROOF of 18+ (finding B). A cached stamp — or a same-session optimistic
-      // attest (#112 Finding 3) — provisionally lifts the gate and paints the
-      // cached Board (that is the #115 offline cold-boot). But a cache MISS or an
-      // unstamped row is UNKNOWN: it must NOT render the Board (that would let a
+      // provisional RENDER permission (finding B). The scoped boolean plus an
+      // existing cached Board — or a same-session optimistic attest (#112
+      // Finding 3) — provisionally lifts the gate and paints the
+      // cached Board (the #115 offline cold-boot). A missing/refused witness
+      // or missing Board is UNKNOWN: it must NOT render the Board (that would let a
       // returning User with a cached board but no proof-of-18+ view the Event
       // offline — the fail-open the age gate exists to prevent), so it HOLDS on
       // the App "Loading…" gate until reconnect settles the authoritative read
@@ -1243,7 +1246,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           // A late REJECTION of a read that already timed out in-time (Codex P2
           // on #762). The in-time failure arm below classifies THAT synthetic
           // timeout as 'connection' and, for that class only, provisionally
-          // lifts `attested` from a cached stamp (#521) on the bet that the
+          // lifts `attested` from a scoped render witness (#521) on the bet that the
           // failure is transient. If the underlying read then rejects with a
           // PERMANENT cause instead, the bet was wrong: correct the reason and
           // revoke the lift, same as the invariant enforced at the in-time
@@ -1407,8 +1410,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // `canRenderEventContent` false, and App then withholds the whole Event
         // — including the #434 durable card this device already holds. That is
         // the ADR 0006 promise inverted: the one moment the saved card exists
-        // for is the one moment it cannot paint. A cached `attestedAdultAt` is
-        // the same proof of 18+ the offline branch accepts, so it lifts RENDER
+        // for is the one moment it cannot paint. A scoped boolean plus an existing
+        // cached Board is the same provisional render witness the offline branch
+        // accepts, so it lifts RENDER
         // here too — PROVISIONALLY: never `attestedAuthoritative`, so no deal
         // fires and no durable rows are created for a User the server has not
         // confirmed, and the late authoritative settle above still downgrades a
@@ -1594,7 +1598,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         completeRedirectReturn(u, false);
       }
       // Gate on "Loading…" until the bootstrap PROVES 18+ (finding B): the
-      // authoritative server read online, or a cached stamp / same-session attest
+      // authoritative server read online, or a scoped render witness / same-session attest
       // offline. Never render the Board before proof. Not an await (that was the
       // offline hang); bootstrapUser releases the hold with setLoading(false) —
       // immediately from the fast local cache read when offline-attested (the #115

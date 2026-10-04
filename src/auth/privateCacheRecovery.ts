@@ -11,6 +11,7 @@ export interface LegacyRecoveryOperations {
   terminate: () => Promise<void>;
   clear: () => Promise<void>;
   recordCompletion: () => void;
+  clearStillPending?: () => void;
 }
 
 /**
@@ -49,7 +50,18 @@ export async function completeLegacyCacheRecovery(
   assertSession();
   await bounded(operations.terminate);
   assertSession();
-  await bounded(operations.clear);
+  // Clearing is destructive and cannot be canceled by Promise.race. A timeout
+  // may report waiting, but may not release this document while the SDK can
+  // still erase persistence. Late settlement refuses the completion marker.
+  let clearTimer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    clearTimer = setTimeout(() => {
+      expired = true;
+      operations.clearStillPending?.();
+    }, timeoutMs);
+    await operations.clear();
+    if (expired) throw new Error('Recovery timed out; reload before retrying.');
+  } finally { if (clearTimer) clearTimeout(clearTimer); }
   assertSession();
   // A failed clear never unlocks private views. A storage failure also fails
   // closed; replay requires the same attended recovery confirmations.

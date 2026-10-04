@@ -4,7 +4,7 @@ import { EVENT_ID } from '../firebase';
 import { capturePrivateFirestore } from '../privateFirestore';
 import { usePrivateFirestore } from './usePrivateFirestore';
 import { blockPairsCol, blocksCol } from '../data/paths';
-import { computeHiddenSet, hiddenUidsFromPairs, reconcileOrphanPair, repairMissingPairs, subscribePendingBlocks, pendingBlockTargets, observeConfirmedBlockTargets, retirePendingBlocks } from '../data/blocks';
+import { computeHiddenSet, hiddenUidsFromPairs, reconcileOrphanPair, repairMissingPairs, subscribePendingBlocks, pendingBlockTargets, observeConfirmedBlockTargets, retirePendingBlocksOutsideScope } from '../data/blocks';
 import { eventScopeKey } from '../data/eventScope';
 import type { BlockDoc } from '../types';
 
@@ -91,11 +91,17 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
   const key = uid !== null && enabled ? eventScopeKey(eventId, 'block-pairs', uid) : null;
   const [state, setState] = useState<HiddenState>(() => initial(uid, key));
   const pending = useSyncExternalStore(subscribePendingBlocks, () => uid ? pendingBlockTargets(uid, eventId) : EMPTY);
-  useEffect(() => () => { if (uid !== null) retirePendingBlocks(uid, eventId); }, [uid, eventId]);
+  // The single shell provider retires other scopes only after committing a
+  // scope change. Same-scope remounts keep process-local unfinished intent.
+  useEffect(() => { retirePendingBlocksOutsideScope(uid, eventId); }, [uid, eventId]);
   const confirmed = useRef<{ key: string; hidden: ReadonlySet<string> } | null>(null);
-  if (confirmed.current?.key !== key || session.uid !== uid || session.recoveryRequired) confirmed.current = null;
+  // A discarded concurrent render must not erase the committed witness.
+  const witness = confirmed.current?.key === key && session.uid === uid && !session.recoveryRequired
+    ? confirmed.current : null;
   useEffect(() => {
-    const carried = confirmed.current?.key === key ? confirmed.current : null;
+    const carried = confirmed.current?.key === key && session.uid === uid && !session.recoveryRequired
+      ? confirmed.current : null;
+    confirmed.current = carried;
     setState(carried ? { key, hidden: carried.hidden, ready: true } : initial(uid, key));
     if (key === null || uid === null || session.uid !== uid || session.recoveryRequired || !session.db) return;
     const lease = captureMatchingLease(uid, session.db);
@@ -239,7 +245,7 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
   if (key === null) return { hidden: EMPTY, ready: uid === null };
   const sameSession = session.uid === uid && !session.recoveryRequired;
   if (!sameSession) return { hidden: EMPTY, ready: false };
-  if (!session.db && (navigator.onLine || confirmed.current?.key !== key)) return { hidden: EMPTY, ready: false };
+  if (!session.db && (navigator.onLine || !witness)) return { hidden: EMPTY, ready: false };
   return state.key === key
     ? { hidden: state.ready && pending.size > 0 ? computeHiddenSet(pending, state.hidden, true) : state.hidden, ready: state.ready }
     : { hidden: EMPTY, ready: false };

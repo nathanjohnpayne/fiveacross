@@ -87,8 +87,9 @@ async function ownProfileLease(uid: string) {
 
 function rememberAttestation(uid: string, attested: boolean): void {
   try { recordOfflineAttestation(firebaseConfig.projectId, uid, attested); } catch {
-    // Unwritable storage grants no offline witness; a committed server write
-    // must not be reported as failed because this render-only hint was refused.
+    // Failed storage writes retire a revoked witness in this process, but cannot
+    // convey revocation to a fresh process if every persistent write is refused.
+    // A committed server result still stands when this render-only hint fails.
   }
 }
 const rawBoard = (uid: string, eventId: string = EVENT_ID) =>

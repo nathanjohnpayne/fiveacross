@@ -1,3 +1,4 @@
+import { Suspense, startTransition, useState } from 'react';
 import { act, render, renderHook, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -121,6 +122,72 @@ afterEach(() => {
 });
 
 describe('useHiddenUidsSubscription', () => {
+  it('same-scope remount retains pending targets without granting cold readiness', async () => {
+    const first = renderHook(() => useHiddenUidsSubscription('bob', true));
+    act(() => H.subscriptions[0].listener(pairs([])));
+    let release!: () => void;
+    H.blockCommits = [() => new Promise<void>(resolve => { release = resolve; })];
+    let commit!: Promise<void>;
+    act(() => { commit = blockPlayer({ me: 'bob', target: 'alice' }); });
+    expect(first.result.current.hidden.has('alice')).toBe(true);
+    first.unmount();
+    const remounted = renderHook(() => useHiddenUidsSubscription('bob', true));
+    expect(remounted.result.current.ready).toBe(false);
+    act(() => H.subscriptions[1].listener(pairs([])));
+    expect(remounted.result.current).toEqual({ hidden: new Set(['alice']), ready: true });
+    await act(async () => { release(); await commit; });
+    expect(remounted.result.current.hidden.has('alice')).toBe(true);
+    act(() => H.subscriptions[1].listener(pairs([['alice', 'bob']])));
+    expect(pendingBlockTargets('bob', H.eventId).size).toBe(0);
+    expect(remounted.result.current.hidden.has('alice')).toBe(true);
+  });
+
+  it('a committed other scope retires pending intent even between provider mounts', async () => {
+    const first = renderHook(() => useHiddenUidsSubscription('bob', true));
+    act(() => H.subscriptions[0].listener(pairs([])));
+    let release!: () => void;
+    H.blockCommits = [() => new Promise<void>(resolve => { release = resolve; })];
+    let commit!: Promise<void>;
+    act(() => { commit = blockPlayer({ me: 'bob', target: 'alice' }); });
+    first.unmount();
+    H.session = { ...H.session, uid: 'carol', generation: 1 };
+    const other = renderHook(() => useHiddenUidsSubscription('carol', true));
+    expect(pendingBlockTargets('bob', H.eventId).size).toBe(0);
+    other.unmount();
+    H.session = { ...H.session, uid: 'bob', generation: 2 };
+    const returned = renderHook(() => useHiddenUidsSubscription('bob', true));
+    act(() => H.subscriptions[2].listener(pairs([])));
+    await act(async () => { release(); await commit; });
+    expect(returned.result.current).toEqual({ hidden: new Set(), ready: true });
+  });
+
+  it('a discarded scope render cannot erase the committed offline witness', () => {
+    let changeUid!: (uid: string) => void;
+    let refresh!: () => void;
+    let suspendedRenders = 0;
+    const pause = new Promise<never>(() => {});
+    function Reader({ uid }: { uid: string }) {
+      const value = useHiddenUidsSubscription(uid, true);
+      if (uid === 'carol') { suspendedRenders += 1; throw pause; }
+      return <output data-testid="committed-hidden">{`${value.ready}:${[...value.hidden].join(',')}`}</output>;
+    }
+    function Harness() {
+      const [uid, setUid] = useState('bob'); changeUid = setUid;
+      const [, setTick] = useState(0); refresh = () => setTick(tick => tick + 1);
+      return <Suspense fallback={<span>Waiting</span>}><Reader uid={uid} /></Suspense>;
+    }
+    render(<Harness />);
+    act(() => H.subscriptions[0].listener(pairs([['alice', 'bob']])));
+    expect(screen.getByTestId('committed-hidden')).toHaveTextContent('true:alice');
+    act(() => { startTransition(() => changeUid('carol')); });
+    expect(suspendedRenders).toBeGreaterThan(0);
+    expect(screen.getByTestId('committed-hidden')).toHaveTextContent('true:alice');
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    H.session = { ...H.session, db: null, generation: 1 };
+    act(() => { changeUid('bob'); refresh(); });
+    expect(screen.getByTestId('committed-hidden')).toHaveTextContent('true:alice');
+  });
+
   it('signed out: ready with nothing hidden, and no listener', () => {
     const view = renderHook(() => useHiddenUidsSubscription(null, true));
     expect(view.result.current).toEqual({ hidden: new Set(), ready: true });

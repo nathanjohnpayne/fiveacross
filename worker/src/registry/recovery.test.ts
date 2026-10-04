@@ -546,7 +546,7 @@ describe('source-attested recovery', () => {
             iamMember: oldMember,
             fullResourceName: oldResource,
             policyEtag: 'old-sa-etag',
-            tokenCreatorMembers: [],
+            tokenCreatorMembers: [], inheritedPoliciesComplete: true,
             responseDigest: '5'.repeat(64),
           },
           {
@@ -555,7 +555,7 @@ describe('source-attested recovery', () => {
             iamMember: replacementMember,
             fullResourceName: replacementResource,
             policyEtag: 'new-sa-etag',
-            tokenCreatorMembers: [],
+            tokenCreatorMembers: [], inheritedPoliciesComplete: true,
             responseDigest: '6'.repeat(64),
           },
         ],
@@ -615,6 +615,77 @@ describe('source-attested recovery', () => {
       leakedCredential: 'must-not-persist',
     } as never;
     expect(() => parseRecovery(nestedReplacementExtra)).toThrow('publisher runtime readback');
+
+    // Neither a person nor a plausible Google/runtime identity is an approved
+    // replacement impersonator merely because the IAM principal is narrow.
+    for (const member of [
+      'user:operator@example.com',
+      'serviceAccount:firebase-adminsdk-fbsvc@fiveacross.iam.gserviceaccount.com',
+      'serviceAccount:unapproved-runtime@fiveacross.iam.gserviceaccount.com',
+      'serviceAccount:service-999999@gcp-sa-pubsub.iam.gserviceaccount.com',
+      'serviceAccount:service-999999@gcf-admin-robot.iam.gserviceaccount.com',
+      'serviceAccount:service-999999@serverless-robot-prod.iam.gserviceaccount.com',
+      'serviceAccount:service-999999@gcp-sa-eventarc.iam.gserviceaccount.com',
+      'serviceAccount:service-999999@gcp-sa-cloudbuild.iam.gserviceaccount.com',
+      'serviceAccount:service-5297095641@gcp-sa-cloudscheduler.iam.gserviceaccount.com',
+      'serviceAccount:service-5297095641@gcp-sa-firebasemods.iam.gserviceaccount.com',
+      'principal://iam.googleapis.com/unapproved-subject',
+      'group:operators@example.com',
+      'domain:example.com',
+      'allUsers',
+      'allAuthenticatedUsers',
+      oldMember,
+    ]) {
+      const unapproved = structuredClone(replacement);
+      unapproved.controlEvidence.serviceAccountAccess[1].tokenCreatorMembers = [member];
+      await expect(
+        applyRecovery(
+          acquired.state,
+          await request(acquired.state, { kind: 'apply', lockId: 'lock-1', publisherReplacement: unapproved }, sourceAudit('2')),
+          replacementContext,
+        ),
+        member,
+      ).rejects.toThrow('replacement service-account policy');
+    }
+
+    for (const complete of [undefined, false, 'true', 'UNKNOWN']) {
+      const incomplete = structuredClone(replacement);
+      incomplete.controlEvidence.serviceAccountAccess[1].inheritedPoliciesComplete = complete as never;
+      const incompleteRequest = await request(acquired.state, { kind: 'apply', lockId: 'lock-1', publisherReplacement: incomplete }, sourceAudit('2'));
+      expect(() => parseRecovery(incompleteRequest)).toThrow('incomplete service-account policy');
+      await expect(applyRecovery(acquired.state, incompleteRequest, replacementContext)).rejects.toThrow('replacement service-account policy');
+    }
+    const omitted = structuredClone(replacement);
+    delete omitted.controlEvidence.serviceAccountAccess[1].inheritedPoliciesComplete;
+    const omittedRequest = await request(acquired.state, { kind: 'apply', lockId: 'lock-1', publisherReplacement: omitted }, sourceAudit('2'));
+    expect(() => parseRecovery(omittedRequest)).toThrow('service-account readback');
+    await expect(applyRecovery(acquired.state, omittedRequest, replacementContext)).rejects.toThrow('replacement service-account policy');
+    const approved = structuredClone(replacement);
+    approved.controlEvidence.serviceAccountAccess[1].tokenCreatorMembers = ['serviceAccount:service-5297095641@gcp-sa-pubsub.iam.gserviceaccount.com'];
+    const approvedRequest = await request(acquired.state, { kind: 'apply', lockId: 'lock-1', publisherReplacement: approved }, sourceAudit('2'));
+    expect(parseRecovery(approvedRequest)).toEqual(approvedRequest);
+    const approvedApply = await applyRecovery(acquired.state, approvedRequest, replacementContext);
+    expect(approvedApply.state.minimumPublisherEpoch).toBe('8');
+    expect((await applyRecovery(acquired.state, approvedRequest, replacementContext)).state).toEqual(approvedApply.state);
+
+    for (const agent of ['gcp-sa-eventarc', 'gcf-admin-robot', 'serverless-robot-prod', 'gcp-sa-cloudbuild']) {
+      const required = structuredClone(replacement);
+      required.controlEvidence.serviceAccountAccess[1].tokenCreatorMembers = [`serviceAccount:service-5297095641@${agent}.iam.gserviceaccount.com`];
+      const requiredRequest = await request(acquired.state, { kind: 'apply', lockId: 'lock-1', publisherReplacement: required }, sourceAudit('2'));
+      expect(parseRecovery(requiredRequest)).toEqual(requiredRequest);
+      await expect.soft(applyRecovery(acquired.state, requiredRequest, replacementContext), agent).resolves.toMatchObject({
+        state: { minimumPublisherEpoch: '8', highestQuarantinedPublisherEpoch: '7' },
+      });
+    }
+
+    const foreignEmail = 'next@foreign-project.iam.gserviceaccount.com';
+    const foreign = JSON.parse(JSON.stringify(replacement)
+      .replaceAll(replacementEmail, foreignEmail)
+      .replaceAll(`projects/fiveacross/serviceAccounts/${foreignEmail}`, `projects/foreign-project/serviceAccounts/${foreignEmail}`)) as NonNullable<PublisherReplacement>;
+    expect(foreign.controlEvidence.serviceAccountAccess[1].tokenCreatorMembers).toEqual([]);
+    await expect(applyRecovery(acquired.state,
+      await request(acquired.state, { kind: 'apply', lockId: 'lock-1', publisherReplacement: foreign }, sourceAudit('2')),
+      replacementContext)).rejects.toThrow('replacement service-account policy');
 
     const applied = await applyRecovery(acquired.state, strictRequest, replacementContext);
     expect(applied.state.minimumPublisherEpoch).toBe('8');

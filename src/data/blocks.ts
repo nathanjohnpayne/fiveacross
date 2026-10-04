@@ -84,6 +84,16 @@ export function retirePendingBlocks(uid: string, eventId: string): void {
   if (pendingBlockIntents.delete(key)) publishPendingBlocks(key);
 }
 
+/** The single shell provider's committed scope retains only its own relay.
+ * Unmount alone is not a scope transition; a same-scope remount still needs
+ * unfinished intent until the independent memory listener observes the batch. */
+export function retirePendingBlocksOutsideScope(uid: string | null, eventId: string): void {
+  const retained = uid === null ? null : pendingBlockKey(uid, eventId);
+  for (const key of pendingBlockIntents.keys()) {
+    if (key !== retained) { pendingBlockIntents.delete(key); publishPendingBlocks(key); }
+  }
+}
+
 /**
  * Block `target`: set the caller's direction record and the pair record in one
  * batch. IDEMPOTENT under the rules (a re-set is a `createdAt` refresh on the

@@ -16,7 +16,7 @@ Two dependencies shipped before this ticket, so this ticket adds only the client
 
 ## Private-cache boundary (#1411)
 
-The timestamp remains server-persisted. Client profile reads use the independent memory-only private session. The owner-approved offline exception is a per-project, per-UID boolean for provisional rendering of an existing cached Board; it contains no profile fields or timestamp, grants no deal authority, and is revoked by definitive server absence. Same-session optimistic UI remains intact. See [the isolation and attended recovery contract](private-cache-isolation.md).
+The timestamp remains server-persisted. Client profile reads use the independent memory-only private session. The owner-approved offline exception is a per-project, per-UID boolean for provisional rendering of an existing cached Board; it contains no profile fields or timestamp, grants no deal authority, and is retired in-process by definitive server absence. If removing the stored true value fails, the helper replaces it with a same-key false tombstone; a later same-process witness read retries the revocation. If all persistent writes fail and reload precedes that retry, a fresh process cannot recover the revocation fact from unchanged disk. The latter reload residual requires an owner decision. Same-session optimistic UI remains intact. See [the isolation and attended recovery contract](private-cache-isolation.md).
 
 ## Contract
 

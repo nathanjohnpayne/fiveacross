@@ -38,7 +38,9 @@ export function renderPrivateCacheRecovery(): void {
   back.type = 'button';
   const status = document.createElement('p');
   status.setAttribute('role', 'status');
+  let recovering = false;
   const returnToApp = () => {
+    if (recovering) return;
     window.location.replace(applicationAfterRecoveryHref(window.location.href));
   };
   back.addEventListener('click', returnToApp);
@@ -46,6 +48,8 @@ export function renderPrivateCacheRecovery(): void {
   allAccounts.addEventListener('change', changed);
   tabsClosed.addEventListener('change', changed);
   finish.addEventListener('click', async () => {
+    if (recovering) return;
+    recovering = true;
     finish.disabled = back.disabled = allAccounts.disabled = tabsClosed.disabled = true;
     status.textContent = 'Finishing recovery…';
     try {
@@ -66,9 +70,14 @@ export function renderPrivateCacheRecovery(): void {
         terminate: () => terminate(db),
         clear: () => clearIndexedDbPersistence(db),
         recordCompletion: () => recordPrivateCacheRecovery(firebaseConfig.projectId),
+        clearStillPending: () => {
+          status.textContent = 'Still waiting for cache clearing. Keep this recovery document open; returning or retrying stays unavailable until clearing settles. If it never settles, close the browser rather than reopening the app while this clear is running.';
+        },
       });
+      recovering = false;
       returnToApp();
     } catch {
+      recovering = false;
       status.textContent = 'Recovery did not complete. Private views remain closed. Return to the app, verify every account’s Marks online and close other tabs before trying again.';
       // A terminated SDK instance cannot be reused. A retry must start a fresh
       // document; it may never jump directly to clear after a prior failure.

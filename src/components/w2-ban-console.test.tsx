@@ -75,6 +75,7 @@ vi.mock('../hooks/useData', async (importOriginal) => {
       loading: false,
       hasServerData: true,
       serverResolved: true,
+      fromCache: false,
       hasPendingWrites: false,
     }),
     useAdminEventDoc: () => ({
@@ -82,6 +83,7 @@ vi.mock('../hooks/useData', async (importOriginal) => {
       loading: false,
       hasServerData: true,
       serverResolved: true,
+      fromCache: false,
       hasPendingWrites: false,
     }),
     usePendingClaims: () => ({ claims: H.claims }),

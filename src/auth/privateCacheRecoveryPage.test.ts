@@ -106,6 +106,34 @@ describe('attended recovery document DOM (#1411)', () => {
     expect(H.terminate).not.toHaveBeenCalled(); expect(H.clear).not.toHaveBeenCalled();
     expect(privateCacheRecovered(project)).toBe(false);
   });
+  it.each(['resolve', 'reject', 'never'] as const)('quarantines the document until a timed-out clear actually settles (%s)', async outcome => {
+    vi.useFakeTimers();
+    let resolveClear = () => {};
+    let rejectClear = (_error: Error) => {};
+    H.clear.mockReturnValue(new Promise<void>((resolve, reject) => {
+      resolveClear = resolve; rejectClear = reject;
+    }));
+    renderPrivateCacheRecovery(); confirmBoth().click();
+    await vi.advanceTimersByTimeAsync(10001);
+    expect(H.clear).toHaveBeenCalledOnce();
+    expect(failure()).toHaveTextContent('Still waiting for cache clearing');
+    const back = screen.getByRole('button', { name: 'Return to the app' });
+    expect(back).toBeDisabled(); back.click();
+    expect(H.replace).not.toHaveBeenCalled();
+    expect(privateCacheRecovered(project)).toBe(false);
+    expect(screen.getByRole('button', { name: 'Clear recovered cache' })).toBeDisabled();
+    expect(screen.queryByRole('link')).not.toBeInTheDocument();
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(back).toBeDisabled(); expect(H.replace).not.toHaveBeenCalled();
+    if (outcome === 'never') return;
+    if (outcome === 'resolve') resolveClear(); else rejectClear(new Error('late clear refusal'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(failure()).toHaveTextContent('Recovery did not complete');
+    expect(privateCacheRecovered(project)).toBe(false);
+    expect(H.replace).not.toHaveBeenCalled();
+    expect(back).not.toBeDisabled(); back.click();
+    expect(H.replace).toHaveBeenCalledOnce();
+  });
   it.each(['throw', 'silent-noop'] as const)('refuses completion when recovery marker storage is %s', async mode => {
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       if (mode === 'throw') throw new Error('Storage denied');

@@ -105,7 +105,7 @@ describe('private-cache named-app Auth feasibility (#1411)', () => {
     const [host, port] = (process.env.FIRESTORE_EMULATOR_HOST ?? '127.0.0.1:8080').split(':');
     const manager = createPrivateFirestoreSessions({ primaryAuth: primary.auth, options,
       recovered: () => recovered, online: () => online,
-      emulator: { authUrl: `http://${process.env.FIREBASE_AUTH_EMULATOR_HOST}`, firestoreHost: host, firestorePort: Number(port) },
+      emulator: { authUrl: `http://${process.env.FIREBASE_AUTH_EMULATOR_HOST ?? '127.0.0.1:9099'}`, firestoreHost: host, firestorePort: Number(port) },
     });
     const ready = async (uid: string) => {
       await vi.waitFor(() => { expect(manager.getSnapshot().uid).toBe(uid); expect(manager.getSnapshot().db).not.toBeNull(); }, { timeout: 5000 });

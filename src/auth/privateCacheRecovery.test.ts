@@ -56,6 +56,27 @@ describe('attended legacy private-cache recovery (#1411)', () => {
     expect(f.operations.clear).not.toHaveBeenCalled();
     expect(f.operations.recordCompletion).not.toHaveBeenCalled();
   });
+  it.each(['resolve', 'reject'] as const)('does not release a timed-out clear until actual %s settlement', async outcome => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture();
+      let resolveClear = () => {};
+      let rejectClear = (_error: Error) => {};
+      vi.mocked(f.operations.clear).mockReturnValue(new Promise<void>((resolve, reject) => {
+        resolveClear = resolve; rejectClear = reject;
+      }));
+      let settled = false;
+      const recovery = completeLegacyCacheRecovery(attended, f.operations, 5)
+        .then(() => { settled = true; return 'completed'; }, () => { settled = true; return 'refused'; });
+      await vi.advanceTimersByTimeAsync(6);
+      expect(f.operations.clear).toHaveBeenCalledOnce();
+      expect(settled).toBe(false);
+      expect(f.operations.recordCompletion).not.toHaveBeenCalled();
+      if (outcome === 'resolve') resolveClear(); else rejectClear(new Error('late refusal'));
+      await expect(recovery).resolves.toBe('refused');
+      expect(f.operations.recordCompletion).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
   it('does not report completion when its durable marker cannot be stored', async () => {
     const f = fixture();
     vi.mocked(f.operations.recordCompletion).mockImplementationOnce(() => { throw new Error('storage denied'); });

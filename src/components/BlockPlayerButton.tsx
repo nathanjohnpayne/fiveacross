@@ -48,8 +48,10 @@ function firstEnabledControl(root: Element): HTMLElement | null {
  * Confirming commits `blockPlayer`'s batch and closes at once. The batch is
  * optimistic and durable (ADR 0006): the counterpart hides immediately, even
  * offline, which usually unmounts this button with the card or row it sat on.
- * So an online rules rejection is logged and self-corrects as the listener
- * rolls the optimistic pair back (the Hearts and Marks posture), and
+ * The in-process pending-target relay hides it behind an already-confirmed
+ * block set; an online rules rejection is logged and retires that intent. The
+ * independent private-memory listener observes server pairs, not the gameplay
+ * batch's local optimistic rows. On success,
  * `block_player` fires only once the batch persists, under the Event it was
  * acted in. A synchronous refusal (a missing or reserved uid) keeps the sheet
  * open with an error.
@@ -162,8 +164,8 @@ function BlockConfirmSheet({
       document.removeEventListener('keydown', onKeyDown, true);
       previouslyFocused?.focus();
       // A confirmed block hides the counterpart, which unmounts the trigger (its
-      // Proof card or who-list row) once the pair listener renders the optimistic
-      // write: in this commit, or in a later one after the sheet has closed. So
+      // Proof card or who-list row) once the pending-target relay hides it behind
+      // a confirmed block set, in this commit or after the sheet has closed. So
       // watch the host who-list sheet until the trigger detaches, then land focus
       // on that sheet if it is still open, so keyboard focus never drops to <body>
       // behind a live dialog. Only a confirmed block watches, and for at most
