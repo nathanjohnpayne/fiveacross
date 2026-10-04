@@ -1698,6 +1698,7 @@ describe('archive', () => {
       ['a zero generation', { archiveToken: 0 }],
       ['a fractional generation', { archiveToken: 2.5 }],
       ['a generation spelled as text', { archiveToken: '3' }],
+      ['an unsafe integer generation', { archiveToken: 2 ** 53 }],
     ])('refuses %s as invalid input before the first read', async (_why, overrides) => {
       const input = archiveInput(overrides);
       if (input.flip === undefined) delete input.flip;
@@ -1811,6 +1812,20 @@ describe('archive', () => {
       ['a record with a key EventArchive does not declare', flipFor(GENERATION, { archive: archiveRecord({ extra: 1 }) })],
       ['a name that is not text', flipFor(GENERATION, { archive: archiveRecord({ eventName: 7 }) })],
       ['a fractional playerCount', flipFor(GENERATION, { archive: archiveRecord({ playerCount: 1.5 }) })],
+      // Integral but unsafe: the Admin SDK stores it as a double, which the
+      // rules' `is int` denies, so it is refused here as the arm would.
+      [
+        'an unsafe integer playerCount',
+        flipFor(GENERATION, { archive: archiveRecord({ standings: Array.from({ length: 200 }, () => ROW), playerCount: 1e20 }) }),
+      ],
+      [
+        'a held row with an unsafe integer rank',
+        flipFor(GENERATION, { archive: archiveRecord({ firstBingoRow: { ...ROW, rank: 2 ** 53 } }) }),
+      ],
+      [
+        'a daily honour with an unsafe integer Day index',
+        flipFor(GENERATION, { archive: archiveRecord({ dailyHonors: [{ ...HONOR(0), dayIndex: 2 ** 53 }] }) }),
+      ],
       ['standings that disagree with playerCount', flipFor(GENERATION, { archive: archiveRecord({ playerCount: 2 }) })],
       ['standings that are not a list', flipFor(GENERATION, { archive: archiveRecord({ standings: { 0: ROW } }) })],
       [

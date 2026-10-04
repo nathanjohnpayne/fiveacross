@@ -1030,9 +1030,20 @@ const ARCHIVE_INSTANT_BOUND = 4102444800000;
 const MAX_ARCHIVED_STANDING_ROWS = 200;
 const MAX_ARCHIVED_DAY_HONORS = 20;
 
+/**
+ * A value the rules' `is int` accepts once the Admin SDK has encoded it. The
+ * SDK writes a JS number as a Firestore integer only when it is a SAFE
+ * integer; `1e20` passes `Number.isInteger` and is stored as a double, which
+ * the flip arm's `is int` would deny. This helper writes as Admin, so the arm
+ * never asks, and every integer field it validates is held to this instead.
+ */
+function firestoreInteger(value) {
+  return Number.isSafeInteger(value);
+}
+
 /** `usableArchiveToken` on both sides of the rules boundary: a positive integer. */
 function usableArchiveToken(value) {
-  return Number.isInteger(value) && value > 0;
+  return firestoreInteger(value) && value > 0;
 }
 
 function finiteArchiveNumber(value) {
@@ -1055,7 +1066,7 @@ function firstBingoPairComplete(archive) {
     finiteArchiveNumber(row.squaresMarked) &&
     typeof row.blackout === 'boolean' &&
     (row.firstBingoAt === null || finiteArchiveNumber(row.firstBingoAt)) &&
-    Number.isInteger(row.rank) &&
+    firestoreInteger(row.rank) &&
     row.rank > 0 &&
     row.uid === honor.uid &&
     row.rank <= archive.playerCount
@@ -1071,7 +1082,7 @@ function firstBingoPairComplete(archive) {
 function writableDayHonor(honor) {
   return (
     isRecord(honor) &&
-    Number.isInteger(honor.dayIndex) &&
+    firestoreInteger(honor.dayIndex) &&
     typeof honor.uid === 'string' &&
     honor.uid.length > 0 &&
     typeof honor.displayName === 'string' &&
@@ -1134,7 +1145,7 @@ function validateArchiveFlip(flip, archiveToken) {
   const complete =
     (archive.eventName === null || typeof archive.eventName === 'string') &&
     Array.isArray(archive.standings) &&
-    Number.isInteger(archive.playerCount) &&
+    firestoreInteger(archive.playerCount) &&
     archive.playerCount >= 0 &&
     archive.standings.length === Math.min(archive.playerCount, MAX_ARCHIVED_STANDING_ROWS) &&
     Array.isArray(archive.dailyHonors) &&
