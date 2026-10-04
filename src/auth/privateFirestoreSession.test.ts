@@ -116,6 +116,20 @@ describe('private named memory lifecycle', () => {
     expect(H.terminated).toContain(old.db);
   });
 
+  it('keeps an Auth incarnation stamp across offline refresh and reconnect publications', async () => {
+    const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
+    const confirmed = sessions.getSnapshot().authGeneration;
+    expect(confirmed).toBeGreaterThan(0);
+    H.online = false; sessions.refreshConnection();
+    expect(sessions.getSnapshot().authGeneration).toBe(confirmed);
+    const refreshed = { uid: 'alice', token: 'refreshed' }; H.primary.currentUser = refreshed;
+    H.idToken!(refreshed);
+    expect(sessions.getSnapshot()).toMatchObject({ uid: 'alice', db: null, transition: 'auth', authGeneration: confirmed + 1 });
+    H.online = true; sessions.refreshConnection(); await settle();
+    expect(sessions.getSnapshot()).toMatchObject({ uid: 'alice', transition: 'connection', authGeneration: confirmed + 1 });
+    expect(sessions.getSnapshot().db).not.toBeNull();
+  });
+
   it('distinguishes reconnect publication from an ordinary same-UID token rotation', async () => {
     const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
     H.online = false; sessions.refreshConnection();

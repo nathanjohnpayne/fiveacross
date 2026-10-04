@@ -95,15 +95,19 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
   // The single shell provider retires other scopes only after committing a
   // scope change. Same-scope remounts keep process-local unfinished intent.
   useEffect(() => { retirePendingBlocksOutsideScope(uid, eventId); }, [uid, eventId]);
-  const confirmed = useRef<{ key: string; generation: number; hidden: ReadonlySet<string> } | null>(null);
+  const confirmed = useRef<{ key: string; generation: number; authGeneration: number; hidden: ReadonlySet<string> } | null>(null);
   // A discarded render cannot erase committed state. Only an actual connection
   // transition (or an offline session) may carry it across private generations;
   // ordinary token rotation requires a fresh answer under refreshed credentials.
-  const witness = confirmed.current?.key === key && session.uid === uid && !session.recoveryRequired && !session.failed && (
+  // The persistent Auth stamp catches an offline rotation even if React misses
+  // its publication. Keep rendering offline; re-confirm when back online.
+  const witness = confirmed.current?.key === key && session.uid === uid && !session.recoveryRequired && !session.failed &&
+    (confirmed.current.authGeneration === session.authGeneration || !navigator.onLine) && (
     confirmed.current.generation === session.generation || session.transition === 'connection' || !navigator.onLine
   ) ? confirmed.current : null;
   useEffect(() => {
-    const carried = confirmed.current?.key === key && session.uid === uid && !session.recoveryRequired && !session.failed && (
+    const carried = confirmed.current?.key === key && session.uid === uid && !session.recoveryRequired && !session.failed &&
+      (confirmed.current.authGeneration === session.authGeneration || !navigator.onLine) && (
       confirmed.current.generation === session.generation || session.transition === 'connection' || !navigator.onLine
     ) ? confirmed.current : null;
     confirmed.current = carried;
@@ -191,7 +195,7 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
         const settled = !snap.metadata.fromCache && !snap.metadata.hasPendingWrites;
         if (settled) {
           lastCommitted = current;
-          confirmed.current = { key, generation: session.generation, hidden: current };
+          confirmed.current = { key, generation: session.generation, authGeneration: session.authGeneration, hidden: current };
           observeConfirmedBlockTargets(uid, eventId, current);
         }
         // Server-confirmed pairs only (offline the delete could not run, and
@@ -242,7 +246,7 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
       clearRetry();
       unsub();
     };
-  }, [key, uid, eventId, session.db, session.generation, session.transition, session.uid, session.recoveryRequired, session.failed]);
+  }, [key, uid, eventId, session.db, session.generation, session.authGeneration, session.transition, session.uid, session.recoveryRequired, session.failed]);
   // With no key there is no listener, so the answer follows from `uid` alone,
   // derived on THIS render (Codex P1 on #1300): comparing keys would let a
   // sign-in while not yet enabled (null key before and after) return the

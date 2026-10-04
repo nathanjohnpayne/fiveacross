@@ -8,6 +8,8 @@ import type { EventDoc } from '../types';
 // Raw (converter-free) ref for writes — mirrors the private `rawUser` each
 // writing data module keeps locally (see data/api.ts).
 const rawUser = (uid: string, database: Firestore) => doc(database, 'users', uid);
+// Public Event metadata and Player mirror writes retain the shared persistent
+// gameplay client; the captured private lease still fences their continuations.
 const rawEvent = (eventId: string = EVENT_ID) => doc(db, 'events', eventId);
 const rawPlayer = (uid: string, eventId: string = EVENT_ID) =>
   doc(db, 'events', eventId, 'players', uid);

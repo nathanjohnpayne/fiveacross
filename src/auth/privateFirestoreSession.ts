@@ -9,7 +9,10 @@ export interface PrivateFirestoreSession {
   uid: string | null;
   db: Firestore | null;
   generation: number;
-  /** Connection transitions alone may carry confirmed same-scope block state. */
+  /** Auth retirement stamp retained across later connection publications. */
+  authGeneration: number;
+  /** Connection transitions may carry confirmed block state online only
+   * within its Auth stamp; same-scope offline rendering is a separate exception. */
   transition?: 'auth' | 'connection' | 'recovery';
   recoveryRequired: boolean;
   failed: boolean;
@@ -54,11 +57,12 @@ let appSequence = 0;
  */
 export function createPrivateFirestoreSessions(config: SessionOptions) {
   let generation = 0;
+  let authGeneration = 0;
   let client: PrivateClient | null = null;
   let stopped = false;
   const listeners = new Set<() => void>();
   let snapshot: PrivateFirestoreSession = {
-    uid: null, db: null, generation, transition: 'auth', recoveryRequired: !config.recovered(), failed: false,
+    uid: null, db: null, generation, authGeneration, transition: 'auth', recoveryRequired: !config.recovered(), failed: false,
   };
   const publish = (value: PrivateFirestoreSession) => {
     snapshot = value;
@@ -72,10 +76,11 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
   };
   const retire = (transition: NonNullable<PrivateFirestoreSession['transition']> = 'auth') => {
     generation += 1;
+    if (transition === 'auth') authGeneration += 1;
     const old = client;
     client = null;
     // Retire visible state synchronously, before primary Auth commits a change.
-    publish({ uid: config.primaryAuth.currentUser?.uid ?? null, db: null, generation, transition, recoveryRequired: !config.recovered(), failed: false });
+    publish({ uid: config.primaryAuth.currentUser?.uid ?? null, db: null, generation, authGeneration, transition, recoveryRequired: !config.recovered(), failed: false });
     void dispose(old);
   };
   const synchronize = async (user: User | null, transition: NonNullable<PrivateFirestoreSession['transition']> = 'auth') => {
@@ -109,12 +114,12 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
         return;
       }
       client = candidate;
-      publish({ uid: user.uid, db: privateDb, generation: attempt, transition, recoveryRequired: !config.recovered(), failed: false });
+      publish({ uid: user.uid, db: privateDb, generation: attempt, authGeneration, transition, recoveryRequired: !config.recovered(), failed: false });
     } catch {
       await dispose(candidate);
       if (!candidate && candidateApp) await deleteApp(candidateApp).catch(() => {});
       if (!stopped && attempt === generation) {
-        publish({ uid: null, db: null, generation: attempt, transition, recoveryRequired: !config.recovered(), failed: true });
+        publish({ uid: null, db: null, generation: attempt, authGeneration, transition, recoveryRequired: !config.recovered(), failed: true });
       }
     }
   };
