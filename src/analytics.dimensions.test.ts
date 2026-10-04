@@ -47,7 +47,7 @@ describe('registerAnalyticsDimensions (#556)', () => {
   });
 
   it('falls back event_slug to the Event id when the Slug is unknown', async () => {
-    // A single-Event build's Resolution never reads a hostnames/{host}
+    // A single-Event build's Resolution never reads a publicHostnames/{host}
     // document, so it has no separate Slug — see Resolution.slug's own doc.
     const { registerAnalyticsDimensions } = await import('./analytics');
     registerAnalyticsDimensions({ eventId: 'med-2026', eventSlug: null });

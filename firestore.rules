@@ -1851,12 +1851,14 @@ service cloud.firestore {
       // has to satisfy the settings/bannedUids shape checks.
       //
       // `settings.forceAdult` (#608) is the ADMIN OVERRIDE on the Event's 18+
-      // posture: `hostnames/{host}.adultContent` is derived server-side as
+      // posture: canonical `hostnames/{host}.adultContent` and its paired
+      // public `publicHostnames/{host}.adultContent` are derived server-side as
       // `forceAdult || (any active spicy Prompt in a dealable pool)`, because
       // `spicy` tracks sexual explicitness specifically and an Event whose only
       // mature content is non-sexual would otherwise show no gate. It stays on
       // the already-admin-writable Event doc — no new write path is opened, and
-      // in particular NOT one into `hostnames`, which no client may write. When
+      // in particular NOT one into either hostname collection, which no client
+      // may write. When
       // the write carries `settings` and names the field it must be a BOOLEAN, so
       // a truthy string cannot smuggle the posture on (the function's own read is
       // a strict `=== true` besides). Optional: the field's absence means "derive
