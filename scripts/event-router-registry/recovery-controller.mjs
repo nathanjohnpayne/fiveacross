@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isAllowedPublisherTokenCreator } from './publisher-impersonation.mjs';
 import { REGISTRY_R0_CONTRACT } from './r0-contract.mjs';
 import { normalizeTimestamp } from './hostname-projection.mjs';
 
@@ -615,7 +616,7 @@ function validateControlReadbacks(plan, readbacks, now) {
     );
     exactKeys(
       account,
-      ['fullResourceName', 'serviceAccountEmail', 'oidcSubject', 'policyEtag', 'tokenCreatorMembers', 'responseDigest'],
+      ['fullResourceName', 'serviceAccountEmail', 'oidcSubject', 'policyEtag', 'tokenCreatorMembers', 'inheritedPoliciesComplete', 'responseDigest'],
       'malformed-service-account-readback',
     );
     if (
@@ -624,12 +625,14 @@ function validateControlReadbacks(plan, readbacks, now) {
       !isNonempty(account.policyEtag) ||
       !SHA256.test(account.responseDigest) ||
       !Array.isArray(account.tokenCreatorMembers) ||
+      account.inheritedPoliciesComplete !== true ||
       account.tokenCreatorMembers.length > 16 ||
       account.tokenCreatorMembers.some(
         (member) =>
           !isNonempty(member) ||
           broadMember(member) ||
-          member === `serviceAccount:${plan.quarantined.serviceAccountEmail}`,
+          member === `serviceAccount:${plan.quarantined.serviceAccountEmail}` ||
+          (entity === plan.replacement && !isAllowedPublisherTokenCreator(entity.serviceAccountEmail, member)),
       )
     ) {
       refuse('service-account-readback-mismatch');
@@ -641,6 +644,7 @@ function validateControlReadbacks(plan, readbacks, now) {
       fullResourceName: account.fullResourceName,
       policyEtag: account.policyEtag,
       tokenCreatorMembers: [...account.tokenCreatorMembers],
+      inheritedPoliciesComplete: true,
       responseDigest: account.responseDigest,
     });
   }

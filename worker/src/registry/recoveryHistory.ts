@@ -1,3 +1,4 @@
+import { isAllowedPublisherTokenCreator } from '../../../scripts/event-router-registry/publisher-impersonation.mjs';
 import { parseSyncRequest, projectionDigest } from './contracts';
 import { isKmsCryptoKeyVersion, isSha256Hex } from './identifiers';
 import type { ConsumedProbeEvidence } from './probe';
@@ -343,7 +344,11 @@ function validatePublisherReplacement(value: unknown): void {
     throw new Error('service account access');
   }
   control.serviceAccountAccess.forEach((entry) => {
+    // Retain signed pre-#1427 audit history without upgrading it into current
+    // recovery authority. New request parsing and validation require true.
+    const hasCompleteness = isRecord(entry) && Object.hasOwn(entry, 'inheritedPoliciesComplete');
     const access = exactRecord(entry, [
+      ...(hasCompleteness ? ['inheritedPoliciesComplete'] : []),
       'subject',
       'serviceAccountEmail',
       'iamMember',
@@ -361,6 +366,7 @@ function validatePublisherReplacement(value: unknown): void {
     ]) {
       nonEmptyString(field);
     }
+    if (hasCompleteness && access.inheritedPoliciesComplete !== true) throw new Error('incomplete service account policy');
     exactStringArray(access.tokenCreatorMembers).forEach(nonEmptyString);
     sha256(access.responseDigest);
   });
@@ -508,7 +514,11 @@ function validatePublisherReplacement(value: unknown): void {
         readback.iamMember !== runtime.iamMember ||
         readback.fullResourceName !== canonicalServiceAccountResource(runtime.serviceAccountEmail) ||
         readback.tokenCreatorMembers.length > 16 ||
-        readback.tokenCreatorMembers.some((member) => broadMember(member) || oldPrincipals.has(member))
+        readback.tokenCreatorMembers.some((member) =>
+          broadMember(member) || oldPrincipals.has(member) ||
+          (readback.inheritedPoliciesComplete === true && runtime === replacementRuntime &&
+            !isAllowedPublisherTokenCreator(readback.serviceAccountEmail, member)),
+        )
       );
     })
   ) {
