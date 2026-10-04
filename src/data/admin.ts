@@ -732,7 +732,7 @@ export const setReportHideThreshold = (n: number): Promise<void> =>
 /**
  * The Admin override on the Event's 18+ posture (#608).
  *
- * An INPUT to the derivation, not the derived flag. `hostnames/{host}.adultContent`
+ * An INPUT to the derivation, not the derived flag. `publicHostnames/{host}.adultContent`
  * is written only by `functions/src/adultContent.ts` — no client may write that
  * collection at all — and this is the field it ORs in:
  *

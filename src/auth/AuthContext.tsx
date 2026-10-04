@@ -1861,7 +1861,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   //
   // #608 SPLITS THE GATE FROM ITS SUBJECT. Every guarantee above is about
   // proving an 18+ attestation before creating durable rows — which presupposes
-  // that this Event asks for one. When `hostnames/{host}.adultContent` is false
+  // that this Event asks for one. When `publicHostnames/{host}.adultContent` is false
   // no attestation is ever collected, so `attested` settles a permanent `false`
   // and the deal would never fire at all. The equivalent "the bootstrap settled
   // authoritatively" signal on that path is `profileReady`, which the ONLINE
@@ -2716,7 +2716,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // …and gated FIRST on whether this Event asks at all (#608). This is the whole
   // retroactive path the dynamic posture needs, and it needs no new surface: an
   // Event that turns 18+ mid-flight (an admin approves the first explicit Prompt)
-  // flips `hostnames/{host}.adultContent`, the next resolution installs `true`,
+  // flips `publicHostnames/{host}.adultContent`, the next resolution installs `true`,
   // and this one condition re-gates every un-attested Player through the
   // re-prompt that already exists.
   const needsAttestation = attestationRequired && user != null && profileReady && attested === false;

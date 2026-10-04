@@ -25,7 +25,7 @@ function isDismissed(): boolean {
  * adult content it was still making the age claim the sign-in gate had just
  * stopped making — the first screen a wedding party sees, contradicting the
  * screen behind it. The analytics disclosure itself is unconditional; only the
- * age claim follows `hostnames/{host}.adultContent`.
+ * age claim follows `publicHostnames/{host}.adultContent`.
  * This is deliberately NOT a consent-management platform and NOT a gate:
  * `firebase.ts` already loads GA4 unconditionally (when supported + a
  * measurement id is configured), so dismissing this notice does not opt

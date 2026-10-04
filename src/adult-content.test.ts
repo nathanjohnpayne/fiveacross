@@ -40,8 +40,8 @@ function fakeStorage(seed: Record<string, string> = {}): StorageLike & { map: Ma
 
 describe('the fail direction is CLOSED', () => {
   // Under-gating is the harmful direction; over-gating costs one checkbox. This
-  // is also what makes every hostname document written before #608 correct with
-  // no backfill: they have no field, so they read as gated.
+  // also gates an otherwise valid public mapping without a posture field.
+  // Canonical/public inventory and projection backfill remain separate.
   it('reads anything that is not a literal false as adult content', () => {
     for (const value of [undefined, null, 'false', 0, '', {}, [], NaN, true]) {
       expect(coerceAdultContent(value), String(value)).toBe(true);
@@ -73,16 +73,22 @@ describe('the network and cache paths agree about the same bytes', () => {
     expect(readCache(storage, HOST, 1000)?.doc.adultContent).toBe(false);
   });
 
-  // The reason CACHE_VERSION is deliberately NOT bumped for this field: a bump
-  // evicts every stored mapping, and the entries it would evict are exactly the
-  // ones an offline cold boot depends on. Coercion gets the same answer without
-  // trading a correct default for a not-found screen.
-  it('reads a pre-#608 cache entry as gated rather than as a miss', () => {
-    const legacy = { v: 1, fetchedAt: 1000, doc: { ...DOC, adultContent: undefined } };
-    const storage = fakeStorage({ [`fa:hostname:${HOST}`]: JSON.stringify(legacy) });
+  // The public-projection boundary retires canonical Version 1 envelopes,
+  // including pre-#608 entries. Additive posture coercion applies only within
+  // the accepted public Version 2 envelope, never across that source boundary.
+  it('rejects a canonical Version 1 cache even when its missing posture would gate', () => {
+    const canonical = { v: 1, fetchedAt: 1000, doc: { ...DOC, adultContent: undefined } };
+    const storage = fakeStorage({ [`fa:hostname:${HOST}`]: JSON.stringify(canonical) });
+    expect(readCache(storage, HOST, 1000)).toBeNull();
+  });
+
+  it('keeps a public Version 2 mapping with missing posture gated and eligible for revalidation', () => {
+    const publicEntry = { v: 2, fetchedAt: 1000, doc: { ...DOC, adultContent: undefined } };
+    const storage = fakeStorage({ [`fa:hostname:${HOST}`]: JSON.stringify(publicEntry) });
     const read = readCache(storage, HOST, 1000);
-    expect(read, 'a legacy entry must still be a HIT').not.toBeNull();
+    expect(read, 'a current public entry remains a routing fallback').not.toBeNull();
     expect(read?.doc.adultContent).toBe(true);
+    expect(read?.requiresPreviewRevalidation).toBe(true);
   });
 
   it('carries the posture onto the resolution from the network', async () => {
@@ -231,7 +237,7 @@ describe('the network and cache paths agree about the same bytes', () => {
 // `status: 'active'` — and the 18+ posture is published by a Cloud Function
 // reacting to it. Two writes with an invocation between them, so for a moment
 // the Prompt is live and the posture is not: every Player's `status == 'active'`
-// listener delivers the explicit text while `hostnames/{host}.adultContent`
+// listener delivers the explicit text while `publicHostnames/{host}.adultContent`
 // still says `false`. No amount of listener promptness closes that — it is an
 // ordering problem, not a latency one — and the client cannot make the two
 // writes atomic, because no client may write `hostnames` at all.

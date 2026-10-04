@@ -93,7 +93,7 @@ Steps 1–4 are Vercel work and step 6 is console-only. Step 5 has an API path b
 
    `VITE_FIREBASE_AUTH_DOMAIN` is belt-and-braces—`resolveAuthDomain` pins the mirror host in code regardless of what the dashboard holds, deliberately, as required by the production same-origin policy. Setting it correctly anyway keeps the dashboard from documenting a lie.
 
-   `VITE_EVENT_ID` makes this a **single-Event build**: the bundle serves exactly the Bodega Event and never consults the `hostnames/{host}` lookup, which is what makes a `.vercel.app` host servable at all (ADR 0010's same-origin escape hatch, ADR 0009's build-mode switch). It is baked in at build time, so changing it later needs a redeploy, not just an edit. `VITE_EDITION` must be set together with it and must **match the primary build**—a mismatch ships the backup host under different branding and chrome than the host it is backing up.
+   `VITE_EVENT_ID` makes this a **single-Event build**: the bundle serves exactly the Bodega Event and skips `publicHostnames/{host}` for hostname-to-Event resolution. After mount, the independent adult-content watcher can still read that public document for posture and display-only preview; it does not change Event or Edition identity. The resolution bypass is what makes a `.vercel.app` host servable at all (ADR 0010's same-origin escape hatch, ADR 0009's build-mode switch). It is baked in at build time, so changing it later needs a redeploy, not just an edit. `VITE_EDITION` must be set together with it and must **match the primary build**—a mismatch ships the backup host under different branding and chrome than the host it is backing up.
 
 4. **Connect Git, and leave auto-deploy off.** Settings → Git → connect `nathanjohnpayne/fiveacross`, production branch `main`. The link is what gives the project a repo to build from; it is **not** what triggers builds. `vercel.json` on `main` carries
 
@@ -164,16 +164,17 @@ Steps 1–4 are Vercel work and step 6 is console-only. Step 5 has an API path b
 
 **It serves the branded app in place and must never redirect to `vacaybingo.com`.** A mirror that bounces to the canonical host is worthless in the one situation it exists for—the canonical host being unreachable. Nothing in the code does this today; the rule is written down so nobody adds it as a convenience later.
 
-#### The `hostnames` document, and why the mirror does not use it
+#### The paired hostname records and the pinned mirror’s resolution bypass
 
-[#625](https://github.com/nathanjohnpayne/fiveacross/issues/625) specifies a Firestore `hostnames/vacaybingo.vercel.app` document so the mirror resolves its Brand and Event the way DNS does. **The provisioned mirror does not use it, deliberately**, and the two are mutually exclusive rather than complementary: setting `VITE_EVENT_ID` makes a *single-Event build*, which per ADR 0009 serves exactly that Event and **never consults the `hostnames/{host}` lookup**. A hostname-resolved build would instead have to complete a Firestore `getDocFromServer` before first paint, and `shouldMountOnBootstrapFailure` makes it fail **closed** to the `unreachable` screen when that read fails.
+[#625](https://github.com/nathanjohnpayne/fiveacross/issues/625) specifies a Firestore `hostnames/vacaybingo.vercel.app` document so the mirror resolves its Brand and Event the way DNS does. **The provisioned mirror does not use the canonical document for hostname-to-Event resolution**, deliberately: setting `VITE_EVENT_ID` makes a *single-Event build*, which per ADR 0009 serves exactly that Event and **skips `publicHostnames/{host}` for hostname-to-Event resolution**. Its post-mount adult-content watcher can still read the public copy for posture and display-only preview, without changing Event or Edition identity. A hostname-resolved build would instead have to complete a Firestore `getDocFromServer` before first paint, and `shouldMountOnBootstrapFailure` makes it fail **closed** to the `unreachable` screen when that read fails.
 
-That is the wrong trade for a backup host. The mirror's entire job is to work when something else is broken, so it should depend on as little as possible at boot—an env-pinned build has no pre-paint network dependency at all. The hostnames document is the right mechanism for a mirror that must serve *many* Events, which is the follow-up design #625 itself defers ("Event slugs on mirrors are the follow-up design ticket").
+That is the wrong trade for a backup host. The mirror's entire job is to work when something else is broken, so it should depend on as little as possible at boot—an env-pinned build has no pre-paint network dependency at all. The paired canonical/public hostname records are the right mechanism for a mirror that must serve *many* Events, which is the follow-up design #625 itself defers ("Event slugs on mirrors are the follow-up design ticket").
 
-If and when a mirror does need hostname resolution, drop `VITE_EVENT_ID` from that project's env and create the document:
+If and when a mirror needs hostname resolution, first use the reviewed paired writer to create canonical `hostnames/vacaybingo.vercel.app` and its full allowlisted `publicHostnames/vacaybingo.vercel.app` replacement in the same atomic operation. The public copy must come from `projectPublicHostname`, preserving the approved seven routing/four nested preview fields while excluding canonical registry/recovery metadata. Both records need the following routing values:
 
 ```
-Collection: hostnames
+Canonical collection: hostnames
+Public collection:    publicHostnames
 Document id: vacaybingo.vercel.app     (lowercase; the lookup lowercases the hostname)
   eventId:       "bodega-bay-2026"     REQUIRED, non-empty
   status:        "active"              REQUIRED, one of active | disabled | archived
@@ -186,7 +187,7 @@ Field names are `eventId` and `status`, **not** `event` and no status: `fetchHos
 
 **`canonicalHost` must name the mirror itself, and `isCanonical` must be `true`.** This is the field where a reasonable-looking value breaks the mirror. Nothing redirects an alias—every registered host in service serves in place ([#599](https://github.com/nathanjohnpayne/fiveacross/issues/599) as amended; a zone being retired, like `fiveacrossbingo.com`, redirects instead)—but a `canonicalHost` naming the brand's real domain would make analytics (`resolvedCanonicalHost()`, `src/canonicalHost.ts`) report the mirror's traffic under the very hostname that was unreachable in the one situation the mirror exists for. Share links are not a harm: since #607 they carry the entry-point origin (`shareOrigin()`), so a link shared from the mirror already points at the mirror regardless of this field. A mirror is its own canonical.
 
-Creating the document while `VITE_EVENT_ID` is still set is harmless but inert—nothing reads it—so it is not a safe way to "pre-stage" a switch, and the switch needs a rebuild either way.
+Verify the canonical/public pair, including an anonymous public point read, before removing `VITE_EVENT_ID` and rebuilding the hostname-resolved mirror. Pre-staging the pair while `VITE_EVENT_ID` remains set does not exercise hostname-to-Event resolution in that pinned build, though its post-mount watcher may read the public copy; a missing or denied public copy has no canonical fallback. Provisioning, backfill and deployment still require their separate authorization.
 
 ### Verifying the mirror
 

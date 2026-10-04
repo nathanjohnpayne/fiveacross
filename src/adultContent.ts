@@ -12,7 +12,7 @@
 // acknowledgement is ON the sign-in gate — pre-auth — so the one client that
 // needs the answer is the one client that can never read the source. This is
 // the same shape as the Edition problem (ADR 0009) and it takes the same
-// solution: a server-derived field on the world-readable `hostnames/{host}`
+// solution: a server-derived field on the field-allowlisted public `publicHostnames/{host}`
 // document, fetched by the resolver before mount.
 //
 // Server-side derivation, monotone and OR'd with an Admin override:
@@ -134,7 +134,7 @@ function emit(): void {
  * takes a second argument. An UNPROVEN `false` — a build-time seed, a cached
  * entry — is provisional: it may paint the first frame, but it is not allowed
  * to survive a failed attempt to confirm it. A PROVEN `false` came from a live
- * server read of `hostnames/{host}` and stands until something raises it.
+ * server read of `publicHostnames/{host}` and stands until something raises it.
  *
  * Raising to `true` is always accepted and always latches. Lowering to `false`
  * is refused once the session has been raised.

@@ -47,8 +47,8 @@ describe('registerAnalyticsDimensions (#556)', () => {
   });
 
   it('falls back event_slug to the Event id when the Slug is unknown', async () => {
-    // A single-Event build's Resolution never reads a hostnames/{host}
-    // document, so it has no separate Slug — see Resolution.slug's own doc.
+    // A single-Event build skips the public hostname lookup for Slug resolution.
+    // Its independent posture/preview watcher does not install a Slug.
     const { registerAnalyticsDimensions } = await import('./analytics');
     registerAnalyticsDimensions({ eventId: 'med-2026', eventSlug: null });
     expect(phRegister).toHaveBeenCalledWith(expect.objectContaining({ event_slug: 'med-2026' }));
