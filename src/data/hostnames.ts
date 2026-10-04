@@ -118,8 +118,8 @@ export async function bootstrapEventResolution(
     hostname,
     fetchDoc: fetchHostnameDoc,
     storage,
-    // A non-empty value marks a single-Event build and short-circuits the lookup
-    // entirely — see resolveEvent step 0.
+    // A non-empty value marks a single-Event build and short-circuits hostname-to-Event
+    // resolution — see resolveEvent step 0. The post-mount watcher is separate.
     envEventId: import.meta.env.VITE_EVENT_ID || null,
     // The 18+ opt-out for that same single-Event build (#608). Passed as the
     // raw string; `resolveEvent` owns the fail-closed reading of it.
@@ -141,7 +141,7 @@ export async function bootstrapEventResolution(
     //
     // Guarded on `null`, not truthiness, because the type separates two
     // different absences. The env short-circuit returns `edition: null` — it
-    // never reads a hostname document — so calling the setter there would reset
+    // never reads a hostname document for resolution — calling the setter would reset
     // a single-Event Vacay build (`VITE_EVENT_ID` + `VITE_EDITION=vacay`)
     // straight back to `gcb` and undo the seed `editions.ts` just made from the
     // very same env (Codex on #576). A lookup that RAN, though, owns the

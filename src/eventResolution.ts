@@ -240,7 +240,7 @@ const defaultDelay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
  *
  * ORDER, and why:
  *
- *  0. **A single-Event build never looks up at all.** A non-empty
+ *  0. **A single-Event build bypasses hostname-to-Event lookup.** A non-empty
  *     `VITE_EVENT_ID` signals that this bundle serves exactly one Event — the
  *     Gay Cruise Bingo build, whose hostname has no `hostnames/` document. It
  *     would be incoherent to consult the lookup and then discard the answer,
@@ -287,7 +287,7 @@ export async function resolveEvent(opts: ResolveOptions): Promise<Resolution> {
   const delay = opts.delay ?? defaultDelay;
   const now = opts.now ?? Date.now;
 
-  // 0. Single-Event build: answer immediately, never touch the network.
+  // 0. Single-Event resolution: answer immediately, without a network read.
   if (envEventId) {
     // `adultContent` defaults CLOSED here, like everywhere else — this path
     // reads no hostname document, so there is nothing to derive from, and the
@@ -297,8 +297,8 @@ export async function resolveEvent(opts: ResolveOptions): Promise<Resolution> {
     // an answer (Phase 4b P1). A single-Event build is the shape the repo
     // documents for a small standalone deployment, and without some build-time
     // input it could never be anything but adults-only. But a baked `false` that
-    // simply STOOD would be the worst version of that: the build never reads a
-    // routing document, so an admin who later approves an explicit Prompt or
+    // simply STOOD would be the worst version of that: startup resolution never
+    // reads a routing document, so without the post-mount watcher an admin who later approves an explicit Prompt or
     // flips `forceAdult` would change nothing on those clients — not on a reload,
     // not ever, short of a rebuild — while the ticket advertises exactly that
     // transition.
