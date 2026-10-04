@@ -208,8 +208,10 @@ describe('draftLastCall ↔ functions finaleTimes parity (#1378)', () => {
     // `Number.MAX_VALUE` is finite and positive, so BOTH sides accept it as a
     // configured freeze — and `MAX_VALUE - 12h === MAX_VALUE` in doubles, so the
     // backward branch yields lastCallAt === standingsFreezeAt. Absurd as a
-    // schedule, but it is the one input where the scheduler's own #784 guard
-    // trips, which makes it the honest fixture for "fires is exactly the guard".
+    // schedule, but it belongs to the only input class where the scheduler's own
+    // #784 guard trips (any finite freeze above roughly 6.04e23 ms, where
+    // freeze - 12h rounds back to freeze; 1e25 behaves the same), which makes it
+    // the honest fixture for "fires is exactly the guard".
     // One Day only: with a preceding Day the forward branch would win instead.
     const days = [day(0, FRI_8)];
     const server = finaleTimes(asFunctionsDays(days), Number.MAX_VALUE);

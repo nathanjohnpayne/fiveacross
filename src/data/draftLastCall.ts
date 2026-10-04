@@ -29,8 +29,7 @@
  */
 
 import { standingsFreezeAtFor } from '../game/logic';
-import type { DayDef } from '../domainTypes';
-import type { DraftDayDef } from '../types';
+import type { DayDef, DraftDayDef } from '../types';
 
 /** `LAST_CALL_LEAD_MS` in `functions/src/unlockDay.ts`: the last-call beat posts
  *  this long before the freeze, or this long after the preceding Day's unlock

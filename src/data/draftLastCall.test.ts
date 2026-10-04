@@ -67,15 +67,18 @@ describe('draftLastCall', () => {
   });
 
   it('reports an empty window as fires:false and leaves lastCallAt uncorrected', () => {
-    // MAX_VALUE − 12h === MAX_VALUE in doubles: the one finite configured freeze
-    // that empties the window (see the parity test for the server-side twin).
-    const r = draftLastCall([day(0, T0)], Number.MAX_VALUE);
-    expect(r).toEqual({
-      lastCallAt: Number.MAX_VALUE,
-      standingsFreezeAt: Number.MAX_VALUE,
-      branch: 'backward',
-      fires: false,
-    });
+    // freeze − 12h === freeze in doubles for every finite freeze above roughly
+    // 6.04e23 ms (2^79, where the spacing between doubles exceeds twice the
+    // lead): that whole class empties the window, e.g. 1e25 and MAX_VALUE (see
+    // the parity test for the server-side twin).
+    for (const freeze of [1e25, Number.MAX_VALUE]) {
+      expect(draftLastCall([day(0, T0)], freeze)).toEqual({
+        lastCallAt: freeze,
+        standingsFreezeAt: freeze,
+        branch: 'backward',
+        fires: false,
+      });
+    }
   });
 
   it('imports nothing from functions/ at runtime (parity is pinned in the test, not the bundle)', () => {
