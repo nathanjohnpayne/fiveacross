@@ -576,7 +576,9 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
     // seeded only for fields the row doesn't already carry — so a concurrent
     // `dayStats` write (or real earlier progress) is never reset to 0. The return
     // value reports whether this was a genuine first join (no identity yet), so the
-    // `join_event` analytic still fires exactly once.
+    // a still-current successful completion records `join_event` once. If
+    // Auth retirement lands after commit but before acknowledgement, the
+    // committed identity remains while that local analytic may be omitted.
     // The saved profile read stays OUTSIDE the transaction: it is advisory
     // identity input (validated + fallback-guarded either way), lives on a doc
     // this write never touches, and re-reading it on a contention retry would
@@ -784,7 +786,8 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
   }));
   // AFTER the transaction settles, never inside it — a transaction retries on
   // contention, and firing here (rather than from the loser's abandoned
-  // attempts) fires exactly once per genuinely committed deal (#559).
+  // attempts) fires once per committed deal whose private completion stays
+  // current (#559); retirement after commit can omit this local analytic.
   if (dealtNew) trackCommunityPromptDeal(cells, 0, eventId);
   return dealtNew;
 }

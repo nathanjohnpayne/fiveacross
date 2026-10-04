@@ -85,7 +85,7 @@ import SquareText from './SquareText';
 function TallyBadge({ itemId, onOpen }: { itemId: string; onOpen: () => void }) {
   const { count } = useTally(itemId);
   const { ready: blockSetReady } = useHiddenUids();
-  if (!blockSetReady && !navigator.onLine) return <span className="tally-badge" role="status" title="Reconnect to see the Tally">Reconnect for Tally</span>;
+  if (!blockSetReady) return null;
   if (count <= 0) return null;
   return (
     <button
@@ -877,6 +877,7 @@ export default function Board() {
   // Reshuffle is the one write that must not queue offline (see `reshuffleBoard`),
   // so it is the one control that has to know about connectivity.
   const online = useOnline();
+  const { ready: blockSetReady } = useHiddenUids();
   // Whether the coach overlay is already behind us, so the launch announcement
   // can queue behind it (see the LaunchIntro mount). Seeded from the stored flag
   // at mount and flipped by CoachOverlay's own dismiss — a plain render-time read
@@ -2635,6 +2636,9 @@ export default function Board() {
         <DaySwitcher days={days} viewedIndex={viewedIndex} onSelect={setViewedIndex} inert={overlayOpen} />
       ) : (
         daySwitcher
+      )}
+      {!blockSetReady && !online && (
+        <div className="center muted" role="status">Reconnect to see the Tally.</div>
       )}
       {/* First-open coach overlay (specs/d15-coach-overlay.md, #214): mounted
           whenever Board has cells — whichever Board is the Player's first

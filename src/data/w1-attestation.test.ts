@@ -37,7 +37,7 @@ import { installMockWebLocks } from '../../tests/support/mockWebLocks';
 import type { User } from 'firebase/auth';
 import { recordOfflineAttestation, hasOfflineAttestation } from '../auth/offlineAttestationWitness';
 import { awaitPrivateFirestore } from '../privateFirestore';
-import { attestAdult, readAdultAttestation, readAdultAttestationFromServer, readAdultAttestationFromCache, ensureUserProfile } from './api';
+import { attestAdult, readAdultAttestation, readAdultAttestationFromServer, readAdultAttestationFromCache, ensureUserProfile, joinAndDeal } from './api';
 
 type FakeTx = { get: ReturnType<typeof vi.fn>; set: ReturnType<typeof vi.fn> };
 
@@ -279,5 +279,74 @@ describe('private profile ownership and minimal offline witness (#1411)', () => 
       return { docs: [cachedCard('events/test-event/days/3/boards/sailor-1', 'sailor-1')] };
     });
     await expect(readAdultAttestationFromCache('sailor-1')).rejects.toThrow(/account changed/i);
+  });
+});
+
+
+describe('joinAndDeal committed identity and private incarnation acknowledgement (#1411)', () => {
+  it.each([false, true])('keeps a committed daily identity when post-commit retirement is %s', async (retireAfterCommit) => {
+    // Run the real daily join against a stateful transaction boundary: callback
+    // writes stage first, then become durable before the SDK promise settles.
+    // This models commit/ack ordering, not real SDK concurrency or AuthContext
+    // analytics. A refused local acknowledgement cannot undo that commit; its
+    // current-incarnation retry may therefore return false and omit join_event.
+    const playerPath = 'events/test-event/players/sailor-1';
+    const rows = new Map<string, Record<string, unknown>>();
+    const writes: Array<{ path: string; data: Record<string, unknown> }> = [];
+    let signalCommitted!: () => void;
+    const committed = new Promise<void>((resolve) => { signalCommitted = resolve; });
+    let releaseAcknowledgement!: () => void;
+    const acknowledgement = new Promise<void>((resolve) => { releaseAcknowledgement = resolve; });
+    getDocMock.mockImplementation(async (ref: { path: string }) => {
+      if (ref.path === 'events/test-event') return snap({ days: [{ index: 0 }] });
+      if (ref.path === 'users/sailor-1') return snap(null);
+      throw new Error(`Unexpected nontransaction read: ${ref.path}`);
+    });
+    let commits = 0;
+    runTransactionMock.mockImplementation(async (_db: unknown, callback: (tx: {
+      get: (ref: { path: string }) => Promise<ReturnType<typeof snap>>;
+      set: (ref: { path: string }, data: Record<string, unknown>, options?: { merge: boolean }) => void;
+    }) => Promise<boolean>) => {
+      const staged: Array<{ path: string; data: Record<string, unknown>; merge: boolean }> = [];
+      const result = await callback({
+        get: async (ref) => snap(rows.get(ref.path) ?? null),
+        set: (ref, data, options) => staged.push({ path: ref.path, data: { ...data }, merge: options?.merge === true }),
+      });
+      for (const write of staged) {
+        rows.set(write.path, { ...(write.merge ? rows.get(write.path) : {}), ...write.data });
+        writes.push({ path: write.path, data: write.data });
+      }
+      commits++;
+      if (commits === 1) {
+        signalCommitted();
+        await acknowledgement;
+      }
+      return result;
+    });
+
+    const joining = joinAndDeal(userLike());
+    const result = retireAfterCommit
+      ? expect(joining).rejects.toThrow('Private session expired.')
+      : expect(joining).resolves.toBe(true);
+    await committed;
+    const joined = { ...rows.get(playerPath)! };
+    expect(joined).toMatchObject({ uid: 'sailor-1', displayName: 'Ada', bingoCount: 0, squaresMarked: 0 });
+    expect(joined.joinedAt).toEqual(expect.any(Number));
+    expect(writes).toHaveLength(1);
+    expect(runTransactionMock.mock.calls[0][0]).not.toBe(privateState.privateDb);
+    expect(awaitPrivateFirestore).toHaveBeenCalledWith('sailor-1', true);
+    if (retireAfterCommit) privateState.generation++;
+    releaseAcknowledgement();
+    await result;
+    expect(rows.get(playerPath)).toEqual(joined); // No compensating rollback.
+
+    // A later current actor sees the committed identity and genuine progress.
+    // It may merge identity again, but cannot stamp another join or zero stats.
+    rows.set(playerPath, { ...joined, bingoCount: 2, squaresMarked: 7 });
+    await expect(joinAndDeal(userLike())).resolves.toBe(false);
+    expect(commits).toBe(2);
+    expect(writes).toHaveLength(2);
+    expect(writes[1]).toEqual({ path: playerPath, data: { uid: 'sailor-1', displayName: 'Ada', photoURL: null } });
+    expect(rows.get(playerPath)).toEqual({ ...joined, bingoCount: 2, squaresMarked: 7 });
   });
 });

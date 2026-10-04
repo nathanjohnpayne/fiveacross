@@ -31,8 +31,9 @@ export function privateFirestoreSessions() {
   return sessions;
 }
 
-/** Capture once before awaiting. Auth bootstrap may read its own profile in
- * memory during attended recovery; private UI and Admin actions remain closed. */
+/** Capture once before awaiting. Gameplay bootstrap may read its own profile and
+ * reciprocal block filter in memory during recovery; ordinary private UI
+ * and Admin actions remain closed. */
 export function capturePrivateFirestore(allowRecovery = false) {
   const lease = privateFirestoreSessions().capture(allowRecovery);
   const functions = getFunctions(lease.db.app, 'us-central1');
@@ -47,6 +48,9 @@ export function capturePrivateFirestore(allowRecovery = false) {
 /** A bounded readiness wait for bootstrap, never a lookup after capturing an action. */
 export async function awaitPrivateFirestore(uid: string, allowRecovery = false) {
   const manager = privateFirestoreSessions();
+  // A caller arriving after failure must not miss the prior publication and
+  // wait five seconds. The bridge retries independently with a bounded budget.
+  if (auth.currentUser?.uid !== uid || manager.getSnapshot().failed) throw new Error('Private session changed.');
   const ready = () => {
     const snapshot = manager.getSnapshot();
     return snapshot.uid === uid && snapshot.db !== null;

@@ -39,9 +39,9 @@ vi.mock('../firebase', () => ({
 }));
 vi.mock('./usePrivateFirestore', () => ({ usePrivateFirestore: () => H.session }));
 vi.mock('../privateFirestore', () => {
-  const capture = () => {
+  const capture = (allowRecovery = false) => {
     const { uid, db, generation } = H.session;
-    const assertCurrent = () => { if (!db || uid !== H.session.uid || generation !== H.session.generation) throw new Error('Private session expired.'); };
+    const assertCurrent = () => { if (!db || uid !== H.session.uid || generation !== H.session.generation || (!allowRecovery && H.session.recoveryRequired)) throw new Error('Private session expired.'); };
     return { uid, db, assertCurrent, guard: async <T,>(op: () => Promise<T>) => { assertCurrent(); const value = await op(); assertCurrent(); return value; } };
   };
   return { capturePrivateFirestore: capture, awaitPrivateFirestore: async (uid: string) => { const lease = capture(); if (lease.uid !== uid) throw new Error('Private account changed.'); lease.assertCurrent(); return lease; } };
@@ -537,6 +537,41 @@ describe('useHiddenUidsSubscription', () => {
     expect(view.result.current.ready).toBe(false);
     act(() => sub.onError(new Error('permission-denied')));
     expect(view.result.current).toEqual({ hidden: new Set(), ready: false });
+  });
+
+  it.each(['empty', 'blocked'] as const)('confirms %s shared filtering online while private views remain quarantined', (answer) => {
+    H.session.recoveryRequired = true;
+    const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+    expect(view.result.current.ready).toBe(false);
+    expect(H.subscriptions).toHaveLength(1);
+    const sub = H.subscriptions[0];
+    expect((sub.target as { args: Array<{ database: unknown }> }).args[0].database).toBe(H.session.db);
+    act(() => sub.listener({ ...pairs([]), metadata: { fromCache: true, hasPendingWrites: false } }));
+    expect(view.result.current.ready).toBe(false);
+    act(() => sub.listener(pairs([['alice', 'bob']], true)));
+    expect(view.result.current.ready).toBe(false);
+    const rows: Array<[string, string]> = answer === 'blocked' ? [['alice', 'bob']] : [];
+    act(() => sub.listener(pairs(rows)));
+    expect(view.result.current).toEqual({ hidden: new Set(answer === 'blocked' ? ['alice'] : []), ready: true });
+    expect(H.session.recoveryRequired).toBe(true);
+    const own = renderHook(() => useMyBlocks('bob'));
+    expect(H.subscriptions).toHaveLength(1);
+    expect(own.result.current.data).toEqual([]);
+  });
+
+  it('missing recovery marker cannot block a confirmed same-session offline filter or qualify a cold reload', () => {
+    H.session.recoveryRequired = true;
+    const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+    expect(H.subscriptions).toHaveLength(1);
+    act(() => H.subscriptions[0].listener(pairs([['alice', 'bob']])));
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    H.session = { ...H.session, db: null, generation: 1, transition: 'connection' };
+    view.rerender();
+    expect(view.result.current).toEqual({ hidden: new Set(['alice']), ready: true });
+    view.unmount();
+    const cold = renderHook(() => useHiddenUidsSubscription('bob', true));
+    expect(cold.result.current).toEqual({ hidden: new Set(), ready: false });
+    expect(H.subscriptions).toHaveLength(1);
   });
 
   it('cold offline starts and reloads never infer an empty confirmed set', () => {

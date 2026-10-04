@@ -180,6 +180,84 @@ describe('private named memory lifecycle', () => {
   });
 });
 
+describe('bounded private bridge retries', () => {
+  it.each(['auth', 'firestore', 'app-check'] as const)('recovers transient %s initialization without a token or connection event', async (failure) => {
+    H.failure = failure; const sessions = manager(true); H.idToken!(H.primary.currentUser); await settle();
+    expect(sessions.getSnapshot().failed).toBe(true);
+    const failedGeneration = sessions.getSnapshot().authGeneration;
+    H.failure = null; await vi.advanceTimersByTimeAsync(249);
+    expect(sessions.getSnapshot().db).toBeNull();
+    await vi.advanceTimersByTimeAsync(1); await settle();
+    expect(sessions.getSnapshot().db).not.toBeNull();
+    expect(H.apps).toHaveLength(2); expect(H.deleted).toContain(H.apps[0]);
+    expect(sessions.getSnapshot().authGeneration).toBeGreaterThan(failedGeneration);
+  });
+
+  it('retries a refused Auth clone with a fresh client and permanently expires the earlier lease', async () => {
+    const sessions = manager(); H.idToken!(H.primary.currentUser); await settle(); const old = sessions.capture();
+    H.cloneWaits = [() => Promise.reject(new Error('transient clone'))];
+    H.idToken!(H.primary.currentUser); await settle();
+    expect(sessions.getSnapshot().failed).toBe(true);
+    await vi.advanceTimersByTimeAsync(250); await settle();
+    expect(sessions.capture().db).not.toBe(old.db); expect(() => old.assertCurrent()).toThrow(/expired/);
+    expect(H.apps).toHaveLength(3); expect(H.deleted).toContain(H.apps[1]); expect(H.terminated).toContain(H.dbs[1]);
+  });
+
+  it('stops after three backed-off retries until a new connection episode', async () => {
+    H.failure = 'auth'; const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
+    await vi.advanceTimersByTimeAsync(250); expect(H.apps).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(999); expect(H.apps).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1); expect(H.apps).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(2000); expect(H.apps).toHaveLength(4);
+    await vi.advanceTimersByTimeAsync(60_000); expect(H.apps).toHaveLength(4);
+    expect(sessions.getSnapshot()).toMatchObject({ db: null, failed: true }); expect(H.deleted).toEqual(H.apps);
+    H.failure = null; sessions.refreshConnection(); await settle(); expect(sessions.capture().uid).toBe('alice');
+    expect(H.apps).toHaveLength(5);
+  });
+
+  it.each(['account', 'offline', 'stop'] as const)('cancels a pending retry on %s retirement', async (reason) => {
+    H.failure = 'auth'; const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
+    H.failure = null;
+    if (reason === 'account') { H.before!(); H.primary.currentUser = { uid: 'bob', token: 'bob' }; H.idToken!(H.primary.currentUser); }
+    if (reason === 'offline') { H.online = false; sessions.refreshConnection(); }
+    if (reason === 'stop') sessions.stop();
+    await settle(); const apps = H.apps.length;
+    await vi.advanceTimersByTimeAsync(10_000); expect(H.apps).toHaveLength(apps);
+    if (reason === 'account') expect(sessions.capture().uid).toBe('bob');
+    else expect(() => sessions.capture()).toThrow(/expired/);
+  });
+
+  it('does not retry when the captured User changed without a publication', async () => {
+    H.failure = 'auth'; const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
+    H.failure = null; H.primary.currentUser = { uid: 'alice', token: 'new-token' };
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(H.apps).toHaveLength(1); expect(() => sessions.capture()).toThrow(/expired/);
+  });
+
+  it('a late failed retry cannot publish failure or schedule work over a newer account', async () => {
+    H.cloneWaits = [() => Promise.reject(new Error('transient'))];
+    const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
+    let reject!: (error: Error) => void;
+    H.cloneWaits = [() => new Promise<void>((_resolve, fail) => { reject = fail; })];
+    await vi.advanceTimersByTimeAsync(250);
+    H.before!(); H.primary.currentUser = { uid: 'bob', token: 'bob' }; H.idToken!(H.primary.currentUser); await settle();
+    const bob = sessions.capture(); reject(new Error('late old failure')); await settle();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(H.apps).toHaveLength(3); expect(sessions.capture().db).toBe(bob.db);
+    expect(sessions.getSnapshot().failed).toBe(false); expect(H.deleted).toContain(H.apps[1]);
+  });
+
+  it('rejects a late retry clone after the account changed, even when its old promise succeeds', async () => {
+    H.cloneWaits = [() => Promise.reject(new Error('transient'))];
+    const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
+    let release!: () => void; H.cloneWaits = [() => new Promise<void>((resolve) => { release = resolve; })];
+    await vi.advanceTimersByTimeAsync(250); expect(H.apps).toHaveLength(2);
+    H.before!(); H.primary.currentUser = { uid: 'bob', token: 'bob' }; H.idToken!(H.primary.currentUser); await settle();
+    const bob = sessions.capture(); release(); await settle();
+    expect(sessions.capture().db).toBe(bob.db); expect(H.deleted).toContain(H.apps[1]); expect(H.terminated).toContain(H.dbs[1]);
+  });
+});
+
 describe('forwarded primary App Check', () => {
   it('preserves the signed token expiration rather than extending it by a minute', async () => {
     const sessions = manager(true); H.idToken!(H.primary.currentUser); await settle();

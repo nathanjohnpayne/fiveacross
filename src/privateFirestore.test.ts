@@ -116,6 +116,25 @@ describe('captured private service transport', () => {
     expect(H.listeners.size).toBe(0); expect(H.getFunctions).not.toHaveBeenCalled(); expect(H.getStorage).not.toHaveBeenCalled();
   });
 
+  it('an already-failed private bridge rejects immediately without allocating a readiness timer', async () => {
+    H.snapshot = { ...H.snapshot, uid: null, db: null, failed: true };
+    const wrapper = await import('./privateFirestore');
+    const waiting = wrapper.awaitPrivateFirestore('alice');
+    const settled = await Promise.race([waiting.then(() => 'resolved', () => 'rejected'), Promise.resolve().then(() => 'pending')]);
+    expect(settled).toBe('rejected'); expect(H.listeners.size).toBe(0); expect(vi.getTimerCount()).toBe(0);
+    expect(H.getFunctions).not.toHaveBeenCalled(); expect(H.getStorage).not.toHaveBeenCalled();
+  });
+
+  it('failure during an existing readiness wait immediately rejects and removes its timer', async () => {
+    H.snapshot = { ...H.snapshot, db: null };
+    const wrapper = await import('./privateFirestore'); const waiting = wrapper.awaitPrivateFirestore('alice');
+    const rejection = expect(waiting).rejects.toThrow(/changed/);
+    H.snapshot = { ...H.snapshot, uid: null, failed: true };
+    [...H.listeners].forEach((listener) => listener()); await rejection;
+    expect(H.listeners.size).toBe(0); expect(vi.getTimerCount()).toBe(0);
+    expect(H.getFunctions).not.toHaveBeenCalled(); expect(H.getStorage).not.toHaveBeenCalled();
+  });
+
   it('a changed actor during bootstrap retires the wait without a new-account service lookup', async () => {
     H.snapshot = { ...H.snapshot, db: null }; const wrapper = await import('./privateFirestore');
     const waiting = wrapper.awaitPrivateFirestore('alice'); const rejection = expect(waiting).rejects.toThrow(/changed/);

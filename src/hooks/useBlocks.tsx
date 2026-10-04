@@ -28,9 +28,9 @@ const EMPTY: ReadonlySet<string> = new Set();
 
 // Session publication and effect execution can straddle retirement. Refuse
 // that race without starting a listener against a different account/database.
-function captureMatchingLease(uid: string, database: ReturnType<typeof capturePrivateFirestore>['db']) {
+function captureMatchingLease(uid: string, database: ReturnType<typeof capturePrivateFirestore>['db'], allowRecovery = false) {
   try {
-    const lease = capturePrivateFirestore();
+    const lease = capturePrivateFirestore(allowRecovery);
     lease.assertCurrent();
     return lease.uid === uid && lease.db === database ? lease : null;
   } catch {
@@ -101,19 +101,21 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
   // ordinary token rotation requires a fresh answer under refreshed credentials.
   // The persistent Auth stamp catches an offline rotation even if React misses
   // its publication. Keep rendering offline; re-confirm when back online.
-  const witness = confirmed.current?.key === key && session.uid === uid && !session.recoveryRequired && !session.failed &&
+  const witness = confirmed.current?.key === key && session.uid === uid && !session.failed &&
     (confirmed.current.authGeneration === session.authGeneration || !navigator.onLine) && (
     confirmed.current.generation === session.generation || session.transition === 'connection' || !navigator.onLine
   ) ? confirmed.current : null;
   useEffect(() => {
-    const carried = confirmed.current?.key === key && session.uid === uid && !session.recoveryRequired && !session.failed &&
+    const carried = confirmed.current?.key === key && session.uid === uid && !session.failed &&
       (confirmed.current.authGeneration === session.authGeneration || !navigator.onLine) && (
       confirmed.current.generation === session.generation || session.transition === 'connection' || !navigator.onLine
     ) ? confirmed.current : null;
     confirmed.current = carried;
     setState(carried ? { key, generation: session.generation, hidden: carried.hidden, ready: true } : initial(uid, key, session.generation));
-    if (key === null || uid === null || session.uid !== uid || session.recoveryRequired || session.failed || !session.db) return;
-    const lease = captureMatchingLease(uid, session.db);
+    if (key === null || uid === null || session.uid !== uid || session.failed || !session.db) return;
+    // Filter bootstrap reads only the named memory client, never the legacy cache.
+    // Ordinary own-block/private panels remain gated by attended recovery.
+    const lease = captureMatchingLease(uid, session.db, true);
     if (!lease) return;
     let active = true;
     let lastCommitted: ReadonlySet<string> = carried?.hidden ?? EMPTY;
@@ -252,7 +254,7 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
   // sign-in while not yet enabled (null key before and after) return the
   // signed-out `ready: true` for the render before the effect resets it.
   if (key === null) return { hidden: EMPTY, ready: uid === null };
-  const sameSession = session.uid === uid && !session.recoveryRequired && !session.failed;
+  const sameSession = session.uid === uid && !session.failed;
   if (!sameSession || (state.generation !== session.generation && !witness)) return { hidden: EMPTY, ready: false };
   if (!session.db && (navigator.onLine || !witness)) return { hidden: EMPTY, ready: false };
   return state.key === key

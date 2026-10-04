@@ -1734,13 +1734,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // already-boarded Player, so a ship-wifi reconnect records nothing.
         // Tracked HERE, on the ORIGINAL promise, not on the awaited race below
         // (#409, Codex P2 on #472): the transactional join resolves `true` from
-        // EXACTLY ONE call per actual join, and that call is not necessarily
+        // its winning call when that private lease stays current through
+        // completion. That call is not necessarily
         // the current attempt — a timed-out (superseded) attempt's transaction
         // can win while the Retry re-reads the committed row and resolves
         // false. Attributing off the original promise records that ordering's
         // join exactly once; the uid guard keeps a join that lands after a
         // sign-out/account switch from attributing to the wrong session (the
-        // rare silent drop is the conservative direction).
+        // rare silent drop is the conservative direction). A private Auth
+        // retirement after commit can also reject the original completion;
+        // retry sees the existing identity, so the local analytic may be omitted.
         if (
           dealt === true &&
           activeEventIdRef.current === ownedEventId &&

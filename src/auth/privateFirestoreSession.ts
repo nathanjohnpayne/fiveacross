@@ -49,6 +49,8 @@ function forwardedAppCheckToken(token: string): AppCheckToken {
 }
 
 let appSequence = 0;
+// Initial attempt plus three fresh-client attempts; no timer survives retirement.
+const BRIDGE_RETRY_DELAYS_MS = [250, 1_000, 2_000] as const;
 
 /**
  * Private reads never share the gameplay app's persistent cache. Each Auth
@@ -60,6 +62,7 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
   let authGeneration = 0;
   let client: PrivateClient | null = null;
   let stopped = false;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
   const listeners = new Set<() => void>();
   let snapshot: PrivateFirestoreSession = {
     uid: null, db: null, generation, authGeneration, transition: 'auth', recoveryRequired: !config.recovered(), failed: false,
@@ -75,6 +78,7 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
     await deleteApp(old.app).catch(() => {});
   };
   const retire = (transition: NonNullable<PrivateFirestoreSession['transition']> = 'auth') => {
+    if (retryTimer !== null) { clearTimeout(retryTimer); retryTimer = null; }
     generation += 1;
     if (transition === 'auth') authGeneration += 1;
     const old = client;
@@ -83,7 +87,7 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
     publish({ uid: config.primaryAuth.currentUser?.uid ?? null, db: null, generation, authGeneration, transition, recoveryRequired: !config.recovered(), failed: false });
     void dispose(old);
   };
-  const synchronize = async (user: User | null, transition: NonNullable<PrivateFirestoreSession['transition']> = 'auth') => {
+  const synchronize = async (user: User | null, transition: NonNullable<PrivateFirestoreSession['transition']> = 'auth', retryIndex = 0) => {
     retire(transition);
     const attempt = generation;
     if (stopped || !user || config.online?.() === false) return;
@@ -120,6 +124,16 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
       if (!candidate && candidateApp) await deleteApp(candidateApp).catch(() => {});
       if (!stopped && attempt === generation) {
         publish({ uid: null, db: null, generation: attempt, authGeneration, transition, recoveryRequired: !config.recovered(), failed: true });
+        const delay = BRIDGE_RETRY_DELAYS_MS[retryIndex];
+        if (delay !== undefined && !stopped && attempt === generation && config.primaryAuth.currentUser === user && config.online?.() !== false) {
+          retryTimer = setTimeout(() => {
+            retryTimer = null;
+            if (stopped || attempt !== generation || config.primaryAuth.currentUser !== user || config.online?.() === false) return;
+            // A failed bridge cannot carry a previously confirmed private set,
+            // even if React never observed its intermediate failed publication.
+            void synchronize(user, 'auth', retryIndex + 1);
+          }, delay);
+        }
       }
     }
   };

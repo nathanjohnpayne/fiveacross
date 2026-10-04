@@ -3057,11 +3057,12 @@ describe('offline Tally privacy state (#1411)', () => {
     vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
     try {
       H.blockSetReady = false;
-      const cells = dealt(); cells[0] = { ...cells[0], marked: true, markedAt: 1 };
+      const cells = dealt().map((cell) => ({ ...cell, marked: true, markedAt: 1 }));
       H.board = { uid: 'u1', dayIndex: 0, seed: 1411, createdAt: 0, cells };
       render(<Board />);
       expect(document.querySelectorAll('.grid .cell')).toHaveLength(25);
-      expect(screen.getAllByText('Reconnect for Tally').length).toBeGreaterThan(0);
+      expect(screen.getAllByText('Reconnect to see the Tally.')).toHaveLength(1);
+      expect(screen.queryByText('Reconnect for Tally')).toBeNull();
       expect(H.setMark).not.toHaveBeenCalled();
     } finally { vi.restoreAllMocks(); }
   });
@@ -3072,7 +3073,7 @@ describe('offline Tally privacy state (#1411)', () => {
       H.board = { uid: 'u1', dayIndex: 0, seed: 1411, createdAt: 0, cells };
       render(<Board />);
       expect(document.querySelectorAll('.grid .cell')).toHaveLength(25);
-      expect(screen.queryByText('Reconnect for Tally')).toBeNull();
+      expect(screen.queryByText('Reconnect to see the Tally.')).toBeNull();
     } finally { vi.restoreAllMocks(); }
   });
 });

@@ -11,6 +11,8 @@
 # wouldn't find the test.
 spec_test_map:
   private-cache-isolation:
+    - src/App.test.tsx
+    - src/data/w1-attestation.test.ts
     - tests/offline/private-cache-auth.test.ts
     - src/auth/privateCacheRecovery.test.ts
     - src/auth/privateCacheRecoveryPage.test.ts

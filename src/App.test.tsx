@@ -10,6 +10,9 @@ import type { Cell } from './types';
 const authState: { value: Record<string, unknown> } = { value: {} };
 const eventScope = vi.hoisted(() => ({ eventId: 'event-a' }));
 const authMocks = vi.hoisted(() => ({ retryDeal: vi.fn() }));
+const privateRecovery = vi.hoisted(() => ({ recoveryRequired: false }));
+vi.mock('./hooks/usePrivateFirestore', () => ({ usePrivateFirestore: () => privateRecovery }));
+beforeEach(() => { privateRecovery.recoveryRequired = false; });
 vi.mock('./firebase', () => ({
   get EVENT_ID() {
     return eventScope.eventId;
@@ -485,5 +488,25 @@ describe('App — a closed Event routes the visit to the standings (#134)', () =
     eventDoc.value = null;
     renderApp();
     expect(screen.getByTestId('board')).toBeInTheDocument();
+  });
+});
+
+
+describe('attended private recovery guidance (#1411)', () => {
+  it('shows an actionable recovery link on shared and setup routes without hiding gameplay', () => {
+    privateRecovery.recoveryRequired = true;
+    const view = render(<MemoryRouter initialEntries={['/']}><App /></MemoryRouter>);
+    expect(screen.getByTestId('board')).toBeTruthy();
+    const link = screen.getByRole('link', { name: 'Finish device recovery' });
+    expect(new URL(link.getAttribute('href')!, window.location.href).searchParams.get('device-cache-recovery')).toBe('1');
+    expect(screen.getByText(/profile, submissions and organizer tools/)).toBeTruthy();
+    view.unmount();
+    render(<MemoryRouter initialEntries={['/setup/basics']}><App /></MemoryRouter>);
+    expect(screen.getByRole('link', { name: 'Finish device recovery' })).toBeTruthy();
+  });
+
+  it('does not show recovery guidance on a recovered device', () => {
+    render(<MemoryRouter><App /></MemoryRouter>);
+    expect(screen.queryByRole('link', { name: 'Finish device recovery' })).toBeNull();
   });
 });
