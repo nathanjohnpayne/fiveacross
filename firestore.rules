@@ -3333,7 +3333,18 @@ service cloud.firestore {
           // their own auth uid, so the two can never meet on a foreign doc).
           && request.resource.data.uid == request.auth.uid
           // Exactly the contract's fields, no extras riding along.
-          && request.resource.data.keys().hasOnly(['uid', 'targetKind', 'targetId', 'targetCreatedAt', 'createdAt'])
+          && request.resource.data.keys().hasOnly(['uid', 'targetKind', 'targetId', 'targetCreatedAt', 'createdAt', 'bindingCommittedAt'])
+          // Old queued clients can remain fieldless. Once stamped, a binding
+          // keeps its native time on retries and a real rebinding must reset it.
+          && (!('bindingCommittedAt' in request.resource.data)
+              ? (resource == null
+                  || !('bindingCommittedAt' in resource.data))
+              : (request.resource.data.bindingCommittedAt is timestamp
+                  && ((resource == null
+                        || !('bindingCommittedAt' in resource.data)
+                        || request.resource.data.targetCreatedAt != resource.data.targetCreatedAt)
+                    ? request.resource.data.bindingCommittedAt == request.time
+                    : request.resource.data.bindingCommittedAt == resource.data.bindingCommittedAt)))
           && request.resource.data.targetKind in ['proof', 'moment']
           && request.resource.data.targetId is string
           && request.resource.data.targetId.size() > 0

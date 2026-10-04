@@ -1,4 +1,4 @@
-import { deleteDoc, setDoc } from 'firebase/firestore';
+import { deleteDoc, getDocFromCache, serverTimestamp, setDoc } from 'firebase/firestore';
 import { heartRef } from './paths';
 import { trackIfCurrentEvent } from '../eventScopedAnalytics';
 import { EVENT_ID } from '../firebase';
@@ -22,6 +22,10 @@ import type { HeartDoc, HeartTargetKind } from '../types';
 export function heartDocId(uid: string, targetKind: HeartTargetKind, targetId: string): string {
   return `${uid}_${targetKind}_${targetId}`;
 }
+
+// Serialize only cache inspection/write enqueue, never server acknowledgement.
+// This preserves rapid on/off intent while offline. Entries leave after enqueue.
+const heartEnqueues = new Map<string, Promise<{ committed: Promise<void> }>>();
 
 /**
  * Set the caller's Heart on a post to the INTENDED state. `on` is what the
@@ -47,37 +51,36 @@ export function setHeart(params: {
   // post the Player actually tapped.
   const eventId = EVENT_ID;
   const ref = heartRef(heartDocId(uid, targetKind, targetId), eventId);
-  if (!on) {
-    return deleteDoc(ref).then(
-      () => {
-        // Analytics dimensions are registered from the active Event and cannot
-        // be rebound for this late continuation. Park the stale completion
-        // instead of reporting Event A's action as Event B's.
-        trackIfCurrentEvent(eventId, 'heart_post', { targetKind, on: false });
-      },
-      (err: unknown) => {
-        console.warn('[hearts] unheart rejected; the listener will re-sync', err);
-      },
+  const key = `${eventId}/${ref.path}`;
+  const previous = heartEnqueues.get(key);
+  const enqueued = (previous ? previous.catch(() => undefined) : Promise.resolve()).then(async () => {
+    let sameBinding = false;
+    if (on) {
+      try {
+        const cached = await getDocFromCache(ref);
+        const prior = cached.exists() ? cached.data() : undefined;
+        sameBinding = prior?.uid === uid && prior.targetKind === targetKind &&
+          prior.targetId === targetId && prior.targetCreatedAt === targetCreatedAt;
+      } catch { /* Cache absence is not a network request; stamp a new binding. */ }
+    }
+    const payload: Omit<HeartDoc, 'id'> = {
+      uid, targetKind, targetId, targetCreatedAt, createdAt: Date.now(),
+      // Omitting this field in a merge preserves even a pending offline server
+      // transform; repeating serverTimestamp would reset eligibility on retry.
+      ...(sameBinding ? {} : { bindingCommittedAt: serverTimestamp() }),
+    };
+    const write = on ? setDoc(ref, payload, { merge: true }) : deleteDoc(ref);
+    const committed = write.then(
+      () => { trackIfCurrentEvent(eventId, 'heart_post', { targetKind, on }); },
+      (err: unknown) => { console.warn('[hearts] heart intent rejected; the listener will re-sync', err); },
     );
-  }
-  const payload: Omit<HeartDoc, 'id'> = {
-    uid,
-    targetKind,
-    targetId,
-    targetCreatedAt,
-    createdAt: Date.now(),
-  };
-  // setDoc, deliberately able to OVERWRITE the caller's own slot: re-hearting
-  // a recreated post refreshes the incarnation stamp in place (the rules
-  // allow owner create AND update under the same full validation).
-  return setDoc(ref, payload).then(
-    () => {
-      trackIfCurrentEvent(eventId, 'heart_post', { targetKind, on: true });
-    },
-    (err: unknown) => {
-      console.warn('[hearts] heart rejected; the listener will re-sync', err);
-    },
-  );
+    return { committed };
+  });
+  heartEnqueues.set(key, enqueued);
+  void enqueued.finally(() => {
+    if (heartEnqueues.get(key) === enqueued) heartEnqueues.delete(key);
+  }).catch(() => undefined);
+  return enqueued.then(({ committed }) => committed);
 }
 
 /** A post's heart state as ONE derivation (pure — unit-tested directly): the
