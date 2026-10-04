@@ -264,7 +264,8 @@ export function visionVerdictWrite(visionFlag: string): Record<string, unknown> 
  *     remain Admin-visible without reversing that decision.
  *     The explicit `false` it writes is equally load-bearing: it is what keeps the
  *     re-hide arm off a genuinely restored Proof. A restored Proof is re-hidden
- *     only by a fresh scan (a re-upload re-flags it) or by an admin.
+ *     only by an admin: its object is create-only and admits one recorded scan,
+ *     and a re-upload creates a separate Proof, scanned on its own.
  *   - Retry-safe. Because it reads state rather than a transition, ANY later
  *     write that leaves the doc `'flagged'` with an extreme flag (a report bump,
  *     an admin Clear reports) re-attempts a hide that an earlier swallowed

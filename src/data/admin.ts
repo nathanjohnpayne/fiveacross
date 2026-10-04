@@ -382,8 +382,9 @@ export function hideProof(id: string, eventId: string = EVENT_ID): Promise<void>
  * fact, the same reason `visionFlag` itself is left in place: the row keeps its
  * `AI screen: …` pill, and the queue keeps the Proof (`useReportedProofs` queues
  * on the verdict), so the decision stays visible and re-hideable instead of
- * vanishing. A fresh scan that re-flags the Proof takes it back to `'flagged'`,
- * which the trigger owns again — the override is a lift, not immunity.
+ * vanishing. The override is a lift, not immunity: an admin can hide the Proof
+ * again. (No later scan re-flags it — its object is create-only and admits one
+ * recorded scan, and a re-upload creates a separate Proof, scanned on its own.)
  *
  * It restores to the state the Proof came FROM, not unconditionally to `'active'`
  * (#133, Codex P1 round 2). In admin_confirmed claim mode a Proof is created
