@@ -534,7 +534,7 @@ describe('writeVisionVerdict — the scanner records a verdict, never a Proof (#
     // scan, so a second verdict of ANY wording for it is the classifier
     // disagreeing with itself about unchanged bytes, never fresh media.
     const { db, updates, ops, store } = fakeDb({
-      // What a Restore leaves behind, here on a merely-racy flag an admin hand-Hid
+      // What a Restore leaves behind, here on a synthetic racy flag an admin hand-Hid
       // and then lifted: active, the explicit `false`, verdict still standing.
       [PROOF]: { uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: 'racy', safetyHide: false, reportCount: 0 },
       [SCAN]: { visionFlag: 'racy', scannedAt: 5, storagePath: MEDIA },
@@ -841,7 +841,7 @@ describe('visionVerdictWrite — the hold is stamped WITH the verdict (#1143)', 
     expect(safetyHideStands({ safetyHide: flagged.safetyHide })).toBe(true);
   });
 
-  it('leaves a racy flag exactly as it was — flagged for admins, no marker, hidden by nobody', async () => {
+  it('leaves a (synthetic) racy flag exactly as it was — flagged for admins, no marker, hidden by nobody', async () => {
     const { db, store } = fakeDb({ [PROOF]: { uid: 'u1', storagePath: MEDIA, status: 'active', visionFlag: null } });
     await writeVisionVerdict(db, 'e', 'p1', 'racy', MEDIA, 5);
     expect(store[PROOF]).toEqual({ uid: 'u1', storagePath: MEDIA, status: 'flagged', visionFlag: 'racy' });

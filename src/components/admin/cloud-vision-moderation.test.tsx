@@ -295,7 +295,7 @@ describe('Review queue — the Vision treatment (specs/cloud-vision-moderation.m
     expect(row.getByRole('button', { name: 'Restore' })).toBeInTheDocument();
   });
 
-  it('never marks a merely-racy verdict as hidden — raciness reaches the queue as a reason only', () => {
+  it('never marks a (hypothetical) racy verdict as hidden — it would reach the queue as a reason only', () => {
     // ADR 0004: the app is intentionally racy. Nothing auto-hides for raciness, so
     // a hypothetical racy verdict leaves an ACTIVE Proof carrying only its reason.
     H.flagged = [proof('racy', 0, { displayName: 'Racy Proof', status: 'active', visionFlag: 'racy' })];
