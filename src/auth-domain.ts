@@ -23,15 +23,8 @@ const FIRST_PARTY_AUTH_HOSTS = new Set([
   'gaycruisebingo.com',
   'gaycruisebingo.vercel.app',
   'gaycruisebingo.firebaseapp.com',
-  // The one non-production entry: the stable Vercel preview alias (ADR 0007).
-  // Its branch URL always serves the latest deployment of the `preview` branch,
-  // so a single registration covers any branch pushed there — per-deployment
-  // preview hosts (`gaycruisebingo-<hash>-…`) can never be registered and stay
-  // deliberately absent. `vercel.json`'s `/__/auth/:path*` rewrite already
-  // applies to previews, so pinning this host keeps the helper same-origin and
-  // the Safari storage-partitioning failure out of preview sign-in too.
-  // Console setup: docs/app/preview-deploys.md.
-  'gaycruisebingo-git-preview-nathanjohnpaynes-projects.vercel.app',
+  // Preview hosts receive no production trust (#1420, superseded ADR 0007).
+  // Their future isolated test Auth configuration must be reviewed separately.
   // The Five Across backup host (#585): the PRODUCTION alias of a second Vercel
   // project building this same repo with the `fiveacross` env. It exists because
   // a Five Across Event served only from Firebase Hosting has no reachable
@@ -43,12 +36,13 @@ const FIRST_PARTY_AUTH_HOSTS = new Set([
   // authorized domains and the `fiveacross` Google OAuth web client, not
   // gaycruisebingo's. `vercel.json`'s FIRST rewrite is host-conditional on this
   // exact hostname and proxies `/__/auth/*` to `fiveacross.firebaseapp.com`, so
-  // pinning here is what keeps that helper same-origin — a plain `.com` build
-  // would proxy to the wrong Firebase project.
+  // pinning here keeps that helper same-origin even if the baked Auth domain
+  // names a different production host.
   //
   // A production alias, not a branch URL, on purpose: the gcb project's preview
-  // deployments sit behind Vercel Standard Protection (ADR 0007 § Consequences),
-  // which would put a player-facing backup host behind a vercel.com login wall.
+  // deployments historically sat behind Vercel Standard Protection; current
+  // protection needs owner inventory (#1420). A login wall is inappropriate
+  // for a player-facing backup host.
   // Console setup: docs/app/preview-deploys.md § The Five Across mirror.
   'fiveacross.vercel.app',
   // The Vacay Bingo backup host (#625): the third and last of the brand family's

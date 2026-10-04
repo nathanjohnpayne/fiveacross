@@ -17,9 +17,10 @@ describe('resolveAuthDomain', () => {
     expect(resolveAuthDomain('localhost', '127.0.0.1')).toBe('localhost');
   });
 
-  it('pins the stable preview alias to its own handler so preview sign-in is same-origin (#453)', () => {
+  it('does not grant the stable preview alias production auth trust (#1420)', () => {
     const alias = 'gaycruisebingo-git-preview-nathanjohnpaynes-projects.vercel.app';
-    expect(resolveAuthDomain('gaycruisebingo.vercel.app', alias)).toBe(alias);
+    expect(resolveAuthDomain('gaycruisebingo.vercel.app', alias)).toBe('gaycruisebingo.vercel.app');
+    expect(isSignInReachableOnHost('gaycruisebingo.vercel.app', alias)).toBe(false);
   });
 
   it('pins the Five Across mirror to its own handler so the backup host signs in same-origin (#585)', () => {

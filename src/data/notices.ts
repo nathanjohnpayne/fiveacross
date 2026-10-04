@@ -1,6 +1,5 @@
 import { collection, deleteDoc, doc, setDoc, updateDoc } from 'firebase/firestore';
-import { db, EVENT_ID } from '../firebase';
-import { markerDisplayName } from './attribution';
+import { auth, db, EVENT_ID } from '../firebase';
 import type { NoticeDoc } from '../types';
 
 // Notices (specs/admin-messages.md): an admin-authored broadcast — title + body,
@@ -9,7 +8,9 @@ import type { NoticeDoc } from '../types';
 // and Doubts (create-once, immutable, deterministic id), a Notice is MUTABLE (the
 // pin toggle and an in-place copy correction, #455) and DELETABLE, so it takes a
 // Firestore auto-id, not a deterministic slot. firestore.rules gates every write on
-// `isAdmin(eventId)` and validates the title/body caps + `pinned: bool` on create
+// `isAdmittedAdmin(eventId)` and binds new attribution to the authenticated UID
+// and nonempty ≤100-character ID-token name. It validates the title/body caps +
+// `pinned: bool` on create
 // AND update; on update it additionally pins the diff to title/body/pinned/editedAt,
 // so attribution (`uid`, `displayName`) and Feed ordering (`createdAt`) are immutable
 // server-side.
@@ -25,13 +26,11 @@ const rawNotice = (id: string) => doc(db, 'events', EVENT_ID, 'notices', id);
 // server will reject.
 export const NOTICE_TITLE_MAX = 60;
 export const NOTICE_BODY_MAX = 400;
+export const NOTICE_NAME_MAX = 100;
 
 export interface PostNoticeArgs {
-  // The posting admin's uid (auth) — the rules cross-check `isAdmin`, not this.
+  // Captured posting UID; checked against current Auth before and after token lookup.
   uid: string;
-  // The admin's resolved public identity (saved player-row name + auth), bounded
-  // here to the ≤100 attribution contract via `markerDisplayName`, Moment-style.
-  displayName?: string;
   title: string;
   body: string;
   pinned: boolean;
@@ -45,17 +44,28 @@ export interface PostNoticeArgs {
  * Post a Notice to the Feed. Trims and caps the title/body to the rules' contract,
  * stamps `createdAt` + the current-Day `dayIndex` (Moment-style), and writes with
  * a Firestore auto-id (returned so the caller can reference the fresh doc). The
- * write is awaited so the compose form can clear only on success and surface a
+ * name comes from the authenticated ID token, never a caller or Player profile.
+ * Missing/empty/oversized token names fail closed; account renaming is an accepted
+ * label change for future Notices, with the stable UID retained in Admin history.
+ * The write is awaited so the compose form can clear only on success and surface a
  * failure otherwise (the admin is online composing — this is not the offline
  * fire-and-forget mark path). Rejects on a rules denial or network error.
  */
 export async function postNotice(args: PostNoticeArgs): Promise<string> {
+  const user = auth.currentUser;
+  if (!user || user.uid !== args.uid) throw new Error('Notice posting account changed.');
+  const { claims } = await user.getIdTokenResult();
+  if (auth.currentUser?.uid !== args.uid) throw new Error('Notice posting account changed.');
+  const name = claims.name;
+  if (typeof name !== 'string' || name.length === 0 || name.length > NOTICE_NAME_MAX) {
+    throw new Error('Notice posting requires a bounded account name.');
+  }
   const ref = doc(rawNotices());
   const payload: Omit<NoticeDoc, 'id'> = {
     title: args.title.trim().slice(0, NOTICE_TITLE_MAX),
     body: args.body.trim().slice(0, NOTICE_BODY_MAX),
     uid: args.uid,
-    displayName: markerDisplayName(args.displayName, undefined),
+    displayName: name,
     createdAt: Date.now(),
     pinned: args.pinned,
     // Firestore rejects an explicit `undefined`, so spread the field only when
