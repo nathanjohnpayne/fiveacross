@@ -2,15 +2,17 @@
 // identifying an Event — a lowercase DNS-safe friendly address, globally unique
 // across Namespaces, and explicitly NOT an authorization secret."
 //
-// ONE list, two consumers, and that is the whole reason this module exists.
+// ONE list, three consumers, and that is the whole reason this module exists.
 // The edge Worker (`worker/src/host.ts`) uses it as a namespace GUARD — the
-// answer to "may this hostname reach the router at all?" — and the Event-setup
+// answer to "may this hostname reach the router at all?" — the Event-setup
 // wizard's address step (#790) uses it as INPUT VALIDATION, the answer to "may
-// an organizer claim this address?". Those two questions must never be
-// answered by two lists: a label the wizard lets an organizer claim but the
-// router refuses is an Event that provisions successfully and then 404s
-// forever, and a label the router admits but the wizard forbids is a reserved
-// infrastructure name an operator can never take back.
+// an organizer claim this address?", and the client's `parseAddress` (#1387)
+// uses it to tell an app route from a path-addressed Event. Those questions
+// must never be answered by separate lists: a label the wizard lets an
+// organizer claim but the router refuses is an Event that provisions
+// successfully and then 404s forever, a label the router admits but the wizard
+// forbids is a reserved infrastructure name an operator can never take back,
+// and a path word the parser reads as a slug is an app route an Event shadows.
 //
 // Deliberately dependency-free, and deliberately rooted under `src/` rather
 // than under `worker/`, mirroring `src/domainTypes.d.ts`: the separately-rooted
