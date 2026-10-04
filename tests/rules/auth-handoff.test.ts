@@ -1,3 +1,4 @@
+import { projectPublicHostname } from '../../functions/src/publicHostnameFields';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -99,6 +100,7 @@ beforeEach(async () => {
       status: 'active',
       isCanonical: true,
     });
+    await setDoc(doc(raw, `publicHostnames/${HOST}`), projectPublicHostname((await getDoc(doc(raw, `hostnames/${HOST}`))).data()));
     // A live, unconsumed handoff — written through the production builder rather
     // than a hand-copied shape, so this fixture cannot drift from what mint writes.
     await setDoc(
@@ -168,7 +170,7 @@ describe('authHandoffs rules', () => {
     // The guard against an over-broad edit: the deny must be scoped to this
     // collection, and the pre-auth hostname lookup in particular must still work
     // — the handoff cannot even start without it.
-    await assertSucceeds(getDoc(doc(anon(), `hostnames/${HOST}`)));
+    await assertSucceeds(getDoc(doc(anon(), `publicHostnames/${HOST}`)));
   });
 });
 

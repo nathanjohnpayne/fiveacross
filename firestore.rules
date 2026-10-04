@@ -1535,12 +1535,12 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // Public hostname -> Event lookup (ADR 0009, specs/hostnames-lookup.md).
+    // Strict public hostname projection (ADR 0009, specs/hostnames-lookup.md).
     //
     // One document per public address, keyed by the FULL hostname:
     //   { eventId, canonicalHost, edition, status, slug, isCanonical }
     //
-    // This is the ONE deliberately world-readable collection in a schema whose
+    // This is the deliberately public, field-allowlisted collection in a schema whose
     // whole posture is membership isolation, so the reasoning matters:
     //
     //   WHY UNAUTHENTICATED. The Event must resolve BEFORE there is a signed-in
@@ -1552,8 +1552,9 @@ service cloud.firestore {
     //   WHY THAT IS SAFE. A Slug is an address, not a secret (CONTEXT.md).
     //   Knowing one grants nothing: every read of Event data still passes the
     //   membership gate. What leaks here is that an Event exists at a hostname
-    //   the reader already typed — plus its Edition, which the branding on the
-    //   page announces anyway.
+    //   the reader already typed — plus its branding, adult posture and the
+    //   approved preview copy the sign-in page announces. The #1419 read guard
+    //   below refuses extra root/preview keys instead of redacting them.
     //
     //   WHY get BUT NOT list. `get` resolves an address the caller already
     //   knows. `list` would enumerate every Event on the platform, turning a
@@ -1598,10 +1599,28 @@ service cloud.firestore {
     // document and returns `exists() == false`, so the client renders an
     // Event-not-found state rather than tripping a permission error it would
     // have to distinguish from a network failure.
+    // #1419: publicHostnames contains only the approved public projection.
+    // Canonical hostnames retains private registry/recovery metadata. Firestore
+    // cannot redact fields: an unexpected projection key denies the whole get.
+    // Literals mirror functions/src/publicHostnameFields.ts (Rules parity test).
+    function publicHostnameData(data) {
+      let preview = data.get('preview', {});
+      return data.keys().hasOnly([
+          'eventId', 'canonicalHost', 'edition', 'status', 'adultContent', 'slug', 'isCanonical', 'preview'
+        ])
+        && preview is map
+        && preview.keys().hasOnly(['eventName', 'dateRange', 'days', 'hostedBy']);
+    }
     match /hostnames/{host} {
-      allow get: if true;
-      allow list: if false;
-      allow create, update, delete: if false;
+      // Canonical registry/recovery data is never an anonymous fallback.
+      allow get: if signedIn();
+      allow list, create, update, delete: if false;
+    }
+    match /publicHostnames/{host} {
+      // Whole-document fail-closed admission, including the nested preview.
+      allow get: if !exists(/databases/$(database)/documents/publicHostnames/$(host))
+        || publicHostnameData(resource.data);
+      allow list, create, update, delete: if false;
     }
 
     // App Check-safe edge registry control-plane state (ADR 0014, #970).

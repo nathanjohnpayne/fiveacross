@@ -7,7 +7,7 @@ import { coerceEventPreview, type EventPreview } from './eventPreview';
 // Runs BEFORE authentication and BEFORE first paint, which is the whole
 // constraint. `events/{eventId}` requires `signedIn()`, so the Event cannot be
 // read from there in time to dress the sign-in screen; the public
-// `hostnames/{host}` lookup exists precisely to answer "which Event is this?"
+// `publicHostnames/{host}` lookup exists precisely to answer "which Event is this?"
 // while the user is still anonymous.
 //
 // Everything here is pure or injected — no Firestore import, no direct
@@ -33,7 +33,7 @@ export type Resolution =
        *  unlike `edition`: there is no "unknown" posture a gate could render, so
        *  an unknown answer resolves to the gated one. */
       adultContent: boolean;
-      /** Whether `adultContent` came from a LIVE read of `hostnames/{host}`, as
+      /** Whether `adultContent` came from a LIVE read of `publicHostnames/{host}`, as
        *  opposed to a build-time seed, a cached entry, or the fail-closed
        *  default. Only a proven `true` latches the session (`sessionRaised`);
        *  only a proven `false` is allowed to stand without revalidation. See the
@@ -304,7 +304,7 @@ export async function resolveEvent(opts: ResolveOptions): Promise<Resolution> {
     //
     // So the seed is marked UNPROVEN (`adultContentProven: false` below). It
     // paints the first frame, and `revalidateAdultContent` then has to confirm it
-    // against `hostnames/{host}` like any other ungated claim. If that read says
+    // against `publicHostnames/{host}` like any other ungated claim. If that read says
     // `true`, the gate goes up. If the document does not exist, there is no
     // channel through which this posture could ever be revoked — so the posture
     // returns to gated rather than standing forever on a promise nobody can keep.

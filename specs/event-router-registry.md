@@ -28,7 +28,8 @@ The actors considered are an unauthenticated Internet caller, a modified browser
 ```text
 trusted hostname writer
       │ one Firestore transaction
-      ├── hostnames/{host}             public point-get source
+      ├── hostnames/{host}             private canonical source
+      ├── publicHostnames/{host}       strict public browser projection
       └── routerReplicas/{host}        private desired state + revision
                     │ Firestore event, retry enabled
                     ▼

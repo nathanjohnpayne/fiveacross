@@ -231,7 +231,7 @@ describe('the network and cache paths agree about the same bytes', () => {
 // `status: 'active'` — and the 18+ posture is published by a Cloud Function
 // reacting to it. Two writes with an invocation between them, so for a moment
 // the Prompt is live and the posture is not: every Player's `status == 'active'`
-// listener delivers the explicit text while `hostnames/{host}.adultContent`
+// listener delivers the explicit text while `publicHostnames/{host}.adultContent`
 // still says `false`. No amount of listener promptness closes that — it is an
 // ordering problem, not a latency one — and the client cannot make the two
 // writes atomic, because no client may write `hostnames` at all.

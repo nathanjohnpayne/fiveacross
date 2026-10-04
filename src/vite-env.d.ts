@@ -15,11 +15,11 @@ interface ImportMetaEnv {
   // means the legacy `gcb` Edition, so existing builds and .env files need no
   // change. Also brands a single-Event build's pre-auth shell
   // (src/editions.ts); hostname-resolved builds take the Edition from
-  // `hostnames/{host}.edition` instead (#543).
+  // `publicHostnames/{host}.edition` instead (#543).
   readonly VITE_EDITION?: string;
   // The 18+ opt-out for a SINGLE-EVENT build (#608). Only a literal 'false'
   // opts out. A hostname-resolved build ignores it entirely and defers to
-  // `hostnames/{host}.adultContent`, which the server derives.
+  // `publicHostnames/{host}.adultContent`, which the server derives.
   readonly VITE_ADULT_CONTENT?: string;
   readonly VITE_RECAPTCHA_SITE_KEY: string;
   // Which route sign-in takes (#549, ADR 0010): 'handoff' (the default) or

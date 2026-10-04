@@ -4,7 +4,7 @@ import { setActiveAdultContent } from '../adultContent';
 /**
  * Keeps this session's 18+ posture current (Phase 4b).
  *
- * WHAT IT FIXES. `hostnames/{host}.adultContent` is resolved once, before React
+ * WHAT IT FIXES. `publicHostnames/{host}.adultContent` is resolved once, before React
  * mounts. But the Event's pool can turn adult while a tab is open — an admin
  * approves the first explicit Prompt, the derivation stamps the routing
  * document — and a tab that only ever resolved at launch would serve the rest of

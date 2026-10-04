@@ -1,3 +1,4 @@
+import { projectPublicHostname } from './publicHostnameFields';
 /**
  * Server-side derivation of an Event's 18+ posture (#608).
  *
@@ -6,7 +7,7 @@
  * `signedIn()`; the 18+ acknowledgement is ON the sign-in gate, pre-auth. So the
  * posture is derived HERE, by the admin SDK (which bypasses security rules), and
  * published onto the world-readable routing documents the resolver already
- * fetches before mount — `hostnames/{host}.adultContent` (ADR 0009's shape,
+ * fetches before mount — `publicHostnames/{host}.adultContent` (ADR 0009's shape,
  * reused).
  *
  *     adultContent = settings.forceAdult || (any ACTIVE spicy Prompt in a dealable pool)
@@ -29,11 +30,12 @@
  * rather than "did this write CROSS?". A crossing test would make a swallowed
  * failure permanent: the item stays active-and-spicy, no later write is a fresh
  * crossing, and the Event stays un-gated forever. Answering on the after-state
- * means every subsequent write to that item is another attempt, and the raise
- * itself skips documents already at `true`, so the steady state costs one query
- * and no writes.
+ * means every subsequent write to that item is another attempt. Each matching
+ * hostname is reread transactionally: its canonical stamp changes only when
+ * needed, while its strict public projection is replaced even when the stamp
+ * is already `true`, repairing a missing or stale public copy.
  *
- * The writes land on `hostnames/*`, never on `events/*` — so neither trigger can
+ * The paired writes land on `hostnames/*` and `publicHostnames/*`, never on `events/*` — so neither trigger can
  * re-fire itself, and no loop guard is needed.
  */
 
@@ -88,15 +90,14 @@ export function eventForcesAdultContent(event: Record<string, unknown> | undefin
 //
 // Declared locally rather than imported from `autohide.ts`: that module's
 // `DocRef` is read-only (`get()` alone), because its writes all go through a
-// transaction. This one needs a plain `update`, and widening the shared
-// interface would hand the auto-hide a write path it deliberately does not have.
+// transaction. This surface owns a paired canonical/public transaction without
+// widening the auto-hide interface.
 
 interface AdultDocSnapshot {
   readonly id: string;
   data(): Record<string, unknown> | undefined;
 }
 interface AdultDocRef {
-  update(data: Record<string, unknown>): Promise<unknown>;
   get(): Promise<{ exists: boolean; data(): Record<string, unknown> | undefined }>;
 }
 interface AdultQueryRef {
@@ -105,6 +106,28 @@ interface AdultQueryRef {
 export interface AdultFirestore {
   doc(path: string): AdultDocRef;
   collection(path: string): { where(field: string, op: string, value: unknown): AdultQueryRef };
+  runTransaction<T>(work: (transaction: {
+    get(ref: AdultDocRef): Promise<{ exists: boolean; data(): Record<string, unknown> | undefined }>;
+    update(ref: AdultDocRef, data: Record<string, unknown>): unknown;
+    set(ref: AdultDocRef, data: Record<string, unknown>): unknown;
+  }) => Promise<T>): Promise<T>;
+}
+
+/** Re-read canonical state inside the transaction; a repoint races safely.
+ * Replace the public document, so private extras can never survive a merge. */
+export async function stampAdultHostname(db: AdultFirestore, host: string, expectedEventId?: string): Promise<boolean> {
+  const canonical = db.doc(`hostnames/${host}`);
+  const projection = db.doc(`publicHostnames/${host}`);
+  return db.runTransaction(async transaction => {
+    const snapshot = await transaction.get(canonical);
+    if (!snapshot.exists) return false;
+    const data = snapshot.data();
+    if (!data || (expectedEventId !== undefined && data.eventId !== expectedEventId)) return false;
+    const changed = data.adultContent !== true;
+    if (changed) transaction.update(canonical, { adultContent: true });
+    transaction.set(projection, projectPublicHostname({ ...data, adultContent: true }));
+    return changed;
+  });
 }
 
 async function adminFirestore(): Promise<AdultFirestore> {
@@ -114,7 +137,7 @@ async function adminFirestore(): Promise<AdultFirestore> {
 
 /**
  * Stamp `adultContent: true` on every routing document that points at this
- * Event, skipping the ones already stamped.
+ * Event, pairing each canonical stamp with its strict public projection.
  *
  * EVERY document, not just the canonical one: an Event's canonical address and
  * each of its aliases are separate `hostnames/{host}` records (ADR 0009), and a
@@ -130,8 +153,8 @@ async function adminFirestore(): Promise<AdultFirestore> {
  * un-gated sign-in shell for an Event that now has active explicit content, with
  * no guaranteed second attempt: the derived flag is a fail-closed security
  * posture, and "logged and forgotten" is not a fail direction it can afford.
- * Retrying is safe because the stamp is idempotent — the already-stamped
- * documents are skipped on the way through.
+ * Retrying is safe: already-stamped canonical rows retain their value, while
+ * their public projection is replaced to repair a missing or stale copy.
  *
  * Returns how many documents it stamped.
  */
@@ -140,10 +163,8 @@ export async function raiseAdultContentForEvent(db: AdultFirestore, eventId: str
   let stamped = 0;
   const failed: string[] = [];
   for (const d of snap.docs) {
-    if (d.data()?.adultContent === true) continue; // already gated — monotone, nothing to do
     try {
-      await db.doc(`hostnames/${d.id}`).update({ adultContent: true });
-      stamped++;
+      if (await stampAdultHostname(db, d.id, eventId)) stamped++;
     } catch (err) {
       console.error('raiseAdultContentForEvent: per-host stamp failed', eventId, d.id, err);
       failed.push(d.id);
@@ -262,15 +283,15 @@ export interface HostnameReconcileDeps {
   /** Defaults to `eventIsAdult` against the admin SDK. */
   eventIsAdult?: (eventId: string) => Promise<boolean>;
   /** Defaults to stamping the one document. */
-  stampHost?: (host: string) => Promise<void>;
+  stampHost?: (host: string, expectedEventId: string) => Promise<void | boolean>;
 }
 
 async function defaultEventIsAdult(eventId: string): Promise<boolean> {
   return eventIsAdult(await adminFirestore(), eventId);
 }
 
-async function defaultStampHost(host: string): Promise<void> {
-  await (await adminFirestore()).doc(`hostnames/${host}`).update({ adultContent: true });
+async function defaultStampHost(host: string, expectedEventId: string): Promise<boolean> {
+  return stampAdultHostname(await adminFirestore(), host, expectedEventId);
 }
 
 /**
@@ -295,6 +316,6 @@ export async function reconcileHostnameAdultContent(
   const eventId = typeof after.eventId === 'string' ? after.eventId : '';
   if (!eventId) return false;
   if (!(await (deps.eventIsAdult ?? defaultEventIsAdult)(eventId))) return false;
-  await (deps.stampHost ?? defaultStampHost)(host);
-  return true;
+  const changed = await (deps.stampHost ?? defaultStampHost)(host, eventId);
+  return changed !== false;
 }

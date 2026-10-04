@@ -67,7 +67,7 @@ describe('fetchHostnameDoc — the read must reach the server', () => {
     mocks.getDocFromServer.mockResolvedValue(snap(DOC));
     await fetchHostnameDoc('Bodega-Bay.VacayBingo.com');
     expect(mocks.getDocFromServer.mock.calls[0][0]).toMatchObject({
-      path: 'hostnames/bodega-bay.vacaybingo.com',
+      path: 'publicHostnames/bodega-bay.vacaybingo.com',
     });
   });
 

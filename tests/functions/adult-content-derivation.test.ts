@@ -8,6 +8,7 @@ import {
   itemImpliesAdultContent,
   raiseAdultContentForEvent,
   reconcileHostnameAdultContent,
+  stampAdultHostname,
   type AdultFirestore,
 } from '../../functions/src/adultContent';
 
@@ -84,16 +85,31 @@ function fakeDb(
   hosts: Record<string, { eventId: string; adultContent?: boolean }>,
   docs: Record<string, Record<string, unknown>> = {},
   items: Record<string, unknown>[] = [],
+  failPath?: string,
 ) {
   const updates: Record<string, Record<string, unknown>> = {};
+  const values = { ...Object.fromEntries(Object.entries(hosts).map(([host, data]) => [`hostnames/${host}`, data])), ...docs };
+  const pathByRef = new WeakMap<object, string>();
   const db: AdultFirestore = {
-    doc: (path: string) => ({
-      update: async (data: Record<string, unknown>) => {
-        updates[path] = { ...(updates[path] ?? {}), ...data };
-        return undefined;
-      },
-      get: async () => ({ exists: path in docs, data: () => docs[path] }),
-    }),
+    doc: (path: string) => {
+      const ref = { get: async () => ({ exists: path in values, data: () => values[path] }) };
+      pathByRef.set(ref, path);
+      return ref;
+    },
+    async runTransaction(work) {
+      const staged: Array<[string, Record<string, unknown>, boolean]> = [];
+      const result = await work({
+        get: ref => ref.get(),
+        update: (ref, data) => { staged.push([pathByRef.get(ref)!, data, false]); },
+        set: (ref, data) => { staged.push([pathByRef.get(ref)!, data, true]); },
+      });
+      if (staged.some(([path]) => path === failPath)) throw new Error('nope');
+      for (const [path, data, replace] of staged) {
+        updates[path] = replace ? data : { ...(updates[path] ?? {}), ...data };
+        values[path] = replace ? data : { ...values[path], ...data };
+      }
+      return result;
+    },
     collection: (path: string) => ({
       where: (_f: string, _op: string, value: unknown) => ({
         get: async () =>
@@ -126,13 +142,14 @@ describe('the stamp: every routing document for the Event', () => {
     expect(updates['hostnames/someone-elses.example.com']).toBeUndefined();
   });
 
-  it('skips documents already stamped — the steady state costs no writes', async () => {
+  it('retains already-stamped canonical data while repairing its public projection', async () => {
     const { db, updates } = fakeDb({
       'a.example.com': { eventId: 'e1', adultContent: true },
       'b.example.com': { eventId: 'e1' },
     });
     expect(await raiseAdultContentForEvent(db, 'e1')).toBe(1);
     expect(updates['hostnames/a.example.com']).toBeUndefined();
+    expect(updates['publicHostnames/a.example.com']).toEqual({ eventId: 'e1', adultContent: true });
     expect(updates['hostnames/b.example.com']).toEqual({ adultContent: true });
   });
 
@@ -141,27 +158,27 @@ describe('the stamp: every routing document for the Event', () => {
   // trigger would leave that alias serving the un-gated shell with no second
   // attempt (Codex P2 on #615). Retrying is safe: the stamp is idempotent.
   it('finishes the remaining aliases when one write fails, then throws for retry', async () => {
-    const { db } = fakeDb({ 'a.example.com': { eventId: 'e1' }, 'b.example.com': { eventId: 'e1' } });
-    const stamped: Record<string, Record<string, unknown>> = {};
-    const failing: AdultFirestore = {
-      ...db,
-      doc: (path: string) => ({
-        update: async (data: Record<string, unknown>) => {
-          stamped[path] = data;
-          // Exact path, not `endsWith` — CodeQL reads a host suffix test as
-          // incomplete URL sanitization, and an exact match is what this double
-          // means anyway.
-          if (path === 'hostnames/a.example.com') throw new Error('nope');
-          return undefined;
-        },
-      }),
-    };
+    const { db, updates: stamped } = fakeDb({ 'a.example.com': { eventId: 'e1' }, 'b.example.com': { eventId: 'e1' } }, {}, [], 'hostnames/a.example.com');
     // The message must name the hostname that is still un-gated — that is the
     // only actionable thing in a retry log. Dots escaped: an unescaped `.` in a
     // hostname pattern matches more hosts than intended (CodeQL).
-    await expect(raiseAdultContentForEvent(failing, 'e1')).rejects.toThrow(/a\.example\.com/);
+    await expect(raiseAdultContentForEvent(db, 'e1')).rejects.toThrow(/a\.example\.com/);
     // …and the good alias was still stamped on the way through.
     expect(stamped['hostnames/b.example.com']).toEqual({ adultContent: true });
+  });
+});
+
+describe('paired adult projection fence', () => {
+  it('refuses a hostname repointed after the Event query', async () => {
+    const { db, updates } = fakeDb({ 'a.example.com': { eventId: 'old' } }, { 'hostnames/a.example.com': { eventId: 'new', adultContent: false } });
+    expect(await raiseAdultContentForEvent(db, 'old')).toBe(0);
+    expect(updates).toEqual({});
+  });
+  it('copies only public fields and preserves private canonical metadata', async () => {
+    const { db, updates } = fakeDb({}, { 'hostnames/a.example.com': { eventId: 'e1', pathNamespace: null, privateEmail: 'secret', preview: { eventName: 'Public', internalNote: 'secret' } } });
+    expect(await stampAdultHostname(db, 'a.example.com')).toBe(true);
+    expect(updates['publicHostnames/a.example.com']).toEqual({ eventId: 'e1', adultContent: true, preview: { eventName: 'Public' } });
+    expect((await db.doc('hostnames/a.example.com').get()).data()?.privateEmail).toBe('secret');
   });
 });
 
@@ -288,7 +305,7 @@ describe('reconcileHostnameAdultContent', () => {
         { eventIsAdult: eventIsAdultFn, stampHost },
       ),
     ).toBe(true);
-    expect(stampHost).toHaveBeenCalledWith('alias.example.com');
+    expect(stampHost).toHaveBeenCalledWith('alias.example.com', 'e1');
   });
 
   // The concurrent-creation race the item trigger's query snapshot misses: the
@@ -300,7 +317,7 @@ describe('reconcileHostnameAdultContent', () => {
       { eventId: 'e1', adultContent: false },
       { eventIsAdult: async () => true, stampHost },
     );
-    expect(stampHost).toHaveBeenCalledWith('racing.example.com');
+    expect(stampHost).toHaveBeenCalledWith('racing.example.com', 'e1');
   });
 
   it('leaves a routing document for a tame Event alone', async () => {

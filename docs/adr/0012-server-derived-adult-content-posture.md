@@ -13,13 +13,13 @@ Deriving the answer in the client would either require exposing the Prompt pool 
 
 ## Decision
 
-Cloud Functions derive `adultContent = settings.forceAdult || any active spicy Prompt in a dealable pool` and publish `adultContent: true` onto every `hostnames/{host}` routing document for the Event. The value is monotone: automatic code never lowers it. Item writes, Event override writes, and hostname writes each have a dedicated idempotent trigger so an approval, a force-adult change, or a later alias all converge on the same invariant. Trigger failures throw so the platform retries them.
+Cloud Functions derive `adultContent = settings.forceAdult || any active spicy Prompt in a dealable pool` and publish `adultContent: true` onto every canonical `hostnames/{host}` routing document and its paired strict `publicHostnames/{host}` projection in one transaction per hostname for the Event. The value is monotone: automatic code never lowers it. Item writes, Event override writes, and hostname writes each have a dedicated idempotent trigger so an approval, a force-adult change, or a later alias all converge on the same invariant. Trigger failures throw so the platform retries them.
 
-The routing field remains world-readable under ADR 0009's `get`-yes / `list`-no boundary. It discloses only the posture needed to render the public gate; it does not expose Prompts, membership, or an enumerable Event directory.
+The routing field remains public on allowlisted hostname documents under ADR 0009's `get`-yes / `list`-no boundary. It discloses only the posture needed to render the public gate; it does not expose Prompts, membership, or an enumerable Event directory.
 
 Clients fail closed. Missing, malformed, cached-unproven, or unreachable posture data reads as adults-only. A literal server-confirmed `false` is the only authority for hiding the acknowledgement. Open tabs watch the routing document so approving the first explicit Prompt re-gates un-attested Players, and every frozen-card publish path withholds explicit Prompts until the raised posture is visible.
 
-A single-Event build may seed the initial posture with `VITE_ADULT_CONTENT=false`, but that is not authority and not a permanent opt-out. It still watches `hostnames/{current-host}`; a missing or failed live read returns the session to the gated posture. A non-adult single-Event deployment therefore requires the corresponding routing document as well as the build-time seed.
+A single-Event build may seed the initial posture with `VITE_ADULT_CONTENT=false`, but that is not authority and not a permanent opt-out. It still watches `publicHostnames/{current-host}`; a missing or failed live read returns the session to the gated posture. A non-adult single-Event deployment therefore requires the corresponding routing document as well as the build-time seed.
 
 ## Consequences
 

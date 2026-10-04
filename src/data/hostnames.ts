@@ -1,3 +1,4 @@
+import { hasOnlyPublicHostnameFields } from '../../functions/src/publicHostnameFields';
 import { doc, getDocFromServer, onSnapshot } from 'firebase/firestore';
 import { db, applyResolvedEventId } from '../firebase';
 import { dropCache, isServable, readCache, resolveEvent, writeCache, type Resolution } from '../eventResolution';
@@ -29,13 +30,13 @@ function hasTrailingRootDot(hostname: string): boolean {
 let bootstrappedEventId: string | null = null;
 
 /**
- * Fetch `hostnames/{host}` FROM THE SERVER.
+ * Fetch `publicHostnames/{host}` FROM THE SERVER.
  *
  * A single `get`, never a query — the rule grants `get` and denies `list`
  * precisely so an address can be resolved without the collection becoming a
  * directory of every Event (specs/hostnames-lookup.md). Runs UNAUTHENTICATED:
  * this happens before sign-in, which is the whole reason the collection is
- * world-readable.
+ * field-allowlisted public.
  *
  * `getDocFromServer`, not `getDoc`, and that distinction is load-bearing. A
  * plain `getDoc` may answer from Firestore's OWN cache, so offline or on a
@@ -59,17 +60,18 @@ let bootstrappedEventId: string | null = null;
  */
 export async function fetchHostnameDoc(hostname: string): Promise<HostnameDoc | null> {
   if (hasTrailingRootDot(hostname)) return null;
-  const snap = await getDocFromServer(doc(db, 'hostnames', hostnameKey(hostname)));
+  const snap = await getDocFromServer(doc(db, 'publicHostnames', hostnameKey(hostname)));
   if (!snap.exists()) return null;
   return coerceHostnameDoc(snap.data() as Partial<HostnameDoc>, hostname);
 }
 
-/** The one reading of a raw `hostnames/{host}` payload into the contract shape
+/** The one reading of a raw `publicHostnames/{host}` payload into the contract shape
  *  — extracted from `fetchHostnameDoc` (verbatim semantics) so the live
  *  watcher below can validate its snapshots identically before caching them.
  *  Two seams reading the same document must not disagree about what a usable
  *  mapping is. */
 function coerceHostnameDoc(d: Partial<HostnameDoc> | undefined, hostname: string): HostnameDoc | null {
+  if (!hasOnlyPublicHostnameFields(d)) return null;
   if (typeof d?.eventId !== 'string' || !d.eventId) return null;
   if (typeof d.status !== 'string' || !VALID_STATUS.has(d.status)) return null;
   return {
@@ -86,7 +88,9 @@ function coerceHostnameDoc(d: Partial<HostnameDoc> | undefined, hostname: string
     slug: typeof d.slug === 'string' ? d.slug : undefined,
     isCanonical: typeof d.isCanonical === 'boolean' ? d.isCanonical : undefined,
     // The sign-in postcard's preview slice (#647). Optional and fail-soft like
-    // `slug`: a malformed or absent slice costs the card, never the Event.
+    // `slug`: malformed approved values or an absent slice cost the card.
+    // Unapproved raw field names are separately denied on anonymous reads by
+    // the whole-document Rules guard; this coercer also refuses them in a local snapshot.
     preview: coerceEventPreview(d.preview),
   };
 }
@@ -292,7 +296,7 @@ function safeLocalStorage(): Storage | null {
 /**
  * Watch THIS origin's 18+ posture and keep it installed (Phase 4b).
  *
- * The posture is the one field on `hostnames/{host}` that is expected to change
+ * The posture is the one field on `publicHostnames/{host}` that is expected to change
  * mid-session: an admin approves the first explicit Prompt, the derivation
  * stamps the routing document, and every already-open tab is now serving an
  * adults-only Event with no acknowledgement. Startup resolution cannot cover
@@ -350,7 +354,7 @@ export function watchAdultContent(
   resolvedEventId: string | null = bootstrappedEventId,
 ): () => void {
   const unsubscribe = onSnapshot(
-    doc(db, 'hostnames', hostnameKey(hostname)),
+    doc(db, 'publicHostnames', hostnameKey(hostname)),
     (snap) => {
       // Server-backed snapshots prove; cached ones may only ever RAISE.
       const proven = snap.metadata.fromCache === false;
@@ -419,7 +423,7 @@ export function watchAdultContent(
       // env-pinned next boot can read the old active envelope before the live
       // watcher has a chance to correct the card.
       if (proven && !servable) dropCache(safeLocalStorage(), hostname);
-      const adult = coerceAdultContent(data?.adultContent);
+      const adult = hasOnlyPublicHostnameFields(data) ? coerceAdultContent(data.adultContent) : true;
       if (!adult && !proven) return; // a cached `false` proves nothing
       setActiveAdultContent(adult, { proven });
     },
