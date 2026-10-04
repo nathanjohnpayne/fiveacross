@@ -53,7 +53,7 @@ events/{eventId}/notices/{noticeId}
 
 ## Validation (tests are the gate; the frames define "right")
 
-- **Rules emulator** (`tests/rules/`): non-admin create/update/delete of a Notice denied; admin allowed; any signed-in read allowed; length caps enforced; `pinned` must be boolean.
+- **Rules emulator** (`tests/rules/`): non-admin create/update/delete of a Notice denied; admin allowed; Event-admitted read allowed; token-bound Notice names and stable Admin-history UID follow the accepted #1426 amendment; length caps enforced; `pinned` must be boolean.
 - **RTL** (`src/components/`): compose posts with title+body+pin and clears; `Unpin` flips `pinned` false; `Delete` removes from history; hub shows the Messages door and routes to `/more/admin/messages` under the existing dismissal contract (`Admin.test.tsx` / `admin-console-ia` patterns).
 - **`mergeFeed` unit**: a pinned Notice sorts above newer Proofs/Moments; an unpinned Notice interleaves by `createdAt`; cap still honored; empty-notice stream leaves the merge byte-identical to today (regression guard).
 - **Banner**: renders while a pinned Notice exists and undismissed; ✕ persists per device across reload (`fake-indexeddb`/localStorage test per the offline suite's pattern); dismissal never hides the Feed copy.

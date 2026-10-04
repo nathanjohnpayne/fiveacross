@@ -3,8 +3,8 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import type { DayDef, NoticeDoc } from '../types';
 
 // specs/admin-messages.md (#439), component layer. MessagesPanel isolated behind
-// focused mocks — the three notice writers, the two data hooks, the identity/day
-// helpers — so the compose + history behavior tests without Firestore.
+// focused writer/read/day mocks — the compose delegates token attribution to
+// postNotice; Admin history keeps the stored UID visible without Firestore.
 
 const H = vi.hoisted(() => ({
   notices: [] as NoticeDoc[],
@@ -70,7 +70,6 @@ describe('MessagesPanel (specs/admin-messages.md)', () => {
     await waitFor(() =>
       expect(writers.postNotice).toHaveBeenCalledWith({
         uid: 'admin-uid',
-        displayName: 'Nathan',
         title: 'Final stretch 🏁',
         body: 'Last days at sea.',
         pinned: true,
@@ -82,7 +81,7 @@ describe('MessagesPanel (specs/admin-messages.md)', () => {
     expect(screen.getByLabelText('Notice body')).toHaveValue('');
   });
 
-  it('attributes to the auth name (not Anonymous) when the player row is still loading (CodeRabbit #440)', async () => {
+  it('leaves attribution to the token-bound writer while the player row is loading', async () => {
     H.player = null; // useMyPlayer still loading — no saved player-row name yet
     render(<MessagesPanel adminUid="admin-uid" days={days} />);
     fireEvent.change(screen.getByLabelText('Notice title'), { target: { value: 'T' } });
@@ -90,9 +89,16 @@ describe('MessagesPanel (specs/admin-messages.md)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Post to everyone' }));
     await waitFor(() =>
       expect(writers.postNotice).toHaveBeenCalledWith(
-        expect.objectContaining({ displayName: 'Nathan (auth)' }),
+        expect.objectContaining({ uid: 'admin-uid' }),
       ),
     );
+    expect(writers.postNotice.mock.calls[0][0]).not.toHaveProperty('displayName');
+  });
+
+  it('shows the stable stored UID alongside the label in Admin history', () => {
+    H.notices = [{ ...notice('same-label', true), uid: 'stable-admin-id', displayName: 'Renamed Admin' }];
+    render(<MessagesPanel adminUid="admin-uid" days={days} />);
+    expect(screen.getByText(/Renamed Admin.*UID stable-admin-id/)).toBeInTheDocument();
   });
 
   it('the Post button is disabled until both title and body are non-empty', () => {
