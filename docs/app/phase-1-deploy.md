@@ -152,7 +152,7 @@ The check is skipped automatically for a deploy that does not release Functions 
 
 ### 1b. One-time rollout sweep for the server-authoritative hide (#43)
 
-The threshold auto-hide (`hideItemAtThreshold` / `hideProofAtThreshold`) fires on a **change**—a report crossing the threshold, or the admin lowering the threshold. Content that had ALREADY crossed the threshold under Phase 0 (before these functions existed) never crosses again and never triggers a decrease, so on first deploy it would stay `status: 'active'` and directly readable despite meeting the server-hide bar. Run the one-time rollout sweep **once, right after the first `--only functions` deploy above**, to hide that pre-existing backlog:
+The threshold auto-hide (`hideItemAtThreshold` / `hideProofAtThreshold`) applies to active content without literal `reportHideSuppressed: true`, on a **change**—a report rising to or above the threshold, or the admin lowering the threshold. Unsuppressed content that had ALREADY crossed the threshold under Phase 0 (before these functions existed) never crosses again and never triggers a decrease, so on first deploy it would stay `status: 'active'` and directly readable despite meeting the server-hide bar. Run the one-time rollout sweep **once, right after the first `--only functions` deploy above**, to hide that pre-existing backlog:
 
 ```bash
 # The functions package must be built + installed (the deploy step above did this).
@@ -160,7 +160,7 @@ GOOGLE_CLOUD_PROJECT=gaycruisebingo node scripts/backfill-hide.mjs           # e
 GOOGLE_CLOUD_PROJECT=gaycruisebingo node scripts/backfill-hide.mjs <eventId> # one event
 ```
 
-`scripts/backfill-hide.mjs` reuses the deployed hide core (`functions/src/autohide.ts`) verbatim—the same active-only gate and the same transactional re-read guard—so it hides only active docs whose `reportCount` meets each Event's current `reportHideThreshold`, skips flagged/pending/already-hidden content, and re-confirms live state per doc (it will not undo an admin Clear-reports mid-sweep). It is **idempotent**—safe to re-run; a second run hides nothing new. Credentials are Application Default Credentials (`gcloud auth application-default login`) or a gitignored `serviceAccountKey.json`, exactly like `scripts/seed.mjs`. This is a rollout-only step: once the functions are live, all new crossings are hidden automatically and the sweep never needs to run again.
+`scripts/backfill-hide.mjs` reuses the deployed hide core (`functions/src/autohide.ts`) verbatim—the same active-only gate and the same transactional re-read guard—so it hides only active docs without literal `reportHideSuppressed: true` whose `reportCount` meets each Event's current positive `reportHideThreshold`, skips suppressed/flagged/pending/already-hidden content, and re-confirms live state per doc (it will not undo an admin Restore or Clear-reports mid-sweep). A suppressed restored or cleared incarnation remaining active above the threshold is an intentional moderation override, not a failed sweep. It is **idempotent**—safe to re-run; a second run hides nothing new. Credentials are Application Default Credentials (`gcloud auth application-default login`) or a gitignored `serviceAccountKey.json`, exactly like `scripts/seed.mjs`. This is a rollout-only step: once the functions are live, qualifying unsuppressed report rises are handled automatically and the sweep never needs to run again.
 
 ### 1c. First deploy of the `approvePrompts` callable (#1275, ADR 0015)
 

@@ -561,7 +561,7 @@ export default function ItemPool() {
       }, itemRateLimitRemainingMs(key, now));
       return;
     }
-    await reportItem(id, eventId, createdAt);
+    await reportItem(id, eventId, createdAt, user.uid);
     if (scopeRef.current === reportingScope) track('report_item');
   };
 

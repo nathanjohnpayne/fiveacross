@@ -31,17 +31,18 @@ export const MAX_PERSISTED_MOST_LOVED_WINNERS = 100;
 export type MostLovedProofInput = Pick<
   ProofDoc,
   'id' | 'uid' | 'displayName' | 'type' | 'status' | 'reportCount' | 'reportHideSuppressed' | 'createdAt' | 'itemText' | 'dayIndex'
->;
+> & { serverCreatedAt?: number; serverCreatedTimestamp?: { seconds: number; nanoseconds: number } };
 
 /** The subset of a `HeartDoc` the award computation reads. */
 export type MostLovedHeartInput = Pick<
   HeartDoc,
   'uid' | 'targetKind' | 'targetId' | 'targetCreatedAt' | 'createdAt'
 > & {
-  /** The server creation time supplied by the scheduler's snapshot mapper. The
+  /** The native binding time supplied by the scheduler's snapshot mapper. The
    *  client mirror accepts it so the parity test exercises the real freeze
    *  boundary; ordinary client HeartDocs intentionally have no such field. */
   serverCreatedAt?: number;
+  serverBindingTimestamp?: { seconds: number; nanoseconds: number };
 };
 
 /** The eligibility/visibility options both builders share. */
@@ -101,7 +102,8 @@ export function buildMostLovedPhotoAward(
   opts: MostLovedAwardOptions,
 ): MostLovedPhotoAward {
   const eligible = proofs.filter(
-    (p) => p.type === 'photo' && proofFeedVisible(p, opts.reportHideThreshold, opts.bannedUids),
+    (p) => Number.isFinite(p.serverCreatedAt ?? p.createdAt) &&
+      (p.serverCreatedAt ?? p.createdAt) <= opts.cutoff && p.type === 'photo' && proofFeedVisible(p, opts.reportHideThreshold, opts.bannedUids),
   );
   const byId = new Map<string, MostLovedProofInput>();
   const heartUids = new Map<string, Set<string>>();
@@ -116,6 +118,12 @@ export function buildMostLovedPhotoAward(
     if (h.targetCreatedAt !== p.createdAt) continue; // another incarnation's heart
     const heartAt = h.serverCreatedAt ?? h.createdAt;
     if (!Number.isFinite(heartAt) || heartAt > opts.cutoff) continue;
+    if (p.serverCreatedTimestamp) {
+      const binding = h.serverBindingTimestamp;
+      const birth = p.serverCreatedTimestamp;
+      if (!binding || binding.seconds < birth.seconds ||
+          (binding.seconds === birth.seconds && binding.nanoseconds < birth.nanoseconds)) continue;
+    }
     if (h.uid === p.uid) continue; // own heart on own proof does NOT count
     if (isBanned(h.uid, opts.bannedUids)) continue; // no own-content exception here
     heartUids.get(p.id)!.add(h.uid);

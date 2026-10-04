@@ -112,8 +112,9 @@ function restoreTitle(visionFlag: string | null | undefined, claimUndecided: boo
  *
  * The Vision treatment (#133) is deliberately a SEPARATE pill from `auto-hidden`,
  * because the two hides are separate mechanisms an admin resolves differently: a
- * report-count hide is lifted with `Clear reports` (zero the counter), a Vision
- * hide with `Restore` (there is no counter to clear). The pill states two facts
+ * report-count presentation hide is lifted with `Clear reports` (zero the
+ * counter) or by `Restore`, which also sets `reportHideSuppressed` (#1443); a
+ * Vision hide only with `Restore` (there is no counter to clear). The pill states two facts
  * the row already carries and never infers a cause — `hidden` from `status`, the
  * verdict from `visionFlag` — so a Proof an admin restored after a Vision hide,
  * and one the community later re-reported over the threshold, each read
@@ -208,10 +209,11 @@ function ProofQueueRow({
         // lands, and the trigger's hide is not instantaneous. Clicking there is
         // agreement with the AI screen, not an override, so `hideProof` carries
         // the standing safety hold onto the hidden doc rather than demoting it to
-        // a plain hide (src/data/admin.ts). A Confirm publishes only a still-
-        // pending Proof of the claimant's own, so the hold is what keeps a later
-        // Restore-to-pending + Confirm (or a cached pre-gate bundle) from
-        // publishing it.
+        // a plain hide (src/data/admin.ts). A current Confirm publishes only a
+        // still-pending Proof of the claimant's own, so it never publishes this
+        // one; the hold is what lets the server's re-hide arm take it back down
+        // if a cached pre-gate bundle publishes it directly. (Restore is the
+        // warned override and clears the hold either way.)
         <AsyncButton onAction={() => hideProof(p.id)}>
           Hide
         </AsyncButton>

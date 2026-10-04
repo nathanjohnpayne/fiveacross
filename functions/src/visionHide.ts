@@ -27,11 +27,12 @@
  *     that marker and the status have come apart (see `visionHideAction`): it
  *     backfills the marker onto an extreme/illegal Proof that reached `'hidden'`
  *     without one, and re-hides an `'active'` Proof whose marker still stands.
- *     The marker — not the status — is what holds the media through a claim
- *     confirm, so an admin who hides a flagged row before the trigger reaches it
- *     must not thereby demote a safety hide to a plain one, and no client, however
- *     stale its cached bundle, may publish a Proof whose hold the server still
- *     records.
+ *     A current claim confirm already refuses anything not still `'pending'`; the
+ *     marker is what the re-hide arm keys on, so it is what keeps a hold
+ *     enforceable against a cached pre-gate client that publishes directly. An
+ *     admin who hides a flagged row before the trigger reaches it must therefore
+ *     not demote a safety hide to a plain one, and no client, however stale its
+ *     cached bundle, may keep public a Proof whose hold the server still records.
  *
  * Extreme/illegal ONLY (ADR 0004). The app is intentionally racy, so the trigger
  * is an ALLOWLIST of the producer's extreme verdicts (`violence`, `extreme`) —
@@ -182,9 +183,9 @@ export interface PendingVisionScan {
 }
 
 /**
- * The SERVER-OWNED marker this module stamps beside `status: 'hidden'`, and the
- * one fact the client's confirm-time gate reads (`safetyHideStands`,
- * src/data/moderation.ts).
+ * The SERVER-OWNED marker this module stamps beside `status: 'hidden'`, and one
+ * of the two server-written facts the client's gate reads (`safetyHideStands`,
+ * src/data/moderation.ts; the other is the `'flagged'` status).
  *
  * It exists because a client must never re-derive the verdict. `visionFlag` is a
  * string whose MEANING lives in `AUTO_HIDE_VISION_FLAGS` above, and Functions and
@@ -228,8 +229,9 @@ export const SAFETY_HIDE_MARKER = 'safetyHide' as const;
  *
  * ALLOWLISTED VERDICTS ONLY, and that is the same ADR 0004 line drawn one write
  * earlier. The marker means "a safety hide stands", and nothing racy ever earns
- * one: a `racy` or otherwise non-allowlisted verdict is flagged for admins,
- * marker-less, and hidden by nobody, exactly as before. The producer/consumer
+ * one: a non-allowlisted verdict would be flagged for admins, marker-less, and
+ * hidden by nobody, exactly as before (today's producer emits only
+ * `violence`/`extreme`, so none reaches this path; tests use `racy` as one). The producer/consumer
  * split is intact — the producer still decides what is worth FLAGGING, and
  * `AUTO_HIDE_VISION_FLAGS`, owned here, still decides what is worth HOLDING.
  */
@@ -262,7 +264,8 @@ export function visionVerdictWrite(visionFlag: string): Record<string, unknown> 
  *     remain Admin-visible without reversing that decision.
  *     The explicit `false` it writes is equally load-bearing: it is what keeps the
  *     re-hide arm off a genuinely restored Proof. A restored Proof is re-hidden
- *     only by a fresh scan (a re-upload re-flags it) or by an admin.
+ *     only by an admin: its object is create-only and admits one recorded scan,
+ *     and a re-upload creates a separate Proof, scanned on its own.
  *   - Retry-safe. Because it reads state rather than a transition, ANY later
  *     write that leaves the doc `'flagged'` with an extreme flag (a report bump,
  *     an admin Clear reports) re-attempts a hide that an earlier swallowed
@@ -290,8 +293,12 @@ export function qualifiesForVisionHide(doc: VisionFlaggedDoc | undefined): boole
  *     a hide whose marker write was lost to a swallowed best-effort failure.
  *     Left unstamped, the Proof reads as a PLAIN hide: a current `confirmClaim`
  *     publishes only a still-`'pending'` Proof, so it no longer publishes this
- *     one directly, but a CACHED pre-gate bundle would, and a Restore to
- *     `'pending'` followed by a Confirm would too — the hole this arm closes.
+ *     one directly, but a CACHED pre-gate bundle would, and without the marker
+ *     the `'rehide'` arm could not take it back down — the hole this arm closes
+ *     once the marker has landed. Residual: a cached pre-gate publish that wins
+ *     before the backfill commits (or reaches a legacy marker-less hidden Proof
+ *     before any later write fires the trigger) matches no arm — an accepted
+ *     residual, stated in specs/cloud-vision-moderation.md (#1514).
  *   - `'rehide'` — an `'active'` Proof whose marker still says `true`. That
  *     combination is not reachable from any current client: every legitimate lift
  *     writes `safetyHide: false` in the SAME update as the status (`restoreProof`,
@@ -311,8 +318,9 @@ export function qualifiesForVisionHide(doc: VisionFlaggedDoc | undefined): boole
  * writes it beside the status), and re-stamping `true` over it would let the
  * server silently overrule the one decision ADR 0004 reserves for a human. A
  * Proof an admin Restored and then hand-Hid keeps that `false` and stays a plain
- * hide — liftable by Restore, publishable by a confirm — because the admin has
- * already seen the verdict and overridden it. The same `false` is what makes the
+ * hide — liftable by Restore (and publishable by a Confirm only after a Restore
+ * to `'pending'`) — because the admin has already seen the verdict and
+ * overridden it. The same `false` is what makes the
  * re-hide arm safe to state as broadly as it is: it fires on the marker alone,
  * with no verdict test, because an override records itself in the same write it
  * overrides with, and a Restore that has already happened is never contested.
@@ -370,9 +378,12 @@ export function visionHideWrite(action: VisionHideAction): Record<string, unknow
  * path (#43 round 2 F1), so a delayed or retried trigger can never act on a stale
  * event snapshot:
  *
- *   - an admin who Restored (`'active'`) or Hid the Proof by hand since the
- *     trigger fired → no-op, so the admin's decision is not silently reverted
- *     and no marker is stamped on a hide the admin owns;
+ *   - an admin who Restored (to `'active'`, or to `'pending'` while an owner
+ *     claim is undecided; marker `false` either way) since the trigger fired
+ *     → no-op, so the admin's decision is not silently reverted; an admin
+ *     hand-Hide is a no-op when it already carries the marker (a current
+ *     console's `hideProof` writes it) and is backfilled when it does not, unless
+ *     the marker is the explicit `false` a Restore left;
  *   - a Proof DELETED since the snapshot → no-op via `tx.update` on a missing
  *     doc, never a re-creating `set`;
  *   - a `visionFlag` no longer in the allowlist → no-op;

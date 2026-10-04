@@ -5,8 +5,9 @@ import type { Cell, ClaimDoc, ProofDoc } from '../types';
 // The claim-confirm half of the Vision auto-hide: `confirmClaim` publishes an
 // admin_confirmed claim's 'pending' Proof by writing `status: 'active'`, and
 // active Proofs are OUTSIDE `qualifiesForVisionHide` — so an unconditional
-// publish would put extreme/illegal media back in front of every Player and the
-// `hideProofOnVisionFlag` trigger would never hide it again. Cloud Vision scans
+// publish would put extreme/illegal media back in front of every Player; the
+// `hideProofOnVisionFlag` re-hide arm takes it back down only while the marker
+// stands, and only after the exposure, so the gate is what prevents it. Cloud Vision scans
 // the uploaded object, so this is not a corner case: a photo is routinely
 // flagged and hidden BEFORE its claim reaches the queue.
 //
@@ -324,10 +325,11 @@ describe('confirmClaim — a Vision safety hide survives the claim confirm (spec
     expect(setPayload('/claims/')).toMatchObject({ status: 'confirmed' });
   });
 
-  it('publishes a Proof whose verdict is outside the allowlist — nothing withholds for raciness', async () => {
-    // ADR 0004 in the confirm path: a racy verdict is a reason on the queue row,
-    // never a hide, so nothing marks it and the claim's photo publishes exactly
-    // as it always did.
+  it('publishes a still-pending Proof whose verdict is outside the allowlist — raciness earns no marker', async () => {
+    // ADR 0004 in the confirm path: a racy verdict on a still-'pending' Proof is a
+    // reason on the queue row, never a hold, so nothing marks it and the claim's
+    // photo publishes. (The producer never emits 'racy'; it stands in here for any
+    // non-allowlisted verdict.)
     liveProof = { uid: 'u1', status: 'pending', visionFlag: 'racy' };
 
     await confirmClaim(pendingClaim(), 'admin-1');
@@ -347,7 +349,7 @@ describe('confirmClaim — a Vision safety hide survives the claim confirm (spec
     expect(setPayload('/claims/')).toMatchObject({ status: 'confirmed' });
   });
 
-  it('leaves a plain hidden Proof carrying NO marker as it stands — its lift is Clear reports / Restore', async () => {
+  it('leaves a plain hidden Proof carrying NO marker as it stands — its lift is Restore, not a confirm', async () => {
     // An extreme verdict alone is not a safety hide, but a confirm publishes only
     // a still-`pending` Proof (specs/sec-rules-shape-hardening.md): a doc hidden
     // by the #43 threshold or an admin's own Hide keeps its own console lift.
@@ -426,8 +428,10 @@ describe('confirmClaim — a Vision safety hide survives the claim confirm (spec
 // retried on the next write). An admin clicking Hide there AGREES with the AI
 // screen. A bare `status: 'hidden'` would nonetheless move the doc out of the
 // state the trigger's hide arm looks for while leaving no marker behind, and
-// `safetyHideStands` reads that as a PLAIN hide — so a later Confirm would
-// publish the media the admin had just taken down (Codex P1 on #1143).
+// `safetyHideStands` reads that as a PLAIN hide. A current console never
+// publishes a 'hidden' Proof on Confirm, but a cached pre-gate console does,
+// directly — and without the marker the server's 'rehide' arm cannot take it
+// back down (Codex P1 on #1143).
 
 describe('hideProof — an admin Hide preserves a standing safety hold (#1143)', () => {
   it('carries the hold onto the hidden doc when one stands on the Proof', async () => {

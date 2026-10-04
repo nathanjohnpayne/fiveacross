@@ -123,9 +123,10 @@ export const BUG_REPORT_APP_CHECK = defineBoolean('BUG_REPORT_APP_CHECK', { defa
  * protects. Turning it on is a launch prerequisite once #549 initialises App
  * Check on the client — see specs/auth-handoff.md § Deployment.
  *
- * It is the abuse control for `exchangeAuthHandoff`, which is unauthenticated by
+ * It complements the process-wide admission budget for `exchangeAuthHandoff`,
+ * which is unauthenticated by
  * design. The risk it answers is resource exhaustion, not compromise: the code
- * space is 2^256 so guessing is hopeless, but every well-formed guess still
+ * space is 2^256 so guessing is hopeless, but every admitted well-formed guess still
  * costs a Firestore transaction, and a flood of them can crowd out real
  * sign-ins.
  */
