@@ -107,6 +107,7 @@ const SNAPSHOT_FIELDS: Doc = {
   claimMode: 'honor',
   days: [{ index: 0, theme: 'neon-playground', unlockAt: 1_000, tonight: [] }],
   standingsFreezeAt: 5_000,
+  bannedUids: ['p9'],
 };
 const quiescedEvent = (overrides: Doc = {}): Doc => ({
   status: 'active',
@@ -444,6 +445,7 @@ describe('the trusted hostname mutation helper against a real transaction', () =
         // the quiesce and the token are unchanged, the configuration is not.
         [quiescedEvent({ name: 'Renamed' }), archive(), 'archive-config-changed'],
         [quiescedEvent({ days: [{ index: 0, theme: 'disco', unlockAt: 1_000, tonight: [] }] }), archive(), 'archive-config-changed'],
+        [quiescedEvent({ bannedUids: [] }), archive(), 'archive-config-changed'],
       ] as Array<[Doc, Doc, string]>) {
         await setDoc(doc(db, `events/${EVENT_ID}`), event);
         expect(await refusalCode(() => applyHostnameMutation(input, dependencies(db)))).toBe(expected);

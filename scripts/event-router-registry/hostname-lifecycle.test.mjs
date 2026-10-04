@@ -1210,6 +1210,7 @@ describe('archive', () => {
     claimMode: 'honor',
     days: [{ index: 0, theme: 'neon-playground', unlockAt: 1_000, tonight: [] }],
     standingsFreezeAt: 5_000,
+    bannedUids: ['p9'],
   };
   const quiescedEvent = (overrides = {}) => ({
     status: 'active',
@@ -1710,8 +1711,9 @@ describe('archive', () => {
       ['no configuration at all', undefined],
       ['a configuration that is not a map', 'bodega'],
       ['a configuration missing a key', (() => { const { frozenAt: _f, ...rest } = archiveSnapshotConfig(quiescedEvent()); return rest; })()],
-      ['a configuration with a key the snapshot does not define', { ...archiveSnapshotConfig(quiescedEvent()), bannedUids: [] }],
+      ['a configuration with a key the snapshot does not define', { ...archiveSnapshotConfig(quiescedEvent()), finaleCompletedAt: null }],
       ['a schedule that is not a list', { ...archiveSnapshotConfig(quiescedEvent()), days: {} }],
+      ['a ban list that is not a list', { ...archiveSnapshotConfig(quiescedEvent()), bannedUids: 'p9' }],
     ])('refuses %s as invalid input before the first read', async (_why, snapshotConfig) => {
       const input = archiveInput({ snapshotConfig });
       if (snapshotConfig === undefined) delete input.snapshotConfig;
@@ -1732,6 +1734,12 @@ describe('archive', () => {
       ['added a Day', { days: [...SNAPSHOT_FIELDS.days, { index: 1, theme: 'disco', unlockAt: 2_000, tonight: [] }] }],
       ['moved the Standings Freeze', { standingsFreezeAt: 6_000 }],
       ['stamped the freeze', { frozenAt: 5_000 }],
+      // The console leaves bans out of its fingerprint only because it builds
+      // the record from its own transactional read; this record was built
+      // from an earlier one, so a ban or an unban in between changes whose
+      // rows it should have kept.
+      ['banned a Player', { bannedUids: ['p9', 'p1'] }],
+      ['unbanned a Player', { bannedUids: [] }],
     ])('refuses an archive whose Event was %s after the record was prepared', async (_why, edit) => {
       const seed = flagship();
       seed['events/bodega-bay-2026'] = quiescedEvent(edit);
@@ -1741,12 +1749,10 @@ describe('archive', () => {
       for (const host of [HOST, SECOND, ALIAS]) expect(docs.get(`hostnames/${host}`).status).toBe('active');
     });
 
-    // …and the two edits the console deliberately leaves outside its own
-    // fingerprint stay outside this one: a ban is moderation, open through the
-    // quiesce on purpose, and a finale marker only ever makes the archive more
-    // permitted.
+    // …while a finale marker stays outside, as it does in the console's: it
+    // only ever makes the archive more permitted, and the builder does not
+    // read it.
     it.each([
-      ['banned a Player', { bannedUids: ['p9'] }],
       ['completed its finale', { finaleCompletedAt: 4_000 }],
     ])('accepts an archive whose Event was %s after the record was prepared', async (_why, edit) => {
       const seed = flagship();
@@ -1763,8 +1769,29 @@ describe('archive', () => {
         days: [],
         standingsFreezeAt: null,
         frozenAt: null,
+        bannedUids: [],
       });
       expect(archiveSnapshotConfig({ days: 'not-a-list' }).days).toEqual([]);
+    });
+
+    // An Admin-written schedule is unconstrained, so it can hold a value the
+    // structural comparison cannot walk. That is a named refusal with nothing
+    // written, not a thrown stack overflow.
+    it('refuses a configuration it cannot compare by name and writes nothing', async () => {
+      // An SDK-shaped object (not a plain map) whose back-reference is cyclic,
+      // as a client `DocumentReference`'s `firestore` handle is.
+      class Reference {
+        constructor(path) {
+          this.path = path;
+          this.firestore = { root: this };
+        }
+      }
+      const cyclic = new Reference('events/elsewhere');
+      const seed = flagship();
+      seed['events/bodega-bay-2026'] = quiescedEvent({ days: [{ ...SNAPSHOT_FIELDS.days[0], link: cyclic }] });
+      const { docs, dependencies } = store(seed);
+      expect(await refusal(archiveInput(), dependencies)).toBe('archive-config-unreadable');
+      untouched(docs, seed['events/bodega-bay-2026']);
     });
 
     // Every question the rules' flip arm asks, because an Admin write is not

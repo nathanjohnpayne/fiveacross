@@ -1175,18 +1175,28 @@ function requireBoundQuiesce(event, archiveToken) {
  *
  * The set is the console's `archiveSnapshotFingerprint` in
  * `src/data/eventArchive.ts` (`claimMode`, `days`, `standingsFreezeAt`,
- * `frozenAt`, with `bannedUids` and `finaleCompletedAt` left out for the
- * reasons given there) plus `name`. The console builds its record inside the
- * transaction, so its title comes from the read the flip lands on; this
- * intent's record is built by the caller, so the name it froze is a read the
- * transaction has to confirm. Raw values, compared structurally, exactly as the
- * console compares two raw reads: normalizing either side could only invent or
- * hide a change.
+ * `frozenAt`) plus the two Event fields the builder reads that the console
+ * does not need to hold, because it builds its record INSIDE the transaction
+ * from the read the flip lands on: `name`, which titles the record, and
+ * `bannedUids`, which decides whose rows and honours it keeps. This intent's
+ * record is built by the caller from an earlier read, so a rename, a ban or an
+ * unban in between would otherwise freeze a record the committed Event
+ * contradicts. `finaleCompletedAt` stays out for the console's reason: it only
+ * moves toward a more permitted archive and the builder does not read it. Raw
+ * values, compared structurally, exactly as the console compares two raw
+ * reads: normalizing either side could only invent or hide a change.
  *
  * Exported so the operator command (#1488) derives the value it passes from
  * the same read and the same function this transaction applies.
  */
-export const ARCHIVE_SNAPSHOT_CONFIG_KEYS = Object.freeze(['name', 'claimMode', 'days', 'standingsFreezeAt', 'frozenAt']);
+export const ARCHIVE_SNAPSHOT_CONFIG_KEYS = Object.freeze([
+  'name',
+  'claimMode',
+  'days',
+  'standingsFreezeAt',
+  'frozenAt',
+  'bannedUids',
+]);
 
 export function archiveSnapshotConfig(event) {
   const source = isRecord(event) ? event : {};
@@ -1196,6 +1206,7 @@ export function archiveSnapshotConfig(event) {
     days: Array.isArray(source.days) ? cloneDocumentValue(source.days) : [],
     standingsFreezeAt: source.standingsFreezeAt ?? null,
     frozenAt: source.frozenAt ?? null,
+    bannedUids: Array.isArray(source.bannedUids) ? cloneDocumentValue(source.bannedUids) : [],
   };
 }
 
@@ -1205,8 +1216,27 @@ function validSnapshotConfig(value) {
   return (
     keys.length === ARCHIVE_SNAPSHOT_CONFIG_KEYS.length &&
     ARCHIVE_SNAPSHOT_CONFIG_KEYS.every((key) => keys.includes(key)) &&
-    Array.isArray(value.days)
+    Array.isArray(value.days) &&
+    Array.isArray(value.bannedUids)
   );
+}
+
+/**
+ * Whether the configuration the transaction read is the one the caller named.
+ * The comparison walks the raw values, and an Admin-written schedule is
+ * unconstrained, so a value the walk cannot serialize (an SDK object carrying
+ * a cyclic back-reference) is answered as a NAMED refusal rather than a thrown
+ * one: the transaction writes nothing either way, and the operator is told
+ * why, as the console's `config-unreadable` tells the Admin.
+ */
+function requireSnapshotConfig(event, snapshotConfig) {
+  let same;
+  try {
+    same = sameValue(archiveSnapshotConfig(event), snapshotConfig);
+  } catch {
+    refuse('archive-config-unreadable');
+  }
+  if (!same) refuse('archive-config-changed');
 }
 
 /**
@@ -1313,7 +1343,7 @@ async function planArchive(input, transaction, clock, buffer, revisions, project
   requireBoundQuiesce(event, archiveToken);
   // The configuration the record was prepared against, held across the window
   // between the caller's reads and this transaction (`archiveSnapshotConfig`).
-  if (!sameValue(archiveSnapshotConfig(event), snapshotConfig)) refuse('archive-config-changed');
+  requireSnapshotConfig(event, snapshotConfig);
   requireCompleteMappingSet(await listEventMappings(transaction, eventId), hosts);
   const states = new Map();
   for (const host of hosts) {
