@@ -346,15 +346,16 @@ export async function readAdultAttestation(uid: string): Promise<number | null> 
 
 /**
  * Provisional offline rendering uses only the owner-approved UID/project boolean
- * witness and an existing cached Event Board. No profile row or timestamp is read
- * from durable Firestore; `1` is a truthy render sentinel, never deal authority.
- * Missing witness/Board stays unknown (null); server-only reads govern new deals.
+ * witness and an existing cached Event card, legacy or daily. No profile row or
+ * timestamp is read from durable Firestore; `1` is a truthy render sentinel, never
+ * deal authority. Missing witness/card stays unknown (null); server-only reads
+ * govern new deals.
  */
 export async function readAdultAttestationFromCache(uid: string): Promise<number | null> {
   if (auth.currentUser?.uid !== uid) throw new Error('Private account changed.');
   const eventId = EVENT_ID;
   const projectId = firebaseConfig.projectId;
-  const cached = await hasCachedBoard(uid, eventId);
+  const cached = await hasCachedCard(uid, eventId);
   if (auth.currentUser?.uid !== uid || firebaseConfig.projectId !== projectId) throw new Error('Private account changed.');
   return cached && hasOfflineAttestation(projectId, uid) ? 1 : null;
 }

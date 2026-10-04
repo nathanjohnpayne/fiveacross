@@ -25,7 +25,7 @@ Implements `plans/admin-redesign-ticket.md` (issue #404), matching `plans/daily-
 
 `src/components/admin/AdminHub.tsx`—section cards (reusing the More menu's exported `MoreRow` chrome), each with a live subtitle and, where a queue waits behind it, a badge:
 
-- **Review queue**—badge = reports + approvals + claims total, where claims count ONLY in `admin_confirmed` claim mode; subtitle enumerates the parts ("Reports N · Approvals N · Claims N—one inbox, oldest first"), or "All clear".
+- **Review queue**—badge = reports + approvals + claims total, where claims count ONLY in `admin_confirmed` claim mode; subtitle enumerates the parts ("Reports N · Approvals N · Claims N—one inbox, oldest first"), or "All clear", only after all four private queue sources are currently server-confirmed and available. Before that it shows loading, or unavailable on failure or the bounded wait expiring, without an empty-count badge.
 - **Game settings**—static subtitle enumerating the dials.
 - **Schedule**—subtitle: day count + next locked unlock formatted in the Event's own IANA timezone (the `ScheduleList` convention).
 - **Prompt pool**—badge = pending-approvals count (the same number the More menu's Admin row badges, derived from the console's own subscription so they can never disagree).
@@ -52,7 +52,7 @@ The Proof & Claims panel's "Pending claims" count-plus-jump-link row (`#admin-pe
 
 ### Review queue (`/more/admin/queue`)
 
-`src/components/admin/ReviewQueue.tsx`—Reports, Approvals, and (admin-confirmed mode only) Pending claims as one triage surface, **each group oldest-first** (`createdAt` asc). The Reports group's oldest-first order supersedes `w2-admin-console`'s most-reported-first sort—triage order is now arrival order, uniform across the three groups. Row affordances are exactly the pre-redesign ones: hide/restore/delete/Clear-reports/Ban-author on report rows (the ADR 0004 queue-membership and auto-hide-lift rules are unchanged), spicy-toggle/Approve/Reject (+ Approve all) on approvals, Confirm/Reject on claims. Empty state: "All clear. Go enjoy the boat."—the `gcb` Edition's value; the string is Edition-scoped since #608 (`src/editions.ts`).
+`src/components/admin/ReviewQueue.tsx`—Reports, Approvals, and (admin-confirmed mode only) Pending claims as one triage surface, **each group oldest-first** (`createdAt` asc). The Reports group's oldest-first order supersedes `w2-admin-console`'s most-reported-first sort—triage order is now arrival order, uniform across the three groups. Row affordances are exactly the pre-redesign ones: hide/restore/delete/Clear-reports/Ban-author on report rows (the ADR 0004 queue-membership and auto-hide-lift rules are unchanged), spicy-toggle/Approve/Reject (+ Approve all) on approvals, Confirm/Reject on claims. Private reports, approvals, claims and all-items sources must all have current server-confirmed answers before this queue mounts or claims an empty result. Listener failure immediately withholds the queue. An unanswered online wait is bounded to 10 seconds per UID/Event/private-session generation and then shows unavailable with reload guidance; confirmation/error/unmount cancels the wait, and a later current confirmed answer can recover. The Event-roster gate uses the same bound while retaining distinct loading, offline reconnect and definitive non-admin states. Empty state, only for confirmed available empty queues: "All clear. Go enjoy the boat."—the `gcb` Edition's value; the string is Edition-scoped since #608 (`src/editions.ts`).
 
 ### Game settings (`/more/admin/settings`)
 

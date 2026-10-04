@@ -66,6 +66,7 @@ const HiddenUidsContext = createContext<HiddenUids>(NONE);
 
 interface HiddenState {
   key: string | null;
+  generation: number;
   hidden: ReadonlySet<string>;
   ready: boolean;
 }
@@ -74,8 +75,8 @@ interface HiddenState {
 // not admitted the viewer to Event watchers yet, or the listener has not
 // answered): NOT ready, so a late admission flip cannot render the counterpart
 // before the first pair snapshot lands.
-const initial = (uid: string | null, key: string | null): HiddenState => ({
-  key,
+const initial = (uid: string | null, key: string | null, generation: number): HiddenState => ({
+  key, generation,
   hidden: EMPTY,
   ready: uid === null,
 });
@@ -89,21 +90,25 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
   const session = usePrivateFirestore();
   const eventId = EVENT_ID;
   const key = uid !== null && enabled ? eventScopeKey(eventId, 'block-pairs', uid) : null;
-  const [state, setState] = useState<HiddenState>(() => initial(uid, key));
+  const [state, setState] = useState<HiddenState>(() => initial(uid, key, session.generation));
   const pending = useSyncExternalStore(subscribePendingBlocks, () => uid ? pendingBlockTargets(uid, eventId) : EMPTY);
   // The single shell provider retires other scopes only after committing a
   // scope change. Same-scope remounts keep process-local unfinished intent.
   useEffect(() => { retirePendingBlocksOutsideScope(uid, eventId); }, [uid, eventId]);
-  const confirmed = useRef<{ key: string; hidden: ReadonlySet<string> } | null>(null);
-  // A discarded concurrent render must not erase the committed witness.
-  const witness = confirmed.current?.key === key && session.uid === uid && !session.recoveryRequired
-    ? confirmed.current : null;
+  const confirmed = useRef<{ key: string; generation: number; hidden: ReadonlySet<string> } | null>(null);
+  // A discarded render cannot erase committed state. Only an actual connection
+  // transition (or an offline session) may carry it across private generations;
+  // ordinary token rotation requires a fresh answer under refreshed credentials.
+  const witness = confirmed.current?.key === key && session.uid === uid && !session.recoveryRequired && !session.failed && (
+    confirmed.current.generation === session.generation || session.transition === 'connection' || !navigator.onLine
+  ) ? confirmed.current : null;
   useEffect(() => {
-    const carried = confirmed.current?.key === key && session.uid === uid && !session.recoveryRequired
-      ? confirmed.current : null;
+    const carried = confirmed.current?.key === key && session.uid === uid && !session.recoveryRequired && !session.failed && (
+      confirmed.current.generation === session.generation || session.transition === 'connection' || !navigator.onLine
+    ) ? confirmed.current : null;
     confirmed.current = carried;
-    setState(carried ? { key, hidden: carried.hidden, ready: true } : initial(uid, key));
-    if (key === null || uid === null || session.uid !== uid || session.recoveryRequired || !session.db) return;
+    setState(carried ? { key, generation: session.generation, hidden: carried.hidden, ready: true } : initial(uid, key, session.generation));
+    if (key === null || uid === null || session.uid !== uid || session.recoveryRequired || session.failed || !session.db) return;
     const lease = captureMatchingLease(uid, session.db);
     if (!lease) return;
     let active = true;
@@ -186,7 +191,7 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
         const settled = !snap.metadata.fromCache && !snap.metadata.hasPendingWrites;
         if (settled) {
           lastCommitted = current;
-          confirmed.current = { key, hidden: current };
+          confirmed.current = { key, generation: session.generation, hidden: current };
           observeConfirmedBlockTargets(uid, eventId, current);
         }
         // Server-confirmed pairs only (offline the delete could not run, and
@@ -214,7 +219,7 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
           }
         }
         setState({
-          key,
+          key, generation: session.generation,
           hidden: computeHiddenSet(current, lastCommitted, !settled),
           ready: settled || confirmed.current?.key === key,
         });
@@ -229,7 +234,7 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
         serverBacked = false;
         clearRetry();
         console.error('[blocks] hidden-set listener failed; withholding until a confirmed answer is available', err);
-        setState({ key, hidden: EMPTY, ready: false });
+        setState({ key, generation: session.generation, hidden: EMPTY, ready: false });
       },
     );
     return () => {
@@ -237,14 +242,14 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
       clearRetry();
       unsub();
     };
-  }, [key, uid, eventId, session.db, session.generation, session.uid, session.recoveryRequired]);
+  }, [key, uid, eventId, session.db, session.generation, session.transition, session.uid, session.recoveryRequired, session.failed]);
   // With no key there is no listener, so the answer follows from `uid` alone,
   // derived on THIS render (Codex P1 on #1300): comparing keys would let a
   // sign-in while not yet enabled (null key before and after) return the
   // signed-out `ready: true` for the render before the effect resets it.
   if (key === null) return { hidden: EMPTY, ready: uid === null };
-  const sameSession = session.uid === uid && !session.recoveryRequired;
-  if (!sameSession) return { hidden: EMPTY, ready: false };
+  const sameSession = session.uid === uid && !session.recoveryRequired && !session.failed;
+  if (!sameSession || (state.generation !== session.generation && !witness)) return { hidden: EMPTY, ready: false };
   if (!session.db && (navigator.onLine || !witness)) return { hidden: EMPTY, ready: false };
   return state.key === key
     ? { hidden: state.ready && pending.size > 0 ? computeHiddenSet(pending, state.hidden, true) : state.hidden, ready: state.ready }

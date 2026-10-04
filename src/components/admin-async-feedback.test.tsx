@@ -57,10 +57,10 @@ vi.mock('../hooks/useData', async (importOriginal) => {
     ...actual,
     useEventDoc: () => ({ data: H.event, loading: false, hasServerData: true, fromCache: false, hasPendingWrites: false }),
     useAdminEventDoc: () => ({ data: H.event, loading: false, hasServerData: true, fromCache: false, hasPendingWrites: false }),
-    usePendingClaims: () => ({ claims: H.claims }),
-    usePendingItems: () => ({ items: H.pendingItems, loading: false }),
-    useReportedProofs: () => ({ flagged: H.flagged, loading: false }),
-    useAllItems: () => ({ items: H.items, loading: false }),
+    usePendingClaims: () => ({ claims: H.claims, hasServerData: true, failed: false }),
+    usePendingItems: () => ({ items: H.pendingItems, loading: false, hasServerData: true, failed: false }),
+    useReportedProofs: () => ({ flagged: H.flagged, loading: false, hasServerData: true, failed: false }),
+    useAllItems: () => ({ items: H.items, loading: false, hasServerData: true, failed: false }),
   };
 });
 vi.mock('../data/admin', () => ({

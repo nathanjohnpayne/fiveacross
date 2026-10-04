@@ -9,6 +9,8 @@ export interface PrivateFirestoreSession {
   uid: string | null;
   db: Firestore | null;
   generation: number;
+  /** Connection transitions alone may carry confirmed same-scope block state. */
+  transition?: 'auth' | 'connection' | 'recovery';
   recoveryRequired: boolean;
   failed: boolean;
 }
@@ -56,7 +58,7 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
   let stopped = false;
   const listeners = new Set<() => void>();
   let snapshot: PrivateFirestoreSession = {
-    uid: null, db: null, generation, recoveryRequired: !config.recovered(), failed: false,
+    uid: null, db: null, generation, transition: 'auth', recoveryRequired: !config.recovered(), failed: false,
   };
   const publish = (value: PrivateFirestoreSession) => {
     snapshot = value;
@@ -68,16 +70,16 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
     await updateCurrentUser(old.auth, null).catch(() => {});
     await deleteApp(old.app).catch(() => {});
   };
-  const retire = () => {
+  const retire = (transition: NonNullable<PrivateFirestoreSession['transition']> = 'auth') => {
     generation += 1;
     const old = client;
     client = null;
     // Retire visible state synchronously, before primary Auth commits a change.
-    publish({ uid: config.primaryAuth.currentUser?.uid ?? null, db: null, generation, recoveryRequired: !config.recovered(), failed: false });
+    publish({ uid: config.primaryAuth.currentUser?.uid ?? null, db: null, generation, transition, recoveryRequired: !config.recovered(), failed: false });
     void dispose(old);
   };
-  const synchronize = async (user: User | null) => {
-    retire();
+  const synchronize = async (user: User | null, transition: NonNullable<PrivateFirestoreSession['transition']> = 'auth') => {
+    retire(transition);
     const attempt = generation;
     if (stopped || !user || config.online?.() === false) return;
     let candidate: PrivateClient | null = null;
@@ -107,22 +109,22 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
         return;
       }
       client = candidate;
-      publish({ uid: user.uid, db: privateDb, generation: attempt, recoveryRequired: !config.recovered(), failed: false });
+      publish({ uid: user.uid, db: privateDb, generation: attempt, transition, recoveryRequired: !config.recovered(), failed: false });
     } catch {
       await dispose(candidate);
       if (!candidate && candidateApp) await deleteApp(candidateApp).catch(() => {});
       if (!stopped && attempt === generation) {
-        publish({ uid: null, db: null, generation: attempt, recoveryRequired: !config.recovered(), failed: true });
+        publish({ uid: null, db: null, generation: attempt, transition, recoveryRequired: !config.recovered(), failed: true });
       }
     }
   };
-  const stopBefore = beforeAuthStateChanged(config.primaryAuth, retire, () => { void synchronize(config.primaryAuth.currentUser); });
+  const stopBefore = beforeAuthStateChanged(config.primaryAuth, () => retire(), () => { void synchronize(config.primaryAuth.currentUser); });
   const stopAuth = onIdTokenChanged(config.primaryAuth, (user) => { void synchronize(user); });
   return {
     getSnapshot: () => snapshot,
     subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    refreshRecovery: () => { void synchronize(config.primaryAuth.currentUser); },
-    refreshConnection: () => { void synchronize(config.primaryAuth.currentUser); },
+    refreshRecovery: () => { void synchronize(config.primaryAuth.currentUser, 'recovery'); },
+    refreshConnection: () => { void synchronize(config.primaryAuth.currentUser, 'connection'); },
     capture: (allowRecovery = false) => {
       const captured = snapshot;
       const assertCurrent = () => {

@@ -526,7 +526,7 @@ interface AuthContextValue {
   // is still UNKNOWN during load can't flash the prompt.
   needsAttestation: boolean;
   // True only after this session has proof that Event content may render:
-  // a offline boolean witness plus a cached Board, a server-confirmed stamp, or a same-session attest.
+  // an offline boolean witness plus a cached Board, a server-confirmed stamp, or a same-session attest.
   // Consumers that bypass Board's normal render path (the durable card fallback)
   // must check this instead of inferring permission from a saved snapshot.
   canRenderEventContent: boolean;
@@ -1127,11 +1127,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (profileAttemptRef.current !== attempt) return;
       if (hasCacheStamp || attestedUidsRef.current.has(u.uid)) {
         setAttested(true);
-        setLoading(false); // proof of 18+ → render the cached Board offline
+        setLoading(false); // provisional permission → render the cached Board offline
         // A successful cache-first settle SUPERSEDES a stale online dealError
         // (Codex #117 round 4, finding B): App renders DealError instead of the
         // Board whenever dealError is non-null, so a prior online failure would
-        // otherwise strand this proven-18+ User on the error panel instead of the
+        // otherwise strand this provisionally admitted User on the error panel instead of the
         // cached Board this branch is meant to render.
         clearDealError(ownedEventId);
       }
@@ -1402,7 +1402,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // lands in the `else` below, not here.
         failDeal(bootstrapFailure.err, ownedEventId);
         // …and, for a CONNECTION-class failure ONLY, fall back to the SAME
-        // cache-first proof the OFFLINE branch uses (#521). `navigator.onLine`
+        // boolean-plus-card render witness the OFFLINE branch uses (#521). `navigator.onLine`
         // said true, but the authority read never landed — which IS the
         // captive/ship-Wi-Fi case this file already bounds a timeout for:
         // effectively offline, with a lying probe. A failed read is not
@@ -1680,7 +1680,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // A mid-bootstrap connectivity LOSS SUPERSEDES the in-flight ONLINE bootstrap
       // (whose ensureUserProfile transaction may never settle offline and would
       // otherwise strand "Loading…") and switches to the cache-first path: release
-      // to the cached Board if proof-of-18+ is cached, else hold (finding B/C).
+      // to the cached Board if the project/UID boolean witness and Board are present
+      // (or this session attested), else hold (finding B/C).
       void bootstrapUser(u, (profileAttemptRef.current += 1), ownedEventId);
     };
     window.addEventListener('online', goOnline);
@@ -2137,8 +2138,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // (Codex #117 round 4, finding A): retryBootstrap awaits ensureUserProfile —
       // a Firestore transaction that never resolves offline — so it would strand
       // the button in "Dealing…" for the whole dead zone. bootstrapUser's offline
-      // branch instead settles from cache immediately (proof-of-18+ → render the
-      // cached Board and clear the stale error; else stay held/retryable), and
+      // branch probes the project/UID boolean plus an existing cached Board or Day Card (or a
+      // same-session attest) for render permission and stale-error clearance;
+      // a missing/refused witness stays held/retryable. It
       // never awaits the transaction. It also never deals (offline gate).
       void bootstrapUser(user, (profileAttemptRef.current += 1), eventId);
     } else if (mayDeal) {

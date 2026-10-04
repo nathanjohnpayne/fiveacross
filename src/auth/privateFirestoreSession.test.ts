@@ -116,6 +116,20 @@ describe('private named memory lifecycle', () => {
     expect(H.terminated).toContain(old.db);
   });
 
+  it('distinguishes reconnect publication from an ordinary same-UID token rotation', async () => {
+    const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
+    H.online = false; sessions.refreshConnection();
+    expect(sessions.getSnapshot()).toMatchObject({ uid: 'alice', db: null, transition: 'connection' });
+    H.online = true; sessions.refreshConnection(); await settle();
+    expect(sessions.getSnapshot()).toMatchObject({ uid: 'alice', transition: 'connection' });
+    H.idToken!(H.primary.currentUser);
+    expect(sessions.getSnapshot()).toMatchObject({ uid: 'alice', db: null, transition: 'auth' });
+    await settle();
+    expect(sessions.getSnapshot()).toMatchObject({ uid: 'alice', transition: 'auth' });
+    sessions.refreshRecovery(); await settle();
+    expect(sessions.getSnapshot().transition).toBe('recovery');
+  });
+
   it('a delayed old Auth clone cannot replace a newer account session', async () => {
     let release!: () => void; H.cloneWaits = [() => new Promise<void>((resolve) => { release = resolve; })];
     const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();

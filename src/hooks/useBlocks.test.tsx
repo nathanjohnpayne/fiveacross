@@ -19,7 +19,7 @@ type Subscription = {
 
 const H = vi.hoisted(() => ({
   eventId: 'event-a',
-  session: { uid: 'bob' as string | null, db: { memory: true } as object | null, generation: 0, recoveryRequired: false, failed: false },
+  session: { uid: 'bob' as string | null, db: { memory: true } as object | null, generation: 0, transition: 'auth' as 'auth' | 'connection' | 'recovery', recoveryRequired: false, failed: false },
   subscriptions: [] as Subscription[],
   // Every server-only pair delete the reconciler sends, by document path.
   reconciled: [] as string[],
@@ -107,7 +107,7 @@ const pathOf = (sub: Subscription) => ((sub.target as { args: unknown[] }).args[
 
 beforeEach(() => {
   H.eventId = 'event-a';
-  H.session = { uid: 'bob', db: { memory: true }, generation: 0, recoveryRequired: false, failed: false };
+  H.session = { uid: 'bob', db: { memory: true }, generation: 0, transition: 'auth' as 'auth' | 'connection' | 'recovery', recoveryRequired: false, failed: false };
   vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
   H.subscriptions = [];
   H.reconciled = [];
@@ -556,14 +556,14 @@ describe('useHiddenUidsSubscription', () => {
     const old = H.subscriptions[0];
     act(() => old.listener(pairs([['alice', 'bob']])));
     vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
-    H.session = { ...H.session, db: null, generation: 1 };
+    H.session = { ...H.session, db: null, generation: 1, transition: 'connection' };
     view.rerender();
     expect(old.unsubscribe).toHaveBeenCalledOnce();
     expect(view.result.current).toEqual({ hidden: new Set(['alice']), ready: true });
     act(() => old.listener(pairs([])));
     expect([...view.result.current.hidden]).toEqual(['alice']);
     vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
-    H.session = { ...H.session, db: { memory: true }, generation: 2 };
+    H.session = { ...H.session, db: { memory: true }, generation: 2, transition: 'connection' };
     view.rerender();
     const fresh = H.subscriptions[1];
     act(() => fresh.listener({ ...pairs([]), metadata: { fromCache: true, hasPendingWrites: false } }));
@@ -571,6 +571,42 @@ describe('useHiddenUidsSubscription', () => {
     expect(view.result.current).toEqual({ hidden: new Set(), ready: false });
     act(() => fresh.listener(pairs([])));
     expect(view.result.current).toEqual({ hidden: new Set(), ready: true });
+  });
+
+  it('an online token rotation withholds before the replacement server answer, including its cache and pending answers', () => {
+    const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+    const old = H.subscriptions[0];
+    act(() => old.listener(pairs([['alice', 'bob']])));
+    H.session = { ...H.session, db: null, generation: 1, transition: 'auth' };
+    view.rerender();
+    expect(view.result.current).toEqual({ hidden: new Set(), ready: false });
+    H.session = { ...H.session, db: { memory: true } };
+    view.rerender();
+    const fresh = H.subscriptions[1];
+    act(() => old.listener(pairs([])));
+    expect(view.result.current.ready).toBe(false);
+    act(() => fresh.listener({ ...pairs([]), metadata: { fromCache: true, hasPendingWrites: false } }));
+    expect(view.result.current.ready).toBe(false);
+    act(() => fresh.listener(pairs([], true)));
+    expect(view.result.current.ready).toBe(false);
+    act(() => fresh.listener(pairs([])));
+    expect(view.result.current).toEqual({ hidden: new Set(), ready: true });
+  });
+
+  it('an Auth rotation during reconnect cannot reuse a previous connection carry', () => {
+    const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+    act(() => H.subscriptions[0].listener(pairs([['alice', 'bob']])));
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    H.session = { ...H.session, db: null, generation: 1, transition: 'connection' };
+    view.rerender();
+    expect(view.result.current.ready).toBe(true);
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
+    H.session = { ...H.session, db: { memory: true }, generation: 2, transition: 'connection' };
+    view.rerender();
+    expect(view.result.current).toEqual({ hidden: new Set(['alice']), ready: true });
+    H.session = { ...H.session, db: { memory: true }, generation: 3, transition: 'auth' };
+    view.rerender();
+    expect(view.result.current).toEqual({ hidden: new Set(), ready: false });
   });
 
   it.each(['account', 'Event'] as const)('offline %s changes retire the confirmed visibility witness', (scope) => {

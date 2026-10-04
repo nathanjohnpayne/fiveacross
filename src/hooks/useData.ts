@@ -1555,13 +1555,15 @@ export function useFeed(max = 60) {
  * a cache-only (or not-yet-arrived) snapshot reads as zero pending claims, and a
  * gate that passes vacuously is no gate at all.
  */
+// Private queues expose failure and current confirmation: an empty array
+// alone cannot mean all clear after denial or an unconfirmed memory answer.
 export function usePendingClaims() {
-  const { data, loading, hasServerData } = usePrivateCol<ClaimDoc>(
+  const { data, loading, hasServerData, failed } = usePrivateCol<ClaimDoc>(
     (database) => claimsCol(database),
     'claims',
   );
   const claims = data.filter((c) => c.status === 'pending').sort((a, b) => a.createdAt - b.createdAt);
-  return { claims, loading, hasServerData };
+  return { claims, loading, hasServerData, failed };
 }
 
 /**
@@ -1576,12 +1578,12 @@ export function usePendingClaims() {
  * every pool) on every render just to find the handful of pending rows.
  */
 export function usePendingItems() {
-  const { data, loading } = usePrivateCol<ItemDoc>(
+  const { data, loading, hasServerData, failed } = usePrivateCol<ItemDoc>(
     (database) => query(itemsCol(database), where('status', '==', 'pending')),
     'items-pending',
   );
   const items = [...data].sort((a, b) => a.createdAt - b.createdAt);
-  return { items, loading };
+  return { items, loading, hasServerData, failed };
 }
 
 /**
@@ -1691,8 +1693,8 @@ export function usePendingItemCount(enabled = true) {
  * too and no Admin could ever act on it — the exact failure ADR 0004 warns of.
  */
 export function useAllItems() {
-  const { data, loading } = usePrivateCol<ItemDoc>((database) => itemsCol(database), 'items-admin');
-  return { items: data.sort((a, b) => b.reportCount - a.reportCount), loading };
+  const { data, loading, hasServerData, failed } = usePrivateCol<ItemDoc>((database) => itemsCol(database), 'items-admin');
+  return { items: data.sort((a, b) => b.reportCount - a.reportCount), loading, hasServerData, failed };
 }
 
 /**
@@ -1726,14 +1728,14 @@ export function useAllItems() {
  * no second listener, no composite index.
  */
 export function useReportedProofs() {
-  const { data, loading } = usePrivateCol<ProofDoc>((database) => proofsCol(database), 'proofs-admin');
+  const { data, loading, hasServerData, failed } = usePrivateCol<ProofDoc>((database) => proofsCol(database), 'proofs-admin');
   const flagged = data
     .filter(
       (p) =>
         p.reportCount > 0 || p.status === 'flagged' || p.status === 'hidden' || !!p.visionFlag,
     )
     .sort((a, b) => b.reportCount - a.reportCount);
-  return { flagged, loading };
+  return { flagged, loading, hasServerData, failed };
 }
 
 /**

@@ -81,10 +81,10 @@ vi.mock('../hooks/useData', () => ({
   // Admin
   useEventDoc: () => ({ data: H.event, loading: false }),
   useAdminEventDoc: () => ({ data: H.event, loading: false, hasServerData: true, fromCache: false, hasPendingWrites: false }),
-  usePendingClaims: () => ({ claims: H.pendingClaims, loading: false }),
-  useReportedProofs: () => ({ flagged: [], loading: false }),
-  useAllItems: () => ({ items: [], loading: false }),
-  usePendingItems: () => ({ items: [], loading: false }),
+  usePendingClaims: () => ({ claims: H.pendingClaims, loading: false, hasServerData: true, failed: false }),
+  useReportedProofs: () => ({ flagged: [], loading: false, hasServerData: true, failed: false }),
+  useAllItems: () => ({ items: [], loading: false, hasServerData: true, failed: false }),
+  usePendingItems: () => ({ items: [], loading: false, hasServerData: true, failed: false }),
   isReportHidden: () => false,
   // Admin.tsx imports these ban predicates from useData (#108/#122); this mock
   // replaces the whole module, so they must be provided or Admin loads with the

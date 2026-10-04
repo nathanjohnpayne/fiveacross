@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { privateCacheRecoveryHref } from '../auth/privateCacheRecoveryNavigation';
 import { useLocation, useNavigate } from 'react-router';
 import { usePrivateFirestore } from '../hooks/usePrivateFirestore';
@@ -33,6 +34,23 @@ import MessagesPanel from './admin/MessagesPanel';
  * `./admin/*` and use the captured private-session Admin write paths.
  */
 
+// Match the established bootstrap wait: availability times out after 10s,
+// while a later confirmed answer can still establish Admin eligibility.
+const ADMIN_EVENT_WAIT_MS = 10_000;
+
+/** A current private-read scope has a bounded availability wait, never authority. */
+function useBoundedPrivateWait(waitKey: string | null): boolean {
+  const [expiredWait, setExpiredWait] = useState<string | null>(null);
+  useEffect(() => {
+    setExpiredWait(null);
+    if (waitKey === null) return;
+    let active = true;
+    const timer = setTimeout(() => { if (active) setExpiredWait(waitKey); }, ADMIN_EVENT_WAIT_MS);
+    return () => { active = false; clearTimeout(timer); };
+  }, [waitKey]);
+  return waitKey !== null && expiredWait === waitKey;
+}
+
 const SECTION_TITLES: Record<AdminSection, string> = {
   queue: 'Review queue',
   settings: 'Game settings',
@@ -59,11 +77,16 @@ export default function Admin() {
   // qualifies the Admin gate and #1151's archive gate. Cache-origin and pending
   // snapshots remain unknown; the old persistent gameplay-cache gate explains
   // the same metadata checks historically, not this private listener's storage.
-  const { data: event, loading, serverResolved, hasServerData, fromCache, hasPendingWrites } = useAdminEventDoc();
+  const { key: eventKey, data: event, loading, serverResolved, hasServerData, fromCache, hasPendingWrites } = useAdminEventDoc();
   const eventConfirmed = hasServerData && !fromCache && !hasPendingWrites;
   const navigate = useNavigate();
   const session = usePrivateFirestore();
   const online = useOnline();
+  const answerUnavailable = serverResolved && !loading && !hasServerData;
+  const waitKey = user && online && session.db && session.uid === user.uid
+    && !session.failed && !session.recoveryRequired && !eventConfirmed && !answerUnavailable
+    ? JSON.stringify([eventKey, user.uid, session.generation]) : null;
+  const waitExpired = useBoundedPrivateWait(waitKey);
   if (user && session.recoveryRequired) {
     return <AdminSheet title="Admin" onDone={() => navigate('/more', { replace: true })}>
       <p>Private views require attended device recovery. Recover and verify every account’s queued Marks online first.</p>
@@ -78,7 +101,7 @@ export default function Admin() {
     : session.failed ? unavailable
     : !online ? 'Reconnect to use Admin.'
     : session.uid !== user.uid || !session.db ? 'Loading Admin…'
-    : !eventConfirmed ? (serverResolved && !loading && !hasServerData ? unavailable : 'Loading Admin…')
+    : !eventConfirmed ? (answerUnavailable || waitExpired ? unavailable : 'Loading Admin…')
     : !event ? unavailable
     : !event.admins?.includes(user.uid) ? 'Admins only.'
     : null;
@@ -89,15 +112,17 @@ export default function Admin() {
       </AdminSheet>
     );
   }
-  return <AdminConsole userUid={user.uid} event={event} eventConfirmed={eventConfirmed} />;
+  return <AdminConsole userUid={user.uid} eventKey={eventKey} event={event} eventConfirmed={eventConfirmed} />;
 }
 
 function AdminConsole({
   userUid,
+  eventKey,
   event,
   eventConfirmed,
 }: {
   userUid: string;
+  eventKey: string;
   event: ReturnType<typeof useAdminEventDoc>['data'];
   /** Whether THIS Event snapshot is fully server-committed — threaded straight
    *  through to `ArchiveEvent`, whose arming gate (#1151) needs it. */
@@ -105,10 +130,26 @@ function AdminConsole({
 }) {
   // `hasServerData` rides along for #1151's drain gate: a not-yet-arrived queue
   // reads as zero pending Claims, and a gate that passes vacuously is no gate.
-  const { claims, hasServerData: claimsLoaded } = usePendingClaims();
-  const { flagged } = useReportedProofs();
-  const { items } = useAllItems();
-  const { items: pendingItems } = usePendingItems();
+  const claimState = usePendingClaims();
+  const { claims, hasServerData: claimsLoaded } = claimState;
+  const proofState = useReportedProofs();
+  const { flagged } = proofState;
+  const itemState = useAllItems();
+  const { items } = itemState;
+  const approvalState = usePendingItems();
+  const { items: pendingItems } = approvalState;
+  const session = usePrivateFirestore();
+  // Empty private rows mean all clear only after every source is confirmed.
+  // Failure/unknown data withholds the queue and its empty badges/actions.
+  const queueSources = [claimState, proofState, itemState, approvalState];
+  const queueFailed = queueSources.some((source) => source.failed);
+  const queueConfirmed = queueSources.every((source) => source.hasServerData === true);
+  const queueWaitKey = !queueFailed && !queueConfirmed
+    ? JSON.stringify([eventKey, userUid, session.generation, 'queue']) : null;
+  const queueWaitExpired = useBoundedPrivateWait(queueWaitKey);
+  const queueStatus = queueFailed || queueWaitExpired ? 'unavailable' : queueConfirmed ? 'ready' : 'loading';
+  const queueMessage = queueStatus === 'unavailable'
+    ? 'Review queue is unavailable. Reload and try again.' : 'Loading review queue…';
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -185,6 +226,7 @@ function AdminConsole({
     <AdminSheet title={title} onBack={section === 'hub' ? undefined : back} onDone={done}>
       {section === 'hub' && (
         <AdminHub
+          queueStatus={queueStatus}
           event={event}
           reportCount={reports.length}
           approvalCount={pendingItems.length}
@@ -194,8 +236,9 @@ function AdminConsole({
           onOpen={openSection}
         />
       )}
-      {section === 'queue' && (
-        <ReviewQueue
+      {section === 'queue' && (queueStatus !== 'ready'
+        ? <p className="center muted" role="status">{queueMessage}</p>
+        : <ReviewQueue
           event={event}
           reports={reports}
           pendingItems={pendingItems}

@@ -86,9 +86,10 @@ vi.mock('../hooks/useData', async (importOriginal) => {
       fromCache: false,
       hasPendingWrites: false,
     }),
-    usePendingClaims: () => ({ claims: H.claims }),
-    useReportedProofs: () => ({ flagged: H.flagged, loading: false }),
-    useAllItems: () => ({ items: H.items, loading: false }),
+    usePendingClaims: () => ({ claims: H.claims, hasServerData: true, failed: false }),
+    useReportedProofs: () => ({ flagged: H.flagged, loading: false, hasServerData: true, failed: false }),
+    useAllItems: () => ({ items: H.items, loading: false, hasServerData: true, failed: false }),
+    usePendingItems: () => ({ items: [], loading: false, hasServerData: true, failed: false }),
     useDayMetasStatus: () => ({ metas: H.dayMetas, loaded: true }),
     useLeaderboard: () => ({ players: H.players, loading: false, hasServerData: true, fromCache: false, hasPendingWrites: false }),
   };

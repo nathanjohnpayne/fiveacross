@@ -14,13 +14,27 @@ vi.mock('firebase/firestore', () => {
       const stop = vi.fn(); H.subscriptions.push({ target, next, error, stop }); return stop;
     } };
 });
-import { useMyUser, usePendingClaims, usePendingItemCount } from './useData';
+import { useMyUser, usePendingClaims, usePendingItems, useAllItems, useReportedProofs, usePendingItemCount } from './useData';
 const snapshot = (fromCache = false) => ({ docs: [{ data: () => ({ uid: 'alice', status: 'pending', createdAt: 1 }) }], metadata: { fromCache, hasPendingWrites: false } });
 beforeEach(() => {
   H.session = { uid: 'alice', db: { name: 'private-memory' }, generation: 1, recoveryRequired: false, failed: false };
   H.subscriptions = [];
 });
 describe('private hook cache and actor boundaries (#1411)', () => {
+  it.each([
+    ['claims', usePendingClaims], ['approvals', usePendingItems], ['items', useAllItems], ['reports', useReportedProofs],
+  ] as const)('exposes confirmed and terminal-failure state for %s', (_name, hook) => {
+    const view = renderHook(() => hook());
+    expect(view.result.current.hasServerData).toBe(false);
+    expect(view.result.current.failed).toBe(false);
+    act(() => H.subscriptions[0].next(snapshot(true)));
+    expect(view.result.current.hasServerData).toBe(false);
+    act(() => H.subscriptions[0].next(snapshot()));
+    expect(view.result.current.hasServerData).toBe(true);
+    act(() => H.subscriptions[0].error());
+    expect(view.result.current.hasServerData).toBe(false);
+    expect(view.result.current.failed).toBe(true);
+  });
   it('binds an Admin queue to the private DB and never publishes a cache-only answer', () => {
     const view = renderHook(() => usePendingClaims());
     expect(JSON.stringify(H.subscriptions[0].target)).toContain('private-memory');

@@ -3,11 +3,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AUTH_BOOTSTRAP_TIMEOUT_MS, AuthProvider, useAuth } from './AuthContext';
 
 // Covers specs/x-offline-cold-boot.md — the connectivity/attestation state
-// machine (#115). The cache lifts the 18+ gate PROVISIONALLY offline so the app
-// cold-boots from the persistent cache without awaiting the network; the server
+// machine (#115). The project/UID boolean witness plus an existing cached Board or Day Card
+// lifts the render gate PROVISIONALLY offline without awaiting the network; the server
 // read is AUTHORITATIVE when it arrives (online sessions stay gated until it
 // settles, and it downgrades a stale cache lift); and the deferred deal fires on
-// reconnect. Mocks the Firebase + data-layer boundary so the REAL AuthProvider
+// reconnect. Historical test titles retain cached-stamp wording; the current
+// render spy returns a sentinel for the boolean-plus-card prerequisite, not a
+// cached profile timestamp. Mocks the data-layer boundary so the REAL AuthProvider
 // runs under jsdom, with connectivity driven by hand.
 const mocks = vi.hoisted(() => ({
   onAuthStateChanged: vi.fn(),
@@ -16,7 +18,7 @@ const mocks = vi.hoisted(() => ({
   ensureUserProfile: vi.fn(),
   attestAdult: vi.fn(),
   // The SERVER-only authority read (#117 r6, getDocFromServer) and the cache-first
-  // RENDER read (getDocFromCache) are DISTINCT spies here, so a test can prove deal
+  // RENDER probe (project/UID boolean plus cached Board or Day Card) are DISTINCT spies, so a test can prove deal
   // authority never comes from cache. `readAdultAttestation` is the OLD cache-capable
   // getDoc reader the fix moved OFF the authority path — modelled as a separate spy
   // so the round-6 test can pin that a cache-served stamp (this spy) does NOT
@@ -230,8 +232,8 @@ describe('offline cold boot (#115)', () => {
   });
 
   it('publishes the User and settles loading:false without awaiting the network transaction', async () => {
-    // Offline: ensureUserProfile (a transaction) would never resolve; the cached
-    // stamp settles the returning User attested.
+    // Offline: ensureUserProfile (a transaction) would never resolve; the boolean
+    // witness plus existing cached Board grants provisional render permission.
     setOnline(false);
     mocks.ensureUserProfile.mockReturnValue(NEVER);
     mocks.readAdultAttestationFromCache.mockResolvedValue(1);
@@ -280,7 +282,7 @@ describe('offline cold boot (#115)', () => {
 
   it('finding B (offline half): a cache-attested returning User renders the cached Board immediately offline', async () => {
     setOnline(false);
-    mocks.readAdultAttestationFromCache.mockResolvedValue(1); // cached: attested
+    mocks.readAdultAttestationFromCache.mockResolvedValue(1); // boolean witness plus cached Board or Day Card: provisional render
     mocks.ensureUserProfile.mockReturnValue(NEVER);
 
     mount();
@@ -294,10 +296,10 @@ describe('offline cold boot (#115)', () => {
   });
 
   it('finding C + round-2 P1: no deal fires on the PROVISIONAL cache attestation during the reconnect window; deals exactly once after the authoritative read CONFIRMS', async () => {
-    // Offline cold boot: attested from cache, but this is a FRESH Event so
-    // joinAndDeal has real work (boards are per-Event). The authoritative read is
+    // The mocked render seam supplies the boolean-plus-cached-card sentinel,
+    // independently of this fixture’s join spy. The authoritative read is
     // HELD in flight across the reconnect so the online-flip deal effect runs
-    // while `attested` is still the provisional cache value — the exact window the
+    // while `attested` is still the provisional render value — the exact window the
     // round-2 P1 closes. On the buggy code the deal fires here (only online was
     // gated); with the authority gate it must not.
     setOnline(false);
@@ -325,7 +327,7 @@ describe('offline cold boot (#115)', () => {
   });
 
   it('finding D + round-2 P1: a HELD authoritative read that returns NO stamp downgrades the stale cache lift to a re-prompt, and never deals — not even in the reconnect window', async () => {
-    // Offline: a STALE cached stamp provisionally lifts the gate. The server row
+    // Offline: a stale true boolean plus cached Board provisionally lifts the gate. The server row
     // now has NO stamp (owner deleted/recreated it). The read is held in flight so
     // the online-flip effect runs on the provisional value: no deal must fire
     // (round-2 P1), and the settled null must downgrade to a re-prompt.
@@ -381,7 +383,7 @@ describe('offline cold boot (#115)', () => {
     mount();
     await coldBoot(RETURNING_USER);
 
-    // No proof of 18+ (cache miss) → the Board is HELD behind the App Loading gate,
+    // No boolean-plus-card render witness → the Board is HELD behind the App Loading gate,
     // NOT rendered; and it never assumes attested — no deal, no re-prompt offline.
     expect(boardHeld()).toBe(true);
     expect(mocks.joinAndDeal).not.toHaveBeenCalled();
@@ -398,7 +400,7 @@ describe('offline cold boot (#115)', () => {
   });
 
   it('finding A (round 4): an OFFLINE retry settles CACHE-FIRST without awaiting the transaction bootstrap (no hang), never deals; an ONLINE retry runs the full bootstrap + deal', async () => {
-    // Offline cold boot, cache-attested. ensureUserProfile is a NEVER promise —
+    // Offline cold boot with the boolean-plus-card witness. ensureUserProfile is a NEVER promise —
     // the offline Firestore transaction that does not queue. If the retry routed
     // into retryBootstrap it would await this and HANG in "Dealing…"; the fix
     // routes it to the cache-first path, which never touches the transaction.
@@ -409,7 +411,7 @@ describe('offline cold boot (#115)', () => {
 
     mount();
     await coldBoot(RETURNING_USER);
-    expect(boardRendered()).toBe(true); // cache-attested → Board renders offline
+    expect(boardRendered()).toBe(true); // boolean-plus-card witness → Board renders offline
     expect(mocks.ensureUserProfile).not.toHaveBeenCalled(); // offline never awaits the txn
 
     await act(async () => {
@@ -446,7 +448,7 @@ describe('offline cold boot (#115)', () => {
     await coldBoot(RETURNING_USER);
     await waitFor(() => expect(dealErrorShown()).toBe(true)); // online deal failed → error panel
 
-    // Go OFFLINE with a cached attestation: the cache-first success proves 18+ and
+    // Go OFFLINE with a boolean witness plus cached Board or Day Card: the render probe
     // must CLEAR the stale dealError so the cached Board renders, not the panel.
     await goOffline();
     await waitFor(() => expect(dealErrorShown()).toBe(false));
@@ -455,7 +457,7 @@ describe('offline cold boot (#115)', () => {
 
   it('finding C: an ONLINE bootstrap that loses connectivity mid-flight is SUPERSEDED — loading releases via the cache path (not stranded), and the late online resolution cannot clobber it', async () => {
     // Online boot with the authoritative bootstrap held in flight, so loading is
-    // gated. The User has a cached stamp, so the offline takeover can render.
+    // gated. A boolean witness plus cached Board or Day Card lets the offline takeover render.
     setOnline(true);
     mocks.readAdultAttestationFromCache.mockResolvedValue(1);
     const ensure = deferred<void>();
@@ -467,8 +469,8 @@ describe('offline cold boot (#115)', () => {
     expect(boardHeld()).toBe(true); // gated on Loading while the online read is in flight
 
     // Connectivity drops mid-bootstrap: the offline handler supersedes the pending
-    // online attempt and releases loading via the cache-first path (cache-attested
-    // → Board), rather than stranding on the transaction that may never settle.
+    // online attempt and releases loading via the boolean-plus-card render probe,
+    // rather than stranding on the transaction that may never settle.
     await goOffline();
     await waitFor(() => expect(boardRendered()).toBe(true));
     expect(rePromptShown()).toBe(false);
@@ -584,9 +586,9 @@ describe('offline cold boot (#115)', () => {
   });
 
   it('finding A (round 6): deal AUTHORITY is SERVER-only — a cache-served stamp does NOT authorize a deal when the SERVER row has none (re-prompt, no rows); a genuine server stamp deals once', async () => {
-    // Offline cold boot with a CACHED stamp → provisional render (no deal offline).
+    // Offline boolean witness plus cached Board or Day Card → provisional render (no deal offline).
     setOnline(false);
-    mocks.readAdultAttestationFromCache.mockResolvedValue(1); // cache render: attested
+    mocks.readAdultAttestationFromCache.mockResolvedValue(1); // boolean-plus-card render sentinel
     mocks.ensureUserProfile.mockResolvedValue(undefined);
     // The OLD cache-capable getDoc WOULD serve this stale cached stamp as authority…
     mocks.readAdultAttestation.mockResolvedValue(1);
@@ -599,9 +601,9 @@ describe('offline cold boot (#115)', () => {
     expect(mocks.joinAndDeal).not.toHaveBeenCalled();
 
     // Reconnect: authority is SERVER-only, so the server-null downgrades to a
-    // re-prompt and NO deal/rows are created — even though the cache still has a
-    // stamp (the pre-fix code, which read authority from the cache-capable getDoc,
-    // deals here).
+    // re-prompt and NO deal/rows are created despite the provisional witness.
+    // Historically, cache-capable getDoc could read a stale profile stamp and
+    // authorize a deal here; the separate OLD reader spy models that defect.
     await reconnect();
     await waitFor(() => expect(rePromptShown()).toBe(true));
     expect(mocks.joinAndDeal).not.toHaveBeenCalled();
@@ -630,7 +632,7 @@ describe('offline cold boot (#115)', () => {
   });
 
   it('finding B (round 6): going offline while a deal is in flight retires it — a stale late REJECTION does NOT set dealError over the rendered cached Board', async () => {
-    // Online, authoritative, cache-attested; the deal is HELD in flight.
+    // Online, authoritative, with a render witness; the deal is HELD in flight.
     setOnline(true);
     mocks.readAdultAttestationFromCache.mockResolvedValue(1);
     mocks.ensureUserProfile.mockResolvedValue(undefined);
@@ -822,10 +824,10 @@ describe('offline cold boot (#115)', () => {
     // effectively-offline-with-a-lying-probe case. Neither committedSticky nor
     // optimisticSticky applies (no in-session attest), so the pre-fix code left
     // `attested` UNKNOWN forever and App withheld the whole Event, including the
-    // #434 durable card this device already holds. The cache fallback (#521)
-    // proves 18+ from the SAME cached stamp the OFFLINE branch trusts.
+    // #434 durable card this device already holds. The fallback (#521) uses the
+    // SAME boolean witness plus cached Board or Day Card as the OFFLINE branch, render-only.
     setOnline(true);
-    mocks.readAdultAttestationFromCache.mockResolvedValue(1); // cached: proof of 18+
+    mocks.readAdultAttestationFromCache.mockResolvedValue(1); // boolean witness plus cached Board or Day Card: render-only
     mocks.ensureUserProfile.mockRejectedValue(unreachable());
     mocks.readAdultAttestationFromServer.mockRejectedValue(unreachable());
 
@@ -844,10 +846,10 @@ describe('offline cold boot (#115)', () => {
   });
 
   it('#521: the same double-failure with a cache MISS never lifts the render gate — the age gate does not fail open', async () => {
-    // Identical failure shape, but this device has no cached attestation at all
+    // Identical failure shape, but this device lacks the boolean-plus-card witness
     // (e.g. a brand-new device on the ship's captive Wi-Fi). This is the
     // important case: it proves the #521 fallback cannot be used to bypass 18+
-    // verification — a miss leaves `canRenderEventContent` false, exactly like
+    // render prerequisite — a miss leaves `canRenderEventContent` false, exactly like
     // before the fix.
     setOnline(true);
     mocks.readAdultAttestationFromCache.mockRejectedValue(new Error('cache miss'));
@@ -870,7 +872,7 @@ describe('offline cold boot (#115)', () => {
   });
 
   it('#521 (Codex P2): a PERMANENT authority failure does NOT lift the render gate from cache — the Event stays withheld behind the retry surface', async () => {
-    // Same cached stamp, same "the authority read failed" shape — but the failure
+    // Same boolean-plus-card witness, same authority-read failure — but the failure
     // is `permission-denied`, which reconnecting cannot fix. The #521 fallback
     // exists for the captive-Wi-Fi/effectively-offline case only; lifting here
     // would mount Nav/Feed/Ranks/More over a rules/schema fault while App's own
@@ -878,7 +880,7 @@ describe('offline cold boot (#115)', () => {
     // paint the card the lift was for. Both decisions read the SAME classifier, so
     // they cannot disagree.
     setOnline(true);
-    mocks.readAdultAttestationFromCache.mockResolvedValue(1); // cached: proof of 18+
+    mocks.readAdultAttestationFromCache.mockResolvedValue(1); // boolean witness plus cached Board or Day Card: render-only
     mocks.ensureUserProfile.mockResolvedValue(undefined);
     mocks.readAdultAttestationFromServer.mockRejectedValue(permanent());
 
@@ -901,7 +903,7 @@ describe('offline cold boot (#115)', () => {
     // leave the stale lift standing forever. The late result must still settle.
     vi.useFakeTimers();
     setOnline(true);
-    mocks.readAdultAttestationFromCache.mockResolvedValue(1); // cached: proof of 18+
+    mocks.readAdultAttestationFromCache.mockResolvedValue(1); // boolean witness plus cached Board or Day Card: render-only
     mocks.ensureUserProfile.mockResolvedValue(undefined);
     const read = deferred<number | null>();
     mocks.readAdultAttestationFromServer.mockReturnValue(read.promise);
@@ -962,7 +964,7 @@ describe('offline cold boot (#115)', () => {
   it('#521 (Codex P2): a cache read that resolves AFTER a late authoritative NULL cannot re-lift the gate the downgrade closed', async () => {
     // The one-level-down version of the same bug: the provisional lift is
     // fire-and-forget, so its `.then` can land after the authoritative settle.
-    // Authority is terminal for the attempt — a slow cache stamp must not undo it.
+    // Authority is terminal for the attempt — a slow render-witness probe must not undo it.
     vi.useFakeTimers();
     setOnline(true);
     const cache = deferred<number | null>();
@@ -986,7 +988,7 @@ describe('offline cold boot (#115)', () => {
     });
     expect(rePromptShown()).toBe(true);
 
-    // …and only then does the cache come back with a stamp. It must be ignored.
+    // …and only then does the render probe return its sentinel. It must be ignored.
     await act(async () => {
       cache.settle(1);
     });
@@ -1006,7 +1008,7 @@ describe('offline cold boot (#115)', () => {
     // User the server says has no stamp. Both paths must honor a late answer.
     vi.useFakeTimers();
     setOnline(true);
-    mocks.readAdultAttestationFromCache.mockResolvedValue(1); // cached: proof of 18+
+    mocks.readAdultAttestationFromCache.mockResolvedValue(1); // boolean witness plus cached Board or Day Card: render-only
     mocks.ensureUserProfile.mockResolvedValue(undefined);
     const boot = deferred<number | null>();
     const retry = deferred<number | null>();
