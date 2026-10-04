@@ -241,9 +241,27 @@ export function validateSlug(candidate: string): SlugCheck {
  * reaches the Feed tab; reserving only the lowercase spelling would hand that
  * route to the slug parser instead. Lowercasing here only ever widens what is
  * refused, never what is accepted.
+ *
+ * Percent-decoded for the same reason. `location.pathname` keeps percent
+ * escapes, but the router decodes each segment before matching, so `/f%65ed`
+ * reaches the Feed tab too. Both the raw and the decoded spelling are checked,
+ * and a malformed escape falls back to the raw segment, which is what the
+ * router matches in that case. Like lowercasing, this only widens the refusal.
  */
 export function isReservedPathSegment(segment: string): boolean {
+  return isReservedSpelling(segment) || isReservedSpelling(decodePathSegment(segment));
+}
+
+function isReservedSpelling(segment: string): boolean {
   return segment.includes('.') || isReservedLabel(segment.toLowerCase());
+}
+
+function decodePathSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
 }
 
 /** `parseAddress`'s whole answer (`specs/path-addressing-and-root.md` § D3). */

@@ -74,6 +74,17 @@ describe('the reserved-path union', () => {
     expect(isReservedPathSegment('SETUP')).toBe(true);
     expect(isReservedPathSegment('bodega-bay')).toBe(false);
   });
+
+  it('decodes percent escapes first, because the router matches decoded segments', () => {
+    expect(isReservedPathSegment('f%65ed')).toBe(true);
+    expect(isReservedPathSegment('%53etup')).toBe(true);
+    expect(isReservedPathSegment('%2Ewell-known')).toBe(true);
+    expect(isReservedPathSegment('sw%2ejs')).toBe(true);
+    // A malformed escape is matched raw by the router, so it is classified raw.
+    expect(isReservedPathSegment('feed%')).toBe(false);
+    expect(isReservedPathSegment('bodega%2')).toBe(false);
+    expect(isReservedPathSegment('b%6Fdega-bay')).toBe(false);
+  });
 });
 
 describe('parseAddress', () => {
@@ -107,6 +118,13 @@ describe('parseAddress', () => {
   it.each(['', '/', '//bodega-bay', 'bodega-bay'])('answers no slug for the non-address pathname %j', (pathname) => {
     expect(parseAddress('fiveacross.app', pathname)).toEqual({ slug: null, basename: '' });
   });
+
+  it.each(['/f%65ed', '/F%65ED/x', '/%6Dore/admin', '/sw%2Ejs'])(
+    'refuses the percent-encoded reserved spelling %s, which the router decodes to an app route',
+    (pathname) => {
+      expect(parseAddress('fiveacross.app', pathname)).toEqual({ slug: null, basename: '' });
+    },
+  );
 
   it('refuses the reserved Firebase helper namespace /__/auth/handler', () => {
     expect(parseAddress('fiveacross.app', '/__/auth/handler')).toEqual({ slug: null, basename: '' });
@@ -177,7 +195,10 @@ describe('one reserved list, read by every slug consumer', () => {
     // the route literals too. An unreserved top-level route would be parsed as
     // a slug before the router could mount it.
     const app = readRepoFile('src/App.tsx');
-    const literals = [...app.matchAll(/<Route\s[^>]*path="\/([^/"*]+)/g)].map((m) => m[1]);
+    // Any `path="/…"` attribute, not only one that follows `<Route` with no `>`
+    // in between: a prop such as `element={() => …}` before `path` would end a
+    // tag-anchored match early and silently skip that route.
+    const literals = [...app.matchAll(/\bpath="\/([^/"*]+)/g)].map((m) => m[1]);
     expect(literals).toContain('setup');
     for (const segment of literals) {
       expect(RESERVED_PATH_SEGMENTS, segment).toContain(segment);
