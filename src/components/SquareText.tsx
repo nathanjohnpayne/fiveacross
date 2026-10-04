@@ -3,6 +3,53 @@ import { useTextSize } from '../hooks/useTextSize';
 import { fitTextSize, shrinkToWholeWords } from '../game/fitText';
 
 /**
+ * #1345: verify the estimate against the real rendered glyphs and keep
+ * shrinking while any single word is wider than the Square (which `.cell`'s
+ * `word-break: break-word` would otherwise split mid-word, "Grandparent / s").
+ * Each probe applies the size with mid-word breaking and hyphenation switched
+ * off, so a too-long word makes the span (a flex item) as wide as that word
+ * instead of wrapping; its width then exceeds the host's usable (content-box)
+ * width. Both sides are compared as fractional layout widths
+ * (`getBoundingClientRect` minus the host's computed padding and border), not
+ * the integer-rounded `offsetWidth`/`clientWidth`, so a word only a fraction
+ * of a pixel too wide is still caught.
+ *
+ * When the accepted size keeps every word whole the overrides STAY on the
+ * span: restoring `.cell`'s `hyphens: auto` / `word-break: break-word` would
+ * let the browser hyphenate or split a word that fits on its own line just to
+ * fill a preceding line. They are removed only when even `minSize` cannot hold
+ * the longest word, where `.cell`'s mid-word breaking is the last-resort
+ * fallback. A host with no layout yet (width 0, pre-first-paint or jsdom) has
+ * nothing to measure against, so the estimate stands with the overrides off.
+ */
+function keepWordsWhole(el: HTMLElement, host: HTMLElement, estimated: number): number {
+  clearWholeWordOverrides(el);
+  const hostStyle = window.getComputedStyle(host);
+  const insets = ['paddingLeft', 'paddingRight', 'borderLeftWidth', 'borderRightWidth'] as const;
+  const inset = insets.reduce((sum, key) => sum + (parseFloat(hostStyle[key]) || 0), 0);
+  const usableWidth = host.getBoundingClientRect().width - inset;
+  if (!(usableWidth > 0)) return estimated;
+  el.style.wordBreak = 'normal';
+  el.style.overflowWrap = 'normal';
+  el.style.hyphens = 'manual';
+  // Layout widths are multiples of 1/64px, so any real overflow clears this
+  // tolerance; it only absorbs float noise in the subtraction above.
+  const overflows = (size: number) => {
+    el.style.fontSize = `${size}px`;
+    return el.getBoundingClientRect().width > usableWidth + 0.005;
+  };
+  const fitted = shrinkToWholeWords(estimated, overflows);
+  if (overflows(fitted)) clearWholeWordOverrides(el);
+  return fitted;
+}
+
+function clearWholeWordOverrides(el: HTMLElement) {
+  el.style.wordBreak = '';
+  el.style.overflowWrap = '';
+  el.style.hyphens = '';
+}
+
+/**
  * A non-free Square's prompt text (#215, specs/d15-text-size.md): the S/M/L
  * auto-fit guard that always wins over the chosen base size. `.cell`'s own
  * `font-size` (index.css, `clamp(...) * var(--text-scale)`) is the CEILING
@@ -25,35 +72,6 @@ import { fitTextSize, shrinkToWholeWords } from '../game/fitText';
  * long prompt at the Large text setting — Firebase-free deps only, so it stays
  * out of the fallback's (and this module's) import graph.
  */
-/**
- * #1345: verify the estimate against the real rendered glyphs and keep
- * shrinking while any single word is wider than the Square (which `.cell`'s
- * `word-break: break-word` would otherwise split mid-word, "Grandparent / s").
- * Each probe applies the size with mid-word breaking and hyphenation switched
- * off, so a too-long word makes the span (a flex item) as wide as that word
- * instead of wrapping; its `offsetWidth` then exceeds the host's usable width.
- * The overrides are removed again before returning. A host with no layout yet
- * (width 0, pre-first-paint or jsdom) has nothing to measure against, so the
- * estimate stands.
- */
-function keepWordsWhole(el: HTMLElement, host: HTMLElement, estimated: number, hostPadding: number): number {
-  const usableWidth = host.clientWidth - hostPadding;
-  if (usableWidth <= 0) return estimated;
-  el.style.wordBreak = 'normal';
-  el.style.overflowWrap = 'normal';
-  el.style.hyphens = 'manual';
-  try {
-    return shrinkToWholeWords(estimated, (size) => {
-      el.style.fontSize = `${size}px`;
-      return el.offsetWidth > usableWidth;
-    });
-  } finally {
-    el.style.wordBreak = '';
-    el.style.overflowWrap = '';
-    el.style.hyphens = '';
-  }
-}
-
 export default function SquareText({ text }: { text: string }) {
   // Not read directly below — its only job is to make this effect re-run
   // when the Player's S/M/L pick changes, since the ceiling itself is read
@@ -96,7 +114,7 @@ export default function SquareText({ text }: { text: string }) {
         height: Math.max(0, hostRect.height - HOST_PADDING),
       };
       const estimated = fitTextSize(text, box, { baseSize });
-      const fitted = keepWordsWhole(el, host, estimated, HOST_PADDING);
+      const fitted = keepWordsWhole(el, host, estimated);
       el.style.fontSize = `${fitted}px`;
       setFontSize(fitted);
     };

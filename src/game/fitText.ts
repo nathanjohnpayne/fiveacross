@@ -57,8 +57,15 @@ const DEFAULT_STEP = 0.5;
  * break-word`), consuming `ceil(word.length / charsPerLine)` lines on its
  * own rather than overflowing sideways. `wordsStayWhole` reports whether
  * that never happened — every word fit on one line — which `fitTextSize`
- * requires of a size before accepting it (#1345).
+ * requires of a size before accepting it (#1345). A whitespace-free run in a
+ * script whose normal CSS line breaking falls BETWEEN its characters
+ * (ideographs, kana, Hangul, and the dictionary-broken Southeast Asian
+ * scripts) is not a word that must stay whole: wrapping it is a legal break,
+ * so it never clears `wordsStayWhole`.
  */
+const INTRA_WORD_BREAK_SCRIPTS =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
+
 function estimateLineCount(
   text: string,
   width: number,
@@ -76,7 +83,7 @@ function estimateLineCount(
   let wordsStayWhole = true;
   for (const word of words) {
     if (word.length > charsPerLine) {
-      wordsStayWhole = false;
+      if (!INTRA_WORD_BREAK_SCRIPTS.test(word)) wordsStayWhole = false;
       if (lineLen > 0) {
         lines += 1;
         lineLen = 0;

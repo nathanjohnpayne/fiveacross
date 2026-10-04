@@ -77,6 +77,13 @@ describe('fitTextSize keeps words whole (#1345)', () => {
     const size = fitTextSize('Supercalifragilistic', { width: 30, height: 200 }, { baseSize: 14, minSize: 8 });
     expect(size).toBe(8);
   });
+
+  it('treats a wrapped whitespace-free CJK run as a legal break, not a word to keep whole', () => {
+    // 12 ideographs: wider than one 60px line at 14px, but CSS breaks between
+    // ideographs, so the tall box holds it at the base size unshrunk.
+    const size = fitTextSize('在甲板上跳舞的祖父母们好', { width: 60, height: 200 }, { baseSize: 14 });
+    expect(size).toBe(14);
+  });
 });
 
 describe('shrinkToWholeWords (#1345)', () => {

@@ -1920,16 +1920,23 @@ describe('Text size auto-fit guard (specs/d15-text-size.md)', () => {
 
   function stubMeasurement() {
     const realGetComputedStyle = window.getComputedStyle;
-    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
-      width: REALISTIC_CELL_SIZE,
-      height: REALISTIC_CELL_SIZE,
-      top: 0,
-      left: 0,
-      right: REALISTIC_CELL_SIZE,
-      bottom: REALISTIC_CELL_SIZE,
-      x: 0,
-      y: 0,
-      toJSON: () => ({}),
+    // Only the Square's box is modelled here. The `.cell-text` span itself
+    // reports no width, so SquareText's real-glyph whole-word probe (#1345,
+    // covered by SquareText.test.tsx) never sees an overflow and these tests
+    // exercise the estimate alone.
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      const size = this.classList.contains('cell-text') ? 0 : REALISTIC_CELL_SIZE;
+      return {
+        width: size,
+        height: size,
+        top: 0,
+        left: 0,
+        right: size,
+        bottom: size,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      };
     });
     vi.spyOn(window, 'getComputedStyle').mockImplementation((el: Element, pseudo?: string | null) => {
       if (el instanceof HTMLElement && el.classList.contains('cell-text')) {
