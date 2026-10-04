@@ -1648,19 +1648,23 @@ describe('archive', () => {
       untouched(docs, event);
     });
 
-    // The staleness the design note names: a payload prepared under one
-    // quiesce, replayed after an abort and a second `beginArchive`. Checking
-    // only the CURRENT generation would pass it with a frozen record taken
-    // against a roster play has since moved, so the payload carries its own.
-    it('refuses a payload prepared under a superseded generation, however the generation is named', async () => {
+    // A payload carried over from one quiesce, replayed after an abort and a
+    // second `beginArchive` with the generation it declares left as it was.
+    // The payload's own `archivedUnder` is what is refused, whichever generation
+    // the caller names beside it. What this cannot catch is a caller that
+    // rewrites BOTH to the new generation around the old record: nothing in the
+    // payload records when the record was read, so its freshness is the
+    // operator command's obligation (#1488), as it is the console's at the
+    // rules boundary.
+    it('refuses a payload declaring a superseded generation, whichever generation the caller names', async () => {
       const seed = flagship();
       seed['events/bodega-bay-2026'] = quiescedEvent({ archiveToken: 4 });
       const stale = store(seed);
       expect(await refusal(archiveInput(), stale.dependencies)).toBe('archive-quiesce-changed');
       untouched(stale.docs, seed['events/bodega-bay-2026']);
 
-      // Naming the generation now in force does not launder the old payload,
-      // and the mismatch is refused before anything is read.
+      // Naming the generation now in force beside a payload that still
+      // declares the old one is refused before anything is read.
       const relabelled = store(seed);
       expect(await refusal(archiveInput({ archiveToken: 4 }), relabelled.dependencies)).toBe(
         'archive-flip-generation-mismatch',

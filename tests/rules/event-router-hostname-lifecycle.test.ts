@@ -416,8 +416,8 @@ describe('the trusted hostname mutation helper against a real transaction', () =
       for (const [event, input, expected] of [
         [{ status: 'active', admins: ['nathan'] }, archive(), 'archive-requires-quiesce'],
         [quiescedEvent({ archiving: false }), archive(), 'archive-requires-quiesce'],
-        // Reopened and shut again: generation 2 is in force, the payload was
-        // prepared under 1, and relabelling it as 2 is refused as well.
+        // Reopened and shut again: generation 2 is in force, the payload
+        // declares 1, and naming 2 beside it is refused as well.
         [quiescedEvent({ archiveToken: 2 }), archive(), 'archive-quiesce-changed'],
         [quiescedEvent({ archiveToken: 2 }), archive({ archiveToken: 2 }), 'archive-flip-generation-mismatch'],
       ] as Array<[Doc, Doc, string]>) {

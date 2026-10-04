@@ -1089,12 +1089,18 @@ function ascendingHonorDays(honors) {
  * before every flip the console commits and the rules cannot. Like both, it
  * does not walk the standings rows; it bounds their count.
  *
- * `archivedUnder` must equal the generation the caller names. The payload is
- * thereby bound to the quiesce it was PREPARED under, not only checked against
- * the one in force: a payload prepared under generation N and replayed after
- * an abort and a second `beginArchive` cannot be relabelled N+1 and pass the
- * transaction's token re-check with a record frozen against a roster play has
- * since moved.
+ * `archivedUnder` must equal the generation the caller names, and the
+ * transaction then requires that generation to be the one in force, so a
+ * payload carried over from an earlier quiesce and paired with the current
+ * generation is refused rather than restamped. That binds the generation the
+ * payload DECLARES, not the record's content: nothing in the payload says when
+ * the record was read, so a caller that rebuilds the envelope with N+1 in both
+ * places around a record frozen under N, before an abort and a second
+ * `beginArchive`, passes here exactly as a direct flip restating
+ * `archivedUnder` passes the rules' `boundToStoredQuiesce`. The record's
+ * freshness is the caller's obligation: the operator command (#1488) builds it
+ * from server reads taken after the `beginArchive` that minted the generation
+ * it names, in the same run, as the console's `archiveEvent` does.
  */
 function validateArchiveFlip(flip, archiveToken) {
   if (!isRecord(flip)) refuse('archive-flip-invalid');
