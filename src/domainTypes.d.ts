@@ -1165,6 +1165,12 @@ export interface ProofDoc {
   // admin-only readable per firestore.rules until confirming the Claim flips it
   // to 'active'. A rejected Claim leaves its Proof 'pending' rather than exposed.
   status: 'active' | 'pending' | 'hidden' | 'flagged';
+  // Established credit at attach time or at a live Admin decision for a
+  // bound Claim/Proof/cell. Owner-immutable after create; Admin resolution may
+  // normalize it. Deletion removes content/projection only when true; absent
+  // unclassified legacy Proofs retain ordinary proof-backed unmark behavior.
+  // This grants no publication/Claim authority.
+  contentOnly?: boolean;
   visionFlag?: string | null; // set by the moderation function for illegal/extreme content
   // The SERVER-OWNED record that a safety hide stands on this Proof (#133).
   // `hideProofOnVisionFlag` stamps `true` in the same transactional update that
@@ -1249,6 +1255,10 @@ export interface ClaimDoc {
   cellIndex: number;
   itemText: string;
   proofId?: string | null;
+  // Optional ceremony hint at creation; an Admin terminal decision normalizes
+  // a present boolean to the live Board-derived established-credit classification.
+  // Absent on older credit Claims, whose existing ceremony behavior remains.
+  contentOnly?: boolean;
   status: 'pending' | 'confirmed' | 'rejected';
   createdAt: number;
   resolvedBy?: string | null;
