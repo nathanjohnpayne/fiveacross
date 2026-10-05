@@ -539,18 +539,23 @@ describe('private facade scheduled bootstrap readiness (#1675)', () => {
   });
 
   it.each(['offline', 'stop'] as const)('%s retirement cancels scheduled work and the bounded wait cannot capture', async (retirement) => {
-    H.failure = 'auth'; const wrapper = await import('../privateFirestore');
-    const sessions = wrapper.privateFirestoreSessions(); managers.push(sessions);
-    const waiting = wrapper.awaitPrivateFirestore('alice', true);
-    const rejected = expect(waiting).rejects.toMatchObject({ code: 'unavailable' });
-    H.idToken!(H.primary.currentUser); await vi.advanceTimersByTimeAsync(0);
-    H.failure = null;
-    if (retirement === 'offline') {
-      Object.defineProperty(navigator, 'onLine', { configurable: true, value: false }); sessions.refreshConnection();
-    } else sessions.stop();
-    await vi.advanceTimersByTimeAsync(5_000); await rejected;
-    expect(H.apps).toHaveLength(1); expect(H.functionsCalls).toHaveLength(0);
-    Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+    const originalOnline = Object.getOwnPropertyDescriptor(navigator, 'onLine');
+    try {
+      H.failure = 'auth'; const wrapper = await import('../privateFirestore');
+      const sessions = wrapper.privateFirestoreSessions(); managers.push(sessions);
+      const waiting = wrapper.awaitPrivateFirestore('alice', true);
+      const rejected = expect(waiting).rejects.toMatchObject({ code: 'unavailable' });
+      H.idToken!(H.primary.currentUser); await vi.advanceTimersByTimeAsync(0);
+      H.failure = null;
+      if (retirement === 'offline') {
+        Object.defineProperty(navigator, 'onLine', { configurable: true, value: false }); sessions.refreshConnection();
+      } else sessions.stop();
+      await vi.advanceTimersByTimeAsync(5_000); await rejected;
+      expect(H.apps).toHaveLength(1); expect(H.functionsCalls).toHaveLength(0);
+    } finally {
+      if (originalOnline) Object.defineProperty(navigator, 'onLine', originalOnline);
+      else Reflect.deleteProperty(navigator, 'onLine');
+    }
   });
 });
 
