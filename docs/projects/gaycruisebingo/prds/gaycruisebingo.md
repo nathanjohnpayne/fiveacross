@@ -3,7 +3,7 @@ generated_by: scripts/project-doc-sync.sh
 do_not_edit: true
 source_repo: nathanjohnpayne/docs
 source_path: projects/gaycruisebingo/prds/gaycruisebingo.md
-source_ref: 7089783
+source_ref: 023a69b
 project: gaycruisebingo
 document_class: prd
 document_slug: gaycruisebingo
@@ -78,7 +78,7 @@ Canonical spec: `plans/daily-cards-spec.md` in the app repo, with `plans/daily-c
 
 | Dependency / Risk | Impact | Mitigation |
 |---|---|---|
-| Sailing is ~8 days out (embark July 15) | High | Ship a ruthless Phase 0 by embarkation; land the fast-follow social layer (moments, share cards, doubts) and Phase 1 (server moderation) as live updates during the cruise. |
+| Sailing was ~8 days out when this PRD was written (embark July 15) | Resolved | The Event sailed July 15–24, 2026 with Phase 0 live (see Status). Original mitigation: ship a ruthless Phase 0 by embarkation; land the fast-follow social layer (moments, share cards, doubts) and Phase 1 (server moderation) as live updates during the cruise. |
 | Public app + user-generated photos/audio/names + adult content | Medium-High | Persisted one-time 18+ attestation, report/hide with a Phase-0 client-side auto-hide at threshold, multi-admin takedown console (round-the-clock coverage), `noindex`, Storage MIME/size limits, and Phase-1 Cloud Vision flagging for extreme/illegal content only. |
 | Custom domain from Cloudflare → Firebase Hosting SSL can take up to ~24h | Medium | Do the domain connection first; set Cloudflare records to DNS-only (unproxied) so Firebase can issue the cert. |
 | ~~Playwright OG rendering cost/latency~~ (dropped) |—| Replaced by on-device share cards (client render → native share sheet); no server render, no public share pages. See ADR 0005. |
