@@ -53,6 +53,8 @@ function forwardedAppCheckToken(token: string): AppCheckToken {
 let appSequence = 0;
 // Initial attempt plus three fresh-client attempts; no timer survives retirement.
 const BRIDGE_RETRY_DELAYS_MS = [250, 1_000, 2_000] as const;
+// The active same-UID copy uses local Auth state, not a network round trip (#1700).
+const ACTIVE_AUTH_COPY_TIMEOUT_MS = 5_000;
 
 /**
  * Private reads never share the gameplay app's persistent cache. Each Auth
@@ -67,6 +69,7 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
   let initializingUid: string | null = null;
   let authRevision = 0;
   let refreshQueue: Promise<void> = Promise.resolve();
+  let refreshCopy: { timer: ReturnType<typeof setTimeout>; cancelWait: () => void } | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   const listeners = new Set<() => void>();
   let snapshot: PrivateFirestoreSession = {
@@ -84,6 +87,11 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
   };
   const retire = (transition: NonNullable<PrivateFirestoreSession['transition']> = 'auth') => {
     if (retryTimer !== null) { clearTimeout(retryTimer); retryTimer = null; }
+    if (refreshCopy !== null) {
+      clearTimeout(refreshCopy.timer);
+      refreshCopy.cancelWait();
+      refreshCopy = null;
+    }
     generation += 1;
     if (transition === 'auth') authGeneration += 1;
     initializingUid = null;
@@ -178,14 +186,27 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
     // Retirement starts an independent queue; old completions remain fenced.
     refreshQueue = refreshQueue.then(async () => {
       if (stopped || attempt !== generation || client !== current || config.primaryAuth.currentUser?.uid !== user.uid) return;
+      let cancelWait!: () => void;
+      let timer!: ReturnType<typeof setTimeout>;
+      const deadline = new Promise<void>((resolve, reject) => {
+        cancelWait = resolve;
+        timer = setTimeout(() => reject(new Error('Private Auth copy timed out.')), ACTIVE_AUTH_COPY_TIMEOUT_MS);
+      });
+      const copying = { timer, cancelWait };
+      refreshCopy = copying;
       try {
-        await updateCurrentUser(current.auth, config.primaryAuth.currentUser);
+        // Race only this active copy. Retirement releases the local waiter;
+        // the SDK operation is uncancelled and its late rejection is consumed.
+        await Promise.race([updateCurrentUser(current.auth, config.primaryAuth.currentUser), deadline]);
       } catch {
         if (!stopped && attempt === generation && client === current && config.primaryAuth.currentUser?.uid === user.uid) {
           // Failed copying cannot keep authorizing the old client. Start the
           // existing bounded fresh-client recovery episode, never a disk fallback.
           void synchronize(config.primaryAuth.currentUser);
         }
+      } finally {
+        clearTimeout(copying.timer);
+        if (refreshCopy === copying) refreshCopy = null;
       }
     });
   };

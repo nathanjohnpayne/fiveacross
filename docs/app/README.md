@@ -10,7 +10,7 @@ Phase 1 backend features land as live updates during the Event without reworking
 
 ## Stack
 
-- **Vite + React 18 + TypeScript** (strict).
+- **Vite + React 19 + TypeScript** (strict).
 - **Firebase**: Auth (Google), Firestore (data), Storage (avatars/proofs), Analytics (GA4), Hosting.
 - **vite-plugin-pwa** for installability.
 - Phase 0 is **Cloud Functions-free**—each player writes their own stats and the leaderboard is a client-side sort. Stats stay client-authoritative in every phase (ADR 0001); Phase 1 adds moderation functions, not stat authority.
@@ -183,4 +183,4 @@ Phase 1 is scaffolded in this same repo and wired into the client: proof system 
 
 ## Verified
 
-`npm run typecheck` clean · `npm test` 10/10 passing · `npm run build` produces a PWA-enabled `dist/`. (Built against firebase 10.14.1, Vite 5, React 18, TypeScript 5.6.)
+Phase 0 snapshot: `npm run typecheck` clean · `npm test` 10/10 passing · `npm run build` produces a PWA-enabled `dist/`. (Built then against firebase 10.14.1, Vite 5, React 18, TypeScript 5.6; `package.json` now pins firebase 12, Vite 6, and React 19.)
