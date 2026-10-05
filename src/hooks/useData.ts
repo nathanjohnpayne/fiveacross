@@ -269,7 +269,8 @@ function useColSub<T>(q: Query<T> | null, key: string, clearOnError = false, ret
     });
     const startRemovalBarrier = () => {
       if (!active || barrierInFlight || retryTimer !== null || queuedRemoval === null) return;
-      const delay = retryAfter - Date.now();
+      // Elapsed cooldown must not grow or disappear with a wall-clock jump.
+      const delay = retryAfter - performance.now();
       if (delay > 0) {
         retryTimer = setTimeout(() => { retryTimer = null; startRemovalBarrier(); }, delay);
         return;
@@ -304,7 +305,7 @@ function useColSub<T>(q: Query<T> | null, key: string, clearOnError = false, ret
             // Only a later settled removal snapshot may retry. Rate-limit those
             // attempts within this subscription; never poll a failed candidate.
             transientFailures = Math.min(transientFailures + 1, 4);
-            retryAfter = Date.now() + 250 * 2 ** (transientFailures - 1);
+            retryAfter = performance.now() + 250 * 2 ** (transientFailures - 1);
           }
         } finally {
           barrierInFlight = false;
