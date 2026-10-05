@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { httpsCallable } from 'firebase/functions';
 
 const H = vi.hoisted(() => ({
   uid: 'alice', generation: 1, recovered: true, online: true, eventId: 'event-a', callableEvent: null as string | null,
@@ -47,6 +48,7 @@ beforeEach(() => {
   for (const value of Object.values(H)) {
     if (vi.isMockFunction(value)) value.mockReset();
   }
+  vi.mocked(httpsCallable).mockClear();
   H.update.mockImplementation(() => undefined);
   H.set.mockImplementation(() => undefined);
   H.delete.mockImplementation(() => undefined);
@@ -70,6 +72,46 @@ beforeEach(() => {
   H.runTransaction.mockImplementation(async (_db, callback) => callback({
     get: H.get, update: H.update, set: H.set, delete: H.delete,
   }));
+});
+
+describe('approveItems empty-input no-op (#1688)', () => {
+  const unavailableStates = [
+    { name: 'offline', arrange: () => { H.online = false; }, error: 'Private session' },
+    { name: 'recovery quarantine', arrange: () => { H.recovered = false; }, error: 'Private session' },
+    { name: 'same-account Auth rotation', arrange: () => {
+      H.generation += 1;
+      H.capture.mockImplementation(() => { throw new Error('Private session expired.'); });
+    }, error: 'Private session' },
+    { name: 'account rotation', arrange: retire, error: 'Admin account changed' },
+  ];
+
+  it.each(unavailableStates)('returns [] without private capture or IO during $name', async ({ arrange }) => {
+    arrange();
+    await expect(approveItems([], 'alice')).resolves.toEqual([]);
+    expect(H.capture).not.toHaveBeenCalled();
+    expect(httpsCallable).not.toHaveBeenCalled();
+    expect(H.callable).not.toHaveBeenCalled();
+    expect(H.runTransaction).not.toHaveBeenCalled();
+    expect(H.updateDoc).not.toHaveBeenCalled();
+  });
+
+  it.each(unavailableStates)('still refuses nonempty input during $name', async ({ arrange, error }) => {
+    arrange();
+    await expect(approveItems([{ id: 'prompt' }], 'alice')).rejects.toThrow(error);
+    expect(H.capture).toHaveBeenCalledOnce();
+    expect(httpsCallable).not.toHaveBeenCalled();
+    expect(H.callable).not.toHaveBeenCalled();
+  });
+
+  it('keeps nonempty approval on the captured private client and Event', async () => {
+    H.callableEvent = 'event-b';
+    const placements = [{ itemId: 'prompt', dayIndex: null, retained: false, outcome: 'untargeted' }];
+    H.callable.mockResolvedValue({ data: { placements } });
+    await expect(approveItems([{ id: 'prompt' }], 'alice')).resolves.toEqual(placements);
+    expect(H.capture).toHaveBeenCalledOnce();
+    expect(httpsCallable).toHaveBeenCalledWith(H.privateFunctions, 'approvePrompts');
+    expect(H.callable).toHaveBeenCalledWith({ eventId: 'event-a', items: [{ id: 'prompt' }] });
+  });
 });
 
 describe('Admin actions own a private Auth incarnation (#1411)', () => {

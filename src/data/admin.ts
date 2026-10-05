@@ -180,7 +180,9 @@ function narrowPlacements(data: unknown, expectedLength: number): ApprovalPlacem
  * click therefore reaches the server and comes back `stale`, which
  * `ReviewQueue`'s outcome reporting treats as benign.
  *
- * `adminUid` must match the captured private session; the server still
+ * Empty input returns `[]` before private-session or Event validation, with
+ * no IO. For nonempty input, `adminUid` must match the captured private
+ * session; the server still
  * stamps `approvedBy` from the verified auth uid and never reads an identity
  * from the payload. `eventId` is captured when the call starts, so a tab that
  * switches Event mid-flight still approves into the Event it was asked about.
@@ -200,10 +202,10 @@ export async function approveItems(
   _adminUid: string,
   eventId: string = EVENT_ID,
 ): Promise<ApprovalPlacement[]> {
+  if (items.length === 0) return [];
   const action = captureAdmin(_adminUid, eventId);
   const { functions } = action;
   return action.guard(async () => {
-    if (items.length === 0) return [];
     const callable = httpsCallable<ApprovePromptsRequest, unknown>(functions, 'approvePrompts');
     const res = await action.guard(() => callable({
       eventId,
@@ -352,7 +354,9 @@ export async function setItemSpicy(
  * mirroring how any other single admin action reads as one moment in the audit
  * trail rather than many micro-timestamps.
  *
- * Since #557 this is a thin alias for `approveItems`, so a bulk approve routes
+ * Empty input is the same no-IO `[]` return as `approveItems`, before private
+ * session or Event validation. For nonempty input, since #557 this is a thin
+ * alias for `approveItems`, so a bulk approve routes
  * each Prompt to its intended Day exactly as a single approve does. Since #1275
  * that means one `approvePrompts` call carrying every row: the server runs the
  * batch in one transaction and stamps one server instant across it, so the
