@@ -19,6 +19,7 @@ import {
   type User,
 } from 'firebase/auth';
 import { auth, EVENT_ID, googleProvider } from '../firebase';
+import { retryPrivateFirestoreSession } from '../privateFirestore';
 import {
   attestAdult,
   ensureUserProfile,
@@ -476,7 +477,7 @@ function withTimeout<T>(work: Promise<T>, timeoutMs: number, label = 'Auth boots
 // late REJECTION used to be dropped on the floor. That is fine for a late
 // 'connection'-class rejection — the in-time timeout already published that exact
 // classification — but bootstrapUser's failure arm provisionally lifts the render
-// gate from a cached stamp FOR THAT CLASS ONLY (#521), on the bet that the failure
+// gate from a scoped render witness FOR THAT CLASS ONLY (#521), on the bet that the failure
 // is transient. If the underlying read then rejects with a PERMANENT cause instead
 // (permission-denied, schema, unknown-coded), the bet was wrong and nothing ever
 // revoked the lift or corrected `dealErrorReason` — contradicting the invariant
@@ -526,7 +527,7 @@ interface AuthContextValue {
   // is still UNKNOWN during load can't flash the prompt.
   needsAttestation: boolean;
   // True only after this session has proof that Event content may render:
-  // a cached offline stamp, a server-confirmed stamp, or a same-session attest.
+  // an offline boolean witness plus a cached Board, a server-confirmed stamp, or a same-session attest.
   // Consumers that bypass Board's normal render path (the durable card fallback)
   // must check this instead of inferring permission from a saved snapshot.
   canRenderEventContent: boolean;
@@ -754,7 +755,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // the same batch as the identity change, so the FIRST render of the shell
   // already carries `held` when the origin holds an invitation. Classification
   // needs no authority and no network; only redemption does. Without it a
-  // cached render permission (an offline cold boot with a cached 18+ stamp)
+  // cached render permission (an offline cold boot with a boolean witness plus a cached Board)
   // would release Board, Nav and their subscriptions to a visit whose
   // invitation had never been checked at all.
   const classifyAdmission = useCallback((uid: string, ownedEventId: string) => {
@@ -787,8 +788,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Reactive connectivity, mirrored from the browser online/offline events (#115).
   // A REACT STATE (not just the imperative `isOnline()` probe) so the deal effect's
   // deps actually CHANGE on reconnect: a globally-attested User who cold-boots
-  // offline onto a FRESH Event (no cached board) settles `attested === true` from
-  // cache but must not deal until online — and the deferred deal has to FIRE on
+  // offline with an existing cached Board may lift render from the boolean
+  // witness, but must not deal until online authority returns — and the deferred deal has to FIRE on
   // reconnect, which only happens if `online` flipping true re-runs that effect.
   const [online, setOnline] = useState(isOnline());
   const signInAttemptRef = useRef<Promise<void> | null>(null);
@@ -1056,14 +1057,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [updateDealStateFor]);
 
   // The connectivity-aware profile/attestation bootstrap, run OFF the render path
-  // (#115). The cache lifts the gate PROVISIONALLY offline; the server read is
+  // (#115). The scoped boolean plus cached Board lifts render PROVISIONALLY;
+  // the server read is
   // AUTHORITATIVE when it arrives. Two mutually-exclusive branches:
   //
   //   OFFLINE — settle the 18+ gate CACHE-FIRST, no network, then DEFER the rest.
-  //     A cached stamp (or a same-session optimistic attest, #112 Finding 3) is
-  //     PROOF of 18+: it lifts the gate AND releases the "Loading…" hold so a
+  //     A boolean witness plus an existing cached Board (or a same-session
+  //     optimistic attest, #112 Finding 3) is provisional RENDER permission:
+  //     it lifts the gate AND releases the "Loading…" hold so a
   //     returning User renders their cached Board offline (the #115 cold-boot). A
-  //     cache miss or a definite-unstamped row is UNKNOWN: it never lifts `true`
+  //     missing/refused witness or missing cached Board is UNKNOWN: it never lifts `true`
   //     (cache-first can't fail the age gate open) and it does NOT render — it
   //     HOLDS on "Loading…" (finding B) until reconnect settles the authoritative
   //     read, because offline can't re-prompt (the attest transaction needs the
@@ -1094,8 +1097,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // avoid rendering the Board without proof-of-18+; an Event whose pool holds
       // no adult content never asked for that proof, so holding "Loading…" until
       // reconnect would strand an offline Player on a spinner over a question
-      // nobody posed. Released BEFORE the IndexedDB read, which would only ever
-      // answer about a stamp this Event does not want.
+      // nobody posed. Released BEFORE the offline witness/Board probe, which would only
+      // answer about an attestation this Event does not require.
       if (!adultContentRequired()) {
         if (profileAttemptRef.current !== attempt) return;
         setLoading(false);
@@ -1103,10 +1106,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return;
       }
       // OFFLINE: settle the gate CACHE-FIRST and RELEASE the render only with
-      // PROOF of 18+ (finding B). A cached stamp — or a same-session optimistic
-      // attest (#112 Finding 3) — provisionally lifts the gate and paints the
-      // cached Board (that is the #115 offline cold-boot). But a cache MISS or an
-      // unstamped row is UNKNOWN: it must NOT render the Board (that would let a
+      // provisional RENDER permission (finding B). The scoped boolean plus an
+      // existing cached Board — or a same-session optimistic attest (#112
+      // Finding 3) — provisionally lifts the gate and paints the
+      // cached Board (the #115 offline cold-boot). A missing/refused witness
+      // or missing Board is UNKNOWN: it must NOT render the Board (that would let a
       // returning User with a cached board but no proof-of-18+ view the Event
       // offline — the fail-open the age gate exists to prevent), so it HOLDS on
       // the App "Loading…" gate until reconnect settles the authoritative read
@@ -1124,11 +1128,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (profileAttemptRef.current !== attempt) return;
       if (hasCacheStamp || attestedUidsRef.current.has(u.uid)) {
         setAttested(true);
-        setLoading(false); // proof of 18+ → render the cached Board offline
+        setLoading(false); // provisional permission → render the cached Board offline
         // A successful cache-first settle SUPERSEDES a stale online dealError
         // (Codex #117 round 4, finding B): App renders DealError instead of the
         // Board whenever dealError is non-null, so a prior online failure would
-        // otherwise strand this proven-18+ User on the error panel instead of the
+        // otherwise strand this provisionally admitted User on the error panel instead of the
         // cached Board this branch is meant to render.
         clearDealError(ownedEventId);
       }
@@ -1243,7 +1247,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           // A late REJECTION of a read that already timed out in-time (Codex P2
           // on #762). The in-time failure arm below classifies THAT synthetic
           // timeout as 'connection' and, for that class only, provisionally
-          // lifts `attested` from a cached stamp (#521) on the bet that the
+          // lifts `attested` from a scoped render witness (#521) on the bet that the
           // failure is transient. If the underlying read then rejects with a
           // PERMANENT cause instead, the bet was wrong: correct the reason and
           // revoke the lift, same as the invariant enforced at the in-time
@@ -1399,7 +1403,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // lands in the `else` below, not here.
         failDeal(bootstrapFailure.err, ownedEventId);
         // …and, for a CONNECTION-class failure ONLY, fall back to the SAME
-        // cache-first proof the OFFLINE branch uses (#521). `navigator.onLine`
+        // boolean-plus-card render witness the OFFLINE branch uses (#521). `navigator.onLine`
         // said true, but the authority read never landed — which IS the
         // captive/ship-Wi-Fi case this file already bounds a timeout for:
         // effectively offline, with a lying probe. A failed read is not
@@ -1407,8 +1411,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // `canRenderEventContent` false, and App then withholds the whole Event
         // — including the #434 durable card this device already holds. That is
         // the ADR 0006 promise inverted: the one moment the saved card exists
-        // for is the one moment it cannot paint. A cached `attestedAdultAt` is
-        // the same proof of 18+ the offline branch accepts, so it lifts RENDER
+        // for is the one moment it cannot paint. A scoped boolean plus an existing
+        // cached Board is the same provisional render witness the offline branch
+        // accepts, so it lifts RENDER
         // here too — PROVISIONALLY: never `attestedAuthoritative`, so no deal
         // fires and no durable rows are created for a User the server has not
         // confirmed, and the late authoritative settle above still downgrades a
@@ -1594,7 +1599,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         completeRedirectReturn(u, false);
       }
       // Gate on "Loading…" until the bootstrap PROVES 18+ (finding B): the
-      // authoritative server read online, or a cached stamp / same-session attest
+      // authoritative server read online, or a scoped render witness / same-session attest
       // offline. Never render the Board before proof. Not an await (that was the
       // offline hang); bootstrapUser releases the hold with setLoading(false) —
       // immediately from the fast local cache read when offline-attested (the #115
@@ -1676,7 +1681,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // A mid-bootstrap connectivity LOSS SUPERSEDES the in-flight ONLINE bootstrap
       // (whose ensureUserProfile transaction may never settle offline and would
       // otherwise strand "Loading…") and switches to the cache-first path: release
-      // to the cached Board if proof-of-18+ is cached, else hold (finding B/C).
+      // to the cached Board if the project/UID boolean witness and Board are present
+      // (or this session attested), else hold (finding B/C).
       void bootstrapUser(u, (profileAttemptRef.current += 1), ownedEventId);
     };
     window.addEventListener('online', goOnline);
@@ -1729,13 +1735,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // already-boarded Player, so a ship-wifi reconnect records nothing.
         // Tracked HERE, on the ORIGINAL promise, not on the awaited race below
         // (#409, Codex P2 on #472): the transactional join resolves `true` from
-        // EXACTLY ONE call per actual join, and that call is not necessarily
+        // its winning call when that private lease stays current through
+        // completion. That call is not necessarily
         // the current attempt — a timed-out (superseded) attempt's transaction
         // can win while the Retry re-reads the committed row and resolves
         // false. Attributing off the original promise records that ordering's
         // join exactly once; the uid guard keeps a join that lands after a
         // sign-out/account switch from attributing to the wrong session (the
-        // rare silent drop is the conservative direction).
+        // rare silent drop is the conservative direction). A private Auth
+        // retirement after commit can also reject the original completion;
+        // retry sees the existing identity, so the local analytic may be omitted.
         if (
           dealt === true &&
           activeEventIdRef.current === ownedEventId &&
@@ -2128,13 +2137,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // effect) only once that confirms.
   const retryDeal = useCallback(() => {
     if (!user) return;
+    // An explicit online connection Retry starts a fresh bounded private bridge
+    // episode before bootstrap/deal. It does not preserve an expired actor lease
+    // or restart the bridge for offline, pool or permanent-authority failures.
+    if (isOnline() && dealErrorReason === 'connection') retryPrivateFirestoreSession();
     if (!isOnline()) {
       // OFFLINE Retry → the CACHE-FIRST path, NEVER the transaction bootstrap
       // (Codex #117 round 4, finding A): retryBootstrap awaits ensureUserProfile —
       // a Firestore transaction that never resolves offline — so it would strand
       // the button in "Dealing…" for the whole dead zone. bootstrapUser's offline
-      // branch instead settles from cache immediately (proof-of-18+ → render the
-      // cached Board and clear the stale error; else stay held/retryable), and
+      // branch probes the project/UID boolean plus an existing cached Board or Day Card (or a
+      // same-session attest) for render permission and stale-error clearance;
+      // a missing/refused witness stays held/retryable. It
       // never awaits the transaction. It also never deals (offline gate).
       void bootstrapUser(user, (profileAttemptRef.current += 1), eventId);
     } else if (mayDeal) {
@@ -2151,7 +2165,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Online but not yet authoritative → re-run the full transaction bootstrap.
       void retryBootstrap(user, eventId);
     }
-  }, [user, mayDeal, runDeal, retryBootstrap, bootstrapUser, eventId, beginAdmissionIfNeeded]);
+  }, [user, mayDeal, runDeal, retryBootstrap, bootstrapUser, eventId, beginAdmissionIfNeeded, dealErrorReason]);
 
   // Persist the current User's honor-system 18+ self-attestation (ADR 0001) and
   // lift the re-prompt gate at once. Optimistic: the local flag flips before the

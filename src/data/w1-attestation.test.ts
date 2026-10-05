@@ -1,26 +1,43 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Covers specs/w1-attestation.md — the data-layer half of the 18+ attestation
 // (#23). Mock ONLY the Firestore boundary so the REAL data/api functions run:
 // `runTransaction` is driven to model the transactional read-then-write that makes
 // `attestAdult` create-only (an existing earlier stamp is never overwritten), and
 // `getDoc` the point read `readAdultAttestation` uses for the re-prompt gate.
-const { docMock, runTransactionMock, getDocMock, getDocFromServerMock } = vi.hoisted(() => ({
+const { docMock, runTransactionMock, getDocMock, getDocFromServerMock, getDocFromCacheMock, getDocsFromCacheMock } = vi.hoisted(() => ({
   docMock: vi.fn((_db: unknown, ...segments: string[]) => ({ path: segments.join('/') })),
   runTransactionMock: vi.fn(),
   getDocMock: vi.fn(),
   getDocFromServerMock: vi.fn(),
+  getDocFromCacheMock: vi.fn(),
+  getDocsFromCacheMock: vi.fn(),
 }));
 vi.mock('firebase/firestore', () => ({
   doc: docMock,
   runTransaction: runTransactionMock,
   getDoc: getDocMock,
   getDocFromServer: getDocFromServerMock,
+  getDocFromCache: getDocFromCacheMock,
+  getDocsFromCache: getDocsFromCacheMock,
+  collectionGroup: vi.fn((_db: unknown, name: string) => ({ collectionGroup: name })),
 }));
-vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event' }));
+const privateState = vi.hoisted(() => ({ uid: 'sailor-1', generation: 0, projectId: 'test-project', privateDb: {} }));
+vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event', auth: { get currentUser() { return { uid: privateState.uid }; } }, firebaseConfig: { get projectId() { return privateState.projectId; } } }));
+vi.mock('../privateFirestore', () => ({
+  awaitPrivateFirestore: vi.fn(async (uid: string, allowRecovery = false) => {
+    const generation = privateState.generation;
+    const assertCurrent = () => { if (uid !== privateState.uid || generation !== privateState.generation) throw new Error('Private session expired.'); };
+    assertCurrent();
+    return { db: privateState.privateDb, uid, assertCurrent, allowRecovery, guard: async <T,>(op: () => Promise<T>) => { assertCurrent(); const value = await op(); assertCurrent(); return value; } };
+  }),
+}));
 
+import { installMockWebLocks } from '../../tests/support/mockWebLocks';
 import type { User } from 'firebase/auth';
-import { attestAdult, readAdultAttestation, readAdultAttestationFromServer } from './api';
+import { recordOfflineAttestation, hasOfflineAttestation } from '../auth/offlineAttestationWitness';
+import { awaitPrivateFirestore } from '../privateFirestore';
+import { attestAdult, readAdultAttestation, readAdultAttestationFromServer, readAdultAttestationFromCache, ensureUserProfile, joinAndDeal } from './api';
 
 type FakeTx = { get: ReturnType<typeof vi.fn>; set: ReturnType<typeof vi.fn> };
 
@@ -37,6 +54,10 @@ const snap = (data: Record<string, unknown> | null) => ({
   data: () => data ?? undefined,
 });
 
+const cachedCard = (path: string, uid: string) => ({
+  ref: { path }, data: () => ({ uid }),
+});
+
 // Drive runTransaction with a single attempt whose transactional read of
 // users/{uid} returns `snapshot`. Returns the tx double so a test can assert set.
 function driveTransaction(snapshot: ReturnType<typeof snap>): FakeTx {
@@ -49,7 +70,15 @@ function driveTransaction(snapshot: ReturnType<typeof snap>): FakeTx {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  privateState.uid = 'sailor-1';
+  privateState.generation = 0;
+  privateState.projectId = 'test-project';
+  localStorage.clear();
+  installMockWebLocks();
+  getDocsFromCacheMock.mockReset().mockResolvedValue({ docs: [] });
 });
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe('attestAdult persists the 18+ self-attestation create-only (#23)', () => {
   it('merges ONLY the stamp on a profile that already exists without one', async () => {
@@ -128,5 +157,248 @@ describe('readAdultAttestationFromServer is the SERVER-ONLY authority read (#117
   it('REJECTS when the server is unreachable (never falls back to cache)', async () => {
     getDocFromServerMock.mockRejectedValue(new Error('Failed to reach server'));
     await expect(readAdultAttestationFromServer('sailor-1')).rejects.toThrow(/server/i);
+  });
+});
+
+
+describe('private profile ownership and minimal offline witness (#1411)', () => {
+  it('uses memory Firestore for bootstrap and server reads, including recovery bootstrap', async () => {
+    driveTransaction(snap(null));
+    await ensureUserProfile(userLike());
+    expect(awaitPrivateFirestore).toHaveBeenCalledWith('sailor-1', true);
+    expect(runTransactionMock.mock.calls[0][0]).toBe(privateState.privateDb);
+    expect(docMock.mock.calls[0][0]).toBe(privateState.privateDb);
+    getDocFromServerMock.mockResolvedValue(snap({ attestedAdultAt: 44 }));
+    await readAdultAttestationFromServer('sailor-1');
+    expect(await hasOfflineAttestation('test-project', 'sailor-1')).toBe(true);
+  });
+
+  it('rejects another UID before acquiring any private session', async () => {
+    privateState.uid = 'bob';
+    await expect(ensureUserProfile(userLike())).rejects.toThrow(/account changed/i);
+    expect(awaitPrivateFirestore).not.toHaveBeenCalled();
+    expect(runTransactionMock).not.toHaveBeenCalled();
+  });
+
+  it('retired transaction read cannot write or record an offline witness', async () => {
+    const tx = driveTransaction(snap(null));
+    tx.get.mockImplementation(async () => { privateState.generation++; return snap(null); });
+    await expect(attestAdult(userLike())).rejects.toThrow(/expired/i);
+    expect(tx.set).not.toHaveBeenCalled();
+    expect(await hasOfflineAttestation('test-project', 'sailor-1')).toBe(false);
+  });
+
+  it('a delayed pre-commit server absence cannot revoke a subsequently committed attestation witness', async () => {
+    let resolveRead!: (value: ReturnType<typeof snap>) => void;
+    getDocFromServerMock.mockReturnValueOnce(new Promise((resolve) => { resolveRead = resolve; }));
+    const reading = readAdultAttestationFromServer('sailor-1');
+    await vi.waitFor(() => expect(getDocFromServerMock).toHaveBeenCalledTimes(1));
+    driveTransaction(snap(null));
+    await attestAdult(userLike(), 777);
+    expect(await hasOfflineAttestation('test-project', 'sailor-1')).toBe(true);
+    resolveRead(snap(null));
+    await expect(reading).resolves.toBeNull(); // Its authority result is not rewritten.
+    expect(await hasOfflineAttestation('test-project', 'sailor-1')).toBe(true);
+    getDocsFromCacheMock.mockResolvedValue({ docs: [cachedCard('events/test-event/boards/sailor-1', 'sailor-1')] });
+    await expect(readAdultAttestationFromCache('sailor-1')).resolves.toBe(1);
+  });
+
+  it('a delayed older positive read cannot restore a witness revoked by a newer server absence', async () => {
+    await recordOfflineAttestation('test-project', 'sailor-1', true);
+    let resolveRead!: (value: ReturnType<typeof snap>) => void;
+    getDocFromServerMock.mockReturnValueOnce(new Promise((resolve) => { resolveRead = resolve; }));
+    const olderRead = readAdultAttestationFromServer('sailor-1');
+    await vi.waitFor(() => expect(getDocFromServerMock).toHaveBeenCalledTimes(1));
+    getDocFromServerMock.mockResolvedValueOnce(snap(null));
+    await expect(readAdultAttestationFromServer('sailor-1')).resolves.toBeNull();
+    expect(await hasOfflineAttestation('test-project', 'sailor-1')).toBe(false);
+    resolveRead(snap({ attestedAdultAt: 44 }));
+    await expect(olderRead).resolves.toBe(44); // The actual server answer is retained.
+    expect(await hasOfflineAttestation('test-project', 'sailor-1')).toBe(false);
+  });
+
+  it('a server absence requested after committed attestation still revokes the render witness', async () => {
+    driveTransaction(snap(null));
+    await attestAdult(userLike(), 777);
+    expect(await hasOfflineAttestation('test-project', 'sailor-1')).toBe(true);
+    getDocFromServerMock.mockResolvedValueOnce(snap(null));
+    await expect(readAdultAttestationFromServer('sailor-1')).resolves.toBeNull();
+    expect(await hasOfflineAttestation('test-project', 'sailor-1')).toBe(false);
+  });
+
+  it('delayed authority completion still refuses a retired actor without revoking the later committed witness', async () => {
+    let resolveRead!: (value: ReturnType<typeof snap>) => void;
+    getDocFromServerMock.mockReturnValueOnce(new Promise((resolve) => { resolveRead = resolve; }));
+    const reading = readAdultAttestationFromServer('sailor-1');
+    const rejected = expect(reading).rejects.toThrow('Private session expired.');
+    await vi.waitFor(() => expect(getDocFromServerMock).toHaveBeenCalledTimes(1));
+    driveTransaction(snap(null));
+    await attestAdult(userLike(), 777);
+    privateState.generation++;
+    resolveRead(snap(null));
+    await rejected;
+    expect(await hasOfflineAttestation('test-project', 'sailor-1')).toBe(true);
+  });
+
+  it('definitive server revocation removes the witness; a failed server read does not', async () => {
+    await recordOfflineAttestation('test-project', 'sailor-1', true);
+    getDocFromServerMock.mockRejectedValueOnce(new Error('offline'));
+    await expect(readAdultAttestationFromServer('sailor-1')).rejects.toThrow('offline');
+    expect(await hasOfflineAttestation('test-project', 'sailor-1')).toBe(true);
+    getDocFromServerMock.mockResolvedValue(snap(null));
+    await expect(readAdultAttestationFromServer('sailor-1')).resolves.toBeNull();
+    expect(await hasOfflineAttestation('test-project', 'sailor-1')).toBe(false);
+  });
+
+  it('does not record a positive witness when the private subject retires during the lock wait', async () => {
+    driveTransaction(snap(null));
+    installMockWebLocks().mockImplementationOnce(async (_name, _options, work) => {
+      privateState.uid = 'bob';
+      return await work();
+    });
+    await expect(attestAdult(userLike())).rejects.toThrow(/expired/i);
+    expect(localStorage.length).toBe(0);
+  });
+  it('rejects an account switch during the offline witness lock wait', async () => {
+    await recordOfflineAttestation('test-project', 'sailor-1', true);
+    getDocsFromCacheMock.mockResolvedValue({ docs: [cachedCard('events/test-event/days/3/boards/sailor-1', 'sailor-1')] });
+    installMockWebLocks().mockImplementationOnce(async (_name, _options, work) => {
+      privateState.uid = 'bob';
+      return await work();
+    });
+    await expect(readAdultAttestationFromCache('sailor-1')).rejects.toThrow(/account changed/i);
+    expect(localStorage.getItem('fiveacross:test-project:offline-attested:sailor-1')).toBe('1');
+  });
+  it('rejects a project switch during the offline witness lock wait', async () => {
+    await recordOfflineAttestation('test-project', 'sailor-1', true);
+    getDocsFromCacheMock.mockResolvedValue({ docs: [cachedCard('events/test-event/days/3/boards/sailor-1', 'sailor-1')] });
+    installMockWebLocks().mockImplementationOnce(async (_name, _options, work) => {
+      privateState.projectId = 'other-project';
+      return await work();
+    });
+    await expect(readAdultAttestationFromCache('sailor-1')).rejects.toThrow(/account changed/i);
+    expect(localStorage.getItem('fiveacross:test-project:offline-attested:sailor-1')).toBe('1');
+  });
+  it('renders a daily cached card with the UID/project witness and no legacy Board', async () => {
+    await recordOfflineAttestation('test-project', 'sailor-1', true);
+    getDocFromCacheMock.mockResolvedValue(snap(null));
+    getDocsFromCacheMock.mockResolvedValue({ docs: [cachedCard('events/test-event/days/3/boards/sailor-1', 'sailor-1')] });
+    await expect(readAdultAttestationFromCache('sailor-1')).resolves.toBe(1);
+    expect(getDocFromCacheMock).not.toHaveBeenCalled();
+    expect(getDocMock).not.toHaveBeenCalled();
+    expect(getDocFromServerMock).not.toHaveBeenCalled();
+    expect(awaitPrivateFirestore).not.toHaveBeenCalled();
+    expect(runTransactionMock).not.toHaveBeenCalled();
+  });
+
+  it('requires both the current UID/project witness and an existing cached legacy Board', async () => {
+    await recordOfflineAttestation('test-project', 'sailor-1', true);
+    getDocsFromCacheMock.mockRejectedValueOnce(new Error('cache miss'));
+    await expect(readAdultAttestationFromCache('sailor-1')).resolves.toBeNull();
+    getDocsFromCacheMock.mockResolvedValue({ docs: [cachedCard('events/test-event/boards/sailor-1', 'sailor-1')] });
+    await expect(readAdultAttestationFromCache('sailor-1')).resolves.toBe(1);
+    expect(docMock.mock.calls.filter((call) => call.slice(1).join('/').startsWith('users/'))).toHaveLength(0);
+    privateState.projectId = 'other-project';
+    await expect(readAdultAttestationFromCache('sailor-1')).resolves.toBeNull();
+    privateState.uid = 'bob';
+    await expect(readAdultAttestationFromCache('sailor-1')).rejects.toThrow(/account changed/i);
+  });
+
+  it('keeps daily cards scoped to the current Event and UID, and requires the witness', async () => {
+    getDocsFromCacheMock.mockResolvedValue({ docs: [cachedCard('events/test-event/days/3/boards/sailor-1', 'sailor-1')] });
+    await expect(readAdultAttestationFromCache('sailor-1')).resolves.toBeNull();
+    await recordOfflineAttestation('test-project', 'sailor-1', true);
+    getDocsFromCacheMock.mockResolvedValue({ docs: [
+      cachedCard('events/old-event/days/3/boards/sailor-1', 'sailor-1'),
+      cachedCard('events/test-event/days/3/boards/bob', 'bob'),
+    ] });
+    await expect(readAdultAttestationFromCache('sailor-1')).resolves.toBeNull();
+  });
+
+  it('rejects a project switch during the daily-card probe', async () => {
+    await recordOfflineAttestation('test-project', 'sailor-1', true);
+    getDocsFromCacheMock.mockImplementation(async () => {
+      privateState.projectId = 'other-project';
+      return { docs: [cachedCard('events/test-event/days/3/boards/sailor-1', 'sailor-1')] };
+    });
+    await expect(readAdultAttestationFromCache('sailor-1')).rejects.toThrow(/account changed/i);
+  });
+
+  it('does not grant an old UID witness after an account switch during the Board probe', async () => {
+    await recordOfflineAttestation('test-project', 'sailor-1', true);
+    getDocsFromCacheMock.mockImplementation(async () => {
+      privateState.uid = 'bob';
+      return { docs: [cachedCard('events/test-event/days/3/boards/sailor-1', 'sailor-1')] };
+    });
+    await expect(readAdultAttestationFromCache('sailor-1')).rejects.toThrow(/account changed/i);
+  });
+});
+
+
+describe('joinAndDeal committed identity and private incarnation acknowledgement (#1411)', () => {
+  it.each([false, true])('keeps a committed daily identity when post-commit retirement is %s', async (retireAfterCommit) => {
+    // Run the real daily join against a stateful transaction boundary: callback
+    // writes stage first, then become durable before the SDK promise settles.
+    // This models commit/ack ordering, not real SDK concurrency or AuthContext
+    // analytics. A refused local acknowledgement cannot undo that commit; its
+    // current-incarnation retry may therefore return false and omit join_event.
+    const playerPath = 'events/test-event/players/sailor-1';
+    const rows = new Map<string, Record<string, unknown>>();
+    const writes: Array<{ path: string; data: Record<string, unknown> }> = [];
+    let signalCommitted!: () => void;
+    const committed = new Promise<void>((resolve) => { signalCommitted = resolve; });
+    let releaseAcknowledgement!: () => void;
+    const acknowledgement = new Promise<void>((resolve) => { releaseAcknowledgement = resolve; });
+    getDocMock.mockImplementation(async (ref: { path: string }) => {
+      if (ref.path === 'events/test-event') return snap({ days: [{ index: 0 }] });
+      if (ref.path === 'users/sailor-1') return snap(null);
+      throw new Error(`Unexpected nontransaction read: ${ref.path}`);
+    });
+    let commits = 0;
+    runTransactionMock.mockImplementation(async (_db: unknown, callback: (tx: {
+      get: (ref: { path: string }) => Promise<ReturnType<typeof snap>>;
+      set: (ref: { path: string }, data: Record<string, unknown>, options?: { merge: boolean }) => void;
+    }) => Promise<boolean>) => {
+      const staged: Array<{ path: string; data: Record<string, unknown>; merge: boolean }> = [];
+      const result = await callback({
+        get: async (ref) => snap(rows.get(ref.path) ?? null),
+        set: (ref, data, options) => staged.push({ path: ref.path, data: { ...data }, merge: options?.merge === true }),
+      });
+      for (const write of staged) {
+        rows.set(write.path, { ...(write.merge ? rows.get(write.path) : {}), ...write.data });
+        writes.push({ path: write.path, data: write.data });
+      }
+      commits++;
+      if (commits === 1) {
+        signalCommitted();
+        await acknowledgement;
+      }
+      return result;
+    });
+
+    const joining = joinAndDeal(userLike());
+    const result = retireAfterCommit
+      ? expect(joining).rejects.toThrow('Private session expired.')
+      : expect(joining).resolves.toBe(true);
+    await committed;
+    const joined = { ...rows.get(playerPath)! };
+    expect(joined).toMatchObject({ uid: 'sailor-1', displayName: 'Ada', bingoCount: 0, squaresMarked: 0 });
+    expect(joined.joinedAt).toEqual(expect.any(Number));
+    expect(writes).toHaveLength(1);
+    expect(runTransactionMock.mock.calls[0][0]).not.toBe(privateState.privateDb);
+    expect(awaitPrivateFirestore).toHaveBeenCalledWith('sailor-1', true);
+    if (retireAfterCommit) privateState.generation++;
+    releaseAcknowledgement();
+    await result;
+    expect(rows.get(playerPath)).toEqual(joined); // No compensating rollback.
+
+    // A later current actor sees the committed identity and genuine progress.
+    // It may merge identity again, but cannot stamp another join or zero stats.
+    rows.set(playerPath, { ...joined, bingoCount: 2, squaresMarked: 7 });
+    await expect(joinAndDeal(userLike())).resolves.toBe(false);
+    expect(commits).toBe(2);
+    expect(writes).toHaveLength(2);
+    expect(writes[1]).toEqual({ path: playerPath, data: { uid: 'sailor-1', displayName: 'Ada', photoURL: null } });
+    expect(rows.get(playerPath)).toEqual({ ...joined, bingoCount: 2, squaresMarked: 7 });
   });
 });

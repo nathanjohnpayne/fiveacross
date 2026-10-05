@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, within, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, fireEvent, within, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import type { DayDef, EventDoc, ItemDoc } from '../types';
 
@@ -55,7 +55,22 @@ const H = vi.hoisted(() => ({
   unbanUser: vi.fn(),
   unlockDayNow: vi.fn(),
   resnapshotDayNow: vi.fn(),
+  recoveryRequired: false,
+  privateAvailable: true,
+  privateFailed: false,
+  privateUid: undefined as string | null | undefined,
+  eventScope: 'test-event',
+  privateGeneration: 1,
+  eventLoading: false,
+  eventServerResolved: true,
+  eventServerData: true,
+  eventFromCache: false,
+  eventPending: false,
+  queueState: { claims: { hasServerData: true, failed: false }, reports: { hasServerData: true, failed: false }, items: { hasServerData: true, failed: false }, approvals: { hasServerData: true, failed: false } },
+  adminOnlySubscriptions: vi.fn(),
 }));
+
+vi.mock('../hooks/usePrivateFirestore', () => ({ usePrivateFirestore: () => ({ uid: H.privateUid === undefined ? H.user?.uid ?? null : H.privateUid, db: H.privateAvailable ? {} : null, generation: H.privateGeneration, recoveryRequired: H.recoveryRequired, failed: H.privateFailed }) }));
 
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event', storage: {}, auth: {}, googleProvider: {}, analytics: null }));
 // #559: ReviewQueue now imports `track` (for `prompt_suggestion_approved`),
@@ -83,11 +98,12 @@ vi.mock('../hooks/useData', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../hooks/useData')>();
   return {
     ...actual,
-    useEventDoc: () => ({ data: H.event, loading: false, hasServerData: true }),
-    usePendingClaims: () => ({ claims: H.claims }),
-    usePendingItems: () => ({ items: H.pendingItems, loading: false }),
-    useReportedProofs: () => ({ flagged: H.flagged, loading: false }),
-    useAllItems: () => ({ items: H.items, loading: false }),
+    useEventDoc: () => ({ data: H.event, loading: false, hasServerData: true, fromCache: false, hasPendingWrites: false }),
+    useAdminEventDoc: () => ({ key: H.eventScope, data: H.event, loading: H.eventLoading, serverResolved: H.eventServerResolved, hasServerData: H.eventServerData, fromCache: H.eventFromCache, hasPendingWrites: H.eventPending }),
+    usePendingClaims: () => { H.adminOnlySubscriptions('claims'); return { claims: H.claims, loading: false, ...H.queueState.claims }; },
+    usePendingItems: () => ({ items: H.pendingItems, loading: false, ...H.queueState.approvals }),
+    useReportedProofs: () => ({ flagged: H.flagged, loading: false, ...H.queueState.reports }),
+    useAllItems: () => ({ items: H.items, loading: false, ...H.queueState.items }),
   };
 });
 vi.mock('../data/admin', () => ({
@@ -120,7 +136,7 @@ vi.mock('../data/admin', () => ({
   unlockDayNow: (...a: unknown[]) => H.unlockDayNow(...a),
   resnapshotDayNow: (...a: unknown[]) => H.resnapshotDayNow(...a),
 }));
-vi.mock('../data/proofs', () => ({ deleteProof: (...a: unknown[]) => H.deleteProof(...a) }));
+vi.mock('../data/proofs', () => ({ deleteProofAsAdmin: (...a: unknown[]) => H.deleteProof(...a) }));
 // The admin pickers read the EDITION-SCOPED list, not the registry (#555), so
 // the stub has to provide both. Both entries are in scope here, which keeps
 // every existing assertion about what the console offers exactly as it was.
@@ -174,6 +190,12 @@ const dayDef = (over: Partial<DayDef> = {}): DayDef => ({
 });
 
 beforeEach(() => {
+  H.queueState = { claims: { hasServerData: true, failed: false }, reports: { hasServerData: true, failed: false }, items: { hasServerData: true, failed: false }, approvals: { hasServerData: true, failed: false } };
+  H.recoveryRequired = false;
+  H.privateAvailable = true; H.privateFailed = false; H.privateUid = undefined;
+  H.eventScope = 'test-event'; H.privateGeneration = 1;
+  H.eventLoading = false; H.eventServerResolved = true; H.eventServerData = true; H.eventFromCache = false; H.eventPending = false;
+  vi.restoreAllMocks();
   vi.clearAllMocks();
   H.user = { uid: 'admin-uid' };
   H.event = {
@@ -188,7 +210,176 @@ beforeEach(() => {
   H.pendingItems = [];
 });
 
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
+
+describe('Admin private gate state', () => {
+  it.each([
+    ['initial answer', () => { H.eventLoading = true; H.eventServerData = false; H.eventServerResolved = false; }, 'Loading Admin…'],
+    ['offline retirement', () => { H.privateAvailable = false; vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false); }, 'Reconnect to use Admin.'],
+    ['session failure', () => { H.privateAvailable = false; H.privateFailed = true; H.privateUid = null; }, 'Admin is unavailable. Reload and try again.'],
+    ['terminal Event read failure', () => { H.eventServerData = false; H.eventServerResolved = true; }, 'Admin is unavailable. Reload and try again.'],
+    ['retired subject', () => { H.privateUid = 'other-account'; }, 'Loading Admin…'],
+    ['missing confirmed Event', () => { H.event = null!; }, 'Admin is unavailable. Reload and try again.'],
+    ['cache-origin answer', () => { H.eventFromCache = true; }, 'Loading Admin…'],
+    ['pending-first answer', () => { H.eventPending = true; H.eventServerData = false; H.eventServerResolved = false; }, 'Loading Admin…'],
+  ] as const)('distinguishes %s from a definitive non-admin answer', (_name, arrange, message) => {
+    arrange();
+    renderAdmin();
+    expect(screen.getByText(message)).toBeInTheDocument();
+    expect(screen.queryByText('Admins only.')).not.toBeInTheDocument();
+    expect(H.adminOnlySubscriptions).not.toHaveBeenCalled();
+    expect(screen.queryByText('Review queue')).not.toBeInTheDocument();
+  });
+
+  it('bounds a cache-only wait, keeps the console closed, and accepts a later confirmed answer', () => {
+    vi.useFakeTimers();
+    H.eventLoading = false; H.eventServerData = false; H.eventServerResolved = false; H.eventFromCache = true;
+    const view = renderAdmin();
+    expect(screen.getByText('Loading Admin…')).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(9_999));
+    expect(screen.getByText('Loading Admin…')).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByText('Admin is unavailable. Reload and try again.')).toBeInTheDocument();
+    expect(screen.queryByText('Admins only.')).not.toBeInTheDocument();
+    expect(H.adminOnlySubscriptions).not.toHaveBeenCalled();
+    H.eventFromCache = false; H.eventServerData = true; H.eventServerResolved = true;
+    view.rerender(<MemoryRouter initialEntries={['/more/admin']}><Admin /></MemoryRouter>);
+    expect(screen.getByText('Review queue')).toBeInTheDocument();
+    expect(screen.queryByText('Admin is unavailable. Reload and try again.')).not.toBeInTheDocument();
+  });
+
+  it.each(['UID', 'Event', 'private generation'] as const)('a %s change starts its own wait without inheriting the old deadline', (scope) => {
+    vi.useFakeTimers();
+    H.eventLoading = false; H.eventServerData = false; H.eventServerResolved = false; H.eventFromCache = true;
+    const view = renderAdmin();
+    act(() => vi.advanceTimersByTime(9_000));
+    if (scope === 'UID') H.user = { uid: 'new-admin' };
+    if (scope === 'Event') H.eventScope = 'other-event';
+    if (scope === 'private generation') H.privateGeneration += 1;
+    view.rerender(<MemoryRouter initialEntries={['/more/admin']}><Admin /></MemoryRouter>);
+    act(() => vi.advanceTimersByTime(1_000));
+    expect(screen.getByText('Loading Admin…')).toBeInTheDocument();
+    expect(H.adminOnlySubscriptions).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(9_000));
+    expect(screen.getByText('Admin is unavailable. Reload and try again.')).toBeInTheDocument();
+    expect(H.adminOnlySubscriptions).not.toHaveBeenCalled();
+  });
+
+  it.each(['confirmation', 'error', 'unmount'] as const)('cancels the unanswered wait on %s', (outcome) => {
+    vi.useFakeTimers();
+    const schedule = vi.spyOn(globalThis, 'setTimeout');
+    const cancel = vi.spyOn(globalThis, 'clearTimeout');
+    H.eventLoading = true; H.eventServerData = false; H.eventServerResolved = false;
+    const view = renderAdmin();
+    const scheduled = schedule.mock.calls.findIndex(([, delay]) => delay === 10_000);
+    expect(scheduled).toBeGreaterThanOrEqual(0);
+    const timer = schedule.mock.results[scheduled].value;
+    expect(cancel).not.toHaveBeenCalledWith(timer);
+    if (outcome === 'unmount') view.unmount();
+    else {
+      H.eventLoading = false; H.eventServerResolved = true;
+      H.eventServerData = outcome === 'confirmation';
+      view.rerender(<MemoryRouter initialEntries={['/more/admin']}><Admin /></MemoryRouter>);
+    }
+    expect(cancel).toHaveBeenCalledWith(timer);
+    act(() => vi.advanceTimersByTime(10_000));
+    if (outcome === 'confirmation') expect(screen.getByText('Review queue')).toBeInTheDocument();
+    if (outcome === 'error') {
+      expect(screen.getByText('Admin is unavailable. Reload and try again.')).toBeInTheDocument();
+      expect(H.adminOnlySubscriptions).not.toHaveBeenCalled();
+    }
+  });
+
+  it('cancels the online wait offline and gives reconnect a fresh bounded wait', () => {
+    vi.useFakeTimers();
+    H.eventServerData = false; H.eventServerResolved = false;
+    renderAdmin();
+    act(() => vi.advanceTimersByTime(9_000));
+    act(() => window.dispatchEvent(new Event('offline')));
+    expect(screen.getByText('Reconnect to use Admin.')).toBeInTheDocument();
+    expect(vi.getTimerCount()).toBe(0);
+    act(() => vi.advanceTimersByTime(20_000));
+    act(() => window.dispatchEvent(new Event('online')));
+    expect(screen.getByText('Loading Admin…')).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(10_000));
+    expect(screen.getByText('Admin is unavailable. Reload and try again.')).toBeInTheDocument();
+    expect(H.adminOnlySubscriptions).not.toHaveBeenCalled();
+  });
+
+  it('shows definitive non-admin only after a current confirmed answer', () => {
+    H.event = { ...H.event, admins: ['someone-else'] };
+    renderAdmin();
+    expect(screen.getByText('Admins only.')).toBeInTheDocument();
+    expect(H.adminOnlySubscriptions).not.toHaveBeenCalled();
+  });
+
+  it('opens the console only after the loading answer becomes current and confirmed', () => {
+    H.eventLoading = true; H.eventServerData = false; H.eventServerResolved = false;
+    const view = renderAdmin();
+    expect(screen.getByText('Loading Admin…')).toBeInTheDocument();
+    expect(H.adminOnlySubscriptions).not.toHaveBeenCalled();
+    H.eventLoading = false; H.eventServerData = true; H.eventServerResolved = true;
+    view.rerender(<MemoryRouter initialEntries={['/more/admin']}><Admin /></MemoryRouter>);
+    expect(screen.queryByText('Loading Admin…')).not.toBeInTheDocument();
+    expect(screen.getByText('Review queue')).toBeInTheDocument();
+    expect(H.adminOnlySubscriptions).toHaveBeenCalled();
+  });
+});
+
+describe('Admin private queue availability', () => {
+  it.each(['claims', 'reports', 'items', 'approvals'] as const)('never renders an empty-clear queue after %s listener denial', (source) => {
+    H.queueState[source] = { hasServerData: false, failed: true };
+    renderAdmin('/more/admin/queue');
+    expect(screen.getByText('Review queue is unavailable. Reload and try again.')).toBeInTheDocument();
+    expect(screen.queryByText(/Nothing reported|Nothing pending review|All clear/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Approve all' })).not.toBeInTheDocument();
+  });
+  it.each(['UID', 'Event', 'private generation'] as const)('does not carry an expired queue wait into a new %s scope', (scope) => {
+    vi.useFakeTimers();
+    H.queueState.claims = { hasServerData: false, failed: false };
+    const view = renderAdmin('/more/admin/queue');
+    act(() => vi.advanceTimersByTime(10_000));
+    expect(screen.getByText('Review queue is unavailable. Reload and try again.')).toBeInTheDocument();
+    if (scope === 'UID') {
+      H.user = { uid: 'new-admin' };
+      H.event = { ...H.event, admins: ['new-admin'] };
+    }
+    if (scope === 'Event') H.eventScope = 'other-event';
+    if (scope === 'private generation') H.privateGeneration += 1;
+    view.rerender(<MemoryRouter initialEntries={['/more/admin/queue']}><Admin /></MemoryRouter>);
+    expect(screen.getByText('Loading review queue…')).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(9_999));
+    expect(screen.getByText('Loading review queue…')).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByText('Review queue is unavailable. Reload and try again.')).toBeInTheDocument();
+  });
+  it.each(['claims', 'reports', 'items', 'approvals'] as const)('labels unknown %s data on the hub and bounds its queue wait', (source) => {
+    vi.useFakeTimers();
+    H.queueState[source] = { hasServerData: false, failed: false };
+    const view = renderAdmin();
+    expect(screen.getByText('Loading review queue…')).toBeInTheDocument();
+    expect(screen.queryByText('All clear')).not.toBeInTheDocument();
+    view.rerender(<MemoryRouter initialEntries={['/more/admin/queue']}><Admin /></MemoryRouter>);
+    fireEvent.click(screen.getByRole('button', { name: /Review queue/ }));
+    expect(screen.getByText('Loading review queue…')).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(10_000));
+    expect(screen.getByText('Review queue is unavailable. Reload and try again.')).toBeInTheDocument();
+    H.queueState[source] = { hasServerData: true, failed: false };
+    view.rerender(<MemoryRouter initialEntries={['/more/admin/queue']}><Admin /></MemoryRouter>);
+    expect(screen.queryByText(/Loading review queue|Review queue is unavailable/)).not.toBeInTheDocument();
+  });
+});
+
 describe('Admin Approvals group (specs/d15-approvals.md, re-housed in the Review queue)', () => {
+  it('loads a separate document for the attended recovery link', () => {
+    H.recoveryRequired = true;
+    render(<MemoryRouter initialEntries={['/more/admin']}><Admin /></MemoryRouter>);
+    const link = screen.getByRole('link', { name: 'Finish device recovery' });
+    const target = new URL(link.getAttribute('href')!, window.location.href);
+    expect(target.searchParams.get('device-cache-recovery')).toBe('1');
+    expect(target.hash).toBe('');
+    expect(target.pathname + target.search).not.toBe(window.location.pathname + window.location.search);
+  });
   it('is not on the hub; the hub card opens the Review queue where the pending row lists', () => {
     H.pendingItems = [pendingItem('p1', { text: 'Awaiting review', createdBy: 'alice' })];
     renderAdmin('/more/admin');
@@ -962,6 +1153,71 @@ describe('Admin Game settings (specs/d15-admin-proof-claims.md rows, re-housed a
     H.event = { ...H.event, claimMode: 'honor' } as unknown as EventDoc;
     renderAdmin('/more/admin/queue');
     expect(screen.queryByText(/Pending claims/)).toBeNull();
+  });
+});
+
+describe('Admin Prompt-pool availability', () => {
+  it.each(['unknown', 'failed'] as const)('withholds pool counts and actions for %s item data', (posture) => {
+    H.queueState.items = { hasServerData: false, failed: posture === 'failed' };
+    renderAdmin();
+    expect(screen.getByRole('button', { name: /Prompt pool/ })).toHaveTextContent(
+      posture === 'failed' ? 'Prompt pool is unavailable. Reload and try again.' : 'Loading Prompt pool…',
+    );
+    expect(screen.queryByText(/0 prompts · curated add/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Prompt pool/ }));
+    expect(screen.queryByText('Prompts (0)')).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'New prompt text' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add' })).not.toBeInTheDocument();
+    expect(H.adminAddItem).not.toHaveBeenCalled();
+  });
+
+  it('bounds an unknown pool wait independently and permits a later confirmed empty pool', () => {
+    vi.useFakeTimers();
+    H.queueState.items = { hasServerData: false, failed: false };
+    const view = renderAdmin('/more/admin/pool');
+    expect(screen.getByText('Loading Prompt pool…')).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(9_999));
+    expect(screen.getByText('Loading Prompt pool…')).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByText('Prompt pool is unavailable. Reload and try again.')).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'New prompt text' })).not.toBeInTheDocument();
+    H.queueState.items = { hasServerData: true, failed: false };
+    H.queueState.claims = { hasServerData: false, failed: true };
+    view.rerender(<MemoryRouter initialEntries={['/more/admin/pool']}><Admin /></MemoryRouter>);
+    expect(screen.getByText('Prompts (0)')).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'New prompt text' })).toBeInTheDocument();
+    expect(screen.queryByText('Prompt pool is unavailable. Reload and try again.')).not.toBeInTheDocument();
+  });
+
+  it.each(['UID', 'Event', 'private generation'] as const)('retires an expired item wait on %s change', (scope) => {
+    vi.useFakeTimers();
+    H.queueState.items = { hasServerData: false, failed: false };
+    const view = renderAdmin('/more/admin/pool');
+    act(() => vi.advanceTimersByTime(10_000));
+    expect(screen.getByText('Prompt pool is unavailable. Reload and try again.')).toBeInTheDocument();
+    if (scope === 'UID') { H.user = { uid: 'new-admin' }; H.event = { ...H.event, admins: ['new-admin'] }; }
+    if (scope === 'Event') H.eventScope = 'other-event';
+    if (scope === 'private generation') H.privateGeneration += 1;
+    view.rerender(<MemoryRouter initialEntries={['/more/admin/pool']}><Admin /></MemoryRouter>);
+    expect(screen.getByText('Loading Prompt pool…')).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(9_999));
+    expect(screen.getByText('Loading Prompt pool…')).toBeInTheDocument();
+    H.queueState.items = { hasServerData: true, failed: false };
+    view.rerender(<MemoryRouter initialEntries={['/more/admin/pool']}><Admin /></MemoryRouter>);
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.getByText('Prompts (0)')).toBeInTheDocument();
+    expect(screen.queryByText('Prompt pool is unavailable. Reload and try again.')).not.toBeInTheDocument();
+  });
+
+  it('keeps confirmed pool editing available when another review source fails', () => {
+    H.queueState.claims = { hasServerData: false, failed: true };
+    renderAdmin();
+    expect(screen.getByText('Review queue is unavailable. Reload and try again.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Prompt pool/ })).toHaveTextContent('0 prompts · curated add');
+    fireEvent.click(screen.getByRole('button', { name: /Prompt pool/ }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'New prompt text' }), { target: { value: 'A real prompt' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    expect(H.adminAddItem).toHaveBeenCalledWith('admin-uid', 'A real prompt', false, 'main');
   });
 });
 

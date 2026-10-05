@@ -2,14 +2,18 @@ import { afterAll, describe, expect, it, vi } from 'vitest';
 import { initializeApp, deleteApp, type FirebaseApp } from 'firebase/app';
 import type { User } from 'firebase/auth';
 
-// joinAndDeal reads the production firebase singleton `db` directly (it takes
-// no injectable database, unlike setMark), so the emulator client is threaded
-// through a mutable holder the mock's getter re-reads on every access.
-const liveDb = vi.hoisted(() => ({ current: null as unknown }));
+// joinAndDeal keeps gameplay transactions on the primary client and captures a
+// separate memory-only client for its private profile read. Wire both to the
+// real authenticated emulator session; do not replace its private lease guard.
+const liveDb = vi.hoisted(() => ({ current: null as unknown, auth: null as unknown }));
 vi.mock('../../src/firebase', () => ({
   get db() {
     return liveDb.current;
   },
+  get auth() { return liveDb.auth; },
+  get firebaseConfig() { return { apiKey: 'demo-api-key', projectId: PROJECT_ID }; },
+  appCheck: null,
+  firebaseEmulatorsEnabled: () => true,
   EVENT_ID: 'med-2026',
 }));
 // DETERMINISTIC overlap barrier (Codex P2 on #472): `Promise.all` alone does
@@ -69,6 +73,7 @@ import {
   type Firestore,
 } from 'firebase/firestore';
 import { joinAndDeal } from '../../src/data/api';
+import { privateFirestoreSessions } from '../../src/privateFirestore';
 import { seedEventDoc } from './seedEvent';
 import { runScopedEmail, runScopedProject } from './runScope';
 
@@ -112,7 +117,7 @@ async function signIn(auth: Auth) {
   }
 }
 
-async function makeClient(name: string): Promise<{ app: FirebaseApp; db: Firestore; uid: string }> {
+async function makeClient(name: string): Promise<{ app: FirebaseApp; db: Firestore; auth: Auth; uid: string }> {
   const app = initializeApp({ apiKey: 'demo-api-key', projectId: PROJECT_ID }, name);
   apps.push(app);
   const auth = getAuth(app);
@@ -120,10 +125,11 @@ async function makeClient(name: string): Promise<{ app: FirebaseApp; db: Firesto
   const cred = await signIn(auth);
   const db = initializeFirestore(app, {});
   connectFirestoreEmulator(db, ...firestoreEmulator());
-  return { app, db, uid: cred.user.uid };
+  return { app, db, auth, uid: cred.user.uid };
 }
 
 afterAll(async () => {
+  privateFirestoreSessions().stop();
   await Promise.all(apps.map((a) => deleteApp(a).catch(() => {})));
 });
 
@@ -134,6 +140,7 @@ describe('#409 — joinAndDeal is idempotent under overlapping calls', () => {
     await seedEventDoc(PROJECT_ID, EVENT_ID, 1);
     const tab = await makeClient('gcb-join-idem-tab');
     liveDb.current = tab.db;
+    liveDb.auth = tab.auth;
     const user = { uid: tab.uid, displayName: 'Idem Tester', photoURL: null } as unknown as User;
 
     // The timed-out-deal + Retry window, compressed: both calls in flight at
@@ -146,6 +153,8 @@ describe('#409 — joinAndDeal is idempotent under overlapping calls', () => {
     // Exactly one actual join — runDeal fires join_event off this verdict, so
     // a double-true is a double-counted analytic; a double-false is a lost one.
     expect([first, second].filter((dealt) => dealt === true)).toHaveLength(1);
+    expect(privateFirestoreSessions().getSnapshot().uid).toBe(tab.uid);
+    expect(privateFirestoreSessions().getSnapshot().db).not.toBe(tab.db);
 
     // One coherent committed row: identity + a single joinedAt stamp + zeroed
     // aggregates, accepted by the live rules (the monotonic reshuffle counter

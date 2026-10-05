@@ -1,6 +1,8 @@
-import { collection, doc, increment, runTransaction, updateDoc } from 'firebase/firestore';
+import { collection, doc, increment, runTransaction, updateDoc, type Firestore, type Transaction } from 'firebase/firestore';
 import { allowedPhotoUrlOrNull } from './photoUrl';
 import { db, EVENT_ID } from '../firebase';
+import { capturePrivateFirestore } from '../privateFirestore';
+import { runPrivateTransaction } from './privateTransaction';
 import { uploadProofMedia, deleteStoragePath, proofMediaGeneration } from './storage';
 import { purgeProofMediaFromCaches } from './proofMediaCache';
 import { resolveProofMediaUrl } from './proofMediaUrl';
@@ -22,20 +24,20 @@ import type {
   ProofType,
 } from '../types';
 
-const rawEvent = (eventId: string = EVENT_ID) => doc(db, 'events', eventId);
+const rawEvent = (eventId: string = EVENT_ID, database: Firestore = db) => doc(database, 'events', eventId);
 const rawProofs = (eventId: string = EVENT_ID) => collection(db, 'events', eventId, 'proofs');
-const rawProof = (id: string, eventId: string = EVENT_ID) =>
-  doc(db, 'events', eventId, 'proofs', id);
+const rawProof = (id: string, eventId: string = EVENT_ID, database: Firestore = db) =>
+  doc(database, 'events', eventId, 'proofs', id);
 const rawClaims = (eventId: string = EVENT_ID) => collection(db, 'events', eventId, 'claims');
-const rawBoard = (uid: string, eventId: string = EVENT_ID) =>
-  doc(db, 'events', eventId, 'boards', uid);
+const rawBoard = (uid: string, eventId: string = EVENT_ID, database: Firestore = db) =>
+  doc(database, 'events', eventId, 'boards', uid);
 // The day-scoped Board write ref (#246, daily-cards-spec § "Data model"): one
 // Board per Player per Day at events/{eventId}/days/{dayIndex}/boards/{uid}.
 // `String(dayIndex)` is the canonical decimal segment the rules gate accepts (#201).
-const rawDayBoard = (dayIndex: number, uid: string, eventId: string = EVENT_ID) =>
-  doc(db, 'events', eventId, 'days', String(dayIndex), 'boards', uid);
-const rawPlayer = (uid: string, eventId: string = EVENT_ID) =>
-  doc(db, 'events', eventId, 'players', uid);
+const rawDayBoard = (dayIndex: number, uid: string, eventId: string = EVENT_ID, database: Firestore = db) =>
+  doc(database, 'events', eventId, 'days', String(dayIndex), 'boards', uid);
+const rawPlayer = (uid: string, eventId: string = EVENT_ID, database: Firestore = db) =>
+  doc(database, 'events', eventId, 'players', uid);
 
 /**
  * The pending-revocation tombstone for a deleted Proof's Storage object (#134
@@ -48,8 +50,8 @@ const rawPlayer = (uid: string, eventId: string = EVENT_ID) =>
  * lets the sweeper read the Proof id straight off its trigger path.
  */
 export const PROOF_STORAGE_DELETES = 'proofStorageDeletes';
-const rawProofStorageDelete = (proofId: string, eventId: string = EVENT_ID) =>
-  doc(db, 'events', eventId, PROOF_STORAGE_DELETES, proofId);
+const rawProofStorageDelete = (proofId: string, eventId: string = EVENT_ID, database: Firestore = db) =>
+  doc(database, 'events', eventId, PROOF_STORAGE_DELETES, proofId);
 
 /** The three object extensions `uploadProofMedia` can produce (jpg / webm / m4a, #295). */
 const PROOF_MEDIA_EXTENSIONS = ['jpg', 'webm', 'm4a'];
@@ -133,8 +135,8 @@ function playerStatWrite(params: {
 // A per-Prompt Tally marker: events/{EVENT_ID}/tally/{itemId}/markers/{uid} (ADR
 // 0002) — the SAME path setMark's honor-Mark marker uses. Raw ref (converter-free),
 // matching the board/player/proof writes in these transactions and setMark's write.
-const rawMarker = (itemId: string, markerUid: string, eventId: string = EVENT_ID) =>
-  doc(db, 'events', eventId, 'tally', itemId, 'markers', markerUid);
+const rawMarker = (itemId: string, markerUid: string, eventId: string = EVENT_ID, database: Firestore = db) =>
+  doc(database, 'events', eventId, 'tally', itemId, 'markers', markerUid);
 
 export interface AttachProofArgs {
   uid: string;
@@ -553,7 +555,29 @@ export class ProofBacksMarkWhileClosingError extends Error {
   }
 }
 
-export async function deleteProof(
+/** Owner/gameplay deletion retains its existing durable Firestore path. */
+export function deleteProof(id: string, storagePath?: string | null, opts?: DeleteProofOptions): Promise<void> {
+  return deleteProofInDatabase(id, storagePath, opts, db, EVENT_ID);
+}
+
+/** Admin moderation reads moderation-only Proofs and related Board/Player state in the captured
+ * recovered memory session. Attribution must match that Auth incarnation. */
+export async function deleteProofAsAdmin(adminUid: string, id: string, storagePath?: string | null, opts?: DeleteProofOptions): Promise<void> {
+  const lease = capturePrivateFirestore();
+  if (adminUid !== lease.uid) throw new Error('Admin account changed.');
+  const eventId = EVENT_ID;
+  return lease.guard(() => deleteProofInDatabase(id, storagePath, opts, lease.db, eventId, lease));
+}
+
+interface DeleteProofOptions {
+  daily?: boolean;
+  dayIndexes?: number[];
+  tutorialDayIndexes?: number[];
+  ceremonialDayIndexes?: number[];
+  statsFrozen?: boolean | (() => boolean);
+}
+
+async function deleteProofInDatabase(
   id: string,
   // A HINT, NOT THE ANSWER (#1153, Phase 4b P2). Both call sites read it off a
   // Feed/queue snapshot that can be stale, and an authorized caller could pass
@@ -577,15 +601,11 @@ export async function deleteProof(
   // Proof's OWN Day; content-only deletion clears the link without a stat fold,
   // mirroring `attachProof`. Absent/false keeps the pre-1.5 flat single-board
   // unmark. `tutorialDayIndexes` scopes the cruise-wide First-to-BINGO exclusion.
-  opts?: {
-    daily?: boolean;
-    dayIndexes?: number[];
-    tutorialDayIndexes?: number[];
-    ceremonialDayIndexes?: number[];
-    statsFrozen?: boolean | (() => boolean);
-  },
+  opts?: DeleteProofOptions,
+  database: Firestore = db,
+  eventId: string = EVENT_ID,
+  privateLease?: ReturnType<typeof capturePrivateFirestore>,
 ): Promise<void> {
-  const eventId = EVENT_ID;
   // COMMIT FIRST, THEN REVOKE THE MEDIA — for the owner and the Admin alike
   // (Codex P1, PR #1157).
   //
@@ -670,11 +690,17 @@ export async function deleteProof(
   // time rather than at sweep time, plus one saved server round trip.
   let generation: string | null = null;
   if (storagePath && proofMediaOwnerUid(storagePath, eventId, id)) {
-    generation = await proofMediaGeneration(storagePath);
+    generation = privateLease
+      ? await proofMediaGeneration(storagePath, privateLease.storage)
+      : await proofMediaGeneration(storagePath);
   }
 
-  await runTransaction(db, async (tx) => {
-    const proofRef = rawProof(id, eventId);
+  let committed = false;
+  const transaction = <T>(operation: (tx: Transaction) => Promise<T>) => privateLease
+    ? runPrivateTransaction(privateLease, operation, () => { committed = true; })
+    : runTransaction(database, operation);
+  await transaction(async (tx) => {
+    const proofRef = rawProof(id, eventId, database);
     // THE EVENT, READ INSIDE THE TRANSACTION THAT WRITES (#134, Codex P2 on PR
     // #1139). The moderation delete is an admin path the freeze deliberately
     // leaves open — a permanent record needs a takedown route (#808) — but the
@@ -704,7 +730,7 @@ export async function deleteProof(
     // close committing in the window aborts this attempt and the retry re-reads
     // the closed state, instead of a cleanup landing on a Board the freeze has
     // already shut.
-    const eventData = (await tx.get(rawEvent(eventId))).data() as Partial<EventDoc> | undefined;
+    const eventData = (await tx.get(rawEvent(eventId, database))).data() as Partial<EventDoc> | undefined;
     const archived = isEventArchived(eventData);
     const closing = !archived && isEventArchiving(eventData);
     const proofSnap = await tx.get(proofRef);
@@ -731,9 +757,9 @@ export async function deleteProof(
       const daily = opts?.daily === true;
       const proofDayIndex = typeof proof.dayIndex === 'number' ? proof.dayIndex : 0;
       const boardRef = daily
-        ? rawDayBoard(proofDayIndex, proof.uid, eventId)
-        : rawBoard(proof.uid, eventId);
-      const playerRef = rawPlayer(proof.uid, eventId);
+        ? rawDayBoard(proofDayIndex, proof.uid, eventId, database)
+        : rawBoard(proof.uid, eventId, database);
+      const playerRef = rawPlayer(proof.uid, eventId, database);
       const boardSnap = await tx.get(boardRef);
       const boardData = boardSnap.data() as { cells?: unknown; seed?: number } | undefined;
       const normalized = cellsFromData(boardData?.cells);
@@ -785,7 +811,7 @@ export async function deleteProof(
             ? await Promise.all(
                 (opts?.dayIndexes ?? [])
                   .filter((dayIndex) => dayIndex !== proofDayIndex)
-                  .map((dayIndex) => tx.get(rawDayBoard(dayIndex, proof.uid, eventId))),
+                  .map((dayIndex) => tx.get(rawDayBoard(dayIndex, proof.uid, eventId, database))),
               )
             : [];
         // The stamp a deletion preserves belongs to the Day whose Board it is
@@ -867,7 +893,7 @@ export async function deleteProof(
           ),
         );
         if (backing.itemId && !markedOnSibling) {
-          tx.delete(rawMarker(backing.itemId, proof.uid, eventId));
+          tx.delete(rawMarker(backing.itemId, proof.uid, eventId, database));
         }
       }
     }
@@ -948,11 +974,16 @@ export async function deleteProof(
           // own transaction.
           ...(generation === null || storagePath !== revokePath ? {} : { generation }),
         };
-        tx.set(rawProofStorageDelete(id, eventId), tombstone);
+        tx.set(rawProofStorageDelete(id, eventId, database), tombstone);
       }
     }
 
     tx.delete(proofRef);
+  }).catch((error: unknown) => {
+    // Retirement after an actual SDK commit withholds acknowledgment and
+    // Storage work, but must still retire this device's legacy media copy.
+    if (committed) void purgeProofMediaFromCaches(resolveProofMediaUrl(mediaURL));
+    throw error;
   });
 
   // The commit already stood down the Proof, so this object is now an orphan
@@ -982,7 +1013,12 @@ export async function deleteProof(
     // The SAME object the tombstone names (#1153, Phase 4b P2) — the stored one
     // wherever the transaction could read the Proof, so the fast path and the
     // durable record can never target different blobs.
-    if (revokePath) await deleteStoragePath(revokePath);
+    privateLease?.assertCurrent();
+    if (revokePath) {
+      if (privateLease) await deleteStoragePath(revokePath, privateLease.storage);
+      else await deleteStoragePath(revokePath);
+    }
+    privateLease?.assertCurrent();
   } finally {
     // Fire-and-forget, AFTER commit (never inside the retryable transaction
     // callback above — a callback re-run on conflict would fire this on every

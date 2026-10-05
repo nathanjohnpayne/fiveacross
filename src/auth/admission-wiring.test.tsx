@@ -82,6 +82,7 @@ vi.mock('../data/api', () => ({
   hasCachedCard: mocks.hasCachedCard,
   joinAndDeal: mocks.joinAndDeal,
 }));
+vi.mock('../privateFirestore', () => ({ retryPrivateFirestoreSession: vi.fn() }));
 vi.mock('../analytics', () => ({ track: mocks.track }));
 vi.mock('../pendingEventInvitation', () => ({
   EVENT_INVITATION_FRAGMENT_KEY: 'fa_invite',

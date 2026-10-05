@@ -14,6 +14,8 @@ import type { EventDoc } from '../../types';
  * hub never imports the whole More screen — Phase 4b P1, PR #410).
  */
 export default function AdminHub({
+  queueStatus,
+  itemStatus,
   event,
   reportCount,
   approvalCount,
@@ -22,6 +24,8 @@ export default function AdminHub({
   pendingCount,
   onOpen,
 }: {
+  queueStatus: 'ready' | 'loading' | 'unavailable';
+  itemStatus: 'ready' | 'loading' | 'unavailable';
   event: EventDoc | null | undefined;
   reportCount: number;
   approvalCount: number;
@@ -53,8 +57,10 @@ export default function AdminHub({
         }).format(new Date(nextUnlockAt))
       : null;
 
-  const queueSub =
-    queueTotal === 0
+  const queueSub = queueStatus === 'unavailable'
+    ? 'Review queue is unavailable. Reload and try again.'
+    : queueStatus === 'loading' ? 'Loading review queue…'
+    : queueTotal === 0
       ? 'All clear'
       : [`Reports ${reportCount}`, `Approvals ${approvalCount}`, ...(claimsVisible ? [`Claims ${claimCount}`] : [])].join(' · ') +
         '—one inbox, oldest first';
@@ -65,7 +71,7 @@ export default function AdminHub({
         icon={ShieldAlert}
         title="Review queue"
         sub={queueSub}
-        badge={queueTotal > 0 ? queueTotal : undefined}
+        badge={queueStatus === 'ready' && queueTotal > 0 ? queueTotal : undefined}
         onClick={() => onOpen('queue')}
       />
       <MoreRow
@@ -83,8 +89,10 @@ export default function AdminHub({
       <MoreRow
         icon={Lightbulb}
         title="Prompt pool"
-        sub={`${itemCount} prompts · curated add${pendingCount ? ` · ${pendingCount} pending` : ''}`}
-        badge={pendingCount > 0 ? pendingCount : undefined}
+        sub={itemStatus === 'unavailable' ? 'Prompt pool is unavailable. Reload and try again.'
+          : itemStatus === 'loading' ? 'Loading Prompt pool…'
+          : `${itemCount} prompts · curated add${pendingCount ? ` · ${pendingCount} pending` : ''}`}
+        badge={itemStatus === 'ready' && pendingCount > 0 ? pendingCount : undefined}
         onClick={() => onOpen('pool')}
       />
       <MoreRow

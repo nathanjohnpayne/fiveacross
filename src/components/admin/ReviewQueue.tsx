@@ -19,7 +19,7 @@ import {
   unbanUser,
   type ApprovalPlacement,
 } from '../../data/admin';
-import { deleteProof, ProofBacksMarkWhileClosingError } from '../../data/proofs';
+import { deleteProofAsAdmin, ProofBacksMarkWhileClosingError } from '../../data/proofs';
 import { trackIfCurrentEvent } from '../../eventScopedAnalytics';
 import { EVENT_ID } from '../../firebase';
 import AsyncButton from './AsyncButton';
@@ -128,6 +128,7 @@ function restoreTitle(visionFlag: string | null | undefined, claimUndecided: boo
  */
 function ProofQueueRow({
   proof: p,
+  adminUid,
   threshold,
   claimUndecided,
   bannedUids,
@@ -137,6 +138,7 @@ function ProofQueueRow({
   standingsFreezeAt,
 }: {
   proof: ProofDoc;
+  adminUid: string;
   threshold: number | undefined;
   /** Is the OWNER's still-pending claim backing this Proof? Restore returns it for review, not to the Feed. */
   claimUndecided: boolean;
@@ -234,7 +236,7 @@ function ProofQueueRow({
           error instanceof ProofBacksMarkWhileClosingError ? error.message : undefined
         }
         onAction={() =>
-          deleteProof(p.id, p.storagePath, {
+          deleteProofAsAdmin(adminUid, p.id, p.storagePath, {
             daily: !!days?.length,
             // Canonical DayDef.index values, not array positions (Phase 4b P1
             // on #447) — same fix as ProofFeed's deleteProof call site.
@@ -791,6 +793,7 @@ export default function ReviewQueue({
               <ProofQueueRow
                 key={`proof-${entry.proof.id}`}
                 proof={entry.proof}
+                adminUid={adminUid}
                 threshold={threshold}
                 claimUndecided={undecidedClaimProofs.get(entry.proof.id)?.has(entry.proof.uid) ?? false}
                 bannedUids={bannedUids}

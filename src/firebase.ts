@@ -9,12 +9,13 @@ import { initializeAnalytics, isSupported, type Analytics } from 'firebase/analy
 import { isSyntheticProbe } from './synthetic-probe';
 import { installFirestorePoisonRecovery } from './firestoreRecovery';
 import { isUrlSafeForTelemetry } from './handoffBoot';
-import { app, firebaseConfig, firebaseEmulatorsEnabled, functions } from './firebaseCore';
+import { app, firebaseConfig, firebaseEmulatorsEnabled, functions, appCheck } from './firebaseCore';
 import { auth, googleProvider } from './firebaseAuth';
 
-export { app, auth, firebaseEmulatorsEnabled, functions, googleProvider };
+export { app, auth, appCheck, firebaseConfig, firebaseEmulatorsEnabled, functions, googleProvider };
 // ADR 0006: a persistent (IndexedDB) local cache so the last-seen Board/Feed/
-// Tally render offline and Marks made in a dead zone queue durably and sync on
+// Tally can render offline using a same-session confirmed in-memory block set;
+// a cold offline reload withholds shared content (#1411). Marks queue durably and sync on
 // reconnect — not the default in-memory cache, which loses queued writes on
 // reload. The multi-tab manager coordinates the shared cache when a Player has
 // the PWA open in several tabs. Same `db` symbol, so no call site changes.

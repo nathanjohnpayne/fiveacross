@@ -93,6 +93,14 @@ vi.mock('../firebase', () => ({ EVENT_ID: 'test-event' }));
 import More from './More';
 
 describe('More menu (specs/d15-more-menu.md)', () => {
+  it('uses a document query rather than a fragment for attended recovery', () => {
+    render(<MemoryRouter initialEntries={['/more']}><More /></MemoryRouter>);
+    const link = screen.getByRole('link', { name: /Device recovery/ });
+    const target = new URL(link.getAttribute('href')!, window.location.href);
+    expect(target.searchParams.get('device-cache-recovery')).toBe('1');
+    expect(target.hash).toBe('');
+    expect(target.pathname + target.search).not.toBe(window.location.pathname + window.location.search);
+  });
   it('renders every section/row in spec order for a non-admin Player, with no Admin row', () => {
     H.event = { ...H.event, admins: [] };
     const { container } = render(<MemoryRouter initialEntries={['/more']}><More /></MemoryRouter>);

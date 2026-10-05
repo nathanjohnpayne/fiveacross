@@ -79,6 +79,7 @@ vi.mock('../data/api', () => ({
   hasCachedCard: mocks.hasCachedCard,
   joinAndDeal: mocks.joinAndDeal,
 }));
+vi.mock('../privateFirestore', () => ({ retryPrivateFirestoreSession: vi.fn() }));
 vi.mock('../analytics', () => ({ track: mocks.track }));
 
 const FAKE_USER = { uid: 'sailor-1', displayName: 'Sailor', photoURL: null };

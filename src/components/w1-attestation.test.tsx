@@ -46,6 +46,7 @@ vi.mock('../data/api', () => ({
   hasCachedBoard: vi.fn().mockResolvedValue(true),
   joinAndDeal: mocks.joinAndDeal,
 }));
+vi.mock('../privateFirestore', () => ({ retryPrivateFirestoreSession: vi.fn() }));
 vi.mock('../analytics', () => ({ track: mocks.track }));
 // The confirm-path listener (#41) mounts inside AuthProvider now; stub it to a
 // mount-recording spy so its real Firestore subscriptions do not run here, and so

@@ -63,7 +63,7 @@ vi.mock('../../data/admin', () => ({
   banUser: vi.fn(),
   unbanUser: vi.fn(),
 }));
-vi.mock('../../data/proofs', () => ({ deleteProof: vi.fn() }));
+vi.mock('../../data/proofs', () => ({ deleteProofAsAdmin: vi.fn() }));
 
 const item = (id: string, spicy: boolean): ItemDoc =>
   ({

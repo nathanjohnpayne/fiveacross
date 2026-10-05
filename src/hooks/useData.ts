@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { collectionGroup, onSnapshot, query, where, type DocumentReference, type Query } from 'firebase/firestore';
+import { collectionGroup, getDocsFromServer, onSnapshot, query, waitForPendingWrites, where, type DocumentReference, type Query } from 'firebase/firestore';
+import { usePrivateFirestore } from './usePrivateFirestore';
 import { db, EVENT_ID } from '../firebase';
 import { eventRef, itemsCol, boardRef, dayBoardRef, dayMetaRef, playerRef, playersCol, proofsCol, claimsCol, userRef, tallyMarkersCol, momentsCol, noticesCol, doubtsCol, heartsCol } from '../data/paths';
 import { isReportHidden, isBanned, isExplicitWithheld, isSystemAuthor, isHiddenFor } from '../data/moderation';
@@ -15,7 +16,7 @@ import { readableTallyEntry } from '../data/converters';
 import { sortPlayers, dayDealState, type DayDealState, nextDisplayBumpTime, BUMP_DEBOUNCE_MS } from '../game/logic';
 import type { EventDoc, ItemDoc, BoardDoc, DayDef, DayMetaDoc, PlayerDoc, ProofDoc, ClaimDoc, UserDoc, TallyEntry, TallyCard, MomentDoc, NoticeDoc, DoubtDoc, HeartDoc } from '../types';
 
-// Both subs subscribe with includeMetadataChanges so the cache→server
+// Default gameplay subs use includeMetadataChanges so the cache→server
 // transition is always observable: with the ADR 0006 persistent cache, a cold
 // or stale IndexedDB can deliver a first snapshot `fromCache` (e.g. an empty
 // pool / missing board that the server would contradict), and WITHOUT metadata
@@ -24,7 +25,8 @@ import type { EventDoc, ItemDoc, BoardDoc, DayDef, DayMetaDoc, PlayerDoc, ProofD
 // first server-backed snapshot and stays true for the life of the key, so
 // consumers (Board's thin-pool guard) can tell "the server really says this"
 // from "the local cache says this so far". Errors leave it false — failing
-// toward the neutral loading state, never toward a false alert.
+// toward the neutral loading state, never toward a false alert. Private callers
+// below instead retain only committed values and reset on cache-only answers.
 type DocSubscriptionState<T> = {
   key: string;
   data: T | null;
@@ -98,6 +100,8 @@ function useDocSub<T>(
    * function defined once at module load.
    */
   observe?: (data: T | null, origin: SnapshotOrigin, eventId: string) => void,
+  clearOnError = false,
+  retainCommittedDuringPending = false,
 ) {
   const [state, setState] = useState<DocSubscriptionState<T>>(() => emptyDocState(key, ref !== null));
   // The per-snapshot halves of the same `{ includeMetadataChanges: true }`
@@ -116,6 +120,7 @@ function useDocSub<T>(
   // standing) is what the drain sees.
   useEffect(() => {
     let active = true;
+    let committed: { data: T | null } | null = null;
     // THE EVENT THIS LISTENER BELONGS TO, read once here — where the listener is
     // opened — and never again (#1152, Codex P2 on PR #1165 round 4). Every
     // Event-scoped `key` this hook is given is built from `EVENT_ID` by
@@ -140,6 +145,12 @@ function useDocSub<T>(
       (snap) => {
         if (!active) return;
         const data = snap.exists() ? (snap.data() as T) : null;
+        if (retainCommittedDuringPending) {
+          if (snap.metadata.fromCache) committed = null;
+          else if (!snap.metadata.hasPendingWrites) committed = { data };
+        }
+        const publishedData = retainCommittedDuringPending ? committed?.data ?? null : data;
+        const committedAnswer = committed !== null;
         // Fail-open, on the same principle the persisted-state helpers it calls
         // already use: an observer is a passenger on this subscription, and a
         // throw from one must never stop the snapshot from reaching `setState`
@@ -150,11 +161,11 @@ function useDocSub<T>(
           /* an observation is never worth the subscription */
         }
         setState((previous) => {
-          const served =
-            previous.key === key && previous.hasServerData ? true : !snap.metadata.fromCache;
+          const served = retainCommittedDuringPending ? committedAnswer && !snap.metadata.fromCache
+            : previous.key === key && previous.hasServerData ? true : !snap.metadata.fromCache;
           return {
             key,
-            data,
+            data: publishedData,
             loading: false,
             hasServerData: served,
             serverResolved: served || (previous.key === key && previous.serverResolved),
@@ -165,8 +176,9 @@ function useDocSub<T>(
       },
       () => {
         if (!active) return;
+        committed = null;
         setState((previous) =>
-          previous.key === key
+          previous.key === key && !clearOnError
             ? { ...previous, loading: false, serverResolved: true }
             : { ...emptyDocState<T>(key, false), serverResolved: true },
         );
@@ -207,7 +219,7 @@ const emptyCollectionState = <T,>(key: string, loading: boolean): CollectionSubs
   hasPendingWrites: false,
 });
 
-function useColSub<T>(q: Query<T> | null, key: string, clearOnError = false) {
+function useColSub<T>(q: Query<T> | null, key: string, clearOnError = false, retainCommittedDuringPending = false) {
   const [state, setState] = useState<CollectionSubscriptionState<T>>(() =>
     emptyCollectionState(key, q !== null),
   );
@@ -220,13 +232,18 @@ function useColSub<T>(q: Query<T> | null, key: string, clearOnError = false) {
   // true when the snapshot reflects a LOCAL write this client issued that the server
   // has NOT yet acked. It is the OTHER half of the `{ includeMetadataChanges: true }`
   // discipline — `fromCache` is cache-vs-server, `hasPendingWrites` is
-  // local-optimistic-vs-server-committed. A snapshot is fully SERVER-COMMITTED only
-  // when both are false. The pool-recovery watcher (#70, Codex P2 on PR #124 round 2)
+  // local-optimistic-vs-server-committed for the documents still in the query.
+  // Both false do not prove a local query exit/delete has settled: private
+  // collection publication below drains writes and fetches a fresh server
+  // answer only when a committed document ID disappears. The public pool-recovery watcher (#70, Codex P2 on PR #124 round 2)
   // needs this: a local optimistic prompt-add arrives with `fromCache === false` AND
   // `hasPendingWrites === true`, so a `fromCache`-only gate would treat that
   // not-yet-committed local echo as a server crossing and fire before the write acks.
   useEffect(() => {
     let active = true;
+    let committed: T[] | null = null;
+    let committedIds = new Set<string>();
+    let observation = 0;
     // Drop the previous query's rows when the key changes so stale results can't
     // render against the new subscription.
     setState(emptyCollectionState(key, q !== null));
@@ -240,20 +257,70 @@ function useColSub<T>(q: Query<T> | null, key: string, clearOnError = false) {
       { includeMetadataChanges: true },
       (snap) => {
         if (!active) return;
+        const currentObservation = ++observation;
+        const data = snap.docs.map((d) => d.data() as T);
+        if (retainCommittedDuringPending) {
+          const publishCommitted = (metadata: typeof snap.metadata) => setState({
+            key, failed: false, data: committed ?? [], loading: committed === null,
+            hasServerData: committed !== null && !metadata.fromCache,
+            fromCache: metadata.fromCache, hasPendingWrites: metadata.hasPendingWrites,
+          });
+          if (snap.metadata.fromCache) { committed = null; committedIds.clear(); }
+          publishCommitted(snap.metadata);
+          if (snap.metadata.fromCache || snap.metadata.hasPendingWrites) return;
+          const candidateIds = new Set(snap.docs.map((doc) => doc.id));
+          const missingCommittedId = [...committedIds].some((id) => !candidateIds.has(id));
+          if (!missingCommittedId) {
+            committed = data;
+            committedIds = candidateIds;
+            publishCommitted(snap.metadata);
+            return;
+          }
+          // A local delete/query exit can have pending=false: the SDK counts only
+          // mutations on documents still in the query. Drain this captured memory
+          // client's writes, then obtain a FRESH server answer; promoting the
+          // captured empty echo could beat rollback delivery after a denied write.
+          const isCurrent = () => active && observation === currentObservation;
+          void (async () => {
+            try {
+              await waitForPendingWrites(q.firestore);
+              if (!isCurrent()) return;
+              const fresh = await getDocsFromServer(q);
+              if (!isCurrent()) return;
+              if (fresh.metadata.fromCache) { committed = null; committedIds.clear(); }
+              else if (!fresh.metadata.hasPendingWrites) {
+                committed = fresh.docs.map((d) => d.data() as T);
+                committedIds = new Set(fresh.docs.map((doc) => doc.id));
+              }
+              publishCommitted(fresh.metadata);
+            } catch (error) {
+              if (!isCurrent()) return;
+              if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'permission-denied') {
+                committed = null;
+                committedIds.clear();
+                setState({ ...emptyCollectionState<T>(key, false), failed: true });
+              }
+              // A transient barrier failure leaves the same-scope committed
+              // answer visible; a later settled removal may retry the barrier.
+            }
+          })();
+          return;
+        }
         setState((previous) => ({
           key,
           failed: false,
-          data: snap.docs.map((d) => d.data() as T),
+          data,
           loading: false,
-          hasServerData: previous.key === key && previous.hasServerData
-            ? true
-            : !snap.metadata.fromCache,
+          hasServerData: previous.key === key && previous.hasServerData ? true : !snap.metadata.fromCache,
           fromCache: snap.metadata.fromCache,
           hasPendingWrites: snap.metadata.hasPendingWrites,
         }));
       },
       () => {
         if (!active) return;
+        observation += 1;
+        committed = null;
+        committedIds.clear();
         setState((previous) =>
           previous.key === key && !clearOnError
             ? { ...previous, loading: false, failed: true }
@@ -270,6 +337,32 @@ function useColSub<T>(q: Query<T> | null, key: string, clearOnError = false) {
   return state.key === key
     ? state
     : emptyCollectionState<T>(key, q !== null);
+}
+
+// Private listeners retain only their last committed server data during
+// server-backed own pending writes in this same memory-app incarnation. Pending
+// data never becomes authority. Cache-only answers, denial and scope retirement
+// drop that confirmation instead of carrying private data across boundaries.
+function usePrivateCol<T>(build: (database: NonNullable<ReturnType<typeof usePrivateFirestore>['db']>) => Query<T>, key: string, enabled = true) {
+  const session = usePrivateFirestore();
+  const ready = enabled && session.db !== null && !session.failed && !session.recoveryRequired;
+  const state = useColSub<T>(ready ? build(session.db!) : null,
+    eventScopeKey(EVENT_ID, key, session.uid ?? 'none', session.generation, ready ? 'ready' : 'closed'), true, true);
+  const confirmed = ready && state.hasServerData && !state.fromCache && !state.failed;
+  return { ...state, data: confirmed ? state.data : [], hasServerData: confirmed };
+}
+
+function usePrivateDoc<T>(build: (database: NonNullable<ReturnType<typeof usePrivateFirestore>['db']>) => DocumentReference<T>, key: string, enabled = true, eventScoped = true) {
+  const session = usePrivateFirestore();
+  const ready = enabled && session.db !== null && !session.failed && !session.recoveryRequired;
+  const state = useDocSub<T>(ready ? build(session.db!) : null,
+    eventScopeKey(eventScoped ? EVENT_ID : 'global', key, session.uid ?? 'none', session.generation, ready ? 'ready' : 'closed'), undefined, true, true);
+  const confirmed = ready && state.hasServerData && !state.fromCache;
+  return { ...state, data: confirmed ? state.data : null, hasServerData: confirmed };
+}
+
+export function useAdminEventDoc() {
+  return usePrivateDoc<EventDoc>((database) => eventRef(database), 'admin-event');
 }
 
 const eventSubscriptionKey = (...parts: readonly (string | number)[]): string =>
@@ -910,8 +1003,8 @@ export function useTally(itemId: string | null | undefined) {
 
 /** The signed-in User's global profile (`users/{uid}`) — display name + avatar. */
 export function useMyUser(uid: string | undefined) {
-  // Identity is global by contract: users/{uid} carries across Events.
-  return useDocSub<UserDoc>(uid ? userRef(uid) : null, `user:${uid ?? 'none'}`);
+  const session = usePrivateFirestore();
+  return usePrivateDoc<UserDoc>((database) => userRef(uid!, database), `my-user:${uid ?? 'none'}`, !!uid && uid === session.uid, false);
 }
 
 export function useLeaderboard() {
@@ -1528,13 +1621,15 @@ export function useFeed(max = 60) {
  * a cache-only (or not-yet-arrived) snapshot reads as zero pending claims, and a
  * gate that passes vacuously is no gate at all.
  */
+// Private queues expose failure and current confirmation: an empty array
+// alone cannot mean all clear after denial or an unconfirmed memory answer.
 export function usePendingClaims() {
-  const { data, loading, hasServerData } = useColSub<ClaimDoc>(
-    claimsCol(),
-    eventSubscriptionKey('claims'),
+  const { data, loading, hasServerData, failed } = usePrivateCol<ClaimDoc>(
+    (database) => claimsCol(database),
+    'claims',
   );
   const claims = data.filter((c) => c.status === 'pending').sort((a, b) => a.createdAt - b.createdAt);
-  return { claims, loading, hasServerData };
+  return { claims, loading, hasServerData, failed };
 }
 
 /**
@@ -1549,12 +1644,12 @@ export function usePendingClaims() {
  * every pool) on every render just to find the handful of pending rows.
  */
 export function usePendingItems() {
-  const { data, loading } = useColSub<ItemDoc>(
-    query(itemsCol(), where('status', '==', 'pending')),
-    eventSubscriptionKey('items-pending'),
+  const { data, loading, hasServerData, failed } = usePrivateCol<ItemDoc>(
+    (database) => query(itemsCol(database), where('status', '==', 'pending')),
+    'items-pending',
   );
   const items = [...data].sort((a, b) => a.createdAt - b.createdAt);
-  return { items, loading };
+  return { items, loading, hasServerData, failed };
 }
 
 /**
@@ -1576,9 +1671,9 @@ export function useMyPendingItems(uid: string | null | undefined) {
   // CACHE snapshot too, which would otherwise let a genuinely still-pending
   // submission read as `not_selected`. See `deriveMySubmissions`'s `ready`
   // doc comment.
-  const { data, loading, hasServerData } = useColSub<ItemDoc>(
-    uid ? query(itemsCol(), where('createdBy', '==', uid), where('status', '==', 'pending')) : null,
-    eventSubscriptionKey('items-pending-mine', uid ?? 'none'),
+  const { data, loading, hasServerData } = usePrivateCol<ItemDoc>(
+    (database) => query(itemsCol(database), where('createdBy', '==', uid), where('status', '==', 'pending')),
+    `items-pending-mine:${uid ?? 'none'}`, !!uid,
   );
   const items = [...data].sort((a, b) => a.createdAt - b.createdAt);
   return { items, loading, hasServerData };
@@ -1617,14 +1712,16 @@ export function useMyActiveItems(uid: string | null | undefined) {
  * Player is NOT an admin, so an unconstrained collection read would be denied.
  * `ConfirmWinMoments` consumes this to notice when one of the Player's pending
  * Marks is confirmed by an Admin, so it can emit the win's Moment wherever the
- * Player is (the confirm-path edge Board's route-scoped detection misses). The
+ * Player is after attended recovery admits the own-Claim read (the confirm-path
+ * edge Board's route-scoped detection misses). Quarantine cannot seed a pending
+ * witness; a first-seen confirmation after recovery is history, not a new Moment. The
  * `hasServerData` latch gates the baseline: the first server-backed snapshot's
  * already-confirmed Claims are history, not fresh confirms to announce.
  */
 export function useMyClaims(uid: string | undefined) {
-  const { data, loading, hasServerData, fromCache } = useColSub<ClaimDoc>(
-    uid ? query(claimsCol(), where('uid', '==', uid)) : null,
-    eventSubscriptionKey('my-claims', uid ?? 'none'),
+  const { data, loading, hasServerData, fromCache } = usePrivateCol<ClaimDoc>(
+    (database) => query(claimsCol(database), where('uid', '==', uid)),
+    `my-claims:${uid ?? 'none'}`, !!uid,
   );
   // `fromCache` lets `ConfirmWinMoments` seed its freshness witness ONLY from a
   // server-backed pending observation (Codex #116 R2 finding 2): a cache-only
@@ -1647,9 +1744,9 @@ export function useMyClaims(uid: string | undefined) {
  * anything writes it).
  */
 export function usePendingItemCount(enabled = true) {
-  const { data, loading } = useColSub<ItemDoc>(
-    enabled ? query(itemsCol(), where('status', '==', 'pending')) : null,
-    eventSubscriptionKey(enabled ? 'items-pending' : 'items-pending:disabled'),
+  const { data, loading } = usePrivateCol<ItemDoc>(
+    (database) => query(itemsCol(database), where('status', '==', 'pending')),
+    'items-pending-count', enabled,
   );
   return { count: data.length, loading };
 }
@@ -1664,8 +1761,8 @@ export function usePendingItemCount(enabled = true) {
  * too and no Admin could ever act on it — the exact failure ADR 0004 warns of.
  */
 export function useAllItems() {
-  const { data, loading } = useColSub<ItemDoc>(itemsCol(), eventSubscriptionKey('items-admin'));
-  return { items: data.sort((a, b) => b.reportCount - a.reportCount), loading };
+  const { data, loading, hasServerData, failed } = usePrivateCol<ItemDoc>((database) => itemsCol(database), 'items-admin');
+  return { items: data.sort((a, b) => b.reportCount - a.reportCount), loading, hasServerData, failed };
 }
 
 /**
@@ -1699,14 +1796,14 @@ export function useAllItems() {
  * no second listener, no composite index.
  */
 export function useReportedProofs() {
-  const { data, loading } = useColSub<ProofDoc>(proofsCol(), eventSubscriptionKey('proofs-admin'));
+  const { data, loading, hasServerData, failed } = usePrivateCol<ProofDoc>((database) => proofsCol(database), 'proofs-admin');
   const flagged = data
     .filter(
       (p) =>
         p.reportCount > 0 || p.status === 'flagged' || p.status === 'hidden' || !!p.visionFlag,
     )
     .sort((a, b) => b.reportCount - a.reportCount);
-  return { flagged, loading };
+  return { flagged, loading, hasServerData, failed };
 }
 
 /**

@@ -8,6 +8,7 @@ import Nav from './components/Nav';
 import SuggestPanelBridge from './components/SuggestPanelBridge';
 import Board from './components/Board';
 import NoticeBanner from './components/NoticeBanner';
+import DeviceRecoveryNotice from './components/DeviceRecoveryNotice';
 import Leaderboard from './components/Leaderboard';
 import ProofFeed from './components/ProofFeed';
 import More from './components/More';
@@ -268,6 +269,7 @@ function EventApp() {
             (reconnects wedged listeners, picks up a fresh deploy). */}
         <PullToRefresh />
         <Nav />
+        <DeviceRecoveryNotice />
         {/* Card/Feed → More "Suggest a square" navigation bridge (#559) — see
             SuggestPanelBridge.tsx for why it's mounted here rather than
             inside Board.tsx. Renders nothing. */}

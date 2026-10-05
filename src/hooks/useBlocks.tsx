@@ -1,8 +1,10 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
-import { onSnapshot, query, where } from 'firebase/firestore';
-import { EVENT_ID } from '../firebase';
+import { createContext, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { onSnapshot, query, waitForPendingWrites, where } from 'firebase/firestore';
+import { db as gameplayDb, EVENT_ID } from '../firebase';
+import { capturePrivateFirestore, retryPrivateFirestoreSession } from '../privateFirestore';
+import { usePrivateFirestore } from './usePrivateFirestore';
 import { blockPairsCol, blocksCol } from '../data/paths';
-import { computeHiddenSet, hiddenUidsFromPairs, reconcileOrphanPair, repairMissingPairs } from '../data/blocks';
+import { computeHiddenSet, hiddenUidsFromPairs, reconcileOrphanPair, repairMissingPairs, subscribePendingBlocks, pendingBlockTargets, observeConfirmedBlockTargets, retirePendingBlocksOutsideScope } from '../data/blocks';
 import { eventScopeKey } from '../data/eventScope';
 import type { BlockDoc } from '../types';
 
@@ -16,16 +18,29 @@ import type { BlockDoc } from '../types';
 export interface HiddenUids {
   /** The uids the viewer hides and is hidden from in this Event. */
   hidden: ReadonlySet<string>;
-  /** True once the first snapshot (cache or server) has arrived, the viewer is
-   * signed out, or no provider is mounted. Content hooks gate their loading
-   * state on this so a blocked Player never flashes in before the listener's
-   * first answer. Deliberately not server-gated (ADR 0006 offline play): a
-   * stale cached pair set shows until the server snapshot lands, the
-   * staleness every cached read accepts (specs/player-blocking.md). */
+  /** True only after gameplay queue drain and a confirmed private-memory answer for this UID/Event.
+   * Mid-use offline retains that same scope's confirmed set in memory; cold
+   * offline starts and unreadable first answers withhold Feed/Tally. */
   ready: boolean;
+  /** A failed bridge or queue-drain budget is actionable instead of loading forever. */
+  failed?: boolean;
+  retry?: () => void;
 }
 
 const EMPTY: ReadonlySet<string> = new Set();
+
+// Session publication and effect execution can straddle retirement. Refuse
+// that race without starting a listener against a different account/database.
+function captureMatchingLease(uid: string, database: ReturnType<typeof capturePrivateFirestore>['db'], allowRecovery = false) {
+  try {
+    const lease = capturePrivateFirestore(allowRecovery);
+    lease.assertCurrent();
+    return lease.uid === uid && lease.db === database ? lease : null;
+  } catch {
+    return null;
+  }
+}
+
 
 // Pairs already offered to `reconcileOrphanPair` this session, keyed on the
 // listener key and the counterpart, so a pair costs one (almost always denied)
@@ -54,43 +69,83 @@ const HiddenUidsContext = createContext<HiddenUids>(NONE);
 
 interface HiddenState {
   key: string | null;
+  generation: number;
   hidden: ReadonlySet<string>;
   ready: boolean;
+  failed?: boolean;
 }
 
 // Signed out: ready with nothing hidden. Signed in with no key (the shell has
 // not admitted the viewer to Event watchers yet, or the listener has not
 // answered): NOT ready, so a late admission flip cannot render the counterpart
 // before the first pair snapshot lands.
-const initial = (uid: string | null, key: string | null): HiddenState => ({
-  key,
+const initial = (uid: string | null, key: string | null, generation: number): HiddenState => ({
+  key, generation,
   hidden: EMPTY,
   ready: uid === null,
 });
 
-/**
- * ONE `includeMetadataChanges` listener on `where('uids', 'array-contains',
- * uid)`, keyed on the Event AND the uid so an Event or account switch drops
- * the old set before the new listener answers. `lastCommitted` is the set from
- * the latest snapshot without pending writes; see `computeHiddenSet` for why a
- * pending snapshot publishes the union. A pair only ever LEAVES this query
- * once the server has accepted its delete (`unblockPlayer` never deletes
- * locally), so no unblock, denied or pending, can reveal a counterpart early. The error path is EXPLICIT (unlike useColSub,
- * which swallows errors): it logs and resolves ready with the last set it
- * published, never blank. Before a first answer that is the empty set, so the
- * app renders unfiltered (the same admission failure would deny the content
- * listeners too); after one, the last hidden set stays until a remount or
- * reload resubscribes.
- */
+/** One private-memory pair listener per viewer/Event. Only confirmed answers
+ * can establish visibility. Pending/cache answers preserve the confirmed union;
+ * same-session offline retains that conservative set. Online rebootstrap waits
+ * for the gameplay queue to drain before a fresh server answer. Private
+ * pair listeners never populate the persistent read cache; the unchanged own
+ * block batch still persists its direction/pair write payload for offline sync. */
 export function useHiddenUidsSubscription(uid: string | null, enabled: boolean): HiddenUids {
+  const session = usePrivateFirestore();
   const eventId = EVENT_ID;
   const key = uid !== null && enabled ? eventScopeKey(eventId, 'block-pairs', uid) : null;
-  const [state, setState] = useState<HiddenState>(() => initial(uid, key));
+  const [state, setState] = useState<HiddenState>(() => initial(uid, key, session.generation));
+  const pending = useSyncExternalStore(subscribePendingBlocks, () => uid ? pendingBlockTargets(uid, eventId) : EMPTY);
+  // The single shell provider retires other scopes only after committing a
+  // scope change. Same-scope remounts keep process-local unfinished intent.
+  useEffect(() => { retirePendingBlocksOutsideScope(uid, eventId); }, [uid, eventId]);
+  const confirmed = useRef<{ key: string; generation: number; authGeneration: number; hidden: ReadonlySet<string> } | null>(null);
+  // A discarded render cannot erase committed state. Only an actual connection
+  // transition (or an offline session) may carry it across private generations;
+  // ordinary token rotation requires a fresh answer under refreshed credentials.
+  // The persistent Auth stamp catches an offline rotation even if React misses
+  // its publication. Keep rendering offline; re-confirm when back online.
+  const witness = confirmed.current?.key === key && session.uid === uid && !session.failed &&
+    (confirmed.current.authGeneration === session.authGeneration || !navigator.onLine) && (
+    confirmed.current.generation === session.generation || session.transition === 'connection' || !navigator.onLine
+  ) ? confirmed.current : null;
   useEffect(() => {
-    setState(initial(uid, key));
-    if (key === null || uid === null) return;
+    const carried = confirmed.current?.key === key && session.uid === uid && !session.failed &&
+      (confirmed.current.authGeneration === session.authGeneration || !navigator.onLine) && (
+      confirmed.current.generation === session.generation || session.transition === 'connection' || !navigator.onLine
+    ) ? confirmed.current : null;
+    confirmed.current = carried;
+    setState(carried ? { key, generation: session.generation, hidden: carried.hidden, ready: !navigator.onLine } : initial(uid, key, session.generation));
+    if (key === null || uid === null || session.uid !== uid || session.failed || !session.db) return;
+    // Filter bootstrap reads only the named memory client, never the legacy cache.
+    // Ordinary own-block/private panels remain gated by attended recovery.
+    const lease = captureMatchingLease(uid, session.db, true);
+    if (!lease) return;
     let active = true;
-    let lastCommitted: ReadonlySet<string> = EMPTY;
+    let unsubscribe: (() => void) | null = null;
+    let draining = true;
+    const isCurrent = () => {
+      if (!active || EVENT_ID !== eventId || !navigator.onLine) return false;
+      try { lease.assertCurrent(); return true; } catch { return false; }
+    };
+    const failVisibility = () => {
+      if (!isCurrent()) return;
+      confirmed.current = null;
+      setState({ key, generation: session.generation, hidden: EMPTY, ready: false, failed: true });
+    };
+    const failDrain = () => {
+      if (!draining) return;
+      draining = false;
+      clearTimeout(drainTimer);
+      failVisibility();
+    };
+    // A reloaded process has no pending-target relay, but its persistent SDK
+    // queue may still contain block writes. Never seed visibility from a private
+    // server answer taken before that queue drains. No extra disk hint is used.
+    const drainTimer = setTimeout(failDrain, 5_000);
+    let confirmedThisSubscription = false;
+    let lastCommitted: ReadonlySet<string> = carried?.hidden ?? EMPTY;
     // The counterparts of the previous snapshot (pending or settled), so a
     // pair DISAPPEARING from a server-confirmed snapshot can be seen.
     let previous: ReadonlySet<string> = EMPTY;
@@ -141,11 +196,11 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
         },
       );
     };
-    const unsub = onSnapshot(
-      query(blockPairsCol(eventId), where('uids', 'array-contains', uid)),
+    const subscribe = () => onSnapshot(
+      query(blockPairsCol(eventId, lease.db), where('uids', 'array-contains', uid)),
       { includeMetadataChanges: true },
       (snap) => {
-        if (!active) return;
+        if (!isCurrent()) return;
         const current = hiddenUidsFromPairs(snap.docs.map((d) => d.data()), uid);
         if ([...previous].some((other) => !current.has(other))) repairOwed = true;
         // A pair that APPEARS after this subscription's first server answer
@@ -165,7 +220,13 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
         // reconnection.
         if (snap.metadata.fromCache) repairChecked = false;
         serverBacked = !snap.metadata.fromCache;
-        if (!snap.metadata.hasPendingWrites) lastCommitted = current;
+        const settled = !snap.metadata.fromCache && !snap.metadata.hasPendingWrites;
+        if (settled) {
+          confirmedThisSubscription = true;
+          lastCommitted = current;
+          confirmed.current = { key, generation: session.generation, authGeneration: session.authGeneration, hidden: current };
+          observeConfirmedBlockTargets(uid, eventId, current);
+        }
         // Server-confirmed pairs only (offline the delete could not run, and
         // the attempt would be spent): offer each one to the reconciler once.
         if (!snap.metadata.fromCache && !snap.metadata.hasPendingWrites) {
@@ -191,29 +252,55 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
           }
         }
         setState({
-          key,
-          hidden: computeHiddenSet(current, lastCommitted, snap.metadata.hasPendingWrites),
-          ready: true,
+          key, generation: session.generation,
+          hidden: computeHiddenSet(current, lastCommitted, !settled),
+          ready: settled || confirmedThisSubscription,
         });
       },
       (err) => {
-        if (!active) return;
-        console.error('[blocks] hidden-set listener failed; keeping the last published hidden set (empty if none arrived)', err);
-        setState((prev) => ({ key, hidden: prev.key === key ? prev.hidden : EMPTY, ready: true }));
+        if (!isCurrent()) return;
+        // A denial retires the visibility witness. Only a connection loss
+        // may carry a confirmed same-scope set; an unreadable listener cannot
+        // qualify this session (including a later offline transition).
+        confirmed.current = null;
+        confirmedThisSubscription = false;
+        serverBacked = false;
+        clearRetry();
+        console.error('[blocks] hidden-set listener failed; withholding until a confirmed answer is available', err);
+        setState({ key, generation: session.generation, hidden: EMPTY, ready: false });
       },
     );
+    const subscribeAfterDrain = () => {
+      if (!draining) return;
+      draining = false;
+      clearTimeout(drainTimer);
+      if (!isCurrent()) return;
+      try { unsubscribe = subscribe(); }
+      catch { failVisibility(); }
+    };
+    try { void waitForPendingWrites(gameplayDb).then(subscribeAfterDrain, failDrain); }
+    catch { failDrain(); }
     return () => {
       active = false;
+      draining = false;
+      clearTimeout(drainTimer);
       clearRetry();
-      unsub();
+      unsubscribe?.();
     };
-  }, [key, uid, eventId]);
+  }, [key, uid, eventId, session.db, session.generation, session.authGeneration, session.transition, session.uid, session.recoveryRequired, session.failed]);
   // With no key there is no listener, so the answer follows from `uid` alone,
   // derived on THIS render (Codex P1 on #1300): comparing keys would let a
   // sign-in while not yet enabled (null key before and after) return the
   // signed-out `ready: true` for the render before the effect resets it.
   if (key === null) return { hidden: EMPTY, ready: uid === null };
-  return state.key === key ? { hidden: state.hidden, ready: state.ready } : { hidden: EMPTY, ready: false };
+  if (session.failed) return { hidden: EMPTY, ready: false, failed: true, retry: retryPrivateFirestoreSession };
+  const sameSession = session.uid === uid && !session.failed;
+  if (!sameSession || (state.generation !== session.generation && (navigator.onLine || !witness))) return { hidden: EMPTY, ready: false };
+  if (!session.db && (navigator.onLine || !witness)) return { hidden: EMPTY, ready: false };
+  if (state.key === key && state.failed) return { hidden: EMPTY, ready: false, failed: true, retry: retryPrivateFirestoreSession };
+  return state.key === key
+    ? { hidden: state.ready && pending.size > 0 ? computeHiddenSet(pending, state.hidden, true) : state.hidden, ready: state.ready }
+    : { hidden: EMPTY, ready: false };
 }
 
 export function HiddenUidsProvider({
@@ -241,7 +328,7 @@ export interface MyBlocks {
   error: boolean;
   /** The server has answered this listener at least once, so an empty `data` means no blocks. */
   confirmed: boolean;
-  /** Targets whose direction record is still an optimistic local write the server has not committed. */
+  /** In-process pending block targets plus pending memory-snapshot rows; no direction rows are synthesized. */
   pendingTargets: ReadonlySet<string>;
 }
 
@@ -249,20 +336,24 @@ const NO_PENDING: ReadonlySet<string> = new Set();
 
 /**
  * The viewer's OWN direction records (`where('ownerUid', '==', uid)`), the
- * only readable ones: the Blocked-players panel lists these. An error settles
+ * only readable ones: the Blocked-players panel lists these only from the
+ * recovered own-memory lease. Retirement clears this private panel. An error settles
  * to an empty list with `error: true` and a console.error, never a hung
  * spinner, so the panel can say it could not load rather than "no blocks".
  *
  * The listener includes metadata changes, for two answers the panel acts on.
  * `confirmed` latches once a snapshot comes from the server: a first open while
- * offline can deliver an empty cache-only snapshot, which is not proof the
- * viewer has blocked nobody. `pendingTargets` names the rows that are still a
- * queued block batch: `unblockPlayer` sends server-only transactions, which do
- * not see an uncommitted local write, so such a row is not yet reversible.
+ * not yet server-backed can deliver an empty memory-cache snapshot, which is not proof the
+ * viewer has blocked nobody. `pendingTargets` also uses the scoped in-process
+ * batch relay to disable an existing row while its new block is unresolved.
+ * New direction rows are never synthesized from queued intent: they appear
+ * only when this memory listener returns them. `unblockPlayer` is server-only.
  */
 export function useMyBlocks(uid: string | null): MyBlocks {
+  const session = usePrivateFirestore();
   const eventId = EVENT_ID;
-  const key = uid !== null ? eventScopeKey(eventId, 'my-blocks', uid) : null;
+  const key = uid !== null ? `${eventScopeKey(eventId, 'my-blocks', uid)}|generation:${session.generation}` : null;
+  const pending = useSyncExternalStore(subscribePendingBlocks, () => uid ? pendingBlockTargets(uid, eventId) : EMPTY);
   const [state, setState] = useState<MyBlocks & { key: string | null }>(() => ({
     key,
     data: [],
@@ -273,13 +364,16 @@ export function useMyBlocks(uid: string | null): MyBlocks {
   }));
   useEffect(() => {
     setState({ key, data: [], loading: uid !== null, error: false, confirmed: uid === null, pendingTargets: NO_PENDING });
-    if (key === null || uid === null) return;
+    if (key === null || uid === null || !session.db || session.uid !== uid || session.recoveryRequired) return;
+    const lease = captureMatchingLease(uid, session.db);
+    if (!lease) return;
     let active = true;
     const unsub = onSnapshot(
-      query(blocksCol(eventId), where('ownerUid', '==', uid)),
+      query(blocksCol(eventId, lease.db), where('ownerUid', '==', uid)),
       { includeMetadataChanges: true },
       (snap) => {
         if (!active) return;
+        try { lease.assertCurrent(); } catch { return; }
         const data = snap.docs.map((d) => d.data());
         const pending = snap.docs.filter((d) => d.metadata.hasPendingWrites).map((d) => d.data().targetUid);
         setState((prev) => ({
@@ -293,6 +387,7 @@ export function useMyBlocks(uid: string | null): MyBlocks {
       },
       (err) => {
         if (!active) return;
+        try { lease.assertCurrent(); } catch { return; }
         console.error('[blocks] own-blocks listener failed', err);
         setState({ key, data: [], loading: false, error: true, confirmed: false, pendingTargets: NO_PENDING });
       },
@@ -301,14 +396,14 @@ export function useMyBlocks(uid: string | null): MyBlocks {
       active = false;
       unsub();
     };
-  }, [key, uid, eventId]);
-  return state.key === key
+  }, [key, uid, eventId, session.db, session.generation, session.uid, session.recoveryRequired]);
+  return state.key === key && session.uid === uid && !!session.db && !session.recoveryRequired
     ? {
         data: state.data,
         loading: state.loading,
         error: state.error,
         confirmed: state.confirmed,
-        pendingTargets: state.pendingTargets,
+        pendingTargets: pending.size > 0 ? computeHiddenSet(pending, state.pendingTargets, true) : state.pendingTargets,
       }
     : { data: [], loading: uid !== null, error: false, confirmed: uid === null, pendingTargets: NO_PENDING };
 }

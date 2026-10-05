@@ -1,7 +1,11 @@
+import { useEffect, useState } from 'react';
+import { privateCacheRecoveryHref } from '../auth/privateCacheRecoveryNavigation';
 import { useLocation, useNavigate } from 'react-router';
+import { usePrivateFirestore } from '../hooks/usePrivateFirestore';
+import { useOnline } from '../hooks/useOnline';
 import { useAuth } from '../auth/AuthContext';
 import {
-  useEventDoc,
+  useAdminEventDoc,
   usePendingClaims,
   usePendingItems,
   useReportedProofs,
@@ -27,8 +31,25 @@ import MessagesPanel from './admin/MessagesPanel';
  * pending-approvals query the old Approvals tab opened), derives the badge
  * math once, resolves the section from the URL, and renders the matching
  * section inside the shared `AdminSheet` chrome. The sections live in
- * `./admin/*` and keep every write path exactly as built (UI-only re-housing).
+ * `./admin/*` and use the captured private-session Admin write paths.
  */
+
+// Match the established bootstrap wait: availability times out after 10s,
+// while a later confirmed answer can still establish Admin eligibility.
+const ADMIN_EVENT_WAIT_MS = 10_000;
+
+/** A current private-read scope has a bounded availability wait, never authority. */
+function useBoundedPrivateWait(waitKey: string | null): boolean {
+  const [expiredWait, setExpiredWait] = useState<string | null>(null);
+  useEffect(() => {
+    setExpiredWait(null);
+    if (waitKey === null) return;
+    let active = true;
+    const timer = setTimeout(() => { if (active) setExpiredWait(waitKey); }, ADMIN_EVENT_WAIT_MS);
+    return () => { active = false; clearTimeout(timer); };
+  }, [waitKey]);
+  return waitKey !== null && expiredWait === waitKey;
+}
 
 const SECTION_TITLES: Record<AdminSection, string> = {
   queue: 'Review queue',
@@ -40,56 +61,106 @@ const SECTION_TITLES: Record<AdminSection, string> = {
 };
 
 /**
- * The admin gate shell. Only the event doc (readable by any signed-in player)
+ * The admin gate shell. Only the current server Event doc through the memory-only private session
  * is subscribed HERE — the admin-only queue/item/proof/claim subscriptions
- * live in `AdminConsole`, which mounts only once `isAdmin` holds. A non-admin
- * deep link therefore gets the dismissible "Admins only." sheet without ever
+ * live in `AdminConsole`, which mounts only once the confirmed roster admits the
+ * current private-session subject. A non-admin
+ * deep link gets a loading/reconnect/unavailable state until the current private
+ * answer establishes eligibility; a confirmed non-admin gets "Admins only."
+ * without ever
  * opening a listener `firestore.rules` would deny (Codex P2, PR #410: the old
  * console relied on More's own gate for this; the route-driven mount cannot).
  */
 export default function Admin() {
   const { user } = useAuth();
-  // The Event's own SERVER-CONFIRMED flag rides along for #1151's archive gate
-  // (Codex P2 on PR #1162). `data` alone cannot answer "has the server spoken
-  // about this Event?": the ADR 0006 persistent cache delivers a document
-  // before any server snapshot, so a non-null `event` is not evidence the
-  // schedule, name or ban list about to be frozen are the current ones. It is
-  // the same fully-server-committed test `src/App.tsx` applies to the Card
-  // redirect — the `hasServerData` LATCH, plus this snapshot's own `fromCache`
-  // and `hasPendingWrites` — because an Admin's own optimistic `archiving: true`
-  // is emitted server-backed but undecided, and a refusal rolls it back.
-  const { data: event, hasServerData, fromCache, hasPendingWrites } = useEventDoc();
-  const eventConfirmed = hasServerData && !fromCache && !hasPendingWrites;
+  // Only the memory client's current, fully server-committed Event answer
+  // qualifies mounted Admin eligibility. The private hook retains
+  // that committed answer during later own pending writes; pending-first and
+  // cache-origin answers remain unknown. Latest pending metadata is preserved
+  // by the hook without replacing the roster with an optimistic payload. Archive
+  // arming separately requires the latest Event metadata to be committed.
+  const { key: eventKey, data: event, loading, serverResolved, hasServerData, fromCache, hasPendingWrites } = useAdminEventDoc();
+  const eventEligible = hasServerData && !fromCache;
+  const eventConfirmed = eventEligible && !hasPendingWrites;
   const navigate = useNavigate();
+  const session = usePrivateFirestore();
+  const online = useOnline();
+  const answerUnavailable = serverResolved && !loading && !hasServerData;
+  const waitKey = user && online && session.db && session.uid === user.uid
+    && !session.failed && !session.recoveryRequired && !eventEligible && !answerUnavailable
+    ? JSON.stringify([eventKey, user.uid, session.generation]) : null;
+  const waitExpired = useBoundedPrivateWait(waitKey);
+  if (user && session.recoveryRequired) {
+    return <AdminSheet title="Admin" onDone={() => navigate('/more', { replace: true })}>
+      <p>Private views require attended device recovery. Recover and verify every account’s queued Marks online first.</p>
+      <a href={privateCacheRecoveryHref(window.location.href)}>Finish device recovery</a>
+    </AdminSheet>;
+  }
 
-  const isAdmin = !!(user && event?.admins?.includes(user.uid));
-  if (!isAdmin || !user) {
+  // Availability never establishes authority. Admin-only subscriptions stay
+  // unmounted until the subject-bound private session has a confirmed roster.
+  const unavailable = 'Admin is unavailable. Reload and try again.';
+  const gateMessage = !user ? 'Sign in to use Admin.'
+    : session.failed ? unavailable
+    : !online ? 'Reconnect to use Admin.'
+    : session.uid !== user.uid || !session.db ? 'Loading Admin…'
+    : !eventEligible ? (answerUnavailable || waitExpired ? unavailable : 'Loading Admin…')
+    : !event ? unavailable
+    : !event.admins?.includes(user.uid) ? 'Admins only.'
+    : null;
+  if (gateMessage !== null || !user) {
     return (
       <AdminSheet title="Admin" onDone={() => navigate('/more', { replace: true })}>
-        <div className="center muted">Admins only.</div>
+        <div className="center muted" role="status">{gateMessage}</div>
       </AdminSheet>
     );
   }
-  return <AdminConsole userUid={user.uid} event={event} eventConfirmed={eventConfirmed} />;
+  return <AdminConsole userUid={user.uid} eventKey={eventKey} event={event} eventConfirmed={eventConfirmed} />;
 }
 
 function AdminConsole({
   userUid,
+  eventKey,
   event,
   eventConfirmed,
 }: {
   userUid: string;
-  event: ReturnType<typeof useEventDoc>['data'];
+  eventKey: string;
+  event: ReturnType<typeof useAdminEventDoc>['data'];
   /** Whether THIS Event snapshot is fully server-committed — threaded straight
    *  through to `ArchiveEvent`, whose arming gate (#1151) needs it. */
   eventConfirmed: boolean;
 }) {
   // `hasServerData` rides along for #1151's drain gate: a not-yet-arrived queue
   // reads as zero pending Claims, and a gate that passes vacuously is no gate.
-  const { claims, hasServerData: claimsLoaded } = usePendingClaims();
-  const { flagged } = useReportedProofs();
-  const { items } = useAllItems();
-  const { items: pendingItems } = usePendingItems();
+  const claimState = usePendingClaims();
+  const { claims, hasServerData: claimsLoaded } = claimState;
+  const proofState = useReportedProofs();
+  const { flagged } = proofState;
+  const itemState = useAllItems();
+  const { items } = itemState;
+  const approvalState = usePendingItems();
+  const { items: pendingItems } = approvalState;
+  const session = usePrivateFirestore();
+  // Empty private rows mean all clear only after every source is confirmed.
+  // Failure/unknown data withholds the queue and its empty badges/actions.
+  const queueSources = [claimState, proofState, itemState, approvalState];
+  const queueFailed = queueSources.some((source) => source.failed);
+  const queueConfirmed = queueSources.every((source) => source.hasServerData === true);
+  const queueWaitKey = !queueFailed && !queueConfirmed
+    ? JSON.stringify([eventKey, userUid, session.generation, 'queue']) : null;
+  const queueWaitExpired = useBoundedPrivateWait(queueWaitKey);
+  const queueStatus = queueFailed || queueWaitExpired ? 'unavailable' : queueConfirmed ? 'ready' : 'loading';
+  const queueMessage = queueStatus === 'unavailable'
+    ? 'Review queue is unavailable. Reload and try again.' : 'Loading review queue…';
+  // Pool availability depends only on its authoritative item answer, not the
+  // unrelated review sources. Unknown rows neither count as empty nor open writes.
+  const itemWaitKey = !itemState.failed && !itemState.hasServerData
+    ? JSON.stringify([eventKey, userUid, session.generation, 'pool']) : null;
+  const itemWaitExpired = useBoundedPrivateWait(itemWaitKey);
+  const itemStatus = itemState.failed || itemWaitExpired ? 'unavailable' : itemState.hasServerData ? 'ready' : 'loading';
+  const itemMessage = itemStatus === 'unavailable'
+    ? 'Prompt pool is unavailable. Reload and try again.' : 'Loading Prompt pool…';
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -166,6 +237,8 @@ function AdminConsole({
     <AdminSheet title={title} onBack={section === 'hub' ? undefined : back} onDone={done}>
       {section === 'hub' && (
         <AdminHub
+          queueStatus={queueStatus}
+          itemStatus={itemStatus}
           event={event}
           reportCount={reports.length}
           approvalCount={pendingItems.length}
@@ -175,8 +248,9 @@ function AdminConsole({
           onOpen={openSection}
         />
       )}
-      {section === 'queue' && (
-        <ReviewQueue
+      {section === 'queue' && (queueStatus !== 'ready'
+        ? <p className="center muted" role="status">{queueMessage}</p>
+        : <ReviewQueue
           event={event}
           reports={reports}
           pendingItems={pendingItems}
@@ -193,8 +267,9 @@ function AdminConsole({
         />
       )}
       {section === 'schedule' && <SchedulePanel days={event?.days ?? []} />}
-      {section === 'pool' && (
-        <PromptPool
+      {section === 'pool' && (itemStatus !== 'ready'
+        ? <p className="center muted" role="status">{itemMessage}</p>
+        : <PromptPool
           items={items}
           threshold={threshold}
           pendingCount={pendingCount}

@@ -1,3 +1,4 @@
+import { privateCacheRecoveryHref } from '../auth/privateCacheRecoveryNavigation';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Navigate, matchPath, useLocation, useNavigate } from 'react-router';
 import { FALLBACK_PATH } from './tabs';
@@ -163,6 +164,12 @@ export default function More() {
         <h3>Support</h3>
         <div className="more-rows">
           <BugReport variant="row" />
+          <a className="more-row" href={privateCacheRecoveryHref(window.location.href)}>
+            <span className="more-row-text">
+              <span className="more-row-title">Device recovery</span>
+              <span className="more-row-sub">Recover queued Marks before clearing old private data</span>
+            </span>
+          </a>
           <AcceptableUse variant="row" attestedAdultAt={myUser?.attestedAdultAt ?? null} />
           <MoreRow
             icon={UserX}

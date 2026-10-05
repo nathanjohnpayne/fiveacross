@@ -68,6 +68,15 @@ const putItem = (id: string, data: Record<string, unknown> = {}) => {
   itemDocs[id] = { status: 'pending', ...data };
 };
 
+// This closed Admin fixture supplies a recovered, current memory-session seam;
+// actor retirement and distinct database binding are tested in private-admin-session.test.ts.
+vi.mock('../privateFirestore', async () => {
+  const { db } = await import('../firebase');
+  return { capturePrivateFirestore: () => ({
+    db, functions: {}, uid: 'admin-uid', generation: 1, assertCurrent: () => {},
+    guard: async <T,>(operation: () => Promise<T>) => operation(),
+  }) };
+});
 vi.mock('../firebase', () => ({
   db: {},
   functions: {},

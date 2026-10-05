@@ -24,12 +24,13 @@ import type { Cell, ClaimDoc } from '../types';
 type Ref = { __kind: 'doc' | 'collection'; id?: string; path: string };
 type Snap = { data: () => unknown; exists: () => boolean };
 
-const { txGet, txSet, txDelete, runTx, eventScope, markRequest } = vi.hoisted(() => ({
+const { txGet, txSet, txDelete, runTx, eventScope, adminSession, markRequest } = vi.hoisted(() => ({
   txGet: vi.fn(),
   txSet: vi.fn(),
   txDelete: vi.fn(),
   runTx: vi.fn(),
   eventScope: { eventId: 'med-2026' },
+  adminSession: { uid: 'admin-1' },
   markRequest: vi.fn(
     (params: {
       cellIndex: number;
@@ -47,6 +48,15 @@ const { txGet, txSet, txDelete, runTx, eventScope, markRequest } = vi.hoisted(()
   ),
 }));
 
+// This closed Admin fixture supplies a recovered, current memory-session seam;
+// actor retirement and distinct database binding are tested in private-admin-session.test.ts.
+vi.mock('../privateFirestore', async () => {
+  const { db } = await import('../firebase');
+  return { capturePrivateFirestore: () => ({
+    db, functions: {}, uid: adminSession.uid, generation: 1, assertCurrent: () => {},
+    guard: async <T,>(operation: () => Promise<T>) => operation(),
+  }) };
+});
 vi.mock('../firebase', () => ({
   db: {},
   get EVENT_ID() {
@@ -194,6 +204,8 @@ const pendingClaim = (over: Partial<ClaimDoc> = {}): ClaimDoc => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  runTx.mockReset();
+  adminSession.uid = 'admin-1';
   eventScope.eventId = 'med-2026';
   vi.spyOn(Date, 'now').mockReturnValue(1000);
   getDocMock.mockResolvedValue({
@@ -411,6 +423,7 @@ describe('confirmClaim — the pending win materializes: credit + publish the Pr
       expect(txDelete).not.toHaveBeenCalled();
       return result;
     });
+    adminSession.uid = 'losing-admin';
     if (winner === 'confirmed') await rejectClaim(pendingClaim(), 'losing-admin');
     else await confirmClaim(pendingClaim(), 'losing-admin');
     expect(claimState).toMatchObject({ status: winner, resolvedBy: 'winning-admin' });

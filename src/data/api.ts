@@ -23,7 +23,9 @@ import {
 } from 'firebase/firestore';
 import type { User } from 'firebase/auth';
 import { httpsCallable } from 'firebase/functions';
-import { db, functions, EVENT_ID } from '../firebase';
+import { db, functions, EVENT_ID, auth, firebaseConfig } from '../firebase';
+import { awaitPrivateFirestore } from '../privateFirestore';
+import { hasOfflineAttestation, recordOfflineAttestation } from '../auth/offlineAttestationWitness';
 import { honorDisplayName, markerDisplayName } from './attribution';
 import { isReportHidden, isBanned, isExplicitWithheld } from './moderation';
 import { reportContent, REPORT_RATE_LIMIT_MS } from './reports';
@@ -72,7 +74,28 @@ import { allowedPhotoUrlOrNull } from './photoUrl';
 import type { Cell, ClaimMode, DayDef, EventDoc, ItemDoc, PlayerDoc, UserDoc, SubmitPromptRequest } from '../types';
 
 // Raw (converter-free) refs for writes, to keep partial merges simple.
-const rawUser = (uid: string) => doc(db, 'users', uid);
+const rawUser = (uid: string, database: Firestore) => doc(database, 'users', uid);
+
+// Bootstrap may use its own memory session during attended recovery. Capture
+// the caller's UID before waiting, never reacquire a newer account afterward.
+async function ownProfileLease(uid: string) {
+  if (auth.currentUser?.uid !== uid) throw new Error('Private account changed.');
+  const lease = await awaitPrivateFirestore(uid, true);
+  lease.assertCurrent();
+  return lease;
+}
+
+// Only ordering metadata in this process: each named memory database belongs to
+// one private Auth incarnation. No profile, stamp or extra witness is persisted.
+const attestationWitnessRevision = new WeakMap<Firestore, object>();
+
+async function rememberAttestation(uid: string, attested: boolean, assertCurrent: () => void): Promise<void> {
+  try { await recordOfflineAttestation(firebaseConfig.projectId, uid, attested, assertCurrent); } catch {
+    // Failed storage writes retire a revoked witness in this process, but cannot
+    // convey revocation to a fresh process if every persistent write is refused.
+    // A committed server result still stands when this render-only hint fails.
+  }
+}
 const rawBoard = (uid: string, eventId: string = EVENT_ID) =>
   doc(db, 'events', eventId, 'boards', uid);
 // A Player's Day Card write ref: events/{EVENT_ID}/days/{dayIndex}/boards/{uid}
@@ -255,12 +278,14 @@ function bootstrapProfile(u: User, now: number = Date.now()) {
  * Pinned by src/data/auth-profile-race.test.ts.
  */
 export async function ensureUserProfile(u: User): Promise<void> {
-  const ref = rawUser(u.uid);
-  await runTransaction(db, async (tx) => {
-    const snap = await tx.get(ref);
+  const lease = await ownProfileLease(u.uid);
+  const ref = rawUser(u.uid, lease.db);
+  await lease.guard(() => runTransaction(lease.db, async (tx) => {
+    lease.assertCurrent();
+    const snap = await lease.guard(() => tx.get(ref));
     if (snap.exists()) return;
     tx.set(ref, bootstrapProfile(u));
-  });
+  }));
 }
 
 /**
@@ -288,9 +313,11 @@ export async function ensureUserProfile(u: User): Promise<void> {
  * row, which then takes the merge-only branch.
  */
 export async function attestAdult(u: User, now: number = Date.now()): Promise<void> {
-  const ref = rawUser(u.uid);
-  await runTransaction(db, async (tx) => {
-    const snap = await tx.get(ref);
+  const lease = await ownProfileLease(u.uid);
+  const ref = rawUser(u.uid, lease.db);
+  await lease.guard(() => runTransaction(lease.db, async (tx) => {
+    lease.assertCurrent();
+    const snap = await lease.guard(() => tx.get(ref));
     if (!snap.exists()) {
       // Won the create race on an absent row — write the complete profile, not a
       // stamp-only stub, so the create-only bootstrap retry cannot strand it.
@@ -300,49 +327,49 @@ export async function attestAdult(u: User, now: number = Date.now()): Promise<vo
     const existing = (snap.data() as Partial<UserDoc>).attestedAdultAt;
     if (typeof existing === 'number') return; // keep the FIRST attestation, never overwrite
     tx.set(ref, { attestedAdultAt: now }, { merge: true });
-  });
+  }));
+  // A completed attest is newer than a server read already in flight, even if
+  // that read returns its earlier absence after this boolean is persisted.
+  attestationWitnessRevision.set(lease.db, {});
+  await lease.guard(() => rememberAttestation(u.uid, true, lease.assertCurrent));
 }
 
 /**
  * Read a User's settled 18+ attestation for the re-prompt gate (#23): the
  * ms-epoch `attestedAdultAt` when present, else `null` for a profile that is
  * DEFINITIVELY without one (missing doc or missing field). A single point read of
- * `users/{uid}`; AuthContext calls it once per auth change AFTER `ensureUserProfile`
+ * `users/{uid}` in the captured private memory session; AuthContext calls it once per auth change AFTER `ensureUserProfile`
  * has settled the row, and treats a THROWN read (offline / permission) as UNKNOWN
  * — never a re-prompt — so only a definite `null` gates a signed-in User. An
  * UNKNOWN is not a silent stall either: AuthContext surfaces the failure through
  * its retryable deal-error panel, whose Retry re-runs this read (#112 round 2).
  */
 export async function readAdultAttestation(uid: string): Promise<number | null> {
-  const snap = await getDoc(rawUser(uid));
+  const lease = await ownProfileLease(uid);
+  const snap = await lease.guard(() => getDoc(rawUser(uid, lease.db)));
   const v = snap.exists() ? (snap.data() as Partial<UserDoc>).attestedAdultAt : undefined;
   return typeof v === 'number' ? v : null;
 }
 
 /**
- * Read a User's 18+ attestation from the PERSISTENT LOCAL CACHE only — the
- * offline-safe, render-path read for the cold-boot gate (#115). Unlike
- * `readAdultAttestation` (a server point read that offline never resolves — a
- * transaction-free `getDoc` still awaits the network round trip when the doc is
- * absent from cache), this is `getDocFromCache`: it resolves SYNCHRONOUSLY from
- * the IndexedDB cache (ADR 0006) with no network, so a returning User's already-
- * cached row settles the gate while offline.
- *
- * Returns the ms-epoch `attestedAdultAt` when the cached row carries one, or
- * `null` for a cached row that DEFINITIVELY lacks it (present-but-unstamped, or a
- * cached "not found"). It REJECTS on a genuine cache MISS (the row was never
- * fetched into this device's cache). AuthContext maps those three outcomes to the
- * knownFirstBingoAt / hasServerData tri-state discipline: a stamp settles the gate
- * TRUE offline; a definite `null` or a cache miss stays UNKNOWN (never re-prompted
- * offline, never settled `true`), so cache-first can neither block render nor fail
- * the age gate OPEN. The authoritative present/absent determination — the one that
- * can settle a definite re-prompt — comes from the server `readAdultAttestation`
- * on the online/reconnect path, never from this cache read.
+ * Provisional offline rendering uses only the owner-approved UID/project boolean
+ * witness and an existing cached Event card, legacy or daily. No profile row or
+ * timestamp is read from durable Firestore; `1` is a truthy render sentinel, never
+ * deal authority. Missing witness/card stays unknown (null); server-only reads
+ * govern new deals.
  */
 export async function readAdultAttestationFromCache(uid: string): Promise<number | null> {
-  const snap = await getDocFromCache(rawUser(uid));
-  const v = snap.exists() ? (snap.data() as Partial<UserDoc>).attestedAdultAt : undefined;
-  return typeof v === 'number' ? v : null;
+  if (auth.currentUser?.uid !== uid) throw new Error('Private account changed.');
+  const eventId = EVENT_ID;
+  const projectId = firebaseConfig.projectId;
+  const cached = await hasCachedCard(uid, eventId);
+  const assertCurrent = () => {
+    if (auth.currentUser?.uid !== uid || firebaseConfig.projectId !== projectId || EVENT_ID !== eventId) throw new Error('Private account changed.');
+  };
+  assertCurrent();
+  const witnessed = cached && await hasOfflineAttestation(projectId, uid, assertCurrent);
+  assertCurrent();
+  return witnessed ? 1 : null;
 }
 
 /**
@@ -355,13 +382,27 @@ export async function readAdultAttestationFromCache(uid: string): Promise<number
  * REJECTS when the server cannot be reached — so AuthContext treats a thrown read
  * as "authority NOT established" (no `attestedAuthoritative`, no deal; fall to the
  * deferred/offline path), and only a server-returned stamp (or a same-session
- * optimistic attest) authorizes the deal. The provisional offline RENDER still uses
+ * committed attest) authorizes the deal. The provisional offline RENDER still uses
  * the cache-first `readAdultAttestationFromCache`; only the deal-authority gate is
- * server-only.
+ * server-only. A definitive server absence removes the render witness when
+ * this is the latest-started read in its private incarnation and no attest has
+ * committed since. Superseded results still return their actual server value
+ * but cannot change the witness; a later absence still revokes. A
+ * confirmed stamp records only its boolean, never this timestamp/profile.
  */
 export async function readAdultAttestationFromServer(uid: string): Promise<number | null> {
-  const snap = await getDocFromServer(rawUser(uid));
+  const lease = await ownProfileLease(uid);
+  const readRevision = {};
+  attestationWitnessRevision.set(lease.db, readRevision);
+  const snap = await lease.guard(() => getDocFromServer(rawUser(uid, lease.db)));
   const v = snap.exists() ? (snap.data() as Partial<UserDoc>).attestedAdultAt : undefined;
+  // Each result remains server authority for its caller. Only the latest-started
+  // read or committed attest may update the offline render witness: an older
+  // positive cannot undo a newer absence, nor can a pre-commit absence undo an
+  // attest. Web Locks serialize writes already dispatched before a newer operation.
+  if (attestationWitnessRevision.get(lease.db) === readRevision) {
+    await lease.guard(() => rememberAttestation(uid, typeof v === 'number', lease.assertCurrent));
+  }
   return typeof v === 'number' ? v : null;
 }
 
@@ -468,6 +509,7 @@ export type JoinOutcome = boolean | 'deferred';
  * where the old plain write would hang until the #403 timeout).
  */
 export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<JoinOutcome> {
+  const lease = await ownProfileLease(u.uid);
   // A join spans several reads and a transaction. Keep every Event-owned ref
   // pinned to the scope active when the operation began; changing the live
   // binding while an Event A read is in flight must never split the eventual
@@ -488,7 +530,7 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
   // runDeal surfaces the retryable dealError, exactly like any other deal failure.
   // A readable-but-empty/missing event (no `days[]`) is a legitimate legacy signal;
   // the threshold/ban fields then fall open on the absent keys as before.
-  const joinEventSnap = await getDoc(rawEvent(eventId));
+  const joinEventSnap = await lease.guard(() => getDoc(rawEvent(eventId)));
   const joinEventData = joinEventSnap.exists() ? (joinEventSnap.data() as Partial<EventDoc>) : null;
   // A CLOSED Event TAKES NO JOIN (#134, Codex P1 on PR #1139). The daily branch
   // below merges identity into `players/{uid}` on EVERY visit, returning Players
@@ -552,12 +594,14 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
     // seeded only for fields the row doesn't already carry — so a concurrent
     // `dayStats` write (or real earlier progress) is never reset to 0. The return
     // value reports whether this was a genuine first join (no identity yet), so the
-    // `join_event` analytic still fires exactly once.
+    // a still-current successful completion records `join_event` once. If
+    // Auth retirement lands after commit but before acknowledgement, the
+    // committed identity remains while that local analytic may be omitted.
     // The saved profile read stays OUTSIDE the transaction: it is advisory
     // identity input (validated + fallback-guarded either way), lives on a doc
     // this write never touches, and re-reading it on a contention retry would
     // add a round trip for no correctness gain.
-    const profileSnap = await getDoc(rawUser(u.uid)).catch(() => null);
+    const profileSnap = await lease.guard(() => getDoc(rawUser(u.uid, lease.db))).catch(() => { lease.assertCurrent(); return null; });
     const profile = profileSnap?.exists() ? (profileSnap.data() as Partial<UserDoc>) : null;
     const savedPhoto = profile ? allowedPhotoUrlOrNull(profile.photoURL, u.uid) : null;
     const displayName = resolveDisplayName(profile, u.displayName);
@@ -574,8 +618,9 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
     // the monotonic rule denies and which then failed the WHOLE join). Under
     // the transaction the loser retries, re-reads the committed row, and its
     // guards degrade it to an identity-only merge with `alreadyJoined` true.
-    return await runTransaction(db, async (tx) => {
-      const existingPlayer = await tx.get(rawPlayer(u.uid, eventId));
+    return await lease.guard(() => runTransaction(db, async (tx) => {
+      lease.assertCurrent();
+      const existingPlayer = await lease.guard(() => tx.get(rawPlayer(u.uid, eventId)));
       const existing = existingPlayer.exists() ? (existingPlayer.data() as Partial<UserDoc & { joinedAt: number; bingoCount: number; squaresMarked: number; firstBingoAt: number | null; blackout: boolean; reshufflesUsed: number }>) : null;
       const alreadyJoined = existing != null && typeof existing.joinedAt === 'number';
       // Identity always merged; aggregates only for fields not already present, so a
@@ -610,10 +655,10 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
       if (typeof existing?.reshufflesUsed !== 'number') seed.reshufflesUsed = 0;
       tx.set(rawPlayer(u.uid, eventId), seed, { merge: true });
       return !alreadyJoined; // a genuine first join (no prior identity) is the analytic-worthy event
-    });
+    }));
   }
 
-  const existing = await getDoc(rawBoard(u.uid, eventId));
+  const existing = await lease.guard(() => getDoc(rawBoard(u.uid, eventId)));
   if (existing.exists()) return false;
 
   // Denormalize the Player's SAVED identity, not the raw Google one (Codex P2
@@ -623,12 +668,14 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
   // only when it is a deliberate custom avatar (customPhoto) — otherwise the
   // profile photo is just a stale copy of the Google one, so the live auth
   // value wins. One extra read, join-path only (returning Players early-return
-  // above), fetched alongside the pool; best-effort — a missing or unreadable
-  // profile falls back to the auth values rather than blocking the deal.
+  // above), fetched alongside the pool after acquiring a current private lease.
+  // Missing/unreadable saved fields fall back to Auth only while that lease
+  // stays current; bridge failure or retirement still refuses the deal.
   const [profileSnap, snap] = await Promise.all([
-    getDoc(rawUser(u.uid)).catch(() => null),
-    getDocs(query(rawItems(eventId), where('status', '==', 'active'))),
+    lease.guard(() => getDoc(rawUser(u.uid, lease.db))).catch(() => { lease.assertCurrent(); return null; }),
+    lease.guard(() => getDocs(query(rawItems(eventId), where('status', '==', 'active')))),
   ]);
+  lease.assertCurrent();
   const profile = profileSnap?.exists() ? (profileSnap.data() as Partial<UserDoc>) : null;
   // Validate before denormalizing (Codex P2 on PR #66 round 3): users/{uid} is
   // self-writable — firestore.rules shape-checks its fields, but a row written
@@ -729,8 +776,9 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
   // no `joinedAt` re-stamp, no duplicate `join_event`). The pool/profile reads
   // stay outside: a query cannot run in a transaction, and the deal is
   // deterministic from the uid, so a retry recomputes identical cells.
-  const dealtNew = await runTransaction(db, async (tx) => {
-    const latestBoard = await tx.get(rawBoard(u.uid, eventId));
+  const dealtNew = await lease.guard(() => runTransaction(db, async (tx) => {
+    lease.assertCurrent();
+    const latestBoard = await lease.guard(() => tx.get(rawBoard(u.uid, eventId)));
     if (latestBoard.exists()) return false;
     const now = Date.now();
     // dayIndex: 0 honors the now-required BoardDoc.dayIndex — today there is one
@@ -754,10 +802,11 @@ export async function joinAndDeal(u: User, eventId: string = EVENT_ID): Promise<
       { merge: true },
     );
     return true; // dealt a NEW board — an actual join
-  });
+  }));
   // AFTER the transaction settles, never inside it — a transaction retries on
   // contention, and firing here (rather than from the loser's abandoned
-  // attempts) fires exactly once per genuinely committed deal (#559).
+  // attempts) fires once per committed deal whose private completion stays
+  // current (#559); retirement after commit can omit this local analytic.
   if (dealtNew) trackCommunityPromptDeal(cells, 0, eventId);
   return dealtNew;
 }

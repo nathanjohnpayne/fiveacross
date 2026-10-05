@@ -52,6 +52,8 @@ const H = vi.hoisted(() => ({
 
 const TEST_EVENT = 'test-event';
 
+vi.mock('../hooks/usePrivateFirestore', () => ({ usePrivateFirestore: () => ({ uid: H.user?.uid ?? null, db: {}, generation: 1, recoveryRequired: false, failed: false }) }));
+
 vi.mock('../firebase', () => ({
   db: {},
   get EVENT_ID() {
@@ -62,11 +64,11 @@ vi.mock('../analytics', () => ({ track: vi.fn() }));
 vi.mock('../auth/AuthContext', () => ({ useAuth: () => ({ user: H.user, loading: false }) }));
 vi.mock('../hooks/useData', () => ({
   // #264: day-meta honor reads — inert stubs (no pinned honors).
-  useDayMeta: () => ({ data: null, loading: false, hasServerData: true }),
+  useDayMeta: () => ({ data: null, loading: false, hasServerData: true, fromCache: false, hasPendingWrites: false }),
   useDayMetas: () => new Map(),
   useDayMetasStatus: () => ({ metas: new Map(), loaded: true }),
   // ConfirmWinMoments
-  useBoard: () => ({ data: H.board, loading: false, hasServerData: true }),
+  useBoard: () => ({ data: H.board, loading: false, hasServerData: true, fromCache: false, hasPendingWrites: false }),
   useMyDayBoards: () => H.dayBoards,
   useMyPlayer: () => ({ data: H.player, loading: H.playerLoading, hasServerData: H.playerConfirmed }),
   useLeaderboard: () => ({ players: H.players, loading: false, hasServerData: H.rosterConfirmed }),
@@ -78,10 +80,11 @@ vi.mock('../hooks/useData', () => ({
   }),
   // Admin
   useEventDoc: () => ({ data: H.event, loading: false }),
-  usePendingClaims: () => ({ claims: H.pendingClaims, loading: false }),
-  useReportedProofs: () => ({ flagged: [], loading: false }),
-  useAllItems: () => ({ items: [], loading: false }),
-  usePendingItems: () => ({ items: [], loading: false }),
+  useAdminEventDoc: () => ({ data: H.event, loading: false, hasServerData: true, fromCache: false, hasPendingWrites: false }),
+  usePendingClaims: () => ({ claims: H.pendingClaims, loading: false, hasServerData: true, failed: false }),
+  useReportedProofs: () => ({ flagged: [], loading: false, hasServerData: true, failed: false }),
+  useAllItems: () => ({ items: [], loading: false, hasServerData: true, failed: false }),
+  usePendingItems: () => ({ items: [], loading: false, hasServerData: true, failed: false }),
   isReportHidden: () => false,
   // Admin.tsx imports these ban predicates from useData (#108/#122); this mock
   // replaces the whole module, so they must be provided or Admin loads with the

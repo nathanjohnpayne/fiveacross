@@ -73,7 +73,9 @@ function cellReflectsConfirm(cells: Cell[], entry: AwaitingConfirm): boolean {
  * silently misses the win.
  *
  * This component closes that gap. It is mounted ONCE at the app shell — OUTSIDE the
- * tab Routes — so it runs wherever the Player is. It watches the Player's OWN
+ * tab Routes — so it runs wherever the Player is after attended device recovery
+ * admits own-Claim reads. While quarantined it cannot observe a new pending
+ * witness; a Claim first seen confirmed after recovery is history. It watches the Player's OWN
  * Claims (`useMyClaims`, a `where('uid','==',uid)`-scoped read the rules permit),
  * notices when one flips to `confirmed`, waits for the confirm's board write to
  * reflect the flip, and emits the SAME Moment(s) the live edge would have —
@@ -93,7 +95,8 @@ function cellReflectsConfirm(cells: Cell[], entry: AwaitingConfirm): boolean {
  *      at first sight is baselined as history. This is the key discriminator, not a
  *      first-snapshot latch — so a confirm that becomes visible only on RECONNECT
  *      (the offline-but-open case) still emits, while only a confirm that landed
- *      while the app was FULLY CLOSED is the accepted residual.
+ *      while the app was FULLY CLOSED or own-Claim reads were quarantined is
+ *      baselined as history; recovery does not create retroactive announcements.
  *   4. UID-KEYED PERSISTENCE (finding 4). The working state lives in module scope
  *      keyed by uid (`getConfirmState`, mirroring the #110 pending queue), so an
  *      account switch PARKS held work (including a roster-held first_bingo) and a

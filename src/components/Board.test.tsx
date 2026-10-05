@@ -43,9 +43,10 @@ const H = vi.hoisted(() => ({
   authReads: 0,
   // The viewer's reciprocal hidden set (#689); empty unless a test sets it.
   hidden: new Set<string>() as ReadonlySet<string>,
+  blockSetReady: true, blockSetFailed: false, retryBlocks: vi.fn(),
 }));
 
-vi.mock('../hooks/useBlocks', () => ({ useHiddenUids: () => ({ hidden: H.hidden, ready: true }) }));
+vi.mock('../hooks/useBlocks', () => ({ useHiddenUids: () => ({ hidden: H.hidden, ready: H.blockSetReady, failed: H.blockSetFailed, retry: H.retryBlocks }) }));
 vi.mock('../hooks/useData', () => ({
   // #264: day-meta honor reads — inert stubs (no pinned honors).
   useDayMeta: () => ({ data: H.dayMeta, loading: false, hasServerData: true }),
@@ -302,6 +303,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   __resetCoachOverlayDismissalsForTests();
   H.eventId = 'test-event';
+  H.blockSetReady = true; H.blockSetFailed = false;
   H.authReads = 0;
   H.dealDayCard.mockReset();
   H.dealDayCard.mockResolvedValue(false);
@@ -3046,5 +3048,42 @@ describe('the now-timer covers the configured Standings Freeze', () => {
     // Nothing further to schedule once the ceremonial Day (and so the freeze)
     // has passed.
     expect(scheduledDelays()).not.toContain(CHECKOUT - (LAST_UNLOCK + 1));
+  });
+});
+
+
+describe('offline Tally privacy state (#1411)', () => {
+  it('failed online block confirmation offers retry without hiding the cached Board', () => {
+    H.blockSetReady = false; H.blockSetFailed = true;
+    H.board = { uid: 'u1', dayIndex: 0, seed: 1411, createdAt: 0, cells: dealt() };
+    render(<Board />);
+    expect(document.querySelectorAll('.grid .cell')).toHaveLength(25);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry Tally' }));
+    expect(H.retryBlocks).toHaveBeenCalledOnce();
+    expect(H.setMark).not.toHaveBeenCalled();
+  });
+
+  it('keeps the cached Board visible while explicitly withholding an unknown offline Tally', () => {
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    try {
+      H.blockSetReady = false;
+      const cells = dealt().map((cell) => ({ ...cell, marked: true, markedAt: 1 }));
+      H.board = { uid: 'u1', dayIndex: 0, seed: 1411, createdAt: 0, cells };
+      render(<Board />);
+      expect(document.querySelectorAll('.grid .cell')).toHaveLength(25);
+      expect(screen.getAllByText('Reconnect to see the Tally.')).toHaveLength(1);
+      expect(screen.queryByText('Reconnect for Tally')).toBeNull();
+      expect(H.setMark).not.toHaveBeenCalled();
+    } finally { vi.restoreAllMocks(); }
+  });
+  it('does not withhold Tally after the same session confirmed its block set', () => {
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    try {
+      const cells = dealt(); cells[0] = { ...cells[0], marked: true, markedAt: 1 };
+      H.board = { uid: 'u1', dayIndex: 0, seed: 1411, createdAt: 0, cells };
+      render(<Board />);
+      expect(document.querySelectorAll('.grid .cell')).toHaveLength(25);
+      expect(screen.queryByText('Reconnect to see the Tally.')).toBeNull();
+    } finally { vi.restoreAllMocks(); }
   });
 });

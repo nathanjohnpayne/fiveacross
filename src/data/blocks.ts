@@ -6,7 +6,8 @@ import {
   writeBatch,
   type DocumentReference,
 } from 'firebase/firestore';
-import { db, EVENT_ID } from '../firebase';
+import { db, EVENT_ID, auth } from '../firebase';
+import { awaitPrivateFirestore } from '../privateFirestore';
 import { blockPairId, blockPairRef, blockPairsCol, blockRef, blocksCol } from './paths';
 import type { BlockDoc, BlockPairDoc } from '../types';
 
@@ -41,6 +42,58 @@ function assertPair(me: string, target: string): void {
   if (target === 'system') throw new Error('[blocks] server-written Moments have no Player to block');
 }
 
+
+// The durable blind batch and private memory listener are separate instances.
+// Relay only this process's pending intent; it cannot establish cold readiness,
+// survives no reload, and is retired with its viewer/Event scope.
+const pendingBlockIntents = new Map<string, Map<object, { target: string; acknowledged: boolean; observed: boolean }>>();
+const pendingBlockSnapshots = new Map<string, ReadonlySet<string>>();
+const pendingBlockListeners = new Set<() => void>();
+const NO_PENDING_BLOCKS: ReadonlySet<string> = new Set();
+const pendingBlockKey = (uid: string, eventId: string) => JSON.stringify([eventId, uid]);
+function publishPendingBlocks(key: string): void {
+  const intents = pendingBlockIntents.get(key);
+  if (intents?.size) pendingBlockSnapshots.set(key, new Set([...intents.values()].map((intent) => intent.target)));
+  else { pendingBlockIntents.delete(key); pendingBlockSnapshots.delete(key); }
+  for (const listener of pendingBlockListeners) listener();
+}
+export function subscribePendingBlocks(listener: () => void): () => void {
+  pendingBlockListeners.add(listener);
+  return () => { pendingBlockListeners.delete(listener); };
+}
+export function pendingBlockTargets(uid: string, eventId: string): ReadonlySet<string> {
+  return pendingBlockSnapshots.get(pendingBlockKey(uid, eventId)) ?? NO_PENDING_BLOCKS;
+}
+/** A server answer bridges batch ACK to named-memory listener visibility. */
+export function observeConfirmedBlockTargets(uid: string, eventId: string, hidden: ReadonlySet<string>): void {
+  const key = pendingBlockKey(uid, eventId);
+  const intents = pendingBlockIntents.get(key);
+  if (!intents) return;
+  let changed = false;
+  for (const [token, intent] of intents) {
+    if (hidden.has(intent.target)) {
+      intent.observed = true;
+      if (intent.acknowledged) { intents.delete(token); changed = true; }
+    }
+  }
+  if (changed) publishPendingBlocks(key);
+}
+/** Leaving a logical viewer/Event cannot transfer unfinished UI intent back. */
+export function retirePendingBlocks(uid: string, eventId: string): void {
+  const key = pendingBlockKey(uid, eventId);
+  if (pendingBlockIntents.delete(key)) publishPendingBlocks(key);
+}
+
+/** The single shell provider's committed scope retains only its own relay.
+ * Unmount alone is not a scope transition; a same-scope remount still needs
+ * unfinished intent until the independent memory listener observes the batch. */
+export function retirePendingBlocksOutsideScope(uid: string | null, eventId: string): void {
+  const retained = uid === null ? null : pendingBlockKey(uid, eventId);
+  for (const key of pendingBlockIntents.keys()) {
+    if (key !== retained) { pendingBlockIntents.delete(key); publishPendingBlocks(key); }
+  }
+}
+
 /**
  * Block `target`: set the caller's direction record and the pair record in one
  * batch. IDEMPOTENT under the rules (a re-set is a `createdAt` refresh on the
@@ -48,7 +101,9 @@ function assertPair(me: string, target: string): void {
  * "already blocked" readiness gate: a blind set from a second device, or before
  * the own-blocks listener has loaded, lands the same way. Rejects online on a
  * rules denial; offline the batch pends durably (ADR 0006) and the promise
- * settles on reconnect.
+ * settles on reconnect. An in-process relay preserves same-session hiding
+ * only for a viewer whose memory pair set was already server-confirmed; an
+ * ACK retains that target until the memory listener observes it.
  */
 export function blockPlayer({ me, target, eventId = EVENT_ID }: BlockPairParams): Promise<void> {
   assertPair(me, target);
@@ -57,7 +112,23 @@ export function blockPlayer({ me, target, eventId = EVENT_ID }: BlockPairParams)
   const batch = writeBatch(db);
   batch.set(blockRef(me, target, eventId), direction);
   batch.set(blockPairRef(me, target, eventId), pair);
-  return batch.commit();
+  const commit = batch.commit();
+  const key = pendingBlockKey(me, eventId);
+  const token = {};
+  const intent = { target, acknowledged: false, observed: false };
+  const intents = pendingBlockIntents.get(key) ?? new Map();
+  intents.set(token, intent);
+  pendingBlockIntents.set(key, intents);
+  publishPendingBlocks(key);
+  return commit.then(() => {
+    // A retired scope cannot be reintroduced by an old completion.
+    if (pendingBlockIntents.get(key)?.get(token) !== intent) return;
+    intent.acknowledged = true;
+    if (intent.observed) { intents.delete(token); publishPendingBlocks(key); }
+  }, (error: unknown) => {
+    if (pendingBlockIntents.get(key)?.get(token) === intent) { intents.delete(token); publishPendingBlocks(key); }
+    throw error;
+  });
 }
 
 export interface UnblockResult {
@@ -84,10 +155,19 @@ export interface UnblockResult {
  * indefinitely while offline. So every unblock write goes through here, and
  * an unblock needs a connection: offline it rejects instead of queueing.
  */
-function deleteOnServer(refs: readonly DocumentReference<unknown>[]): Promise<void> {
-  return runTransaction(db, async (tx) => {
+type BlockLease = Awaited<ReturnType<typeof awaitPrivateFirestore>>;
+async function ownBlockLease(uid: string): Promise<BlockLease> {
+  if (auth.currentUser?.uid !== uid) throw new Error('Private account changed.');
+  const lease = await awaitPrivateFirestore(uid, true);
+  lease.assertCurrent();
+  return lease;
+}
+
+function deleteOnServer(refs: readonly DocumentReference<unknown>[], lease: BlockLease): Promise<void> {
+  return lease.guard(() => runTransaction(lease.db, async (tx) => {
+    lease.assertCurrent();
     for (const ref of refs) tx.delete(ref);
-  });
+  }));
 }
 
 /**
@@ -130,28 +210,32 @@ export async function unblockPlayer({
   eventId = EVENT_ID,
 }: BlockPairParams): Promise<UnblockResult> {
   assertPair(me, target);
-  const direction = blockRef(me, target, eventId);
-  const pair = blockPairRef(me, target, eventId);
+  const lease = await ownBlockLease(me);
+  const direction = blockRef(me, target, eventId, lease.db);
+  const pair = blockPairRef(me, target, eventId, lease.db);
   try {
-    await deleteOnServer([direction, pair]);
+    await deleteOnServer([direction, pair], lease);
     return { stillHidden: false };
   } catch (err) {
+    lease.assertCurrent();
     if (!isPermissionDenied(err)) throw err;
   }
   try {
-    await deleteOnServer([direction]);
+    await deleteOnServer([direction], lease);
   } catch (err) {
+    lease.assertCurrent();
     if (!isPermissionDenied(err)) throw err;
     // The other direction left between our first two attempts (an interleaved
     // mutual unblock, CodeRabbit on #1300), so the rules now require the pair
     // to leave WITH ours: the first attempt's shape, once more.
-    await deleteOnServer([direction, pair]);
+    await deleteOnServer([direction, pair], lease);
     return { stillHidden: false };
   }
   try {
-    await deleteOnServer([pair]);
+    await deleteOnServer([pair], lease);
     return { stillHidden: false };
   } catch {
+    lease.assertCurrent();
     // Denied is the ordinary mutual case, but a MISSING pair is denied too
     // (a direction that had lost its pair to a concurrent delete; Codex P2 on
     // #1300), so ask the server whether the pair still stands rather than
@@ -161,10 +245,11 @@ export async function unblockPlayer({
     // provider's query, which the rules allow whatever it contains) answers
     // for a missing pair too. An unreadable answer keeps the conservative `true`.
     try {
-      const mine = await getDocsFromServer(query(blockPairsCol(eventId), where('uids', 'array-contains', me)));
+      const mine = await lease.guard(() => getDocsFromServer(query(blockPairsCol(eventId, lease.db), where('uids', 'array-contains', me))));
       const id = blockPairId(me, target);
       return { stillHidden: mine.docs.some((row) => row.id === id) };
     } catch {
+      lease.assertCurrent();
       return { stillHidden: true };
     }
   }
@@ -186,7 +271,8 @@ export async function unblockPlayer({
 export async function reconcileOrphanPair({ me, target, eventId = EVENT_ID }: BlockPairParams): Promise<boolean> {
   try {
     assertPair(me, target);
-    await deleteOnServer([blockPairRef(me, target, eventId)]);
+    const lease = await ownBlockLease(me);
+    await deleteOnServer([blockPairRef(me, target, eventId, lease.db)], lease);
     return true;
   } catch {
     return false;
@@ -226,19 +312,23 @@ export async function repairMissingPairs({
   knownCounterparts: ReadonlySet<string>;
   eventId?: string;
 }): Promise<number> {
-  const own = await getDocsFromServer(query(blocksCol(eventId), where('ownerUid', '==', me)));
+  const lease = await ownBlockLease(me);
+  const own = await lease.guard(() => getDocsFromServer(query(blocksCol(eventId, lease.db), where('ownerUid', '==', me))));
   let restored = 0;
   let transient: unknown = null;
   for (const row of own.docs) {
+    lease.assertCurrent();
     const target = row.data().targetUid;
     if (typeof target !== 'string' || target === me || knownCounterparts.has(target)) continue;
     const pair: BlockPairDoc = { uids: me < target ? [me, target] : [target, me], eventId };
     try {
-      await runTransaction(db, async (tx) => {
-        tx.set(blockPairRef(me, target, eventId), pair);
-      });
+      await lease.guard(() => runTransaction(lease.db, async (tx) => {
+        lease.assertCurrent();
+        tx.set(blockPairRef(me, target, eventId, lease.db), pair);
+      }));
       restored += 1;
     } catch (err) {
+      lease.assertCurrent();
       // Denied: the direction left meanwhile, so there is nothing to restore.
       if (!isPermissionDenied(err)) transient = err;
     }
@@ -273,11 +363,11 @@ export function hiddenUidsFromPairs(
 }
 
 /**
- * The published hidden set for one snapshot. A snapshot with pending local
- * writes publishes `current ∪ lastCommitted` (the set from the latest snapshot
- * without pending writes), and a settled one publishes `current`. So a
- * pending BLOCK hides immediately (it is in `current`) and no pending local
- * write ever reveals anyone. This is defence in depth, not the unblock
+ * The conservative union for an unsettled snapshot or in-process block
+ * overlay: `current ∪ lastCommitted`. Only a server-confirmed snapshot without
+ * pending writes can publish `current` alone. New batch intent is relayed from
+ * the durable writer into an already-confirmed memory set; no pending/cache
+ * answer establishes cold readiness or reveals a confirmed counterpart. This is defence in depth, not the unblock
  * guarantee: the SDK does not flag a query snapshot whose only pending write
  * REMOVED a document, so a pending pair delete could not be seen here at all.
  * That is why `unblockPlayer` never deletes locally (`deleteOnServer`), and
@@ -286,9 +376,9 @@ export function hiddenUidsFromPairs(
 export function computeHiddenSet(
   current: ReadonlySet<string>,
   lastCommitted: ReadonlySet<string>,
-  hasPendingWrites: boolean,
+  unsettled: boolean,
 ): ReadonlySet<string> {
-  if (!hasPendingWrites) return current;
+  if (!unsettled) return current;
   const union = new Set(current);
   for (const uid of lastCommitted) union.add(uid);
   return union;

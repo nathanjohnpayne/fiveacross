@@ -25,8 +25,11 @@ const H = vi.hoisted(() => ({
   hideProof: vi.fn(),
   restoreProof: vi.fn(),
   clearProofReports: vi.fn(),
+  deleteProofAsAdmin: vi.fn(async () => undefined),
   confirmClaim: vi.fn(),
 }));
+
+vi.mock('../../hooks/usePrivateFirestore', () => ({ usePrivateFirestore: () => ({ uid: H.user?.uid ?? null, db: {}, generation: 1, recoveryRequired: false, failed: false }) }));
 
 vi.mock('../../firebase', () => ({ db: {}, EVENT_ID: 'test-event', storage: {}, auth: {}, googleProvider: {}, analytics: null }));
 vi.mock('../../analytics', () => ({ track: vi.fn() }));
@@ -48,11 +51,12 @@ vi.mock('../../hooks/useData', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../hooks/useData')>();
   return {
     ...actual,
-    useEventDoc: () => ({ data: H.event, loading: false, hasServerData: true }),
-    usePendingClaims: () => ({ claims: H.claims }),
-    usePendingItems: () => ({ items: [] }),
-    useReportedProofs: () => ({ flagged: H.flagged, loading: false }),
-    useAllItems: () => ({ items: [], loading: false }),
+    useEventDoc: () => ({ data: H.event, loading: false, hasServerData: true, fromCache: false, hasPendingWrites: false }),
+    useAdminEventDoc: () => ({ data: H.event, loading: false, hasServerData: true, fromCache: false, hasPendingWrites: false }),
+    usePendingClaims: () => ({ claims: H.claims, hasServerData: true, failed: false }),
+    usePendingItems: () => ({ items: [], hasServerData: true, failed: false }),
+    useReportedProofs: () => ({ flagged: H.flagged, loading: false, hasServerData: true, failed: false }),
+    useAllItems: () => ({ items: [], loading: false, hasServerData: true, failed: false }),
   };
 });
 vi.mock('../../data/admin', () => ({
@@ -72,7 +76,7 @@ vi.mock('../../data/admin', () => ({
   banUser: vi.fn(),
   unbanUser: vi.fn(),
 }));
-vi.mock('../../data/proofs', () => ({ deleteProof: vi.fn() }));
+vi.mock('../../data/proofs', () => ({ deleteProofAsAdmin: H.deleteProofAsAdmin }));
 vi.mock('../../auth/AuthContext', () => ({ useAuth: () => ({ user: H.user }) }));
 
 import Admin from '../Admin';
@@ -121,6 +125,13 @@ beforeEach(() => {
 });
 
 describe('Review queue — the Vision treatment (specs/cloud-vision-moderation.md)', () => {
+  it('routes a hidden Proof takedown through captured private moderation with the observed Admin UID', () => {
+    H.flagged = [proof('private-P', 0, { displayName: 'Private Proof', status: 'hidden', visionFlag: 'violence' })];
+    renderQueue();
+    fireEvent.click(rowFor('Private Proof').getByTitle('Delete'));
+    expect(H.deleteProofAsAdmin).toHaveBeenCalledWith('admin-uid', 'private-P', 'proofs/e/u/private-P.jpg', expect.objectContaining({ daily: false }));
+  });
+
   it('marks a Vision-hidden Proof as hidden WITH its reason, and offers Restore', () => {
     H.flagged = [proof('vh', 0, { displayName: 'Vision Hidden', status: 'hidden', visionFlag: 'violence' })];
     renderQueue();

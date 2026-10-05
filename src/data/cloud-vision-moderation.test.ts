@@ -39,6 +39,15 @@ const { txGet, txSet, txUpdate, txDelete, runTx, getDocMock, getDocsMock, ops } 
   ops: [] as Array<{ op: 'get' | 'set' | 'update' | 'delete'; path: string }>,
 }));
 
+// This closed Admin fixture supplies a recovered, current memory-session seam;
+// actor retirement and distinct database binding are tested in private-admin-session.test.ts.
+vi.mock('../privateFirestore', async () => {
+  const { db } = await import('../firebase');
+  return { capturePrivateFirestore: () => ({
+    db, functions: {}, uid: 'admin-1', generation: 1, assertCurrent: () => {},
+    guard: async <T,>(operation: () => Promise<T>) => operation(),
+  }) };
+});
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'med-2026', storage: {} }));
 // attachProof (below, the #1143 create-shape pin) uploads media before its
 // transaction; stub the two Storage calls proofs.ts uses so nothing here touches

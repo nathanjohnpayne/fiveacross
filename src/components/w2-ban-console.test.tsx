@@ -43,6 +43,8 @@ const H = vi.hoisted(() => ({
   deleteProof: vi.fn(),
 }));
 
+vi.mock('../hooks/usePrivateFirestore', () => ({ usePrivateFirestore: () => ({ uid: H.user?.uid ?? null, db: {}, generation: 1, recoveryRequired: false, failed: false }) }));
+
 vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event', storage: {}, auth: {}, googleProvider: {}, analytics: null }));
 vi.mock('firebase/firestore', () => {
   const makeRef = (kind: string, args: unknown[]) => {
@@ -73,13 +75,23 @@ vi.mock('../hooks/useData', async (importOriginal) => {
       loading: false,
       hasServerData: true,
       serverResolved: true,
+      fromCache: false,
       hasPendingWrites: false,
     }),
-    usePendingClaims: () => ({ claims: H.claims }),
-    useReportedProofs: () => ({ flagged: H.flagged, loading: false }),
-    useAllItems: () => ({ items: H.items, loading: false }),
+    useAdminEventDoc: () => ({
+      data: H.event,
+      loading: false,
+      hasServerData: true,
+      serverResolved: true,
+      fromCache: false,
+      hasPendingWrites: false,
+    }),
+    usePendingClaims: () => ({ claims: H.claims, hasServerData: true, failed: false }),
+    useReportedProofs: () => ({ flagged: H.flagged, loading: false, hasServerData: true, failed: false }),
+    useAllItems: () => ({ items: H.items, loading: false, hasServerData: true, failed: false }),
+    usePendingItems: () => ({ items: [], loading: false, hasServerData: true, failed: false }),
     useDayMetasStatus: () => ({ metas: H.dayMetas, loaded: true }),
-    useLeaderboard: () => ({ players: H.players, loading: false, hasServerData: true }),
+    useLeaderboard: () => ({ players: H.players, loading: false, hasServerData: true, fromCache: false, hasPendingWrites: false }),
   };
 });
 vi.mock('../data/admin', () => ({
@@ -103,7 +115,7 @@ vi.mock('../data/admin', () => ({
   banUser: (...a: unknown[]) => H.banUser(...a),
   unbanUser: (...a: unknown[]) => H.unbanUser(...a),
 }));
-vi.mock('../data/proofs', () => ({ deleteProof: (...a: unknown[]) => H.deleteProof(...a) }));
+vi.mock('../data/proofs', () => ({ deleteProofAsAdmin: (...a: unknown[]) => H.deleteProof(...a) }));
 // Admin pickers read the EDITION-SCOPED list, not the registry (#555).
 vi.mock('../theme/themes', () => {
   const THEMES = [{ id: 'neon-playground', emoji: '🎉', label: 'Neon' }];

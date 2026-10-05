@@ -23,6 +23,8 @@ Blocking is **a per-pair, per-viewer narrowing of ADR 0002's attribution and of 
 
 **Admins are blockable as a social hide only.** The Admin console, moderation surfaces and Notices never apply block filtering, so moderation reach is unchanged. Avatars, profiles and proof media stay globally readable under `specs/event-membership.md` D9 and are hidden in the display only. Only the blocker can reverse a block.
 
+**Private read storage.** Direction and reciprocal-pair reads use an isolated memory-only client. A same-account/Event session retains its confirmed block set when going offline; an offline reload withholds Feed/Tally with explicit reconnect states until online confirmation. Durable block batches remain on the gameplay client, with an in-process pending-target relay that cannot grant cold-start readiness. [ADR 0006](0006-offline-resilience.md) and the owning spec define the amended offline guarantee.
+
 ## Consequences
 
 - Rules, hosting and the client provider are coupled in one direction: deploy `firestore.rules` first (additive collections; the Hearts conjunct denies nothing until a pair exists), hosting second. Old clients never write blocks and simply do not hide until updated. No backfill.

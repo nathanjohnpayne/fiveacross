@@ -11,7 +11,7 @@ type Outcome = { kind: 'done' | 'still-hidden' | 'error'; name: string };
 
 /**
  * More → Blocked players (#689, specs/player-blocking.md § Block and unblock
- * controls): the viewer's OWN direction records, and the only way to reverse a
+ * controls): the viewer's server-observed OWN direction records, and the only way to reverse a
  * block. Only the blocker can reverse one, so a block someone else made on the
  * viewer never appears here (the rules keep it unreadable). Names come from the
  * RAW roster, since the counterpart is hidden everywhere else; a target with no
@@ -22,9 +22,9 @@ type Outcome = { kind: 'done' | 'still-hidden' | 'error'; name: string };
  * transactions, so it needs a connection. While the browser reports offline the
  * button is disabled with a note rather than started (`useOnline` can only
  * trust a `false`); started online, the row reads "Unblocking…" until the
- * server answers. A row whose block batch is still queued reads "Saving this
- * block…" with Unblock disabled until it commits, since the server-only unblock
- * would not see it, and an empty list reads "Loading…" rather than "no blocks"
+ * server answers. An existing row with a pending in-process re-block intent reads "Saving this
+ * block…" with Unblock disabled until commit and pair observation, since the server-only unblock
+ * cannot safely reverse an uncommitted intent, and an empty list reads "Loading…" rather than "no blocks"
  * until the server has answered the listener. Every settle is reported here, at the panel level, because a
  * landed unblock removes its row from the listener: "Unblocked", the
  * `stillHidden` note (worded as likely, not proven, since an orphaned pair or an
@@ -69,7 +69,7 @@ export default function BlockedPlayersPanel({ uid }: { uid: string | null }) {
   // An empty list is "no blocks" only once the server has answered; a cache-only
   // empty snapshot (a first open while offline) keeps the panel loading.
   const awaitingServer = rows.length === 0 && !confirmed;
-  // A row that is still a queued block batch can't be reversed yet: the unblock's
+  // A server-observed row with a queued re-block intent cannot be reversed yet: the unblock's
   // server-only transactions would not see it, fail, and the block would land after.
   const reversible = (target: string) => online && nameKnown(target) && !pendingTargets.has(target);
 

@@ -17,7 +17,8 @@ vi.mock('../firebase', () => ({
   analytics: null,
 }));
 
-const H = vi.hoisted(() => ({ onSnapshot: vi.fn(), navigate: vi.fn() }));
+const H = vi.hoisted(() => ({ onSnapshot: vi.fn(), navigate: vi.fn(), blocksReady: true, blocksFailed: false, retryBlocks: vi.fn() }));
+vi.mock('../hooks/useBlocks', () => ({ useHiddenUids: () => ({ hidden: new Set<string>(), ready: H.blocksReady, failed: H.blocksFailed, retry: H.retryBlocks }) }));
 H.onSnapshot.mockReturnValue(() => {});
 
 vi.mock('firebase/firestore', () => {
@@ -825,5 +826,28 @@ describe('ProofFeed — the Hearts cue (#534/#561)', () => {
     // The Feed itself still renders; only the cue is gone.
     expect(document.querySelector('.tally-card')).toBeTruthy();
     expect(document.querySelector('.feed-heart-cue')).toBeNull();
+  });
+});
+
+
+describe('failed shared Feed confirmation', () => {
+  it('shows an actionable online failure instead of an indefinite loading or empty Feed', () => {
+    H.blocksReady = false; H.blocksFailed = true;
+    try {
+      render(<ProofFeed />);
+      expect(screen.getByText('Feed is temporarily unavailable.')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Retry Feed' }));
+      expect(H.retryBlocks).toHaveBeenCalledOnce();
+      expect(screen.queryByText('Nothing in the feed yet. Somebody do something.')).toBeNull();
+    } finally { H.blocksReady = true; H.blocksFailed = false; }
+  });
+  it('offline failure still presents the explicit reconnect contract', () => {
+    H.blocksReady = false; H.blocksFailed = true;
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    try {
+      render(<ProofFeed />);
+      expect(screen.getByText('Reconnect to see the Feed.')).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Retry Feed' })).toBeNull();
+    } finally { H.blocksReady = true; H.blocksFailed = false; vi.restoreAllMocks(); }
   });
 });

@@ -15,8 +15,8 @@
  * The application is therefore reached through a DYNAMIC import, which is
  * evaluated only when this line runs — after the capture. Do not convert it to
  * a static import, and do not add a static import of anything from `src/` other
- * than the boot seam: either would reintroduce the leak this file exists to
- * close.
+ * than the boot seam: other runtime imports would reintroduce the leak this
+ * file exists to close.
  */
 import {
   captureUrlCredentialsFromUrl,
@@ -44,7 +44,15 @@ void runApplicationBootstrap({
     const { completeHandoffReturn } = await import('./auth/handoffReturn');
     return completeHandoffReturn({ code, origin: window.location.origin });
   },
-  loadMain: () => import('./main'),
+  loadMain: async () => {
+    const { isPrivateCacheRecoveryDocument } = await import('./auth/privateCacheRecoveryNavigation');
+    if (isPrivateCacheRecoveryDocument(window.location.href)) {
+      const { renderPrivateCacheRecovery } = await import('./auth/privateCacheRecoveryPage');
+      renderPrivateCacheRecovery();
+      return;
+    }
+    return import('./main');
+  },
   // The return module may already have touched primary Auth. The boot seam
   // therefore maps any unexpected return failure to recovery, never app mount.
   renderFailure: renderBootstrapFailure,

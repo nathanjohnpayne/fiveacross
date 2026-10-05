@@ -56,6 +56,8 @@ const {
   deleteDocSpy: vi.fn(),
 }));
 
+vi.mock('../privateFirestore', () => ({ capturePrivateFirestore: vi.fn(() => { throw new Error('Unexpected private capture in owner proof tests.'); }) }));
+
 vi.mock('../firebase', () => ({
   db: {},
   get EVENT_ID() {
