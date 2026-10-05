@@ -136,7 +136,7 @@ describe('actual private Admin settings save feedback (#1678)', () => {
     const button = control(); fireEvent.click(button);
     await waitFor(() => expect(H.writes).toHaveLength(1));
     expect(H.writes[0]!.fields).toEqual({ [field]: value });
-    expect(control()).toBe(button); expect(button).toBeDisabled(); assertOld();
+    expect(control()).toBe(button); expect(button).toHaveAttribute('aria-disabled', 'true'); expect(button).toHaveAttribute('aria-busy', 'true'); assertOld();
     expect(screen.getByRole('button', { name: 'Archive…' })).toBeDisabled();
     fireEvent.click(button); expect(H.writes).toHaveLength(1);
     await reject();
@@ -204,7 +204,7 @@ describe('actual private Admin settings save feedback (#1678)', () => {
     expect(locked).toBeDisabled();
     fireEvent.change(future, { target: { value: 'duty-free' } });
     await waitFor(() => expect(H.writes).toHaveLength(1));
-    expect(future).toHaveValue('neon-playground'); expect(future).toBeDisabled();
+    expect(future).toHaveValue('neon-playground'); expect(future).toHaveAttribute('aria-disabled', 'true');
     expect(H.writes[0]!.fields.days).toEqual(H.event.days.map((day) => day.index === 0 ? { ...day, theme: 'duty-free' } : day));
     await reject(); expect(screen.getByRole('alert')).toHaveTextContent('Day theme save failed. Try again.');
     expect(future).toHaveValue('neon-playground'); expect(future).toBeEnabled(); expect(locked).toBeDisabled();
@@ -234,7 +234,7 @@ describe('actual private Admin settings save feedback (#1678)', () => {
     renderAdmin(); await act(async () => emit());
     const toggle = screen.getByRole('checkbox', { name: 'Adults only' });
     fireEvent.click(toggle); await waitFor(() => expect(H.writes).toHaveLength(1));
-    expect(screen.queryByRole('dialog', { name: 'This makes the whole Event 18+' })).toBeNull(); expect(toggle).toBeDisabled();
+    expect(screen.queryByRole('dialog', { name: 'This makes the whole Event 18+' })).toBeNull(); expect(toggle).toHaveAttribute('aria-disabled', 'true');
     expect(H.writes[0]!.fields).toEqual({ 'settings.forceAdult': !prior });
     await reject(); expect(screen.getByRole('alert')).toHaveTextContent('Adults-only setting save failed. Try again.');
     expect(toggle).toBeEnabled(); expect((toggle as HTMLInputElement).checked).toBe(prior);

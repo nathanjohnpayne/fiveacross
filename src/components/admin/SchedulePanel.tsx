@@ -243,7 +243,7 @@ function ScheduleRow({
   const [themeError, setThemeError] = useState('');
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   const commitTheme = async (theme: ThemeId) => {
-    if (themePending.current) return;
+    if (locked || themePending.current) return;
     themePending.current = true;
     setThemeBusy(true);
     setThemeError('');
@@ -361,8 +361,19 @@ function ScheduleRow({
         <select
           aria-label={`Day ${day.index + 1} theme`}
           value={day.theme}
-          disabled={locked || themeBusy}
-          onChange={(e) => void commitTheme(e.target.value as ThemeId)}
+          disabled={locked}
+          aria-disabled={locked || themeBusy}
+          aria-busy={themeBusy}
+          // A pending select must keep focus without opening/changing its native
+          // picker. Tab/Escape retain the sheet's navigation and dismissal.
+          onPointerDown={(e) => { if (themePending.current) e.preventDefault(); }}
+          onKeyDown={(e) => {
+            if (themePending.current && e.key !== 'Tab' && e.key !== 'Escape') e.preventDefault();
+          }}
+          onChange={(e) => {
+            if (locked || themePending.current) { e.currentTarget.value = day.theme; return; }
+            void commitTheme(e.target.value as ThemeId);
+          }}
         >
           {/* Scoped to this Edition (#555) — an Admin must not be able to set a
               Bodega Theme on a cruise Day. `…Including(day.theme)` keeps the
@@ -375,6 +386,7 @@ function ScheduleRow({
             </option>
           ))}
         </select>
+        {themeBusy && <span className="visually-hidden" role="status">Day theme saving…</span>}
         {themeError && <div className="error" role="alert">{themeError}</div>}
       </div>
       {/* Repair line: a full-width second line inside the row for a Day that
