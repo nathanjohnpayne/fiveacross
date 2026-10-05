@@ -16,6 +16,8 @@ export interface PrivateFirestoreSession {
   transition?: 'auth' | 'connection' | 'recovery';
   recoveryRequired: boolean;
   failed: boolean;
+  /** A failed bridge still has a bounded, scheduled fresh-client retry. */
+  retryPending: boolean;
 }
 
 type PrivateClient = { app: FirebaseApp; auth: Auth; db: Firestore };
@@ -54,7 +56,7 @@ const BRIDGE_RETRY_DELAYS_MS = [250, 1_000, 2_000] as const;
 
 /**
  * Private reads never share the gameplay app's persistent cache. Each Auth
- * generation gets a fresh named app and memory-only Auth/Firestore. Dropping
+ * account/retirement generation gets a fresh named app and memory-only Auth/Firestore. Dropping
  * Auth alone cannot retire a Firestore cache (real-SDK #1411 feasibility test).
  */
 export function createPrivateFirestoreSessions(config: SessionOptions) {
@@ -62,10 +64,13 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
   let authGeneration = 0;
   let client: PrivateClient | null = null;
   let stopped = false;
+  let initializingUid: string | null = null;
+  let authRevision = 0;
+  let refreshQueue: Promise<void> = Promise.resolve();
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   const listeners = new Set<() => void>();
   let snapshot: PrivateFirestoreSession = {
-    uid: null, db: null, generation, authGeneration, transition: 'auth', recoveryRequired: !config.recovered(), failed: false,
+    uid: null, db: null, generation, authGeneration, transition: 'auth', recoveryRequired: !config.recovered(), failed: false, retryPending: false,
   };
   const publish = (value: PrivateFirestoreSession) => {
     snapshot = value;
@@ -81,16 +86,19 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
     if (retryTimer !== null) { clearTimeout(retryTimer); retryTimer = null; }
     generation += 1;
     if (transition === 'auth') authGeneration += 1;
+    initializingUid = null;
+    refreshQueue = Promise.resolve();
     const old = client;
     client = null;
     // Retire visible state synchronously, before primary Auth commits a change.
-    publish({ uid: config.primaryAuth.currentUser?.uid ?? null, db: null, generation, authGeneration, transition, recoveryRequired: !config.recovered(), failed: false });
+    publish({ uid: config.primaryAuth.currentUser?.uid ?? null, db: null, generation, authGeneration, transition, recoveryRequired: !config.recovered(), failed: false, retryPending: false });
     void dispose(old);
   };
   const synchronize = async (user: User | null, transition: NonNullable<PrivateFirestoreSession['transition']> = 'auth', retryIndex = 0) => {
     retire(transition);
     const attempt = generation;
     if (stopped || !user || config.online?.() === false) return;
+    initializingUid = user.uid;
     let candidate: PrivateClient | null = null;
     let candidateApp: FirebaseApp | null = null;
     try {
@@ -112,33 +120,86 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
           isTokenAutoRefreshEnabled: false,
         });
       }
-      await updateCurrentUser(privateAuth, user);
+      // Token callbacks can arrive during first bootstrap. Copy the newest
+      // same-account subject before publishing, without starting competing apps.
+      let copiedUser = user;
+      for (;;) {
+        const copiedRevision = authRevision;
+        await updateCurrentUser(privateAuth, copiedUser);
+        const latest = config.primaryAuth.currentUser;
+        if (stopped || attempt !== generation || latest?.uid !== user.uid || config.online?.() === false) break;
+        if (latest === copiedUser && copiedRevision === authRevision) break;
+        copiedUser = latest;
+      }
       if (stopped || attempt !== generation || config.primaryAuth.currentUser?.uid !== user.uid || config.online?.() === false) {
+        // Release only this attempt before disposal yields to a newer bootstrap.
+        if (attempt === generation) initializingUid = null;
         await dispose(candidate);
         return;
       }
+      initializingUid = null;
       client = candidate;
-      publish({ uid: user.uid, db: privateDb, generation: attempt, authGeneration, transition, recoveryRequired: !config.recovered(), failed: false });
+      publish({ uid: user.uid, db: privateDb, generation: attempt, authGeneration, transition, recoveryRequired: !config.recovered(), failed: false, retryPending: false });
     } catch {
       await dispose(candidate);
       if (!candidate && candidateApp) await deleteApp(candidateApp).catch(() => {});
       if (!stopped && attempt === generation) {
-        publish({ uid: null, db: null, generation: attempt, authGeneration, transition, recoveryRequired: !config.recovered(), failed: true });
+        initializingUid = null;
         const delay = BRIDGE_RETRY_DELAYS_MS[retryIndex];
-        if (delay !== undefined && !stopped && attempt === generation && config.primaryAuth.currentUser === user && config.online?.() !== false) {
+        const retryPending = delay !== undefined && config.primaryAuth.currentUser?.uid === user.uid && config.online?.() !== false;
+        if (retryPending) {
           retryTimer = setTimeout(() => {
             retryTimer = null;
-            if (stopped || attempt !== generation || config.primaryAuth.currentUser !== user || config.online?.() === false) return;
+            if (stopped || attempt !== generation || config.primaryAuth.currentUser?.uid !== user.uid || config.online?.() === false) return;
             // A failed bridge cannot carry a previously confirmed private set,
             // even if React never observed its intermediate failed publication.
-            void synchronize(user, 'auth', retryIndex + 1);
+            void synchronize(config.primaryAuth.currentUser, 'auth', retryIndex + 1);
           }, delay);
         }
+        // Publish failure and its scheduled-retry status together. Readiness
+        // waiters must distinguish this episode from exhausted bridge failure.
+        publish({ uid: null, db: null, generation: attempt, authGeneration, transition, recoveryRequired: !config.recovered(), failed: true, retryPending });
       }
     }
   };
-  const stopBefore = beforeAuthStateChanged(config.primaryAuth, () => retire(), () => { void synchronize(config.primaryAuth.currentUser); });
-  const stopAuth = onIdTokenChanged(config.primaryAuth, (user) => { void synchronize(user); });
+  const refreshAuth = (user: User | null) => {
+    if (stopped) return;
+    authRevision += 1;
+    const current = client;
+    if (user && snapshot.uid === user.uid && config.online?.() === false) return;
+    if (user && initializingUid === user.uid) return;
+    if (!user || !current || snapshot.uid !== user.uid || snapshot.failed) {
+      void synchronize(user);
+      return;
+    }
+    const attempt = generation;
+    // The named Auth API copies credentials into the existing memory client.
+    // Serialize refreshes: an older delayed copy must not overwrite a newer one.
+    // Retirement starts an independent queue; old completions remain fenced.
+    refreshQueue = refreshQueue.then(async () => {
+      if (stopped || attempt !== generation || client !== current || config.primaryAuth.currentUser?.uid !== user.uid) return;
+      try {
+        await updateCurrentUser(current.auth, config.primaryAuth.currentUser);
+      } catch {
+        if (!stopped && attempt === generation && client === current && config.primaryAuth.currentUser?.uid === user.uid) {
+          // Failed copying cannot keep authorizing the old client. Start the
+          // existing bounded fresh-client recovery episode, never a disk fallback.
+          void synchronize(config.primaryAuth.currentUser);
+        }
+      }
+    });
+  };
+  const stopBefore = beforeAuthStateChanged(config.primaryAuth, (nextUser) => {
+    if (nextUser?.uid !== config.primaryAuth.currentUser?.uid) {
+      retire();
+    }
+  }, () => {
+    // Primary middleware can overlap before its Auth operation queue. Restore
+    // the actual current actor after an abort if its bridge remains retired;
+    // a shared per-callback flag can be overwritten by another same-UID call.
+    if (!stopped && !client && initializingUid === null) void synchronize(config.primaryAuth.currentUser);
+  });
+  const stopAuth = onIdTokenChanged(config.primaryAuth, refreshAuth);
   return {
     getSnapshot: () => snapshot,
     subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
@@ -174,4 +235,3 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
     stop: () => { stopped = true; stopBefore(); stopAuth(); retire(); listeners.clear(); },
   };
 }
-

@@ -1,5 +1,5 @@
 import { act, renderHook } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const H = vi.hoisted(() => ({
   session: { uid: 'alice' as string | null, db: { name: 'private-memory' } as object | null, generation: 1, recoveryRequired: false, failed: false },
   legacyDb: { name: 'legacy-persistent' },
@@ -24,6 +24,16 @@ const snapshot = (fromCache = false) => ({ docs: [{ id: 'row-alice', data: () =>
 const docSnapshot = (data: object | null, fromCache = false, hasPendingWrites = false) => ({
   exists: () => data !== null, data: () => data, metadata: { fromCache, hasPendingWrites },
 });
+const rowsSnapshot = (ids: string[]) => ({ ...snapshot(), docs: ids.map((id) => ({
+  id, data: () => ({ uid: id, text: id, status: 'pending', createdAt: 1, reportCount: 1 }),
+})) });
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+}
+afterEach(() => { vi.useRealTimers(); });
 beforeEach(() => {
   H.session = { uid: 'alice', db: { name: 'private-memory' }, generation: 1, recoveryRequired: false, failed: false };
   H.subscriptions = [];
@@ -32,6 +42,190 @@ beforeEach(() => {
   H.serverRead.mockReset().mockImplementation(async () => snapshot());
 });
 describe('private hook cache and actor boundaries (#1411)', () => {
+  it('coalesces a removal burst during drain into one latest-candidate rerun', async () => {
+    const view = renderHook(() => useAllItems());
+    const listener = H.subscriptions[0];
+    await act(async () => listener.next(rowsSnapshot(['a', 'b', 'c'])));
+    const drain = deferred<void>();
+    H.pendingWrites.mockReturnValueOnce(drain.promise);
+    H.serverRead.mockResolvedValueOnce(rowsSnapshot([]));
+    await act(async () => {
+      listener.next(rowsSnapshot(['b', 'c']));
+      for (let i = 0; i < 20; i += 1) listener.next(rowsSnapshot(['c']));
+      listener.next(rowsSnapshot([]));
+    });
+    expect(H.pendingWrites).toHaveBeenCalledTimes(1);
+    expect(H.serverRead).not.toHaveBeenCalled();
+    expect(view.result.current.items.map((row) => row.text)).toEqual(['a', 'b', 'c']);
+    await act(async () => drain.resolve());
+    expect(H.pendingWrites).toHaveBeenCalledTimes(2);
+    expect(H.serverRead).toHaveBeenCalledTimes(1);
+    expect(view.result.current.items).toEqual([]);
+    await act(async () => listener.next(rowsSnapshot([])));
+    expect(H.pendingWrites).toHaveBeenCalledTimes(2);
+  });
+
+  it('coalesces a burst during a server read and never publishes its superseded answer', async () => {
+    const view = renderHook(() => usePendingItems());
+    const listener = H.subscriptions[0];
+    await act(async () => listener.next(rowsSnapshot(['a', 'b', 'c'])));
+    const first = deferred<ReturnType<typeof snapshot>>();
+    const latest = deferred<ReturnType<typeof snapshot>>();
+    H.serverRead.mockReturnValueOnce(first.promise).mockReturnValueOnce(latest.promise);
+    await act(async () => listener.next(rowsSnapshot(['b', 'c'])));
+    await act(async () => {
+      for (let i = 0; i < 20; i += 1) listener.next(rowsSnapshot(['c']));
+    });
+    expect(H.serverRead).toHaveBeenCalledTimes(1);
+    expect(H.pendingWrites).toHaveBeenCalledTimes(1);
+    await act(async () => first.resolve(rowsSnapshot(['b', 'c'])));
+    expect(view.result.current.items.map((row) => row.text)).toEqual(['a', 'b', 'c']);
+    expect(H.pendingWrites).toHaveBeenCalledTimes(2);
+    expect(H.serverRead).toHaveBeenCalledTimes(2);
+    await act(async () => latest.resolve(rowsSnapshot(['c'])));
+    expect(view.result.current.items.map((row) => row.text)).toEqual(['c']);
+  });
+
+  it('keeps a later removal queued after a direct non-removal answer supersedes an active read', async () => {
+    const view = renderHook(() => usePendingItems());
+    const listener = H.subscriptions[0];
+    await act(async () => listener.next(rowsSnapshot(['a'])));
+    const first = deferred<ReturnType<typeof snapshot>>();
+    H.serverRead.mockReturnValueOnce(first.promise).mockResolvedValueOnce(rowsSnapshot(['b']));
+    await act(async () => listener.next(rowsSnapshot([])));
+    await act(async () => listener.next(rowsSnapshot(['a', 'b'])));
+    expect(view.result.current.items.map((row) => row.text)).toEqual(['a', 'b']);
+    await act(async () => listener.next(rowsSnapshot(['b'])));
+    await act(async () => first.resolve(rowsSnapshot([])));
+    expect(H.pendingWrites).toHaveBeenCalledTimes(2);
+    expect(H.serverRead).toHaveBeenCalledTimes(2);
+    expect(view.result.current.items.map((row) => row.text)).toEqual(['b']);
+  });
+
+  it('a newer pending callback discards the queued removal as well as the active answer', async () => {
+    const view = renderHook(() => usePendingItems());
+    const listener = H.subscriptions[0];
+    await act(async () => listener.next(snapshot()));
+    const first = deferred<ReturnType<typeof snapshot>>();
+    H.serverRead.mockReturnValueOnce(first.promise);
+    await act(async () => listener.next(rowsSnapshot([])));
+    await act(async () => listener.next(rowsSnapshot([])));
+    await act(async () => listener.next({ ...rowsSnapshot([]), metadata: { fromCache: false, hasPendingWrites: true } }));
+    await act(async () => first.resolve(rowsSnapshot([])));
+    expect(H.pendingWrites).toHaveBeenCalledTimes(1);
+    expect(H.serverRead).toHaveBeenCalledTimes(1);
+    expect(view.result.current.items).toHaveLength(1);
+  });
+
+  it('ignores an older denied read after a newer callback and confirms the queued candidate afresh', async () => {
+    const view = renderHook(() => usePendingItems());
+    const listener = H.subscriptions[0];
+    await act(async () => listener.next(snapshot()));
+    const first = deferred<ReturnType<typeof snapshot>>();
+    const latest = deferred<ReturnType<typeof snapshot>>();
+    H.serverRead.mockReturnValueOnce(first.promise).mockReturnValueOnce(latest.promise);
+    await act(async () => listener.next(rowsSnapshot([])));
+    await act(async () => listener.next(rowsSnapshot([])));
+    await act(async () => first.reject(Object.assign(new Error('stale denial'), { code: 'permission-denied' })));
+    expect(view.result.current.items).toHaveLength(1);
+    expect(view.result.current.failed).toBe(false);
+    expect(H.serverRead).toHaveBeenCalledTimes(2);
+    await act(async () => latest.resolve(snapshot()));
+    expect(view.result.current.items).toHaveLength(1);
+  });
+
+  it('caps snapshot-triggered transient backoff and never automatically retries a failed candidate', async () => {
+    vi.useFakeTimers();
+    const view = renderHook(() => usePendingItems());
+    const listener = H.subscriptions[0];
+    await act(async () => listener.next(snapshot()));
+    H.pendingWrites.mockRejectedValue(Object.assign(new Error('unavailable'), { code: 'unavailable' }));
+    await act(async () => listener.next(rowsSnapshot([])));
+    for (const [index, delay] of [250, 500, 1000, 2000, 2000].entries()) {
+      await act(async () => listener.next(rowsSnapshot([])));
+      await act(async () => vi.advanceTimersByTimeAsync(delay - 1));
+      expect(H.pendingWrites).toHaveBeenCalledTimes(index + 1);
+      await act(async () => vi.advanceTimersByTimeAsync(1));
+      expect(H.pendingWrites).toHaveBeenCalledTimes(index + 2);
+      expect(view.result.current.items).toHaveLength(1);
+    }
+    await act(async () => vi.advanceTimersByTimeAsync(10000));
+    expect(H.pendingWrites).toHaveBeenCalledTimes(6);
+    expect(H.serverRead).not.toHaveBeenCalled();
+    H.pendingWrites.mockResolvedValue(undefined);
+    H.serverRead.mockResolvedValueOnce(rowsSnapshot([]));
+    await act(async () => listener.next(rowsSnapshot([])));
+    expect(view.result.current.items).toEqual([]);
+    // A successful barrier resets the cooldown for subsequent removal work.
+    await act(async () => listener.next(snapshot()));
+    H.serverRead.mockResolvedValueOnce(rowsSnapshot([]));
+    await act(async () => listener.next(rowsSnapshot([])));
+    expect(H.pendingWrites).toHaveBeenCalledTimes(8);
+    expect(view.result.current.items).toEqual([]);
+  });
+
+  it('backs off a superseded transient read and retains only the latest candidate during cooldown', async () => {
+    vi.useFakeTimers();
+    const view = renderHook(() => useAllItems());
+    const listener = H.subscriptions[0];
+    await act(async () => listener.next(rowsSnapshot(['a', 'b', 'c'])));
+    const first = deferred<ReturnType<typeof snapshot>>();
+    H.serverRead.mockReturnValueOnce(first.promise).mockResolvedValueOnce(rowsSnapshot(['c']));
+    await act(async () => listener.next(rowsSnapshot(['b', 'c'])));
+    await act(async () => listener.next(rowsSnapshot([])));
+    await act(async () => first.reject(Object.assign(new Error('lost connection'), { code: 'unavailable' })));
+    await act(async () => listener.next(rowsSnapshot(['c'])));
+    await act(async () => vi.advanceTimersByTimeAsync(249));
+    expect(H.pendingWrites).toHaveBeenCalledTimes(1);
+    expect(view.result.current.items).toHaveLength(3);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(H.pendingWrites).toHaveBeenCalledTimes(2);
+    expect(H.serverRead).toHaveBeenCalledTimes(2);
+    expect(view.result.current.items.map((row) => row.text)).toEqual(['c']);
+  });
+
+  it('scopes an in-flight barrier and transient cooldown to its own private subscription', async () => {
+    vi.useFakeTimers();
+    const view = renderHook(() => ({ items: usePendingItems(), claims: usePendingClaims() }));
+    const [items, claims] = H.subscriptions;
+    await act(async () => { items.next(snapshot()); claims.next(snapshot()); });
+    H.pendingWrites.mockRejectedValueOnce(Object.assign(new Error('unavailable'), { code: 'unavailable' }));
+    await act(async () => items.next(rowsSnapshot([])));
+    await act(async () => items.next(rowsSnapshot([])));
+    H.serverRead.mockResolvedValueOnce(rowsSnapshot([]));
+    await act(async () => claims.next(rowsSnapshot([])));
+    expect(H.pendingWrites).toHaveBeenCalledTimes(2);
+    expect(view.result.current.items.items).toHaveLength(1);
+    expect(view.result.current.claims.claims).toEqual([]);
+    H.serverRead.mockResolvedValueOnce(rowsSnapshot([]));
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    expect(H.pendingWrites).toHaveBeenCalledTimes(3);
+    expect(view.result.current.items.items).toEqual([]);
+  });
+
+  it.each(['pending', 'settled rows', 'cache', 'denial', 'scope', 'unmount'] as const)(
+    'discards a cooldown candidate on %s without a delayed private operation', async (retirement) => {
+      vi.useFakeTimers();
+      const view = renderHook(() => usePendingItems());
+      const listener = H.subscriptions[0];
+      await act(async () => listener.next(snapshot()));
+      H.pendingWrites.mockRejectedValueOnce(Object.assign(new Error('unavailable'), { code: 'unavailable' }));
+      await act(async () => listener.next(rowsSnapshot([])));
+      await act(async () => listener.next(rowsSnapshot([])));
+      if (retirement === 'pending') await act(async () => listener.next({ ...snapshot(), metadata: { fromCache: false, hasPendingWrites: true } }));
+      if (retirement === 'settled rows') await act(async () => listener.next(snapshot()));
+      if (retirement === 'cache') await act(async () => listener.next(snapshot(true)));
+      if (retirement === 'denial') await act(async () => listener.error());
+      if (retirement === 'scope') { H.session = { ...H.session, generation: 2 }; view.rerender(); }
+      if (retirement === 'unmount') view.unmount();
+      await act(async () => vi.advanceTimersByTimeAsync(5000));
+      expect(H.pendingWrites).toHaveBeenCalledTimes(1);
+      expect(H.serverRead).not.toHaveBeenCalled();
+      if (retirement === 'pending' || retirement === 'settled rows') expect(view.result.current.items).toHaveLength(1);
+      else if (retirement !== 'unmount') expect(view.result.current.items).toEqual([]);
+    },
+  );
+
   it.each(['first empty', 'first rows', 'addition', 'modification', 'metadata only'] as const)(
     'narrow barrier: publishes %s without a drain or extra server read', async (kind) => {
       const view = renderHook(() => usePendingItems());
@@ -50,6 +244,7 @@ describe('private hook cache and actor boundaries (#1411)', () => {
 
   it.each(['drain', 'server read'] as const)(
     'narrow barrier: a non-denial %s failure preserves committed rows and later retries', async (phase) => {
+      vi.useFakeTimers();
       const view = renderHook(() => usePendingItems());
       const listener = H.subscriptions[0];
       await act(async () => listener.next(snapshot()));
@@ -64,6 +259,8 @@ describe('private hook cache and actor boundaries (#1411)', () => {
       expect(view.result.current.failed).toBe(false);
       H.serverRead.mockResolvedValueOnce(removal);
       await act(async () => listener.next(removal));
+      expect(view.result.current.items).toEqual(committed);
+      await act(async () => vi.advanceTimersByTimeAsync(250));
       expect(view.result.current.items).toEqual([]);
       expect(view.result.current.hasServerData).toBe(true);
     },
@@ -177,6 +374,8 @@ describe('private hook cache and actor boundaries (#1411)', () => {
       let drain!: () => void;
       H.pendingWrites.mockImplementationOnce(() => new Promise<void>((resolve) => { drain = resolve; }));
       await act(async () => listener.next({ docs: [], metadata: { fromCache: false, hasPendingWrites: false } }));
+      // Retirement must also cancel a burst's queued latest candidate.
+      await act(async () => { listener.next(rowsSnapshot([])); listener.next(rowsSnapshot([])); });
       const priorReads = H.serverRead.mock.calls.length;
       if (retirement === 'cache') await act(async () => listener.next(snapshot(true)));
       if (retirement === 'denial') await act(async () => listener.error());

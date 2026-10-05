@@ -116,6 +116,7 @@ beforeEach(() => {
   H.repaired = [];
   H.ownListings = 0;
   H.ownTargets = []; H.blockCommits = [];
+  H.waitPending.mockClear(); H.retryPrivate.mockClear();
   // Empty-queue controls deliver the mocked drain signal immediately. Race
   // cases below hold a native Promise to exercise real asynchronous ordering.
   H.waitPending.mockImplementation(() => ({ then: (done: () => void) => { done(); } }));
@@ -127,6 +128,214 @@ afterEach(() => {
 });
 
 describe('useHiddenUidsSubscription', () => {
+  it.each(['cache', 'pending'] as const)('a timed-out unknown %s answer cannot qualify offline rendering', async (kind) => {
+    vi.useFakeTimers();
+    try {
+      const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+      act(() => H.subscriptions[0].listener(kind === 'cache'
+        ? { ...pairs([['alice', 'bob']]), metadata: { fromCache: true, hasPendingWrites: false } }
+        : pairs([['alice', 'bob']], true)));
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+      H.session = { ...H.session, db: null, generation: 1, transition: 'connection' };
+      view.rerender();
+      expect(view.result.current).toEqual({ hidden: new Set(), ready: false });
+      view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(['timeout', 'local Retry'] as const)('retains only known same-scope offline filtering after reconfirmation %s', async (action) => {
+    vi.useFakeTimers();
+    try {
+      const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+      act(() => H.subscriptions[0].listener(pairs([['alice', 'bob']])));
+      vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+      H.session = { ...H.session, db: null, generation: 1, transition: 'connection' };
+      view.rerender(); expect(view.result.current.ready).toBe(true);
+      H.waitPending.mockImplementation(() => new Promise<void>(() => {}));
+      vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
+      H.session = { ...H.session, db: { memory: true }, generation: 2, transition: 'connection' };
+      view.rerender();
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(view.result.current).toMatchObject({ ready: false, failed: true });
+      if (action === 'local Retry') act(() => view.result.current.retry!());
+      vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+      H.session = { ...H.session, db: null, generation: 3, transition: 'connection' };
+      view.rerender();
+      expect(view.result.current).toEqual({ hidden: new Set(['alice']), ready: true });
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(H.subscriptions).toHaveLength(1);
+      view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('a permission-denied queue wait is terminal while transport failure can retry locally', async () => {
+    vi.useFakeTimers();
+    try {
+      H.waitPending.mockRejectedValueOnce(Object.assign(new Error('denied'), { code: 'permission-denied' }));
+      const denied = renderHook(() => useHiddenUidsSubscription('bob', true));
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(H.waitPending).toHaveBeenCalledTimes(1);
+      expect(denied.result.current.failed).toBe(true);
+      denied.unmount();
+      H.waitPending.mockClear();
+      H.waitPending.mockRejectedValueOnce(Object.assign(new Error('unavailable'), { code: 'unavailable' }));
+      const interrupted = renderHook(() => useHiddenUidsSubscription('bob', true));
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(H.waitPending).toHaveBeenCalledTimes(2);
+      act(() => H.subscriptions[0].listener(pairs([])));
+      expect(interrupted.result.current.ready).toBe(true);
+      expect(H.retryPrivate).not.toHaveBeenCalled();
+      interrupted.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('exhausts three first-answer attempts, then a local Retry ignores every old listener', async () => {
+    vi.useFakeTimers();
+    try {
+      const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+      await act(async () => { await vi.advanceTimersByTimeAsync(33_000); });
+      expect(H.subscriptions).toHaveLength(3);
+      expect(H.waitPending).toHaveBeenCalledTimes(3);
+      expect(view.result.current.failed).toBe(true);
+      for (const sub of H.subscriptions) expect(sub.unsubscribe).toHaveBeenCalledOnce();
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(H.subscriptions).toHaveLength(3);
+      const old = [...H.subscriptions];
+      act(() => view.result.current.retry!());
+      expect(H.subscriptions).toHaveLength(4);
+      act(() => H.subscriptions[3].listener(pairs([['alice', 'bob']])));
+      for (const sub of old) act(() => sub.listener(pairs([])));
+      expect(view.result.current).toEqual({ hidden: new Set(['alice']), ready: true });
+      expect(H.retryPrivate).not.toHaveBeenCalled();
+      view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('exhausts increasingly long queue windows without cancelling or clearing durable work', async () => {
+    vi.useFakeTimers();
+    try {
+      const drains: Array<() => void> = [];
+      H.waitPending.mockImplementation(() => new Promise<void>((resolve) => { drains.push(resolve); }));
+      const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+      await act(async () => { await vi.advanceTimersByTimeAsync(38_000); });
+      expect(drains).toHaveLength(3);
+      expect(H.waitPending.mock.calls.every(([database]) => database === H.gameplayDb)).toBe(true);
+      expect(view.result.current.failed).toBe(true);
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(drains).toHaveLength(3);
+      act(() => view.result.current.retry!());
+      expect(drains).toHaveLength(4);
+      await act(async () => { drains[3](); });
+      act(() => H.subscriptions[0].listener(pairs([['alice', 'bob']])));
+      await act(async () => { for (const finish of drains.slice(0, 3)) finish(); });
+      expect(H.subscriptions).toHaveLength(1);
+      expect(view.result.current).toEqual({ hidden: new Set(['alice']), ready: true });
+      view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('a terminal pair denial cancels attempts and never qualifies its late answer or offline witness', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+      const first = H.subscriptions[0];
+      act(() => first.listener(pairs([['alice', 'bob']])));
+      act(() => first.onError(Object.assign(new Error('denied'), { code: 'permission-denied' })));
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(H.subscriptions).toHaveLength(1);
+      expect(view.result.current.failed).toBe(true);
+      act(() => first.listener(pairs([])));
+      expect(view.result.current.ready).toBe(false);
+      vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+      H.session = { ...H.session, db: null, generation: 1, transition: 'connection' };
+      view.rerender();
+      expect(view.result.current).toEqual({ hidden: new Set(), ready: false });
+      view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('a current settled answer cancels its deadline and preserves healthy same-client observation', async () => {
+    vi.useFakeTimers();
+    try {
+      const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+      await act(async () => { await vi.advanceTimersByTimeAsync(9_999); });
+      act(() => H.subscriptions[0].listener(pairs([['alice', 'bob']])));
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(H.subscriptions).toHaveLength(1);
+      expect(H.subscriptions[0].unsubscribe).not.toHaveBeenCalled();
+      expect(view.result.current.ready).toBe(true);
+      expect(H.retryPrivate).not.toHaveBeenCalled();
+      view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(['account', 'Event', 'client', 'offline', 'unmount'] as const)('retires first-answer deadlines and retries on %s change', async (scope) => {
+    vi.useFakeTimers();
+    try {
+      const view = renderHook(({ uid }) => useHiddenUidsSubscription(uid, true), { initialProps: { uid: 'bob' } });
+      const first = H.subscriptions[0];
+      if (scope === 'account') H.session = { ...H.session, uid: 'carol', generation: 1 };
+      if (scope === 'Event') H.eventId = 'event-b';
+      if (scope === 'client') H.session = { ...H.session, db: { memory: true }, generation: 1 };
+      if (scope === 'offline') {
+        vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+        H.session = { ...H.session, db: null, generation: 1, transition: 'connection' };
+      }
+      if (scope === 'unmount') view.unmount();
+      else view.rerender({ uid: H.session.uid! });
+      const current = H.subscriptions.at(-1)!;
+      if (scope !== 'offline' && scope !== 'unmount') act(() => current.listener(pairs([])));
+      const subscriptions = H.subscriptions.length;
+      act(() => first.listener(pairs([['alice', 'bob']])));
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(first.unsubscribe).toHaveBeenCalledOnce();
+      expect(H.subscriptions).toHaveLength(subscriptions);
+      if (scope !== 'unmount') expect(view.result.current.ready).toBe(scope !== 'offline');
+      view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('backs off a slow queue within the same client and ignores the old drain after its deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const drains: Array<() => void> = [];
+      H.waitPending.mockImplementation(() => new Promise<void>((resolve) => { drains.push(resolve); }));
+      const original = { ...H.session };
+      const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(view.result.current.failed).toBe(true);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(drains).toHaveLength(2);
+      await act(async () => { drains[0](); });
+      expect(H.subscriptions).toHaveLength(0);
+      await act(async () => { drains[1](); });
+      expect(H.subscriptions).toHaveLength(1);
+      expect(view.result.current.ready).toBe(false);
+      expect(view.result.current.failed).toBe(true);
+      act(() => H.subscriptions[0].listener(pairs([['alice', 'bob']])));
+      expect(view.result.current).toEqual({ hidden: new Set(['alice']), ready: true });
+      expect(H.session).toEqual(original); expect(H.retryPrivate).not.toHaveBeenCalled();
+      view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('offers scoped Retry when an online first pair answer stays unknown past ten seconds', async () => {
+    vi.useFakeTimers();
+    try {
+      const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+      const first = H.subscriptions[0];
+      act(() => first.listener({ ...pairs([]), metadata: { fromCache: true, hasPendingWrites: false } }));
+      act(() => first.listener(pairs([], true)));
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      expect(view.result.current.ready).toBe(false);
+      expect(view.result.current.failed).toBe(true);
+      expect(view.result.current.retry).toEqual(expect.any(Function));
+      view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+
   it('same-scope remount retains pending targets without granting cold readiness', async () => {
     const first = renderHook(() => useHiddenUidsSubscription('bob', true));
     act(() => H.subscriptions[0].listener(pairs([])));
@@ -540,8 +749,8 @@ describe('useHiddenUidsSubscription', () => {
     expect((sub.target as { args: Array<{ database: unknown }> }).args[0].database).toBe(H.session.db);
     act(() => sub.listener({ ...pairs([]), metadata: { fromCache: true, hasPendingWrites: false } }));
     expect(view.result.current.ready).toBe(false);
-    act(() => sub.onError(new Error('permission-denied')));
-    expect(view.result.current).toEqual({ hidden: new Set(), ready: false });
+    act(() => sub.onError(Object.assign(new Error('permission-denied'), { code: 'permission-denied' })));
+    expect(view.result.current).toMatchObject({ hidden: new Set(), ready: false, failed: true });
   });
 
   it.each(['empty', 'blocked'] as const)('confirms %s shared filtering online while private views remain quarantined', (answer) => {
@@ -607,9 +816,12 @@ describe('useHiddenUidsSubscription', () => {
     view.rerender();
     const fresh = H.subscriptions[1];
     act(() => fresh.listener({ ...pairs([]), metadata: { fromCache: true, hasPendingWrites: false } }));
-    act(() => fresh.onError(new Error('permission-denied')));
-    expect(view.result.current).toEqual({ hidden: new Set(), ready: false });
+    act(() => fresh.onError(Object.assign(new Error('permission-denied'), { code: 'permission-denied' })));
+    expect(view.result.current).toMatchObject({ hidden: new Set(), ready: false, failed: true });
     act(() => fresh.listener(pairs([])));
+    expect(view.result.current.ready).toBe(false);
+    act(() => view.result.current.retry!());
+    act(() => H.subscriptions.at(-1)!.listener(pairs([])));
     expect(view.result.current).toEqual({ hidden: new Set(), ready: true });
   });
 
@@ -651,7 +863,7 @@ describe('useHiddenUidsSubscription', () => {
     expect(view.result.current).toEqual({ hidden: new Set(['cara']), ready: true });
   });
 
-  it('an online token rotation withholds before the replacement server answer, including its cache and pending answers', () => {
+  it('an explicit Auth retirement withholds before the replacement server answer, including its cache and pending answers', () => {
     const view = renderHook(() => useHiddenUidsSubscription('bob', true));
     const old = H.subscriptions[0];
     act(() => old.listener(pairs([['alice', 'bob']])));
@@ -710,8 +922,8 @@ describe('useHiddenUidsSubscription', () => {
     const view = renderHook(() => useHiddenUidsSubscription('bob', true));
     const sub = H.subscriptions[0];
     act(() => sub.listener(pairs([['alice', 'bob']])));
-    act(() => sub.onError(new Error('permission-denied')));
-    expect(view.result.current).toEqual({ hidden: new Set(), ready: false });
+    act(() => sub.onError(Object.assign(new Error('permission-denied'), { code: 'permission-denied' })));
+    expect(view.result.current).toMatchObject({ hidden: new Set(), ready: false, failed: true });
     vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
     H.session = { ...H.session, db: null, generation: 1 };
     view.rerender();
@@ -889,15 +1101,18 @@ describe('private block bootstrap waits for the persistent gameplay queue (#1670
     if (retirement !== 'unmount') expect(view.result.current.ready).toBe(false);
   });
 
-  it('rejecting the drain withholds content and offers the existing fresh-session Retry', async () => {
+  it('rejecting the drain withholds content and offers local readiness Retry', async () => {
     H.waitPending.mockRejectedValueOnce(new Error('account queue unavailable'));
     const view = renderHook(() => useHiddenUidsSubscription('bob', true));
     await act(async () => {});
     expect(view.result.current).toMatchObject({ ready: false, failed: true, hidden: new Set() });
     expect(H.subscriptions).toHaveLength(0);
-    H.retryPrivate.mockClear();
     act(() => view.result.current.retry?.());
-    expect(H.retryPrivate).toHaveBeenCalledOnce();
+    expect(H.retryPrivate).not.toHaveBeenCalled();
+    expect(H.waitPending).toHaveBeenCalledTimes(2);
+    expect(H.subscriptions).toHaveLength(1);
+    act(() => H.subscriptions[0].listener(pairs([])));
+    expect(view.result.current.ready).toBe(true);
   });
 
   it('bounds a never-draining queue and refuses late completion after exhaustion', async () => {
