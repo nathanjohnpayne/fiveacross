@@ -5,7 +5,7 @@ type Snapshot = { uid: string | null; db: { app: App } | null; generation: numbe
 const H = vi.hoisted(() => ({
   primary: { currentUser: { uid: 'alice' } as { uid: string } | null },
   snapshot: { uid: 'alice', db: { app: { name: 'memory-alice' } }, generation: 1, failed: false } as Snapshot,
-  recovered: true, emulators: false,
+  recovered: true, emulators: false, divergentLeaseUid: null as string | null,
   listeners: new Set<() => void>(),
   factory: vi.fn(), captures: vi.fn(), getFunctions: vi.fn(), getStorage: vi.fn(),
   connectFunctions: vi.fn(), connectStorage: vi.fn(),
@@ -32,7 +32,8 @@ vi.mock('./auth/privateFirestoreSession', () => ({
           if (!snapshot.db || snapshot.uid !== H.primary.currentUser?.uid || snapshot.generation !== H.snapshot.generation || (!allowRecovery && !H.recovered)) throw new Error('Private session expired');
         };
         assertCurrent();
-        return { ...snapshot, assertCurrent, guard: async <T,>(operation: () => Promise<T>) => { assertCurrent(); const value = await operation(); assertCurrent(); return value; } };
+        // Explicit manager-contract violation for the facade's defensive UID check.
+        return { ...snapshot, uid: H.divergentLeaseUid ?? snapshot.uid, assertCurrent, guard: async <T,>(operation: () => Promise<T>) => { assertCurrent(); const value = await operation(); assertCurrent(); return value; } };
       },
     };
   },
@@ -51,7 +52,7 @@ beforeEach(() => {
   vi.resetModules(); vi.clearAllMocks(); vi.useFakeTimers(); H.listeners.clear();
   H.primary.currentUser = { uid: 'alice' };
   H.snapshot = { uid: 'alice', db: { app: { name: 'memory-alice' } }, generation: 1, failed: false };
-  H.recovered = true; H.emulators = false;
+  H.recovered = true; H.emulators = false; H.divergentLeaseUid = null;
   Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
 });
 afterEach(() => { vi.useRealTimers(); });
@@ -107,7 +108,18 @@ describe('captured private service transport', () => {
     const lease = await waiting;
     expect(lease.db!.app.name).toBe('memory-alice-ready'); expect(H.captures.mock.calls).toEqual([[true]]);
     expect(lease.storage.app).toBe(lease.db!.app); expect(lease.functions.app).toBe(lease.db!.app);
+    expect(H.getFunctions.mock.calls).toEqual([[lease.db!.app, 'us-central1']]);
+    expect(H.getStorage.mock.calls).toEqual([[lease.db!.app]]);
     expect(H.listeners.size).toBe(0);
+  });
+
+  it.each([false, true])('a divergent bare bootstrap lease refuses before service binding (emulators=%s)', async (emulators) => {
+    H.emulators = emulators; H.recovered = false; H.divergentLeaseUid = 'bob';
+    const wrapper = await import('./privateFirestore');
+    await expect(wrapper.awaitPrivateFirestore('alice', true)).rejects.toThrow('Private account changed.');
+    expect(H.captures.mock.calls).toEqual([[true]]);
+    expect(H.getFunctions).not.toHaveBeenCalled(); expect(H.getStorage).not.toHaveBeenCalled();
+    expect(H.connectFunctions).not.toHaveBeenCalled(); expect(H.connectStorage).not.toHaveBeenCalled();
   });
 
   it('missing readiness times out without constructing any service or falling back', async () => {

@@ -52,7 +52,12 @@ function privateUnavailable() { return Object.assign(new Error('Private session 
  * reciprocal block filter in memory during recovery; ordinary private UI
  * and Admin actions remain closed. */
 export function capturePrivateFirestore(allowRecovery = false) {
-  const lease = privateFirestoreSessions().capture(allowRecovery);
+  return bindPrivateServices(privateFirestoreSessions().capture(allowRecovery));
+}
+
+type PrivateLease = ReturnType<ReturnType<typeof privateFirestoreSessions>['capture']>;
+
+function bindPrivateServices(lease: PrivateLease) {
   const functions = getFunctions(lease.db.app, 'us-central1');
   const storage = getStorage(lease.db.app);
   if (firebaseEmulatorsEnabled()) {
@@ -85,7 +90,7 @@ export async function awaitPrivateFirestore(uid: string, allowRecovery = false) 
   // A ready publication and a primary-account change can both precede this
   // continuation. Refuse before constructing another account's services.
   if (auth.currentUser?.uid !== uid) throw new Error('Private session changed.');
-  const lease = capturePrivateFirestore(allowRecovery);
+  const lease = manager.capture(allowRecovery);
   if (lease.uid !== uid) throw new Error('Private account changed.');
-  return lease;
+  return bindPrivateServices(lease);
 }
