@@ -45,11 +45,15 @@ void runApplicationBootstrap({
     return completeHandoffReturn({ code, origin: window.location.origin });
   },
   loadMain: async () => {
-    const { isPrivateCacheRecoveryDocument } = await import('./auth/privateCacheRecoveryNavigation');
-    if (isPrivateCacheRecoveryDocument(window.location.href)) {
-      const { renderPrivateCacheRecovery } = await import('./auth/privateCacheRecoveryPage');
-      renderPrivateCacheRecovery();
-      return;
+    // Ordinary URLs need no recovery module before starting the app graph.
+    // Keep value/duplicate parsing in the deferred navigation helper.
+    if (new URL(window.location.href).searchParams.has('device-cache-recovery')) {
+      const { isPrivateCacheRecoveryDocument } = await import('./auth/privateCacheRecoveryNavigation');
+      if (isPrivateCacheRecoveryDocument(window.location.href)) {
+        const { renderPrivateCacheRecovery } = await import('./auth/privateCacheRecoveryPage');
+        renderPrivateCacheRecovery();
+        return;
+      }
     }
     return import('./main');
   },
