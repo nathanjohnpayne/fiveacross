@@ -19,7 +19,7 @@ import {
   type User,
 } from 'firebase/auth';
 import { auth, EVENT_ID, googleProvider } from '../firebase';
-import { retryPrivateFirestoreSession } from '../privateFirestore';
+import { retryPrivateFirestoreSession, type PrivateReadOperation } from '../privateFirestore';
 import {
   attestAdult,
   ensureUserProfile,
@@ -492,10 +492,13 @@ function startAuthorityRead(
   u: User,
   onLate: (serverAttested: boolean) => void,
   onLateError: (err: unknown) => void = () => {},
+  onReadFailure: (read: PrivateReadOperation | null) => void = () => {},
 ): Promise<boolean> {
+  let activeRead: PrivateReadOperation | null = null;
+  const observeRead = (read: PrivateReadOperation | null) => { activeRead = read; };
   const authority = (async () => {
-    await ensureUserProfile(u);
-    return (await readAdultAttestationFromServer(u.uid)) !== null;
+    await ensureUserProfile(u, observeRead);
+    return (await readAdultAttestationFromServer(u.uid, observeRead)) !== null;
   })();
   let undelivered = false;
   void authority.then(
@@ -508,6 +511,7 @@ function startAuthorityRead(
   );
   return withTimeout(authority, AUTH_BOOTSTRAP_TIMEOUT_MS).catch((err: unknown) => {
     undelivered = true;
+    onReadFailure(activeRead);
     throw err;
   });
 }
@@ -638,11 +642,12 @@ type EventDealState = {
   eventId: string;
   dealError: string | null;
   dealErrorReason: DealErrorReason | null;
+  privateReadFailure: { read: PrivateReadOperation; attempt: number } | null;
   dealing: boolean;
 };
 
 function neutralDealState(eventId: string): EventDealState {
-  return { eventId, dealError: null, dealErrorReason: null, dealing: false };
+  return { eventId, dealError: null, dealErrorReason: null, privateReadFailure: null, dealing: false };
 }
 
 // The SINGLE classification of a deal/bootstrap failure. Every consumer that has
@@ -1029,7 +1034,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // identities (their only dependency is the stable scoped-state updater), so
   // wiring them into the deal/bootstrap callbacks' deps below does not change
   // those callbacks' identity — no #117 effect re-runs.
-  const failDeal = useCallback((err: unknown, ownedEventId: string) => {
+  const failDeal = useCallback((err: unknown, ownedEventId: string, privateReadFailure: EventDealState['privateReadFailure'] = null) => {
     const reason = dealErrorReasonFor(err);
     const message = dealErrorMessage(err);
     // Three-way (#434, Codex #438), via the shared `dealErrorReasonFor` so this
@@ -1043,6 +1048,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       ...state,
       dealError: message,
       dealErrorReason: reason,
+      privateReadFailure: reason === 'connection' ? privateReadFailure : null,
     }));
   }, [updateDealStateFor]);
   const clearDealError = useCallback((ownedEventId: string) => {
@@ -1050,6 +1056,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       ...state,
       dealError: null,
       dealErrorReason: null,
+      privateReadFailure: null,
     }));
   }, [updateDealStateFor]);
   const setDealingFor = useCallback((ownedEventId: string, next: boolean) => {
@@ -1237,6 +1244,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // terminal rather than letting the two overwrite each other. Only the ATTEMPT
     // guard is the caller's job here (a settle belonging to a superseded attempt
     // must not touch current state at all); terminality is the settle's.
+    let failedPrivateRead: PrivateReadOperation | null = null;
     const readAuthority = () =>
       startAuthorityRead(
         u,
@@ -1290,13 +1298,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           // committed-adjacent optimistic sticky; otherwise leave it UNKNOWN.
           setAttested(attestedUidsRef.current.has(u.uid) ? true : undefined);
         },
+        (read) => { failedPrivateRead = read; },
       );
     let attestedRead: boolean | undefined;
-    let bootstrapFailure: { err: unknown } | null = null;
+    let bootstrapFailure: { err: unknown; read: PrivateReadOperation | null } | null = null;
     try {
       attestedRead = await readAuthority();
     } catch (err) {
-      bootstrapFailure = { err };
+      bootstrapFailure = { err, read: failedPrivateRead };
     }
     // #519, the BOOTSTRAP half of the same startup race (Codex P2 on #719). An
     // update reload can drop `ensureUserProfile` or the server-only attestation
@@ -1327,7 +1336,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         attestedRead = await readAuthority();
         bootstrapFailure = null;
       } catch (err) {
-        bootstrapFailure = { err };
+        bootstrapFailure = { err, read: failedPrivateRead };
       }
     }
     if (profileAttemptRef.current !== attempt) return;
@@ -1380,6 +1389,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // nothing left to clear it. A settled authority retires this work.
         setAttested(true);
         const failure = bootstrapFailure.err;
+        const failedRead = bootstrapFailure.read;
         void hasCachedBoard(u.uid, ownedEventId).then((boarded) => {
           // Also guarded on `permanentFailureConfirmed` (Codex P2 round 4 on
           // #762): `failure` is whatever `bootstrapFailure` holds NOW, which
@@ -1387,7 +1397,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           // timeout, weaker evidence than an already-confirmed permanent
           // rejection. A weaker failure must never downgrade a confirmed one.
           if (!authorityApplied && !permanentFailureConfirmed && profileAttemptRef.current === attempt && !boarded) {
-            failDeal(failure, ownedEventId);
+            failDeal(failure, ownedEventId, failedRead ? { read: failedRead, attempt } : null);
           }
         });
       } else if (!permanentFailureConfirmed) {
@@ -1401,7 +1411,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // (`provisionalLiftRetired`); nothing else in this branch is safe to
         // run over it. A genuine authoritative SUCCESS is unaffected — it
         // lands in the `else` below, not here.
-        failDeal(bootstrapFailure.err, ownedEventId);
+        failDeal(bootstrapFailure.err, ownedEventId, bootstrapFailure.read ? { read: bootstrapFailure.read, attempt } : null);
         // …and, for a CONNECTION-class failure ONLY, fall back to the SAME
         // boolean-plus-card render witness the OFFLINE branch uses (#521). `navigator.onLine`
         // said true, but the authority read never landed — which IS the
@@ -2065,6 +2075,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       }
     };
+    let failedPrivateRead: PrivateReadOperation | null = null;
     try {
       // Routed through the SHARED `startAuthorityRead` so the retry honors a LATE
       // server answer exactly as the initial bootstrap does (Codex P2 on #728).
@@ -2113,12 +2124,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setAttested(attestedUidsRef.current.has(u.uid) ? true : undefined);
           setDealingFor(ownedEventId, false);
         },
+        (read) => { failedPrivateRead = read; },
       );
       if (profileAttemptRef.current !== attempt) return;
       settleRetry(read);
     } catch (err) {
       if (profileAttemptRef.current !== attempt) return;
-      failDeal(err, ownedEventId);
+      failDeal(err, ownedEventId, failedPrivateRead ? { read: failedPrivateRead, attempt } : null);
       setDealingFor(ownedEventId, false);
     }
   }, [failDeal, clearDealError, setAttestedAuthoritative, setDealingFor]);
@@ -2136,11 +2148,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // attestation; it drives the authoritative read, and the deal fires (via the
   // effect) only once that confirms.
   const retryDeal = useCallback(() => {
-    if (!user || auth.currentUser?.uid !== user.uid) return;
-    // A connection Retry restarts only an unavailable current-actor bridge.
-    // Unrelated gameplay timeouts retain a healthy client and confirmed blocks;
-    // an unavailable bridge still gets the existing fresh bounded episode.
-    if (isOnline() && dealErrorReason === 'connection') retryPrivateFirestoreSession(user.uid);
+    if (!user || auth.currentUser?.uid !== user.uid || activeEventIdRef.current !== eventId) return;
+    // The whole Retry is actor/Event-fenced. Only a current authority attempt's
+    // explicit private-read failure may replace an initialized client; gameplay
+    // errors retain it. The facade additionally fences the captured lease.
+    if (isOnline() && dealErrorReason === 'connection') {
+      const failure = dealState.privateReadFailure;
+      retryPrivateFirestoreSession(user.uid, failure?.attempt === profileAttemptRef.current ? failure.read : null);
+    }
     if (!isOnline()) {
       // OFFLINE Retry → the CACHE-FIRST path, NEVER the transaction bootstrap
       // (Codex #117 round 4, finding A): retryBootstrap awaits ensureUserProfile —
@@ -2165,7 +2180,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Online but not yet authoritative → re-run the full transaction bootstrap.
       void retryBootstrap(user, eventId);
     }
-  }, [user, mayDeal, runDeal, retryBootstrap, bootstrapUser, eventId, beginAdmissionIfNeeded, dealErrorReason]);
+  }, [user, mayDeal, runDeal, retryBootstrap, bootstrapUser, eventId, beginAdmissionIfNeeded, dealErrorReason, dealState.privateReadFailure]);
 
   // Persist the current User's honor-system 18+ self-attestation (ADR 0001) and
   // lift the re-prompt gate at once. Optimistic: the local flag flips before the
