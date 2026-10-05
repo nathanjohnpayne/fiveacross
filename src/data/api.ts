@@ -91,11 +91,12 @@ export type PrivateReadObserver = (operation: PrivateReadOperation | null) => vo
 async function observedPrivateRead<T>(lease: PrivateReadOperation['lease'], kind: PrivateReadOperation['kind'],
   read: () => Promise<T>, observe?: PrivateReadObserver): Promise<T> {
   return lease.guard(async () => {
-    const operation: PrivateReadOperation = { kind, lease, outcome: 'pending' };
+    const operation: PrivateReadOperation = { kind, lease, outcome: 'pending', retryEligible: true };
     observe?.(operation);
     try {
       const result = await read();
       operation.outcome = 'succeeded';
+      operation.retryEligible = false;
       observe?.(null);
       return result;
     } catch (error) {

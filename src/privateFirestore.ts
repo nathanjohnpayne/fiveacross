@@ -37,6 +37,8 @@ export type PrivateReadOperation = {
   kind: 'profile-read' | 'attestation-read';
   lease: ReturnType<ReturnType<typeof privateFirestoreSessions>['capture']>;
   outcome: 'pending' | 'failed' | 'succeeded';
+  /** A later successful SDK read in the same authority call disarms old proof. */
+  retryEligible: boolean;
 };
 
 /** Explicit private-UI retry starts one fresh bounded bridge episode.
@@ -49,7 +51,7 @@ export function retryPrivateFirestoreSession(unavailableForUid?: string, failedR
     const manager = privateFirestoreSessions();
     const snapshot = manager.getSnapshot();
     if (failedRead) {
-      if (!['profile-read', 'attestation-read'].includes(failedRead.kind) ||
+      if (!failedRead.retryEligible || !['profile-read', 'attestation-read'].includes(failedRead.kind) ||
           !['pending', 'failed'].includes(failedRead.outcome) ||
           failedRead.lease.uid !== unavailableForUid || failedRead.lease.db !== snapshot.db ||
           failedRead.lease.generation !== snapshot.generation) return;

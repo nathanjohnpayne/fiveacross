@@ -495,7 +495,14 @@ function startAuthorityRead(
   onReadFailure: (read: PrivateReadOperation | null) => void = () => {},
 ): Promise<boolean> {
   let activeRead: PrivateReadOperation | null = null;
-  const observeRead = (read: PrivateReadOperation | null) => { activeRead = read; };
+  let reportedRead: PrivateReadOperation | null = null;
+  const observeRead = (read: PrivateReadOperation | null) => {
+    activeRead = read;
+    // The SDK may retry a profile transaction callback after an earlier get
+    // failed. A successful later get disarms that call's reported read failure
+    // before any pending transaction commit or witness work completes.
+    if (read === null && reportedRead) reportedRead.retryEligible = false;
+  };
   const authority = (async () => {
     await ensureUserProfile(u, observeRead);
     return (await readAdultAttestationFromServer(u.uid, observeRead)) !== null;
@@ -511,7 +518,8 @@ function startAuthorityRead(
   );
   return withTimeout(authority, AUTH_BOOTSTRAP_TIMEOUT_MS).catch((err: unknown) => {
     undelivered = true;
-    onReadFailure(activeRead);
+    reportedRead = activeRead;
+    onReadFailure(reportedRead);
     throw err;
   });
 }

@@ -19,6 +19,7 @@ const H = vi.hoisted(() => ({
   profileExists: true, profileCommitFailure: null as Error | null,
   profileCommitSteps: [] as Array<() => Promise<void>>,
   profileReadSteps: [] as Array<() => Promise<void>>,
+  profileRetrySteps: [] as Array<() => Promise<void>>,
   serverSteps: [] as Array<() => Promise<void>>,
   gameplayTransactions: 0, heldJoin: true, releaseJoin: null as (() => void) | null,
   pairListeners: [] as Array<{ target: Ref; next: (snapshot: unknown) => void; error: (error: Error) => void; stop: ReturnType<typeof vi.fn> }>,
@@ -64,7 +65,7 @@ vi.mock('firebase/firestore', async (original) => {
         if (H.heldJoin) { H.heldJoin = false; await new Promise<void>((resolve) => { H.releaseJoin = resolve; }); }
       }
       const writeStart = H.writes.length;
-      const result = await operation({
+      const transaction: TransactionFixture = {
         get: async (ref) => {
           if (ref.path.startsWith('users/')) {
             H.profileReads.push(ref);
@@ -76,7 +77,14 @@ vi.mock('firebase/firestore', async (original) => {
         },
         set: (ref) => { H.writes.push(ref); },
         delete: () => { throw Object.assign(new Error('standing direction refuses orphan delete'), { code: 'permission-denied' }); },
-      });
+      };
+      let result: unknown;
+      try { result = await operation(transaction); } catch (error) {
+        const retry = database.app.name !== 'persistent' ? H.profileRetrySteps.shift() : undefined;
+        if (!retry) throw error;
+        await retry();
+        result = await operation(transaction);
+      }
       if (database.app.name !== 'persistent' && H.writes.slice(writeStart).some(ref => ref.path.startsWith('users/'))) {
         await (H.profileCommitSteps.shift() ?? (() => Promise.resolve()))();
         if (H.profileCommitFailure) throw H.profileCommitFailure;
@@ -126,6 +134,7 @@ beforeEach(() => {
   H.profileFailure = null;
   H.profileExists = true; H.profileCommitFailure = null; H.profileCommitSteps = [];
   H.profileReadSteps = [];
+  H.profileRetrySteps = [];
   H.serverSteps = []; H.gameplayTransactions = 0; H.heldJoin = true; H.releaseJoin = null; H.pairListeners = []; H.writes = [];
   Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
   Object.defineProperty(navigator, 'locks', { configurable: true, value: {
@@ -299,6 +308,24 @@ it('a failed replacement bridge retires the old lease and blocks until Retry get
 
 // #1732: only explicitly current private reads can replace an initialized client.
 describe('private reads failing while the bridge remains initialized', () => {
+  it('a successful SDK transaction read retry disarms the earlier failed read before commit', async () => {
+    let releaseRetry!: () => void; let releaseCommit!: () => void;
+    H.profileExists = false; H.heldJoin = false;
+    H.profileFailure = Object.assign(new Error('first get unavailable'), { code: 'unavailable' });
+    H.profileRetrySteps = [() => new Promise<void>(resolve => { releaseRetry = () => { H.profileFailure = null; resolve(); }; })];
+    H.profileCommitSteps = [() => new Promise<void>(resolve => { releaseCommit = resolve; })];
+    const view = await mount(); const before = sessions!.getSnapshot(); const lease = view.capture();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(screen.getByTestId('error')).toHaveTextContent('connection'); expect(H.writes).toHaveLength(0);
+    await act(async () => { releaseRetry(); await vi.advanceTimersByTimeAsync(0); });
+    expect(H.profileReads).toHaveLength(2); expect(H.writes).toHaveLength(1); expect(H.serverReads).toHaveLength(0);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry' })); await vi.advanceTimersByTimeAsync(0); });
+    expect(sessions!.getSnapshot()).toBe(before); expect(H.apps).toHaveLength(1); expect(() => lease.assertCurrent()).not.toThrow();
+    expect(H.gameplayTransactions).toBe(1); expect(screen.getByTestId('error')).toHaveTextContent('none');
+    await act(async () => { releaseCommit(); await vi.advanceTimersByTimeAsync(0); });
+    expect(H.apps).toHaveLength(1); expect(H.gameplayTransactions).toBe(1); expect(screen.getByTestId('error')).toHaveTextContent('none');
+  });
+
   it('a timed-out profile read that later succeeds disarms replacement while its commit is still pending', async () => {
     let releaseRead!: () => void; let releaseCommit!: () => void;
     H.profileExists = false; H.heldJoin = false;
