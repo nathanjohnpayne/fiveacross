@@ -235,13 +235,21 @@ afterEach(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  delete (mockedAuth as { currentUser?: unknown }).currentUser;
   eventScope.eventId = 'event-a';
   resetEventPlayPhaseForTests();
   localStorage.clear();
   forgetHandoffAttestation();
   emitAuth = () => {};
   mocks.onAuthStateChanged.mockImplementation((_a: unknown, cb: (u: unknown) => unknown) => {
-    emitAuth = cb;
+    // The SDK publishes currentUser before notifying Auth listeners. Retry's
+    // primary-actor fence must observe that same public state in this fixture.
+    emitAuth = (user) => {
+      const primary = mockedAuth as { currentUser?: unknown };
+      if (user == null) delete primary.currentUser;
+      else primary.currentUser = user;
+      return cb(user);
+    };
     return () => {};
   });
   mocks.ensureUserProfile.mockResolvedValue(undefined);

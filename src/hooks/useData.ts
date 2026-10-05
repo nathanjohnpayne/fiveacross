@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { collectionGroup, getDocsFromServer, onSnapshot, query, waitForPendingWrites, where, type DocumentReference, type Query } from 'firebase/firestore';
+import { collectionGroup, getDocsFromServer, onSnapshot, query, waitForPendingWrites, where, type DocumentReference, type Query, type SnapshotMetadata } from 'firebase/firestore';
 import { usePrivateFirestore } from './usePrivateFirestore';
 import { db, EVENT_ID } from '../firebase';
 import { eventRef, itemsCol, boardRef, dayBoardRef, dayMetaRef, playerRef, playersCol, proofsCol, claimsCol, userRef, tallyMarkersCol, momentsCol, noticesCol, doubtsCol, heartsCol } from '../data/paths';
@@ -252,19 +252,77 @@ function useColSub<T>(q: Query<T> | null, key: string, clearOnError = false, ret
         active = false;
       };
     }
+    let barrierInFlight = false;
+    let queuedRemoval: number | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let transientFailures = 0;
+    let retryAfter = 0;
+    const discardQueuedRemoval = () => {
+      queuedRemoval = null;
+      if (retryTimer !== null) clearTimeout(retryTimer);
+      retryTimer = null;
+    };
+    const publishCommitted = (metadata: SnapshotMetadata) => setState({
+      key, failed: false, data: committed ?? [], loading: committed === null,
+      hasServerData: committed !== null && !metadata.fromCache,
+      fromCache: metadata.fromCache, hasPendingWrites: metadata.hasPendingWrites,
+    });
+    const startRemovalBarrier = () => {
+      if (!active || barrierInFlight || retryTimer !== null || queuedRemoval === null) return;
+      const delay = retryAfter - Date.now();
+      if (delay > 0) {
+        retryTimer = setTimeout(() => { retryTimer = null; startRemovalBarrier(); }, delay);
+        return;
+      }
+      const currentObservation = queuedRemoval;
+      queuedRemoval = null;
+      barrierInFlight = true;
+      const isCurrent = () => active && observation === currentObservation;
+      void (async () => {
+        try {
+          await waitForPendingWrites(q.firestore);
+          if (!isCurrent()) return;
+          const fresh = await getDocsFromServer(q);
+          if (!isCurrent()) return;
+          if (fresh.metadata.fromCache) { committed = null; committedIds.clear(); }
+          else if (!fresh.metadata.hasPendingWrites) {
+            committed = fresh.docs.map((d) => d.data() as T);
+            committedIds = new Set(fresh.docs.map((doc) => doc.id));
+          }
+          transientFailures = 0;
+          retryAfter = 0;
+          publishCommitted(fresh.metadata);
+        } catch (error) {
+          if (!active) return;
+          if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'permission-denied') {
+            if (!isCurrent()) return;
+            discardQueuedRemoval();
+            committed = null;
+            committedIds.clear();
+            setState({ ...emptyCollectionState<T>(key, false), failed: true });
+          } else {
+            // Only a later settled removal snapshot may retry. Rate-limit those
+            // attempts within this subscription; never poll a failed candidate.
+            transientFailures = Math.min(transientFailures + 1, 4);
+            retryAfter = Date.now() + 250 * 2 ** (transientFailures - 1);
+          }
+        } finally {
+          barrierInFlight = false;
+          // A burst replaces the single queued observation, never starts a
+          // second drain/read concurrently or publishes the superseded answer.
+          startRemovalBarrier();
+        }
+      })();
+    };
     const unsub = onSnapshot(
       q,
       { includeMetadataChanges: true },
       (snap) => {
         if (!active) return;
         const currentObservation = ++observation;
+        discardQueuedRemoval();
         const data = snap.docs.map((d) => d.data() as T);
         if (retainCommittedDuringPending) {
-          const publishCommitted = (metadata: typeof snap.metadata) => setState({
-            key, failed: false, data: committed ?? [], loading: committed === null,
-            hasServerData: committed !== null && !metadata.fromCache,
-            fromCache: metadata.fromCache, hasPendingWrites: metadata.hasPendingWrites,
-          });
           if (snap.metadata.fromCache) { committed = null; committedIds.clear(); }
           publishCommitted(snap.metadata);
           if (snap.metadata.fromCache || snap.metadata.hasPendingWrites) return;
@@ -280,30 +338,8 @@ function useColSub<T>(q: Query<T> | null, key: string, clearOnError = false, ret
           // mutations on documents still in the query. Drain this captured memory
           // client's writes, then obtain a FRESH server answer; promoting the
           // captured empty echo could beat rollback delivery after a denied write.
-          const isCurrent = () => active && observation === currentObservation;
-          void (async () => {
-            try {
-              await waitForPendingWrites(q.firestore);
-              if (!isCurrent()) return;
-              const fresh = await getDocsFromServer(q);
-              if (!isCurrent()) return;
-              if (fresh.metadata.fromCache) { committed = null; committedIds.clear(); }
-              else if (!fresh.metadata.hasPendingWrites) {
-                committed = fresh.docs.map((d) => d.data() as T);
-                committedIds = new Set(fresh.docs.map((doc) => doc.id));
-              }
-              publishCommitted(fresh.metadata);
-            } catch (error) {
-              if (!isCurrent()) return;
-              if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'permission-denied') {
-                committed = null;
-                committedIds.clear();
-                setState({ ...emptyCollectionState<T>(key, false), failed: true });
-              }
-              // A transient barrier failure leaves the same-scope committed
-              // answer visible; a later settled removal may retry the barrier.
-            }
-          })();
+          queuedRemoval = currentObservation;
+          startRemovalBarrier();
           return;
         }
         setState((previous) => ({
@@ -319,6 +355,7 @@ function useColSub<T>(q: Query<T> | null, key: string, clearOnError = false, ret
       () => {
         if (!active) return;
         observation += 1;
+        discardQueuedRemoval();
         committed = null;
         committedIds.clear();
         setState((previous) =>
@@ -330,6 +367,7 @@ function useColSub<T>(q: Query<T> | null, key: string, clearOnError = false, ret
     );
     return () => {
       active = false;
+      discardQueuedRemoval();
       unsub();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -31,8 +31,20 @@ export function privateFirestoreSessions() {
   return sessions;
 }
 
-/** Explicit user retry: one fresh bounded bridge episode, never a service fallback. */
-export function retryPrivateFirestoreSession(): void { privateFirestoreSessions().retry(); }
+/** Explicit private-UI retry starts one fresh bounded bridge episode.
+ * Gameplay supplies its actor UID to restart only an unavailable bridge;
+ * a healthy current client retains its subscriptions and captured leases. */
+export function retryPrivateFirestoreSession(unavailableForUid?: string): void {
+  if (unavailableForUid !== undefined) {
+    if (auth.currentUser?.uid !== unavailableForUid || navigator.onLine === false) return;
+    const manager = privateFirestoreSessions();
+    const snapshot = manager.getSnapshot();
+    if (snapshot.uid === unavailableForUid && snapshot.db !== null && !snapshot.failed) return;
+    manager.retry();
+    return;
+  }
+  privateFirestoreSessions().retry();
+}
 
 function privateUnavailable() { return Object.assign(new Error('Private session unavailable.'), { code: 'unavailable' }); }
 
@@ -50,13 +62,14 @@ export function capturePrivateFirestore(allowRecovery = false) {
   return { ...lease, functions, storage };
 }
 
-/** A bounded readiness wait for bootstrap, never a lookup after capturing an action. */
+/** One bounded bootstrap wait spans scheduled bridge retries. It never replaces
+ * a captured action lease, and no publication resets the absolute deadline. */
 export async function awaitPrivateFirestore(uid: string, allowRecovery = false) {
   const manager = privateFirestoreSessions();
-  // A caller arriving after failure must not miss the prior publication and
-  // wait five seconds. The bridge retries independently with a bounded budget.
+  // Exhaustion rejects promptly, including callers arriving after publication.
+  // A still-scheduled retry may recover within this same five-second wait.
   if (auth.currentUser?.uid !== uid) throw new Error('Private session changed.');
-  if (manager.getSnapshot().failed) throw privateUnavailable();
+  if (manager.getSnapshot().failed && !manager.getSnapshot().retryPending) throw privateUnavailable();
   const ready = () => {
     const snapshot = manager.getSnapshot();
     return snapshot.uid === uid && snapshot.db !== null;
@@ -64,11 +77,14 @@ export async function awaitPrivateFirestore(uid: string, allowRecovery = false) 
   if (!ready()) await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => { unsubscribe(); reject(privateUnavailable()); }, 5_000);
     const unsubscribe = manager.subscribe(() => {
-      if (auth.currentUser?.uid !== uid || manager.getSnapshot().failed) {
+      if (auth.currentUser?.uid !== uid || (manager.getSnapshot().failed && !manager.getSnapshot().retryPending)) {
         clearTimeout(timer); unsubscribe(); reject(auth.currentUser?.uid !== uid ? new Error('Private session changed.') : privateUnavailable());
       } else if (ready()) { clearTimeout(timer); unsubscribe(); resolve(); }
     });
   });
+  // A ready publication and a primary-account change can both precede this
+  // continuation. Refuse before constructing another account's services.
+  if (auth.currentUser?.uid !== uid) throw new Error('Private session changed.');
   const lease = capturePrivateFirestore(allowRecovery);
   if (lease.uid !== uid) throw new Error('Private account changed.');
   return lease;
