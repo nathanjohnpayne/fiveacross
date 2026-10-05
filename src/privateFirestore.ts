@@ -32,12 +32,13 @@ export function privateFirestoreSessions() {
 }
 
 /** A captured SDK read, never a whole profile transaction/write. Its outcome
- * changes only when that exact SDK read settles; a late success disarms Retry. */
+ * changes only when that exact SDK read settles; success or a terminal authority
+ * rejection disarms Retry. */
 export type PrivateReadOperation = {
   kind: 'profile-read' | 'attestation-read';
   lease: ReturnType<ReturnType<typeof privateFirestoreSessions>['capture']>;
   outcome: 'pending' | 'failed' | 'succeeded';
-  /** A later successful SDK read in the same authority call disarms old proof. */
+  /** A successful SDK read or permanent authority rejection disarms old proof. */
   retryEligible: boolean;
 };
 

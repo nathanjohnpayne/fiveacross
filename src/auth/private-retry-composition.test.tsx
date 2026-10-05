@@ -308,6 +308,43 @@ it('a failed replacement bridge retires the old lease and blocks until Retry get
 
 // #1732: only explicitly current private reads can replace an initialized client.
 describe('private reads failing while the bridge remains initialized', () => {
+  it.each([
+    ['profile', 'permission-denied'], ['profile', 'unauthenticated'],
+    ['attestation', 'permission-denied'], ['attestation', 'unauthenticated'],
+  ] as const)('a retained timeout Retry refuses late terminal %s %s', async (source, code) => {
+    let rejectRead!: (error: Error) => void;
+    const heldRead = () => new Promise<void>((_resolve, reject) => { rejectRead = reject; });
+    if (source === 'profile') H.profileReadSteps = [heldRead]; else H.serverSteps = [heldRead];
+    const view = await mount(); await confirmBlocks();
+    const before = sessions!.getSnapshot(); const lease = view.capture();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(screen.getByTestId('error')).toHaveTextContent('connection');
+    const savedRetry = view.retry();
+    await act(async () => { rejectRead(Object.assign(new Error('late terminal read'), { code })); await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByTestId('error')).toHaveTextContent('permanent');
+    const reads = [H.profileReads.length, H.serverReads.length];
+    await act(async () => { savedRetry(); await vi.advanceTimersByTimeAsync(0); });
+    expect(sessions!.getSnapshot()).toBe(before); expect(H.apps).toHaveLength(1);
+    expect(() => lease.assertCurrent()).not.toThrow();
+    expect([H.profileReads.length, H.serverReads.length]).toEqual(reads);
+    expect(H.gameplayTransactions).toBe(0); expect(screen.getByTestId('error')).toHaveTextContent('permanent');
+    expect(screen.getByTestId('blocks')).toHaveTextContent('blocked');
+    expect(H.pairListeners[0].stop).not.toHaveBeenCalled();
+  });
+
+  it('a retained timeout Retry still replaces its current client after a late transient read failure', async () => {
+    let rejectRead!: (error: Error) => void;
+    H.serverSteps = [() => new Promise<void>((_resolve, reject) => { rejectRead = reject; })]; H.heldJoin = false;
+    const view = await mount(); await confirmBlocks(); const lease = view.capture();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    const savedRetry = view.retry();
+    await act(async () => { rejectRead(Object.assign(new Error('late transient read'), { code: 'unavailable' })); await vi.advanceTimersByTimeAsync(0); });
+    await act(async () => { savedRetry(); await vi.advanceTimersByTimeAsync(0); });
+    expect(H.apps).toHaveLength(2); expect(() => lease.assertCurrent()).toThrow(/expired/);
+    expect(H.gameplayTransactions).toBe(1); expect(screen.getByTestId('error')).toHaveTextContent('none');
+    expect(screen.getByTestId('blocks')).toHaveTextContent('withheld');
+  });
+
   it('a successful SDK transaction read retry disarms the earlier failed read before commit', async () => {
     let releaseRetry!: () => void; let releaseCommit!: () => void;
     H.profileExists = false; H.heldJoin = false;

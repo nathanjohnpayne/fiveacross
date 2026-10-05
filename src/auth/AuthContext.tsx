@@ -513,7 +513,12 @@ function startAuthorityRead(
       if (undelivered) onLate(late);
     },
     (err: unknown) => {
-      if (undelivered) onLateError(err);
+      if (undelivered) {
+        // A timeout cannot keep replacement authority after this same call
+        // settles permanently, even in a Retry closure retained before render.
+        if (reportedRead && dealErrorReasonFor(err) === 'permanent') reportedRead.retryEligible = false;
+        onLateError(err);
+      }
     },
   );
   return withTimeout(authority, AUTH_BOOTSTRAP_TIMEOUT_MS).catch((err: unknown) => {
@@ -930,6 +935,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // from dealAttemptRef on purpose: runDeal bumps dealAttemptRef mid-sign-in,
   // which must not read as the profile bootstrap being superseded.
   const profileAttemptRef = useRef(0);
+  // Async terminal publication must retire saved Retry callbacks immediately,
+  // without waiting for React to replace their captured failure state.
+  const currentPrivateReadFailureRef = useRef<EventDealState['privateReadFailure']>(null);
   const updateDealStateFor = useCallback(
     (ownedEventId: string, update: (state: EventDealState) => EventDealState) => {
       if (activeEventIdRef.current !== ownedEventId) return;
@@ -949,6 +957,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // mutating identity-adjacent authority state after a newer Event takes over.
     dealAttemptRef.current += 1;
     profileAttemptRef.current += 1;
+    currentPrivateReadFailureRef.current = null;
     pendingEventBootstrapRef.current = eventId;
     setStoredDealState(neutralDealState(eventId));
     admissionVisitRef.current = null;
@@ -1043,8 +1052,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // wiring them into the deal/bootstrap callbacks' deps below does not change
   // those callbacks' identity — no #117 effect re-runs.
   const failDeal = useCallback((err: unknown, ownedEventId: string, privateReadFailure: EventDealState['privateReadFailure'] = null) => {
+    if (activeEventIdRef.current !== ownedEventId) return;
     const reason = dealErrorReasonFor(err);
     const message = dealErrorMessage(err);
+    const currentFailure = reason === 'connection' ? privateReadFailure : null;
+    currentPrivateReadFailureRef.current = currentFailure;
     // Three-way (#434, Codex #438), via the shared `dealErrorReasonFor` so this
     // publication and every other consumer of the classification agree by
     // construction: a PERMANENT rules/schema/permission or unknown-coded failure
@@ -1056,10 +1068,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       ...state,
       dealError: message,
       dealErrorReason: reason,
-      privateReadFailure: reason === 'connection' ? privateReadFailure : null,
+      privateReadFailure: currentFailure,
     }));
   }, [updateDealStateFor]);
   const clearDealError = useCallback((ownedEventId: string) => {
+    if (activeEventIdRef.current !== ownedEventId) return;
+    currentPrivateReadFailureRef.current = null;
     updateDealStateFor(ownedEventId, (state) => ({
       ...state,
       dealError: null,
@@ -2160,9 +2174,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // The whole Retry is actor/Event-fenced. Only a current authority attempt's
     // explicit private-read failure may replace an initialized client; gameplay
     // errors retain it. The facade additionally fences the captured lease.
+    const failure = dealState.privateReadFailure;
+    if (failure && (failure !== currentPrivateReadFailureRef.current || failure.attempt !== profileAttemptRef.current)) return;
     if (isOnline() && dealErrorReason === 'connection') {
-      const failure = dealState.privateReadFailure;
-      if (failure && failure.attempt !== profileAttemptRef.current) return;
       retryPrivateFirestoreSession(user.uid, failure?.read);
     }
     if (!isOnline()) {
