@@ -134,6 +134,27 @@ describe('private hook cache and actor boundaries (#1411)', () => {
     expect(view.result.current.items).toHaveLength(1);
   });
 
+  it.each([-60_000, 60_000])('keeps elapsed cooldown unchanged when the wall clock moves by %i ms', async (wallClockChange) => {
+    vi.useFakeTimers({ toFake: ['Date', 'performance', 'setTimeout', 'clearTimeout'] });
+    const view = renderHook(() => usePendingItems());
+    const listener = H.subscriptions[0];
+    await act(async () => listener.next(snapshot()));
+    H.pendingWrites.mockRejectedValueOnce(Object.assign(new Error('unavailable'), { code: 'unavailable' }));
+    await act(async () => listener.next(rowsSnapshot([])));
+    expect(H.pendingWrites).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(Date.now() + wallClockChange);
+    H.serverRead.mockResolvedValueOnce(rowsSnapshot([]));
+    await act(async () => listener.next(rowsSnapshot([])));
+    expect(H.pendingWrites).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(249));
+    expect(H.pendingWrites).toHaveBeenCalledTimes(1);
+    expect(view.result.current.items).toHaveLength(1);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(H.pendingWrites).toHaveBeenCalledTimes(2);
+    expect(H.serverRead).toHaveBeenCalledTimes(1);
+    expect(view.result.current.items).toEqual([]);
+  });
+
   it('caps snapshot-triggered transient backoff and never automatically retries a failed candidate', async () => {
     vi.useFakeTimers();
     const view = renderHook(() => usePendingItems());
