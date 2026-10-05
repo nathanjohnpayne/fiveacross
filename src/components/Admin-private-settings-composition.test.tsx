@@ -179,6 +179,24 @@ describe('actual private Admin settings save feedback (#1678)', () => {
     expect(H.writes[1]!.fields).toEqual({ 'settings.easyMixRatio': 0.8 }); await acknowledge();
   });
 
+  it('preserves a newer slider draft that returns to the failed release value and retries it', async () => {
+    renderAdmin(); await act(async () => emit());
+    const slider = screen.getByRole('slider') as HTMLInputElement;
+    slider.focus();
+    fireEvent.change(slider, { target: { value: '60' } }); fireEvent.pointerUp(slider);
+    await waitFor(() => expect(H.writes).toHaveLength(1));
+    fireEvent.change(slider, { target: { value: '80' } });
+    fireEvent.change(slider, { target: { value: '60' } });
+    await reject();
+    expect(slider.value).toBe('60');
+    expect(slider).toHaveAttribute('aria-valuetext', '60% · 14 of 24 squares');
+    expect(screen.getByRole('alert')).toHaveTextContent('Easy mix save failed. Try again.');
+    fireEvent.pointerUp(slider); await waitFor(() => expect(H.writes).toHaveLength(2));
+    expect(H.writes[1]!.fields).toEqual({ 'settings.easyMixRatio': 0.6 });
+    expect(screen.queryByRole('alert')).toBeNull(); await acknowledge();
+    expect(slider.value).toBe('60');
+  });
+
   it('holds Day-theme feedback through the private transaction denial and preserves the Day lock', async () => {
     renderAdmin('schedule'); await act(async () => emit());
     const future = screen.getByRole('combobox', { name: 'Day 1 theme' });

@@ -47,6 +47,7 @@ export function EasyMixSlider({ value, onChange }: { value: number; onChange: (r
   const [error, setError] = useState('');
   const active = useRef(true);
   const request = useRef(0);
+  const draftRevision = useRef(0);
   const observed = useRef(value);
   observed.current = value;
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
@@ -79,6 +80,7 @@ export function EasyMixSlider({ value, onChange }: { value: number; onChange: (r
     if (ratio === lastCommitted.current) return false;
     lastCommitted.current = ratio;
     const attempt = ++request.current;
+    const releasedDraft = draftRevision.current;
     setError('');
     const failed = () => {
       // A slow rejection cannot undo a later release or touch retired Admin
@@ -86,7 +88,9 @@ export function EasyMixSlider({ value, onChange }: { value: number; onChange: (r
       if (!active.current || attempt !== request.current) return;
       const committed = snapPct(observed.current);
       lastCommitted.current = committed / 100;
-      if (inputRef.current && Number(inputRef.current.value) === next) {
+      // Numeric equality alone cannot identify the released draft: a newer
+      // adjustment may leave and return to this same value before rejection.
+      if (draftRevision.current === releasedDraft && inputRef.current && Number(inputRef.current.value) === next) {
         inputRef.current.value = String(committed);
         setPct(committed);
       }
@@ -123,7 +127,7 @@ export function EasyMixSlider({ value, onChange }: { value: number; onChange: (r
         list="easymix-detents"
         aria-label="Easy mix percentage"
         aria-valuetext={squaresPhrase(pct)}
-        onChange={(e) => setPct(Number(e.target.value))}
+        onChange={(e) => { draftRevision.current++; setPct(Number(e.target.value)); }}
         onPointerUp={(e) => commit(Number((e.target as HTMLInputElement).value))}
         onKeyUp={(e) => commit(Number((e.target as HTMLInputElement).value))}
         onBlur={(e) => onBlurCommit(Number((e.target as HTMLInputElement).value))}
