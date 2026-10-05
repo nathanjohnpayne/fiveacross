@@ -5,6 +5,7 @@ import { FALLBACK_PATH } from './tabs';
 import { Palette, CalendarDays, Lightbulb, GraduationCap, Download, Wrench, LogOut, ALargeSmall, UserX } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { useEventDoc, useMyUser, usePendingItemCount } from '../hooks/useData';
+import { usePrivateFirestore } from '../hooks/usePrivateFirestore';
 import { useInstallPrompt } from '../hooks/useInstallPrompt';
 import { useTextSize, type TextSize } from '../hooks/useTextSize';
 import { THEMES } from '../theme/themes';
@@ -42,6 +43,7 @@ import { useOpenSuggestPanelIntent, clearOpenSuggestPanel } from '../hooks/useOp
  */
 export default function More() {
   const { user, signOutUser } = useAuth();
+  const { recoveryRequired } = usePrivateFirestore();
   const { data: event } = useEventDoc();
   // The More tab already owns Firebase-backed data hooks; keep AcceptableUse's
   // default/floating import path hermetic by passing the row-only attestation
@@ -164,12 +166,14 @@ export default function More() {
         <h3>Support</h3>
         <div className="more-rows">
           <BugReport variant="row" />
-          <a className="more-row" href={privateCacheRecoveryHref(window.location.href)}>
-            <span className="more-row-text">
-              <span className="more-row-title">Device recovery</span>
-              <span className="more-row-sub">Recover queued Marks before clearing old private data</span>
-            </span>
-          </a>
+          {recoveryRequired && (
+            <a className="more-row" href={privateCacheRecoveryHref(window.location.href)}>
+              <span className="more-row-text">
+                <span className="more-row-title">Device recovery</span>
+                <span className="more-row-sub">Recover queued Marks before clearing old private data</span>
+              </span>
+            </a>
+          )}
           <AcceptableUse variant="row" attestedAdultAt={myUser?.attestedAdultAt ?? null} />
           <MoreRow
             icon={UserX}
