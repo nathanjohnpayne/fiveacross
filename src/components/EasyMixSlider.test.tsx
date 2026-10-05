@@ -1,8 +1,7 @@
-// The shared Easy mix dial in isolation (#1376): mounted with a plain
-// `value`/`onChange` pair, no Admin shell, no Firestore. The Admin surface's
-// own behavior (the `setEasyMixRatio` write path, the focus guard's echo
-// handling) stays pinned by `Admin.test.tsx`, which this extraction leaves
-// unmodified.
+// The shared Easy mix dial takes a plain value/callback pair. These controls
+// pin generic draft, committed-prop, failure recovery and focus ownership.
+// Admin.test.tsx covers the Admin surface; the private settings composition
+// drives its real committed Event hook and captured writer.
 import { describe, it, expect, vi } from 'vitest';
 import { Suspense, startTransition, useLayoutEffect, useState } from 'react';
 import { act, render, screen, fireEvent } from '@testing-library/react';
@@ -13,6 +12,85 @@ function mount(value: number, onChange = vi.fn()) {
   const slider = screen.getByRole('slider', { name: 'Easy mix percentage' }) as HTMLInputElement;
   return { slider, onChange };
 }
+
+function orderedReleases() {
+  const pending: { resolve: () => void; reject: () => void }[] = [];
+  const save = vi.fn((_ratio: number) => new Promise<void>((resolve, reject) => {
+    pending.push({ resolve, reject: () => reject(new Error('Denied')) });
+  }));
+  const view = render(<EasyMixSlider value={0.5} onChange={save} />);
+  const slider = screen.getByRole('slider') as HTMLInputElement;
+  const change = (pct: number) => fireEvent.change(slider, { target: { value: String(pct) } });
+  const release = (pct: number) => { change(pct); fireEvent.keyUp(slider); };
+  const echo = (value: number) => view.rerender(<EasyMixSlider value={value} onChange={save} />);
+  slider.focus(); release(60); release(65);
+  return { slider, save, pending, change, release, echo };
+}
+
+describe('latest failed fallback committed echoes (#1713)', () => {
+  it('follows successive committed echoes without a new draft, including an untouched deduped release', async () => {
+    const { slider, save, pending, echo } = orderedReleases();
+    await act(async () => pending[1].reject());
+    expect(slider.value).toBe('50'); fireEvent.keyUp(slider);
+    await act(async () => pending[0].resolve());
+    expect(slider.value).toBe('50'); expect(save.mock.calls.map(call => call[0])).toEqual([0.6, 0.65]);
+    echo(0.62); expect(slider.value).toBe('60');
+    echo(0.7); expect(slider.value).toBe('70'); expect(slider).toHaveFocus();
+    expect(screen.getByText('70% · 17 of 24 squares')).toBeInTheDocument();
+    expect(slider).toHaveAttribute('aria-valuetext', '70% · 17 of 24 squares');
+    expect(screen.getByRole('alert')).toHaveTextContent('Easy mix save failed. Try again.');
+    fireEvent.pointerUp(slider); fireEvent.keyUp(slider); act(() => slider.blur());
+    expect(save).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { timing: 'before', aba: false, final: 80 }, { timing: 'before', aba: true, final: 65 },
+    { timing: 'after', aba: false, final: 80 }, { timing: 'after', aba: true, final: 50 },
+  ])('keeps a newer $timing-failure draft (ABA=$aba) when an earlier echo commits', async ({ timing, aba, final }) => {
+    const { slider, save, pending, change, release, echo } = orderedReleases();
+    const draft = () => { change(80); if (aba) change(final); };
+    if (timing === 'before') draft();
+    await act(async () => pending[1].reject());
+    if (timing === 'after') draft();
+    echo(0.6);
+    expect(slider.value).toBe(String(final)); expect(slider).toHaveFocus();
+    const phrase = `${final}% · ${Math.round(24 * final / 100)} of 24 squares`;
+    expect(slider).toHaveAttribute('aria-valuetext', phrase); expect(screen.getByText(phrase)).toBeInTheDocument();
+    expect(save).toHaveBeenCalledTimes(2);
+    release(70); expect(save).toHaveBeenLastCalledWith(0.7);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it.each([65, 70])('a newer %i request ends old recovery, and only its own failure may follow a later echo', async (next) => {
+    const { slider, save, pending, release, echo } = orderedReleases();
+    await act(async () => pending[1].reject());
+    release(next); echo(0.6);
+    expect(slider.value).toBe(String(next)); expect(save).toHaveBeenCalledTimes(3);
+    expect(screen.queryByRole('alert')).toBeNull();
+    await act(async () => pending[0].reject());
+    expect(slider.value).toBe(String(next)); expect(screen.queryByRole('alert')).toBeNull();
+    await act(async () => pending[2].reject());
+    expect(slider.value).toBe('60'); echo(0.7);
+    expect(slider.value).toBe('70'); expect(slider).toHaveFocus();
+    expect(screen.getByRole('alert')).toHaveTextContent('Easy mix save failed. Try again.');
+    fireEvent.pointerUp(slider); expect(save).toHaveBeenCalledTimes(3);
+  });
+
+  it('retains the ordinary healthy focus guard and catches up on no-op blur', () => {
+    const { slider, save, echo } = orderedReleases();
+    echo(0.6); echo(0.7);
+    expect(slider.value).toBe('65'); expect(slider).toHaveAttribute('aria-valuetext', '65% · 16 of 24 squares');
+    act(() => slider.blur()); expect(slider.value).toBe('70'); expect(save).toHaveBeenCalledTimes(2);
+  });
+
+  it('ends failed-fallback recovery on blur and protects the next focused interaction', async () => {
+    const { slider, save, pending, echo } = orderedReleases();
+    await act(async () => pending[1].reject()); echo(0.6);
+    expect(slider.value).toBe('60'); act(() => slider.blur()); slider.focus();
+    echo(0.7); expect(slider.value).toBe('60');
+    act(() => slider.blur()); expect(slider.value).toBe('70'); expect(save).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe('EasyMixSlider (shared module)', () => {
   it('reads "50% · 12 of 24 squares" at 50% in the bubble and in aria-valuetext', () => {
