@@ -27,7 +27,15 @@ const H = vi.hoisted(() => ({
   } as unknown as EventDoc,
   pendingCount: 0,
   signOutUser: vi.fn(),
+  recoveryRequired: true,
 }));
+
+vi.mock('../hooks/usePrivateFirestore', () => ({
+  usePrivateFirestore: () => ({ recoveryRequired: H.recoveryRequired }),
+}));
+beforeEach(() => {
+  H.recoveryRequired = true;
+});
 
 vi.mock('../auth/AuthContext', () => ({
   useAuth: () => ({ user: H.user, signOutUser: H.signOutUser }),
@@ -93,6 +101,26 @@ vi.mock('../firebase', () => ({ EVENT_ID: 'test-event' }));
 import More from './More';
 
 describe('More menu (specs/d15-more-menu.md)', () => {
+  it('hides the ordinary recovery shortcut after recovery completes without removing other support actions', () => {
+    const view = render(<MemoryRouter initialEntries={['/more']}><More /></MemoryRouter>);
+    expect(screen.getByRole('link', { name: /Device recovery/ })).toBeInTheDocument();
+    H.recoveryRequired = false;
+    view.rerender(<MemoryRouter initialEntries={['/more']}><More /></MemoryRouter>);
+    expect(screen.queryByRole('link', { name: /Device recovery/ })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Report a bug (row)' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Blocked players/ })).toBeInTheDocument();
+    H.recoveryRequired = true;
+    view.rerender(<MemoryRouter initialEntries={['/more']}><More /></MemoryRouter>);
+    expect(screen.getByRole('link', { name: /Device recovery/ })).toBeInTheDocument();
+  });
+
+  it('does not offer ordinary recovery when the device is already recovered on mount', () => {
+    H.recoveryRequired = false;
+    render(<MemoryRouter initialEntries={['/more']}><More /></MemoryRouter>);
+    expect(screen.queryByRole('link', { name: /Device recovery/ })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Sign out' })).toBeInTheDocument();
+  });
+
   it('uses a document query rather than a fragment for attended recovery', () => {
     render(<MemoryRouter initialEntries={['/more']}><More /></MemoryRouter>);
     const link = screen.getByRole('link', { name: /Device recovery/ });

@@ -684,7 +684,7 @@ describe('private profile action lifetime (#1411)', () => {
   beforeEach(() => { resetMocks(); authState.current = { user: null, loading: false }; });
   afterEach(() => vi.unstubAllGlobals());
 
-  it.each(['another account', 'same UID refresh'])('refuses an avatar write when image preparation resumes after %s', async (retirement) => {
+  it.each(['another account', 'same UID private-client Retry'])('refuses an avatar write when image preparation resumes after %s', async (retirement) => {
     let finishDecode!: () => void;
     const decode = vi.fn(() => new Promise<never>((_resolve, reject) => {
       finishDecode = () => reject(new Error('decode fallback'));
