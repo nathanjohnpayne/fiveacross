@@ -11,7 +11,7 @@ type ClientAuth = { app: App; currentUser: Subject | null };
 type ClientDb = { app: App; cache: unknown };
 const H = vi.hoisted(() => ({
   primary: { currentUser: { uid: 'alice', token: 'initial' } as Subject | null },
-  before: null as (() => void) | null,
+  before: null as ((user: Subject | null) => void) | null,
   abort: null as (() => void) | null,
   idToken: null as ((subject: Subject | null) => void) | null,
   apps: [] as App[], auths: [] as ClientAuth[], dbs: [] as ClientDb[],
@@ -37,12 +37,15 @@ vi.mock('firebase/auth', () => ({
   },
   updateCurrentUser: async (auth: ClientAuth, subject: Subject | null) => {
     if (subject) {
-      H.clones.push({ auth, subject });
+      H.clones.push({ auth, subject: { ...subject } });
+      const copied = { ...subject };
       await (H.cloneWaits.shift() ?? (() => Promise.resolve()))();
+      auth.currentUser = copied;
+    } else {
+      auth.currentUser = null;
     }
-    auth.currentUser = subject;
   },
-  beforeAuthStateChanged: (_auth: unknown, before: () => void, abort: () => void) => {
+  beforeAuthStateChanged: (_auth: unknown, before: (user: Subject | null) => void, abort: () => void) => {
     H.before = before; H.abort = abort; return vi.fn();
   },
   onIdTokenChanged: (_auth: unknown, callback: (subject: Subject | null) => void) => { H.idToken = callback; return vi.fn(); },
@@ -104,19 +107,21 @@ beforeEach(() => {
 afterEach(async () => { managers.splice(0).forEach((value) => value.stop()); await settle(); vi.useRealTimers(); });
 
 describe('private named memory lifecycle', () => {
-  it('same-UID token refresh rotates the memory app and retires earlier leases', async () => {
+  it('same-UID token refresh updates Auth without replacing the memory app or retiring leases', async () => {
     const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
     const old = sessions.capture();
     const refreshed = { uid: 'alice', token: 'refreshed' }; H.primary.currentUser = refreshed;
-    H.idToken!(refreshed); expect(() => old.assertCurrent()).toThrow(/expired/); await settle();
+    H.idToken!(refreshed); expect(() => old.assertCurrent()).not.toThrow(); await settle();
     expect(H.clones.map((clone) => clone.subject.token)).toEqual(['initial', 'refreshed']);
-    expect(sessions.capture().db).not.toBe(old.db);
+    expect(sessions.capture().db).toBe(old.db);
+    expect(sessions.getSnapshot().generation).toBe(old.generation);
+    expect(H.apps).toHaveLength(1);
     expect(H.dbs.every((db) => (db.cache as { kind: string }).kind === 'memory')).toBe(true);
     expect(H.auths.every((auth) => auth !== H.primary)).toBe(true);
-    expect(H.terminated).toContain(old.db);
+    expect(H.terminated).not.toContain(old.db);
   });
 
-  it('keeps an Auth incarnation stamp across offline refresh and reconnect publications', async () => {
+  it('keeps the Auth incarnation across same-UID offline refresh and reconnect publications', async () => {
     const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
     const confirmed = sessions.getSnapshot().authGeneration;
     expect(confirmed).toBeGreaterThan(0);
@@ -124,30 +129,94 @@ describe('private named memory lifecycle', () => {
     expect(sessions.getSnapshot().authGeneration).toBe(confirmed);
     const refreshed = { uid: 'alice', token: 'refreshed' }; H.primary.currentUser = refreshed;
     H.idToken!(refreshed);
-    expect(sessions.getSnapshot()).toMatchObject({ uid: 'alice', db: null, transition: 'auth', authGeneration: confirmed + 1 });
+    expect(sessions.getSnapshot()).toMatchObject({ uid: 'alice', db: null, transition: 'connection', authGeneration: confirmed });
     H.online = true; sessions.refreshConnection(); await settle();
-    expect(sessions.getSnapshot()).toMatchObject({ uid: 'alice', transition: 'connection', authGeneration: confirmed + 1 });
+    expect(sessions.getSnapshot()).toMatchObject({ uid: 'alice', transition: 'connection', authGeneration: confirmed });
     expect(sessions.getSnapshot().db).not.toBeNull();
   });
 
-  it('distinguishes reconnect publication from an ordinary same-UID token rotation', async () => {
+  it('reconnect creates a client while routine same-UID token refresh keeps it', async () => {
     const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
     H.online = false; sessions.refreshConnection();
     expect(sessions.getSnapshot()).toMatchObject({ uid: 'alice', db: null, transition: 'connection' });
     H.online = true; sessions.refreshConnection(); await settle();
     expect(sessions.getSnapshot()).toMatchObject({ uid: 'alice', transition: 'connection' });
+    const reconnected = sessions.getSnapshot();
     H.idToken!(H.primary.currentUser);
-    expect(sessions.getSnapshot()).toMatchObject({ uid: 'alice', db: null, transition: 'auth' });
+    expect(sessions.getSnapshot()).toBe(reconnected);
     await settle();
-    expect(sessions.getSnapshot()).toMatchObject({ uid: 'alice', transition: 'auth' });
+    expect(sessions.getSnapshot()).toBe(reconnected);
     sessions.refreshRecovery(); await settle();
     expect(sessions.getSnapshot().transition).toBe('recovery');
+  });
+
+  it('serializes overlapping same-UID refreshes and keeps the newest credentials', async () => {
+    const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
+    const lease = sessions.capture(); const before = sessions.getSnapshot();
+    let release!: () => void;
+    H.cloneWaits = [() => new Promise<void>((resolve) => { release = resolve; })];
+    H.primary.currentUser = { uid: 'alice', token: 'refresh-one' }; H.idToken!(H.primary.currentUser); await settle();
+    H.primary.currentUser = { uid: 'alice', token: 'refresh-two' }; H.idToken!(H.primary.currentUser); await settle();
+    expect(sessions.getSnapshot()).toBe(before); expect(H.auths).toHaveLength(1);
+    release(); await settle();
+    expect(H.auths[0].currentUser?.token).toBe('refresh-two');
+    expect(sessions.getSnapshot()).toBe(before); expect(() => lease.assertCurrent()).not.toThrow();
+  });
+
+  it('retries a failed bootstrap with the latest same-UID subject rather than stranding the bridge', async () => {
+    let reject!: (error: Error) => void;
+    H.cloneWaits = [() => new Promise<void>((_resolve, fail) => { reject = fail; })];
+    const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
+    H.primary.currentUser = { uid: 'alice', token: 'latest' }; H.idToken!(H.primary.currentUser);
+    reject(new Error('transient first clone')); await settle();
+    expect(sessions.getSnapshot().failed).toBe(true);
+    await vi.advanceTimersByTimeAsync(250); await settle();
+    expect(sessions.capture().uid).toBe('alice'); expect(H.auths.at(-1)?.currentUser?.token).toBe('latest');
+    expect(H.apps).toHaveLength(2);
+  });
+
+  it('copies a mutable primary User token again when a token callback arrives during bootstrap', async () => {
+    let release!: () => void;
+    H.cloneWaits = [() => new Promise<void>((resolve) => { release = resolve; })];
+    const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
+    H.primary.currentUser!.token = 'mutated'; H.idToken!(H.primary.currentUser);
+    release(); await settle();
+    expect(sessions.capture().uid).toBe('alice'); expect(H.auths[0].currentUser?.token).toBe('mutated');
+    expect(H.apps).toHaveLength(1); expect(H.clones.map((clone) => clone.subject.token)).toEqual(['initial', 'mutated']);
+  });
+
+  it('a refresh held across account retirement cannot publish into the replacement actor', async () => {
+    const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
+    const old = sessions.capture(); let release!: () => void;
+    H.cloneWaits = [() => new Promise<void>((resolve) => { release = resolve; })];
+    H.primary.currentUser = { uid: 'alice', token: 'refresh' }; H.idToken!(H.primary.currentUser); await settle();
+    H.before!({ uid: 'bob', token: 'bob' }); H.primary.currentUser = { uid: 'bob', token: 'bob' }; H.idToken!(H.primary.currentUser); await settle();
+    const bob = sessions.getSnapshot(); release(); await settle();
+    expect(sessions.getSnapshot()).toBe(bob); expect(sessions.capture().uid).toBe('bob');
+    expect(() => old.assertCurrent()).toThrow(/expired/); expect(H.terminated).toContain(old.db);
+  });
+
+  it('same-UID before-state acceptance and abort leave a healthy client unchanged', async () => {
+    const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
+    const before = sessions.getSnapshot(); const lease = sessions.capture();
+    H.before!({ uid: 'alice', token: 'candidate' }); H.abort!(); await settle();
+    expect(sessions.getSnapshot()).toBe(before); expect(H.apps).toHaveLength(1);
+    expect(() => lease.assertCurrent()).not.toThrow();
+  });
+
+  it('restores the current account after overlapping different-UID and same-UID middleware aborts', async () => {
+    const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
+    const old = sessions.capture();
+    H.before!({ uid: 'bob', token: 'candidate-bob' });
+    H.before!(H.primary.currentUser); H.abort!(); await settle();
+    expect(sessions.capture().uid).toBe('alice'); expect(H.apps).toHaveLength(2);
+    expect(sessions.capture().db).not.toBe(old.db); expect(() => old.assertCurrent()).toThrow(/expired/);
   });
 
   it('a delayed old Auth clone cannot replace a newer account session', async () => {
     let release!: () => void; H.cloneWaits = [() => new Promise<void>((resolve) => { release = resolve; })];
     const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
-    H.before!(); H.primary.currentUser = { uid: 'bob', token: 'bob-token' }; H.idToken!(H.primary.currentUser); await settle();
+    H.before!({ uid: 'bob', token: 'bob' }); H.primary.currentUser = { uid: 'bob', token: 'bob-token' }; H.idToken!(H.primary.currentUser); await settle();
     const current = sessions.capture(); release(); await settle();
     expect(sessions.capture().db).toBe(current.db); expect(sessions.getSnapshot().uid).toBe('bob');
     expect(H.deleted).toContain(H.apps[0]);
@@ -195,7 +264,7 @@ describe('bounded private bridge retries', () => {
 
   it('retries a refused Auth clone with a fresh client and permanently expires the earlier lease', async () => {
     const sessions = manager(); H.idToken!(H.primary.currentUser); await settle(); const old = sessions.capture();
-    H.cloneWaits = [() => Promise.reject(new Error('transient clone'))];
+    H.cloneWaits = [() => Promise.reject(new Error('transient refresh')), () => Promise.reject(new Error('transient clone'))];
     H.idToken!(H.primary.currentUser); await settle();
     expect(sessions.getSnapshot().failed).toBe(true);
     await vi.advanceTimersByTimeAsync(250); await settle();
@@ -218,7 +287,7 @@ describe('bounded private bridge retries', () => {
   it('explicit Retry recovers an exhausted bridge with a fresh credential incarnation', async () => {
     const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
     const old = sessions.capture(); const priorAuth = sessions.getSnapshot().authGeneration;
-    H.failure = 'auth'; H.idToken!(H.primary.currentUser); await settle();
+    H.failure = 'auth'; sessions.retry(); await settle();
     await vi.advanceTimersByTimeAsync(3_250); await settle();
     expect(sessions.getSnapshot().failed).toBe(true);
     const attempts = H.apps.length; H.failure = null; sessions.retry(); await settle();
@@ -240,7 +309,7 @@ describe('bounded private bridge retries', () => {
   it.each(['account', 'offline', 'stop'] as const)('cancels a pending retry on %s retirement', async (reason) => {
     H.failure = 'auth'; const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
     H.failure = null;
-    if (reason === 'account') { H.before!(); H.primary.currentUser = { uid: 'bob', token: 'bob' }; H.idToken!(H.primary.currentUser); }
+    if (reason === 'account') { H.before!({ uid: 'bob', token: 'bob' }); H.primary.currentUser = { uid: 'bob', token: 'bob' }; H.idToken!(H.primary.currentUser); }
     if (reason === 'offline') { H.online = false; sessions.refreshConnection(); }
     if (reason === 'stop') sessions.stop();
     await settle(); const apps = H.apps.length;
@@ -249,9 +318,9 @@ describe('bounded private bridge retries', () => {
     else expect(() => sessions.capture()).toThrow(/expired/);
   });
 
-  it('does not retry when the captured User changed without a publication', async () => {
+  it('does not retry when the captured UID changed without a publication', async () => {
     H.failure = 'auth'; const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
-    H.failure = null; H.primary.currentUser = { uid: 'alice', token: 'new-token' };
+    H.failure = null; H.primary.currentUser = { uid: 'bob', token: 'new-token' };
     await vi.advanceTimersByTimeAsync(10_000);
     expect(H.apps).toHaveLength(1); expect(() => sessions.capture()).toThrow(/expired/);
   });
@@ -262,7 +331,7 @@ describe('bounded private bridge retries', () => {
     let reject!: (error: Error) => void;
     H.cloneWaits = [() => new Promise<void>((_resolve, fail) => { reject = fail; })];
     await vi.advanceTimersByTimeAsync(250);
-    H.before!(); H.primary.currentUser = { uid: 'bob', token: 'bob' }; H.idToken!(H.primary.currentUser); await settle();
+    H.before!({ uid: 'bob', token: 'bob' }); H.primary.currentUser = { uid: 'bob', token: 'bob' }; H.idToken!(H.primary.currentUser); await settle();
     const bob = sessions.capture(); reject(new Error('late old failure')); await settle();
     await vi.advanceTimersByTimeAsync(10_000);
     expect(H.apps).toHaveLength(3); expect(sessions.capture().db).toBe(bob.db);
@@ -274,7 +343,7 @@ describe('bounded private bridge retries', () => {
     const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
     let release!: () => void; H.cloneWaits = [() => new Promise<void>((resolve) => { release = resolve; })];
     await vi.advanceTimersByTimeAsync(250); expect(H.apps).toHaveLength(2);
-    H.before!(); H.primary.currentUser = { uid: 'bob', token: 'bob' }; H.idToken!(H.primary.currentUser); await settle();
+    H.before!({ uid: 'bob', token: 'bob' }); H.primary.currentUser = { uid: 'bob', token: 'bob' }; H.idToken!(H.primary.currentUser); await settle();
     const bob = sessions.capture(); release(); await settle();
     expect(sessions.capture().db).toBe(bob.db); expect(H.deleted).toContain(H.apps[1]); expect(H.terminated).toContain(H.dbs[1]);
   });
@@ -300,7 +369,8 @@ describe('forwarded primary App Check', () => {
     const old = await H.providers[0].getToken();
     H.primaryToken = tokenFor(1_700_000_090);
     H.primary.currentUser = { uid: 'alice', token: 'refreshed' }; H.idToken!(H.primary.currentUser); await settle();
-    const refreshed = await H.providers[1].getToken();
+    const refreshed = await H.providers[0].getToken();
+    expect(H.providers).toHaveLength(1);
     expect(refreshed).toEqual({ token: H.primaryToken, expireTimeMillis: 1_700_000_090_000 });
     expect(refreshed.token).not.toBe(old.token);
     expect(H.tokenCalls.every((call) => call.force === false)).toBe(true);
@@ -312,7 +382,7 @@ describe('forwarded primary App Check', () => {
     let release!: () => void; H.primaryTokenWait = new Promise<void>((resolve) => { release = resolve; });
     const operation = lease.guard(() => H.providers[0].getToken());
     const rejected = expect(operation).rejects.toThrow(/expired/);
-    H.before!(); H.primary.currentUser = { uid: 'bob', token: 'bob' }; H.idToken!(H.primary.currentUser); await settle();
+    H.before!({ uid: 'bob', token: 'bob' }); H.primary.currentUser = { uid: 'bob', token: 'bob' }; H.idToken!(H.primary.currentUser); await settle();
     release(); await rejected;
     expect(sessions.getSnapshot().uid).toBe('bob');
     // Project attestation is not account authority or cancellation of a sent request.

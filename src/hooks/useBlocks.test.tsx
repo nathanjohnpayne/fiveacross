@@ -651,7 +651,7 @@ describe('useHiddenUidsSubscription', () => {
     expect(view.result.current).toEqual({ hidden: new Set(['cara']), ready: true });
   });
 
-  it('an online token rotation withholds before the replacement server answer, including its cache and pending answers', () => {
+  it('an explicit Auth retirement withholds before the replacement server answer, including its cache and pending answers', () => {
     const view = renderHook(() => useHiddenUidsSubscription('bob', true));
     const old = H.subscriptions[0];
     act(() => old.listener(pairs([['alice', 'bob']])));
