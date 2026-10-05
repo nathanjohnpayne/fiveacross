@@ -2136,6 +2136,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // attestation; it drives the authoritative read, and the deal fires (via the
   // effect) only once that confirms.
   const retryDeal = useCallback(() => {
+    // Fence the whole gameplay Retry on the committed primary actor before
+    // bridge, offline cache-first, bootstrap, admission or deal work is dispatched.
+    // The rendered User can lag primary Auth during an account transition.
     if (!user || auth.currentUser?.uid !== user.uid) return;
     // A connection Retry restarts only an unavailable current-actor bridge.
     // Unrelated gameplay timeouts retain a healthy client and confirmed blocks;
