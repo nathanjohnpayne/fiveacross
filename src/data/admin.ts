@@ -200,10 +200,10 @@ export async function approveItems(
   _adminUid: string,
   eventId: string = EVENT_ID,
 ): Promise<ApprovalPlacement[]> {
+  if (items.length === 0) return [];
   const action = captureAdmin(_adminUid, eventId);
   const { functions } = action;
   return action.guard(async () => {
-    if (items.length === 0) return [];
     const callable = httpsCallable<ApprovePromptsRequest, unknown>(functions, 'approvePrompts');
     const res = await action.guard(() => callable({
       eventId,
