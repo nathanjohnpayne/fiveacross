@@ -171,6 +171,8 @@ describe('real Auth bootstrap across scheduled private retries (#1675)', () => {
     expect(sessions!.getSnapshot().db).not.toBe(capturedDb);
     await act(async () => { release(); await vi.advanceTimersByTimeAsync(0); });
     expect(screen.getByTestId('error')).toHaveTextContent('connection'); expect(H.join).not.toHaveBeenCalled();
+    // Profile creation and server attestation each bind Functions once.
+    expect(H.services).toHaveLength(2);
     expect(H.services.every((app) => app === capturedDb.app)).toBe(true);
   });
 
