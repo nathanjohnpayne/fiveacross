@@ -327,8 +327,11 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
         draining = false;
         clearDeadline();
         deadline = setTimeout(() => failAttempt(), FIRST_ANSWER_WAIT_MS);
-        try { unsubscribe = subscribe(); }
-        catch (error) { failAttempt(readinessRetryable(error)); }
+        try {
+          unsubscribe = subscribe();
+          // An injected synchronous callback may retire before returning the handle.
+          if (!current) { unsubscribe(); unsubscribe = null; }
+        } catch (error) { failAttempt(readinessRetryable(error)); }
       };
       const failDrain = (error?: unknown) => { if (draining) failAttempt(readinessRetryable(error)); };
       // The persistent gameplay queue may contain reloaded block writes. Only
