@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 /** The 24 non-free Squares of a Day Card — the denominator of the slider's
  *  ratio-to-squares translation (`dealBoard` deals 24 + the free centre). */
@@ -32,7 +32,7 @@ function snapPct(ratio: number): number {
  * 5% grid for display — the native range coerces off-grid DOM values itself, so
  * the label must agree with the thumb — and the dedup ref syncs to the SNAPPED
  * value, so an untouched release never rewrites the stored setting.
- * A rejected latest release resets dedup to the observed value and offers an
+ * A rejected latest release resets dedup to the committed React prop and offers an
  * identical retry. Earlier failures cannot undo a later release or new draft.
  */
 export function EasyMixSlider({ value, onChange }: { value: number; onChange: (ratio: number) => void | Promise<void> }) {
@@ -49,7 +49,9 @@ export function EasyMixSlider({ value, onChange }: { value: number; onChange: (r
   const request = useRef(0);
   const draftRevision = useRef(0);
   const observed = useRef(value);
-  observed.current = value;
+  // Only committed React work can establish the failure fallback. A layout
+  // effect publishes it before parent layout effects can invoke a release.
+  useLayoutEffect(() => { observed.current = value; }, [value]);
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   // Dedup against the LAST REQUESTED ratio, not the `value` prop: `onChange`
   // writes Firestore asynchronously, so `value` stays stale until the write
