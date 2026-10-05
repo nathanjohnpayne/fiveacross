@@ -28,8 +28,9 @@ export interface HiddenUids {
   retry?: () => void;
 }
 
-// One visibility episode stays on its captured memory client. Ship Wi-Fi may
-// drain slowly: later attempts allow more time without rotating private Auth.
+// Unresolved visibility episodes stay on their captured memory client. A current
+// committed answer renews the retry budget; later attempts allow more drain time
+// without rotating private Auth.
 const DRAIN_WAIT_MS = [5_000, 10_000, 20_000] as const;
 const READINESS_BACKOFF_MS = [1_000, 2_000] as const;
 const FIRST_ANSWER_WAIT_MS = 10_000;
@@ -168,6 +169,9 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
     restart.current = restartHere;
     const startAttempt = (attempt: number) => {
       if (!scopeCurrent()) return;
+      // Success ends the unresolved episode. A later listener outage starts
+      // with this active listener, regardless of its bootstrap attempt index.
+      let retryIndex = attempt;
       let current = true;
       let draining = true;
       let unsubscribe: (() => void) | null = null;
@@ -191,11 +195,11 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
         if (!retryable) confirmed.current = null;
         setState({ key, generation: session.generation, hidden: EMPTY, ready: false, failed: true });
         retire();
-        if (retryable && attempt < READINESS_BACKOFF_MS.length) {
+        if (retryable && retryIndex < READINESS_BACKOFF_MS.length) {
           backoffTimer = setTimeout(() => {
             backoffTimer = null;
-            startAttempt(attempt + 1);
-          }, READINESS_BACKOFF_MS[attempt]);
+            startAttempt(retryIndex + 1);
+          }, READINESS_BACKOFF_MS[retryIndex]);
         }
       };
       let confirmedThisSubscription = false;
@@ -277,6 +281,7 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
           serverBacked = !snap.metadata.fromCache;
           const settled = !snap.metadata.fromCache && !snap.metadata.hasPendingWrites;
           if (settled) {
+            retryIndex = 0;
             clearDeadline();
             visibilityFailed = false;
             confirmedThisSubscription = true;
