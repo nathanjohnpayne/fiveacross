@@ -4,7 +4,8 @@
 // handling) stays pinned by `Admin.test.tsx`, which this extraction leaves
 // unmodified.
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { Suspense, startTransition, useLayoutEffect, useState } from 'react';
+import { act, render, screen, fireEvent } from '@testing-library/react';
 import { EasyMixSlider } from './EasyMixSlider';
 
 function mount(value: number, onChange = vi.fn()) {
@@ -92,4 +93,66 @@ describe('EasyMixSlider (shared module)', () => {
     expect(screen.getByText('75% · 18 of 24 squares')).toBeInTheDocument();
     expect(onChange).not.toHaveBeenCalled();
   });
+
+  it('restores the last committed prop after a rendered transition is discarded', async () => {
+    let reject!: (error: Error) => void;
+    const save = vi.fn(() => new Promise<void>((_, fail) => { reject = fail; }));
+    const renders: number[] = [];
+    const commits: number[] = [];
+    let update!: (value: number, suspended: boolean) => void;
+    const held = new Promise<void>(() => {});
+    function Gate({ suspended }: { suspended: boolean }) {
+      if (suspended) throw held;
+      return null;
+    }
+    function Slider({ value }: { value: number }) {
+      renders.push(value);
+      useLayoutEffect(() => { commits.push(value); }, [value]);
+      return <><span data-testid="committed-value">{value}</span><EasyMixSlider value={value} onChange={save} /></>;
+    }
+    function Harness() {
+      const [state, setState] = useState({ value: 0.5, suspended: false });
+      update = (value, suspended) => setState({ value, suspended });
+      return <Suspense fallback={<span>Suspended</span>}><Slider value={state.value} /><Gate suspended={state.suspended} /></Suspense>;
+    }
+    render(<Harness />);
+    const slider = screen.getByRole('slider') as HTMLInputElement;
+    slider.focus();
+    fireEvent.change(slider, { target: { value: '60' } });
+    fireEvent.pointerUp(slider);
+    act(() => { startTransition(() => update(0.8, true)); });
+    expect(renders).toContain(0.8);
+    expect(commits).toEqual([0.5]);
+    expect(screen.getByTestId('committed-value')).toHaveTextContent('0.5');
+    await act(async () => { reject(new Error('Denied')); });
+    act(() => update(0.5, false));
+    expect(commits).not.toContain(0.8);
+    expect(screen.queryByText('Suspended')).toBeNull();
+    expect(screen.getByRole('alert')).toHaveTextContent('Easy mix save failed');
+    expect(slider).toHaveFocus();
+    expect(save).toHaveBeenCalledExactlyOnceWith(0.6);
+    expect(slider.value).toBe('50');
+    expect(slider).toHaveAttribute('aria-valuetext', '50% · 12 of 24 squares');
+  });
+
+  it('observes a committed prop before a parent layout effect can release and fail', () => {
+    const save = vi.fn(() => { throw new Error('Denied'); });
+    function Harness({ value, release }: { value: number; release: boolean }) {
+      useLayoutEffect(() => {
+        if (release) fireEvent.pointerUp(screen.getByRole('slider'));
+      }, [release]);
+      return <EasyMixSlider value={value} onChange={save} />;
+    }
+    const view = render(<Harness value={0.5} release={false} />);
+    const slider = screen.getByRole('slider') as HTMLInputElement;
+    slider.focus();
+    fireEvent.change(slider, { target: { value: '60' } });
+    view.rerender(<Harness value={0.8} release />);
+    expect(save).toHaveBeenCalledExactlyOnceWith(0.6);
+    expect(slider).toHaveFocus();
+    expect(screen.getByRole('alert')).toHaveTextContent('Easy mix save failed');
+    expect(slider.value).toBe('80');
+    expect(slider).toHaveAttribute('aria-valuetext', '80% · 19 of 24 squares');
+  });
+
 });
