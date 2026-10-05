@@ -15,7 +15,7 @@ const H = vi.hoisted(() => ({
   tokenChanged: null as ((next: Subject | null) => void) | null,
   cloneFailures: 0, cloneSteps: [] as Array<() => Promise<void>>,
   apps: [] as App[], services: [] as App[], profileReads: [] as Ref[], serverReads: [] as Ref[],
-  serverFailure: null as Error | null,
+  serverFailure: null as Error | null, profileFailure: null as Error | null,
   serverSteps: [] as Array<() => Promise<void>>,
   gameplayTransactions: 0, heldJoin: true, releaseJoin: null as (() => void) | null,
   pairListeners: [] as Array<{ target: Ref; next: (snapshot: unknown) => void; error: (error: Error) => void; stop: ReturnType<typeof vi.fn> }>,
@@ -62,7 +62,11 @@ vi.mock('firebase/firestore', async (original) => {
       }
       return operation({
         get: async (ref) => {
-          if (ref.path.startsWith('users/')) { H.profileReads.push(ref); return snapshot({ attestedAdultAt: 123 }); }
+          if (ref.path.startsWith('users/')) {
+            H.profileReads.push(ref);
+            if (H.profileFailure) throw H.profileFailure;
+            return snapshot({ attestedAdultAt: 123 });
+          }
           return snapshot({ joinedAt: 123 });
         },
         set: (ref) => { H.writes.push(ref); },
@@ -109,6 +113,7 @@ beforeEach(() => {
   H.primary.currentUser = { uid: 'alice', displayName: 'Alice', photoURL: null };
   H.eventId = 'event-a'; H.recovered = true; H.before = null; H.authChanged = null; H.tokenChanged = null;
   H.cloneFailures = 0; H.cloneSteps = []; H.apps = []; H.services = []; H.profileReads = []; H.serverReads = []; H.serverFailure = null;
+  H.profileFailure = null;
   H.serverSteps = []; H.gameplayTransactions = 0; H.heldJoin = true; H.releaseJoin = null; H.pairListeners = []; H.writes = [];
   Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
   Object.defineProperty(navigator, 'locks', { configurable: true, value: {
@@ -129,10 +134,10 @@ async function mount() {
       <button onClick={auth.retryDeal}>Retry</button>
     </div>;
   }
-  render(<AuthProvider><Probe /></AuthProvider>);
+  const tree = render(<AuthProvider><Probe /></AuthProvider>);
   await act(async () => { H.authChanged!(H.primary.currentUser); await vi.advanceTimersByTimeAsync(0); });
   sessions = privateFirestoreSessions();
-  return { capture: () => capturePrivateFirestore(true) };
+  return { capture: () => capturePrivateFirestore(true), rerender: () => tree.rerender(<AuthProvider><Probe /></AuthProvider>) };
 }
 async function confirmBlocks() {
   expect(H.pairListeners).toHaveLength(1);
@@ -276,4 +281,112 @@ it('a failed replacement bridge retires the old lease and blocks until Retry get
   });
   expect(screen.getByTestId('blocks')).toHaveTextContent('new-blocked');
   expect(() => oldLease.assertCurrent()).toThrow(/expired/);
+});
+
+// #1735 pins the current initialized-client contract. Any classified-failure
+// rotation change belongs to the pending #1732 decision and its runtime scope.
+describe('private reads failing while the bridge remains initialized', () => {
+  it.each(['profile', 'attestation'] as const)('gameplay Retry rereads a failing private %s on the same app and lease', async (source) => {
+    const error = Object.assign(new Error('controlled private read unavailable'), { code: 'unavailable' });
+    if (source === 'profile') H.profileFailure = error; else H.serverFailure = error;
+    H.heldJoin = false; const view = await mount();
+    const before = sessions!.getSnapshot();
+    expect(before).toMatchObject({ uid: 'alice', failed: false });
+    expect(before.db).not.toBeNull(); expect(before.db!.app.name).not.toBe('persistent');
+    expect(before.db!.app).toBe(H.apps[0]);
+    expect(H.profileReads[0].database).toBe(before.db);
+    expect(H.profileReads[0].path).toBe('users/alice');
+    expect(H.serverReads).toHaveLength(source === 'profile' ? 0 : 1);
+    expect(screen.getByTestId('error')).toHaveTextContent('connection');
+    expect(H.gameplayTransactions).toBe(0);
+    await confirmBlocks(); const lease = view.capture();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry' })); await vi.advanceTimersByTimeAsync(0); });
+    expect(sessions!.getSnapshot()).toBe(before); expect(H.apps).toHaveLength(1);
+    expect(() => lease.assertCurrent()).not.toThrow();
+    expect(H.profileReads).toHaveLength(2);
+    expect(H.profileReads.every((ref) => ref.database === before.db)).toBe(true);
+    expect(H.serverReads).toHaveLength(source === 'profile' ? 0 : 2);
+    expect(screen.getByTestId('error')).toHaveTextContent('connection'); expect(H.gameplayTransactions).toBe(0);
+    expect(screen.getByTestId('blocks')).toHaveTextContent('blocked');
+    expect(H.pairListeners).toHaveLength(1); expect(H.pairListeners[0].stop).not.toHaveBeenCalled();
+    expect(H.drains).toHaveBeenCalledTimes(1);
+    // Recovery is controlled transport success on this same client, not proof
+    // that a native Firestore wedge or a network fault has been repaired.
+    H.profileFailure = null; H.serverFailure = null;
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry' })); await vi.advanceTimersByTimeAsync(0); });
+    expect(sessions!.getSnapshot()).toBe(before); expect(H.apps).toHaveLength(1); expect(H.gameplayTransactions).toBe(1);
+    expect(H.serverReads.every((ref) => ref.database === before.db)).toBe(true);
+    expect(screen.getByTestId('error')).toHaveTextContent('none'); expect(screen.getByTestId('blocks')).toHaveTextContent('blocked');
+  });
+
+  it.each(['success', 'denial'] as const)('a private read timeout retains its client and ignores the older %s after Retry succeeds', async (late) => {
+    let release!: () => void;
+    H.serverSteps = [() => new Promise<void>((resolve, reject) => {
+      release = () => late === 'success' ? resolve() : reject(Object.assign(new Error('old private denial'), { code: 'permission-denied' }));
+    })];
+    H.heldJoin = false; const view = await mount(); const before = sessions!.getSnapshot(); const lease = view.capture();
+    expect(before.db).not.toBeNull(); expect(before.failed).toBe(false);
+    expect(H.serverReads[0].database).toBe(before.db); expect(H.gameplayTransactions).toBe(0);
+    await confirmBlocks();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(screen.getByTestId('error')).toHaveTextContent('connection'); expect(sessions!.getSnapshot()).toBe(before);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry' })); await vi.advanceTimersByTimeAsync(0); });
+    expect(H.apps).toHaveLength(1); expect(H.serverReads).toHaveLength(2); expect(H.gameplayTransactions).toBe(1);
+    expect(H.serverReads.every((ref) => ref.database === before.db)).toBe(true);
+    expect(sessions!.getSnapshot()).toBe(before); expect(() => lease.assertCurrent()).not.toThrow();
+    expect(screen.getByTestId('error')).toHaveTextContent('none'); expect(screen.getByTestId('blocks')).toHaveTextContent('blocked');
+    await act(async () => { release(); await vi.advanceTimersByTimeAsync(0); });
+    expect(sessions!.getSnapshot()).toBe(before); expect(H.gameplayTransactions).toBe(1);
+    expect(screen.getByTestId('error')).toHaveTextContent('none'); expect(screen.getByTestId('blocks')).toHaveTextContent('blocked');
+  });
+
+  it('a late private failure from Alice cannot replace Bob authority or restart his client', async () => {
+    let rejectOld!: (error: Error) => void;
+    H.serverSteps = [() => new Promise<void>((_resolve, reject) => { rejectOld = reject; })];
+    H.heldJoin = false; const view = await mount(); const oldLease = view.capture();
+    const bob: Subject = { uid: 'bob', displayName: 'Bob', photoURL: null };
+    await act(async () => {
+      H.before!(bob); H.primary.currentUser = bob; H.tokenChanged!(bob); H.authChanged!(bob);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const current = sessions!.getSnapshot(); const currentLease = view.capture();
+    expect(current.uid).toBe('bob'); expect(H.apps).toHaveLength(2); expect(H.gameplayTransactions).toBe(1);
+    expect(H.serverReads.at(-1)!.database).toBe(current.db);
+    expect(screen.getByTestId('error')).toHaveTextContent('none'); expect(() => oldLease.assertCurrent()).toThrow(/expired/);
+    await act(async () => { rejectOld(Object.assign(new Error('late Alice unavailable'), { code: 'unavailable' })); await vi.advanceTimersByTimeAsync(0); });
+    expect(sessions!.getSnapshot()).toBe(current); expect(H.apps).toHaveLength(2); expect(H.gameplayTransactions).toBe(1);
+    expect(() => currentLease.assertCurrent()).not.toThrow(); expect(screen.getByTestId('error')).toHaveTextContent('none');
+  });
+
+  it('an old Event private completion cannot replace the current Event attempt', async () => {
+    let rejectOld!: (error: Error) => void;
+    H.serverSteps = [() => new Promise<void>((_resolve, reject) => { rejectOld = reject; })];
+    H.heldJoin = false; const view = await mount(); const before = sessions!.getSnapshot();
+    await act(async () => { H.eventId = 'event-b'; view.rerender(); await vi.advanceTimersByTimeAsync(0); });
+    expect(H.gameplayTransactions).toBe(1); expect(screen.getByTestId('error')).toHaveTextContent('none');
+    expect(sessions!.getSnapshot()).toBe(before); expect(H.apps).toHaveLength(1);
+    await act(async () => { rejectOld(Object.assign(new Error('late old Event denial'), { code: 'permission-denied' })); await vi.advanceTimersByTimeAsync(0); });
+    expect(sessions!.getSnapshot()).toBe(before); expect(H.apps).toHaveLength(1); expect(H.gameplayTransactions).toBe(1);
+    expect(screen.getByTestId('error')).toHaveTextContent('none');
+  });
+
+  it('a stale same-UID private completion cannot change the explicitly replaced client or its successful Retry', async () => {
+    let rejectOld!: (error: Error) => void;
+    H.serverSteps = [() => new Promise<void>((_resolve, reject) => { rejectOld = reject; })];
+    H.heldJoin = false; const view = await mount(); const oldLease = view.capture();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    const { retryPrivateFirestoreSession } = await import('../privateFirestore');
+    // Direct diagnostic invocation of the existing private facade. This does
+    // not assert a separate private Retry button exists in the boardless UI.
+    await act(async () => { retryPrivateFirestoreSession(); await vi.advanceTimersByTimeAsync(0); });
+    const current = sessions!.getSnapshot(); const lease = view.capture();
+    expect(current.db).not.toBe(oldLease.db); expect(H.apps).toHaveLength(2);
+    expect(() => oldLease.assertCurrent()).toThrow(/expired/);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry' })); await vi.advanceTimersByTimeAsync(0); });
+    expect(H.serverReads.at(-1)!.database).toBe(current.db); expect(H.gameplayTransactions).toBe(1);
+    expect(screen.getByTestId('error')).toHaveTextContent('none');
+    await act(async () => { rejectOld(Object.assign(new Error('late retired-client denial'), { code: 'permission-denied' })); await vi.advanceTimersByTimeAsync(0); });
+    expect(sessions!.getSnapshot()).toBe(current); expect(H.apps).toHaveLength(2); expect(H.gameplayTransactions).toBe(1);
+    expect(() => lease.assertCurrent()).not.toThrow(); expect(screen.getByTestId('error')).toHaveTextContent('none');
+  });
 });
