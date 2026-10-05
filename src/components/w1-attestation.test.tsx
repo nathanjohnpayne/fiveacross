@@ -144,7 +144,8 @@ beforeEach(() => {
   ctxSignIn = async () => {};
   mocks.auth.currentUser = null;
   mocks.onAuthStateChanged.mockImplementation((_a: unknown, cb: (u: unknown) => unknown) => {
-    emitAuth = cb;
+    // Mirror Firebase's public actor state before invoking AuthProvider.
+    emitAuth = (user) => { mocks.auth.currentUser = user; return cb(user); };
     return () => {};
   });
   mocks.ensureUserProfile.mockResolvedValue(undefined);

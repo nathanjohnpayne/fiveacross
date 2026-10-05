@@ -31,8 +31,20 @@ export function privateFirestoreSessions() {
   return sessions;
 }
 
-/** Explicit user retry: one fresh bounded bridge episode, never a service fallback. */
-export function retryPrivateFirestoreSession(): void { privateFirestoreSessions().retry(); }
+/** Explicit private-UI retry starts one fresh bounded bridge episode.
+ * Gameplay supplies its actor UID to restart only an unavailable bridge;
+ * a healthy current client retains its subscriptions and captured leases. */
+export function retryPrivateFirestoreSession(unavailableForUid?: string): void {
+  if (unavailableForUid !== undefined) {
+    if (auth.currentUser?.uid !== unavailableForUid || navigator.onLine === false) return;
+    const manager = privateFirestoreSessions();
+    const snapshot = manager.getSnapshot();
+    if (snapshot.uid === unavailableForUid && snapshot.db !== null && !snapshot.failed) return;
+    manager.retry();
+    return;
+  }
+  privateFirestoreSessions().retry();
+}
 
 function privateUnavailable() { return Object.assign(new Error('Private session unavailable.'), { code: 'unavailable' }); }
 
