@@ -32,6 +32,8 @@ function snapPct(ratio: number): number {
  * 5% grid for display — the native range coerces off-grid DOM values itself, so
  * the label must agree with the thumb — and the dedup ref syncs to the SNAPPED
  * value, so an untouched release never rewrites the stored setting.
+ * A rejected latest release resets dedup to the observed value and offers an
+ * identical retry. Earlier failures cannot undo a later release or new draft.
  */
 export function EasyMixSlider({ value, onChange }: { value: number; onChange: (ratio: number) => void | Promise<void> }) {
   // The input is deliberately UNCONTROLLED: the browser owns the thumb during

@@ -75,8 +75,9 @@ function useSettingFeedback() {
  * Game settings (specs/admin-console-ia.md § "Game settings"): every event dial
  * in one place — the Easy mix slider, the Claims & proof knobs (claim mode,
  * photo source, EXIF strip, AI screen, auto-hide threshold — #222, recaptioned
- * ADR 0001 verbatim), and Appearance › default theme. Pure re-housing: every
- * control keeps its exact `data/admin` write path. AI image screen stays a live
+ * ADR 0001 verbatim), and Appearance › default theme. Every control keeps its
+ * exact `data/admin` write path and catches save failures inline (#1678); the
+ * 18+ dialog owns failures while its action is deferred. AI image screen stays a live
  * setting (#268): a deployed scanner consults it per upload — the deploy-time
  * env flag remains the master kill-switch for whether the scanner exists at all.
  */
