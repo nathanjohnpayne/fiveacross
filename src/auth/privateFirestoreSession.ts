@@ -16,6 +16,8 @@ export interface PrivateFirestoreSession {
   transition?: 'auth' | 'connection' | 'recovery';
   recoveryRequired: boolean;
   failed: boolean;
+  /** A failed bridge still has a bounded, scheduled fresh-client retry. */
+  retryPending: boolean;
 }
 
 type PrivateClient = { app: FirebaseApp; auth: Auth; db: Firestore };
@@ -68,7 +70,7 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   const listeners = new Set<() => void>();
   let snapshot: PrivateFirestoreSession = {
-    uid: null, db: null, generation, authGeneration, transition: 'auth', recoveryRequired: !config.recovered(), failed: false,
+    uid: null, db: null, generation, authGeneration, transition: 'auth', recoveryRequired: !config.recovered(), failed: false, retryPending: false,
   };
   const publish = (value: PrivateFirestoreSession) => {
     snapshot = value;
@@ -89,7 +91,7 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
     const old = client;
     client = null;
     // Retire visible state synchronously, before primary Auth commits a change.
-    publish({ uid: config.primaryAuth.currentUser?.uid ?? null, db: null, generation, authGeneration, transition, recoveryRequired: !config.recovered(), failed: false });
+    publish({ uid: config.primaryAuth.currentUser?.uid ?? null, db: null, generation, authGeneration, transition, recoveryRequired: !config.recovered(), failed: false, retryPending: false });
     void dispose(old);
   };
   const synchronize = async (user: User | null, transition: NonNullable<PrivateFirestoreSession['transition']> = 'auth', retryIndex = 0) => {
@@ -130,20 +132,22 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
         copiedUser = latest;
       }
       if (stopped || attempt !== generation || config.primaryAuth.currentUser?.uid !== user.uid || config.online?.() === false) {
+        // Release only this attempt before disposal yields to a newer bootstrap.
+        if (attempt === generation) initializingUid = null;
         await dispose(candidate);
         return;
       }
       initializingUid = null;
       client = candidate;
-      publish({ uid: user.uid, db: privateDb, generation: attempt, authGeneration, transition, recoveryRequired: !config.recovered(), failed: false });
+      publish({ uid: user.uid, db: privateDb, generation: attempt, authGeneration, transition, recoveryRequired: !config.recovered(), failed: false, retryPending: false });
     } catch {
       await dispose(candidate);
       if (!candidate && candidateApp) await deleteApp(candidateApp).catch(() => {});
       if (!stopped && attempt === generation) {
         initializingUid = null;
-        publish({ uid: null, db: null, generation: attempt, authGeneration, transition, recoveryRequired: !config.recovered(), failed: true });
         const delay = BRIDGE_RETRY_DELAYS_MS[retryIndex];
-        if (delay !== undefined && !stopped && attempt === generation && config.primaryAuth.currentUser?.uid === user.uid && config.online?.() !== false) {
+        const retryPending = delay !== undefined && config.primaryAuth.currentUser?.uid === user.uid && config.online?.() !== false;
+        if (retryPending) {
           retryTimer = setTimeout(() => {
             retryTimer = null;
             if (stopped || attempt !== generation || config.primaryAuth.currentUser?.uid !== user.uid || config.online?.() === false) return;
@@ -152,6 +156,9 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
             void synchronize(config.primaryAuth.currentUser, 'auth', retryIndex + 1);
           }, delay);
         }
+        // Publish failure and its scheduled-retry status together. Readiness
+        // waiters must distinguish this episode from exhausted bridge failure.
+        publish({ uid: null, db: null, generation: attempt, authGeneration, transition, recoveryRequired: !config.recovered(), failed: true, retryPending });
       }
     }
   };
@@ -228,4 +235,3 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
     stop: () => { stopped = true; stopBefore(); stopAuth(); retire(); listeners.clear(); },
   };
 }
-
