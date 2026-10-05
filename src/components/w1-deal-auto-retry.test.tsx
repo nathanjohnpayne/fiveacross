@@ -19,6 +19,7 @@ const POOL_ERR = 'dealBoard needs at least 24 prompts, received 5.'; // isPoolSh
 const CONN_ERR = 'network request failed'; // classified 'connection' → never arms the watcher
 
 const mocks = vi.hoisted(() => ({
+  auth: { currentUser: null as unknown },
   onAuthStateChanged: vi.fn(),
   signInWithPopup: vi.fn(),
   signOut: vi.fn(),
@@ -56,7 +57,7 @@ vi.mock('firebase/auth', () => ({
 }));
 // #689: AuthProvider's hidden-set listener needs the `db` this firebase mock omits.
 vi.mock('../hooks/useBlocks', () => ({ HiddenUidsProvider: ({ children }: { children?: unknown }) => children }));
-vi.mock('../firebase', () => ({ auth: {}, EVENT_ID: 'test-event', googleProvider: {} }));
+vi.mock('../firebase', () => ({ auth: mocks.auth, EVENT_ID: 'test-event', googleProvider: {} }));
 // AuthProvider also mounts ConfirmWinMoments (#41); stub it — this suite is about the
 // pool-recovery watcher, which is real below.
 vi.mock('../components/ConfirmWinMoments', () => ({ default: () => null }));
@@ -192,6 +193,7 @@ function setNavigatorOnline(v: boolean) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.auth.currentUser = null;
   emitAuth = () => {};
   mocks.pool = { items: [], fromCache: true, hasPendingWrites: false };
   mocks.serverSeen = false;
@@ -199,7 +201,8 @@ beforeEach(() => {
   mocks.useItemsEnabled = [];
   setNavigatorOnline(true);
   mocks.onAuthStateChanged.mockImplementation((_a: unknown, cb: (u: unknown) => unknown) => {
-    emitAuth = cb;
+    // Mirror Firebase's public actor state before invoking AuthProvider.
+    emitAuth = (user) => { mocks.auth.currentUser = user; return cb(user); };
     return () => {};
   });
   mocks.ensureUserProfile.mockResolvedValue(undefined);
