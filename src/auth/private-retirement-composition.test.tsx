@@ -8,6 +8,7 @@ type Ref = { database: Database; path: string };
 type Listener = { target: Ref; next: (snapshot: unknown) => void; error: (error: Error) => void; stop: ReturnType<typeof vi.fn> };
 const H = vi.hoisted(() => ({
   primary: { currentUser: { uid: 'alice' } as Subject | null },
+  gameplayDb: { app: { name: 'persistent' } },
   eventId: 'event-a', recovered: true,
   before: null as ((next: Subject | null) => void) | null,
   tokenChanged: null as ((next: Subject | null) => void) | null,
@@ -17,7 +18,7 @@ const H = vi.hoisted(() => ({
   drains: vi.fn(), drainSteps: [] as Array<() => Promise<void>>,
 }));
 vi.mock('../firebase', () => ({
-  auth: H.primary, get EVENT_ID() { return H.eventId; }, db: { app: { name: 'persistent' } }, storage: {}, appCheck: null,
+  auth: H.primary, get EVENT_ID() { return H.eventId; }, db: H.gameplayDb, storage: {}, appCheck: null,
   firebaseConfig: { projectId: 'demo-private-retirement', apiKey: 'fixture', appId: 'fixture' }, firebaseEmulatorsEnabled: () => false,
 }));
 vi.mock('firebase/app', async (original) => ({
@@ -157,6 +158,7 @@ describe('actual manager publications retire the real reciprocal observer (#1701
     await act(async () => { sessions!.retry(); await vi.advanceTimersByTimeAsync(0); });
     expect(sessions!.getSnapshot().db).not.toBe(previous.db); expect(() => lease.assertCurrent()).toThrow(/expired/);
     expect(old.stop).toHaveBeenCalledOnce(); expect(H.drains).toHaveBeenCalledTimes(2); expect(H.listeners).toHaveLength(1);
+    expect(H.drains.mock.calls[1]?.[0]).toBe(H.gameplayDb);
     expect(view.result.current).toEqual({ hidden: new Set(), ready: false });
     await act(async () => { old.next(pairs(['alice', 'obsolete'])); await vi.advanceTimersByTimeAsync(0); });
     expect(view.result.current.ready).toBe(false);
