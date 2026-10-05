@@ -2136,11 +2136,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // attestation; it drives the authoritative read, and the deal fires (via the
   // effect) only once that confirms.
   const retryDeal = useCallback(() => {
-    if (!user) return;
-    // An explicit online connection Retry starts a fresh bounded private bridge
-    // episode before bootstrap/deal. It does not preserve an expired actor lease
-    // or restart the bridge for offline, pool or permanent-authority failures.
-    if (isOnline() && dealErrorReason === 'connection') retryPrivateFirestoreSession();
+    if (!user || auth.currentUser?.uid !== user.uid) return;
+    // A connection Retry restarts only an unavailable current-actor bridge.
+    // Unrelated gameplay timeouts retain a healthy client and confirmed blocks;
+    // an unavailable bridge still gets the existing fresh bounded episode.
+    if (isOnline() && dealErrorReason === 'connection') retryPrivateFirestoreSession(user.uid);
     if (!isOnline()) {
       // OFFLINE Retry → the CACHE-FIRST path, NEVER the transaction bootstrap
       // (Codex #117 round 4, finding A): retryBootstrap awaits ensureUserProfile —
