@@ -116,7 +116,7 @@ describe('captured private service transport', () => {
     expect(H.listeners.size).toBe(0); expect(H.getFunctions).not.toHaveBeenCalled(); expect(H.getStorage).not.toHaveBeenCalled();
   });
 
-  it('an already-failed private bridge rejects immediately without allocating a readiness timer', async () => {
+  it('an already-exhausted private bridge rejects immediately without allocating a readiness timer', async () => {
     H.snapshot = { ...H.snapshot, uid: null, db: null, failed: true };
     const wrapper = await import('./privateFirestore');
     const waiting = wrapper.awaitPrivateFirestore('alice');
@@ -125,7 +125,7 @@ describe('captured private service transport', () => {
     expect(H.getFunctions).not.toHaveBeenCalled(); expect(H.getStorage).not.toHaveBeenCalled();
   });
 
-  it('failure during an existing readiness wait immediately rejects and removes its timer', async () => {
+  it('exhaustion during an existing readiness wait immediately rejects and removes its timer', async () => {
     H.snapshot = { ...H.snapshot, db: null };
     const wrapper = await import('./privateFirestore'); const waiting = wrapper.awaitPrivateFirestore('alice');
     const rejection = expect(waiting).rejects.toMatchObject({ code: 'unavailable' });
@@ -161,5 +161,18 @@ describe('captured private service transport', () => {
     H.primary.currentUser = { uid: 'bob' }; H.snapshot = { ...H.snapshot, uid: 'bob', db: { app: { name: 'memory-bob' } } };
     [...H.listeners].forEach((listener) => listener()); await rejection;
     expect(H.listeners.size).toBe(0); expect(H.getFunctions).not.toHaveBeenCalled(); expect(H.getStorage).not.toHaveBeenCalled();
+  });
+
+  it('rechecks the actor after readiness resolves and before constructing services', async () => {
+    H.snapshot = { ...H.snapshot, db: null }; const wrapper = await import('./privateFirestore');
+    const waiting = wrapper.awaitPrivateFirestore('alice'); const rejection = expect(waiting).rejects.toThrow(/changed/);
+    H.snapshot = { ...H.snapshot, db: { app: { name: 'memory-alice' } } };
+    [...H.listeners].forEach((listener) => listener());
+    // Both publications may precede the async wait continuation.
+    H.primary.currentUser = { uid: 'bob' };
+    H.snapshot = { ...H.snapshot, uid: 'bob', db: { app: { name: 'memory-bob' } }, generation: 2 };
+    [...H.listeners].forEach((listener) => listener());
+    await rejection;
+    expect(H.getFunctions).not.toHaveBeenCalled(); expect(H.getStorage).not.toHaveBeenCalled();
   });
 });
