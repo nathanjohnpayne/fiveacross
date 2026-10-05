@@ -190,6 +190,103 @@ describe('useHiddenUidsSubscription', () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it.each([1, 2])('confirmed bootstrap attempt %i renews the later outage allowance without dispatching work', async (successfulAttempt) => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const session = { ...H.session };
+      const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+      for (let attempt = 0; attempt < successfulAttempt; attempt += 1) {
+        act(() => H.subscriptions[attempt].onError({ code: 'unavailable' }));
+        await act(async () => { await vi.advanceTimersByTimeAsync((attempt + 1) * 1_000); });
+      }
+      const confirmed = H.subscriptions[successfulAttempt];
+      act(() => confirmed.listener(pairs([['alice', 'bob']])));
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(H.subscriptions).toHaveLength(successfulAttempt + 1);
+      expect(H.waitPending).toHaveBeenCalledTimes(successfulAttempt + 1);
+      expect(confirmed.unsubscribe).not.toHaveBeenCalled();
+      expect(view.result.current).toEqual({ hidden: new Set(['alice']), ready: true });
+
+      // A later outage consumes the active listener as attempt zero. Its two
+      // fresh retries retain the existing delay and queue-drain windows.
+      H.waitPending.mockImplementation(() => new Promise<void>(() => {}));
+      act(() => confirmed.onError({ code: 'unavailable' }));
+      expect(view.result.current).toMatchObject({ ready: false, failed: true });
+      await act(async () => { await vi.advanceTimersByTimeAsync(999); });
+      expect(H.waitPending).toHaveBeenCalledTimes(successfulAttempt + 1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(H.waitPending).toHaveBeenCalledTimes(successfulAttempt + 2);
+      await act(async () => { await vi.advanceTimersByTimeAsync(9_999); });
+      expect(vi.getTimerCount()).toBe(1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1 + 1_999); });
+      expect(H.waitPending).toHaveBeenCalledTimes(successfulAttempt + 2);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(H.waitPending).toHaveBeenCalledTimes(successfulAttempt + 3);
+      await act(async () => { await vi.advanceTimersByTimeAsync(19_999); });
+      expect(vi.getTimerCount()).toBe(1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1 + 60_000); });
+      expect(vi.getTimerCount()).toBe(0);
+      expect(H.waitPending).toHaveBeenCalledTimes(successfulAttempt + 3);
+      expect(H.session).toEqual(session);
+      expect(H.retryPrivate).not.toHaveBeenCalled();
+      // Retryable exhaustion retains only the established offline witness.
+      vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+      H.session = { ...H.session, db: null, generation: 1, transition: 'connection' };
+      view.rerender();
+      expect(view.result.current).toEqual({ hidden: new Set(['alice']), ready: true });
+      view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(['cache', 'pending', 'retired attempt'] as const)('%s answers cannot renew an exhausted readiness allowance', async (kind) => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+      await act(async () => { await vi.advanceTimersByTimeAsync(23_000); });
+      expect(H.subscriptions).toHaveLength(3);
+      const answer = pairs([['alice', 'bob']]);
+      act(() => {
+        if (kind === 'retired attempt') H.subscriptions[0].listener(answer);
+        else H.subscriptions[2].listener(kind === 'cache'
+          ? { ...answer, metadata: { fromCache: true, hasPendingWrites: false } }
+          : pairs([['alice', 'bob']], true));
+      });
+      expect(view.result.current.ready).toBe(false);
+      act(() => H.subscriptions[2].onError({ code: 'unavailable' }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(H.subscriptions).toHaveLength(3);
+      expect(H.waitPending).toHaveBeenCalledTimes(3);
+      expect(view.result.current).toMatchObject({ ready: false, failed: true });
+      view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('a later outage still bounds each fresh listener first answer and consecutive unresolved failures', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const view = renderHook(() => useHiddenUidsSubscription('bob', true));
+      await act(async () => { await vi.advanceTimersByTimeAsync(23_000); });
+      act(() => H.subscriptions[2].listener(pairs([])));
+      act(() => H.subscriptions[2].onError({ code: 'unavailable' }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(H.subscriptions).toHaveLength(4);
+      await act(async () => { await vi.advanceTimersByTimeAsync(9_999); });
+      expect(H.subscriptions[3].unsubscribe).not.toHaveBeenCalled();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(H.subscriptions[3].unsubscribe).toHaveBeenCalledOnce();
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+      expect(H.subscriptions).toHaveLength(5);
+      await act(async () => { await vi.advanceTimersByTimeAsync(70_000); });
+      expect(H.subscriptions).toHaveLength(5);
+      expect(H.subscriptions[4].unsubscribe).toHaveBeenCalledOnce();
+      expect(view.result.current).toMatchObject({ ready: false, failed: true });
+      view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+
   it('exhausts three first-answer attempts, then a local Retry ignores every old listener', async () => {
     vi.useFakeTimers();
     try {
@@ -235,14 +332,14 @@ describe('useHiddenUidsSubscription', () => {
     } finally { vi.useRealTimers(); }
   });
 
-  it('a terminal pair denial cancels attempts and never qualifies its late answer or offline witness', async () => {
+  it.each(['permission-denied', 'unauthenticated'])('a terminal %s pair denial cancels attempts and never qualifies its late answer or offline witness', async (code) => {
     vi.useFakeTimers();
     vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       const view = renderHook(() => useHiddenUidsSubscription('bob', true));
       const first = H.subscriptions[0];
       act(() => first.listener(pairs([['alice', 'bob']])));
-      act(() => first.onError(Object.assign(new Error('denied'), { code: 'permission-denied' })));
+      act(() => first.onError(Object.assign(new Error('denied'), { code })));
       await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
       expect(H.subscriptions).toHaveLength(1);
       expect(view.result.current.failed).toBe(true);
