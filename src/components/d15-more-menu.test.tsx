@@ -76,8 +76,9 @@ vi.mock('./AcceptableUse', () => ({
   ),
 }));
 // Blocked players is stubbed to what matters to the panel's focus trap: an
-// Unblock control that is disabled (offline or mid-request), which the browser
+// Unblock control that is disabled mid-request, which the browser
 // skips, so the trap must not count it as the panel's first control.
+// Offline, the real panel withholds rows and Unblock controls entirely.
 // It keeps the real panel's programmatic focus targets too (#1314): the
 // tabIndex=-1 root it focuses while an unblock runs, and the tabIndex=-1
 // outcome message it focuses afterwards, ahead of the rows.

@@ -77,8 +77,8 @@ function BlockedPlayersForScope({ uid }: { uid: string | null }) {
   const rows = [...blocks]
     .filter((b) => unblocked[b.targetUid] !== b.createdAt)
     .sort((a, b) => b.createdAt - a.createdAt);
-  // An empty list is "no blocks" only once the server has answered; a cache-only
-  // empty snapshot (a first open while offline) keeps the panel loading.
+  // An empty list is "no blocks" only once the server has answered; an online
+  // unconfirmed answer keeps the panel loading. Offline shows reconnect guidance.
   const awaitingServer = !confirmed;
   // A server-observed row with a queued re-block intent cannot be reversed yet: the unblock's
   // server-only transactions would not see it, fail, and the block would land after.
