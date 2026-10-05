@@ -169,6 +169,11 @@ jobs:
       - name: Build
         run: npm run build
 
+      # A full checkout can hide imports excluded from the mirror upload set.
+      # Compile only tracked .vercelignore admissions after a fresh install.
+      - name: Vercel upload-set build
+        run: node scripts/check-vercel-upload-build.mjs
+
       # Pure fixture repositories exercise the deploy wrapper's fail-closed
       # selection, readiness, and post-publish reconciliation paths. This stays
       # in app-ci (rather than the propagated repo-lint workflow) because both
