@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { setDayTheme, setDayTonight, unlockDayNow, resnapshotDayNow } from '../../data/admin';
 import { dayDueForManualUnlock } from '../../game/logic';
 import { themesForEditionIncluding } from '../../theme/themes';
@@ -233,10 +233,27 @@ function ScheduleRow({
 }: {
   day: DayDef;
   now: number;
-  onChangeTheme: (dayIndex: number, theme: ThemeId) => void;
+  onChangeTheme: (dayIndex: number, theme: ThemeId) => Promise<void>;
   onChangeTonight: (dayIndex: number, tonight: string[]) => Promise<void>;
 }) {
   const locked = day.unlockAt <= now;
+  const active = useRef(true);
+  const themePending = useRef(false);
+  const [themeBusy, setThemeBusy] = useState(false);
+  const [themeError, setThemeError] = useState('');
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
+  const commitTheme = async (theme: ThemeId) => {
+    if (themePending.current) return;
+    themePending.current = true;
+    setThemeBusy(true);
+    setThemeError('');
+    try { await onChangeTheme(day.index, theme); }
+    catch { if (active.current) setThemeError('Day theme save failed. Try again.'); }
+    finally {
+      themePending.current = false;
+      if (active.current) setThemeBusy(false);
+    }
+  };
   const dueForManualUnlock = dayDueForManualUnlock(day, now);
   // The easy-mix re-snapshot fallback only makes sense for a MAIN Day that has already
   // unlocked AND been stamped (a stamped-but-maybe-main-only snapshot); an unstamped Day
@@ -344,8 +361,8 @@ function ScheduleRow({
         <select
           aria-label={`Day ${day.index + 1} theme`}
           value={day.theme}
-          disabled={locked}
-          onChange={(e) => onChangeTheme(day.index, e.target.value as ThemeId)}
+          disabled={locked || themeBusy}
+          onChange={(e) => void commitTheme(e.target.value as ThemeId)}
         >
           {/* Scoped to this Edition (#555) — an Admin must not be able to set a
               Bodega Theme on a cruise Day. `…Including(day.theme)` keeps the
@@ -358,6 +375,7 @@ function ScheduleRow({
             </option>
           ))}
         </select>
+        {themeError && <div className="error" role="alert">{themeError}</div>}
       </div>
       {/* Repair line: a full-width second line inside the row for a Day that
           needs a fallback. Anomaly in plain words first, the quiet fix button at

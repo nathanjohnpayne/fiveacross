@@ -33,7 +33,7 @@ function snapPct(ratio: number): number {
  * the label must agree with the thumb — and the dedup ref syncs to the SNAPPED
  * value, so an untouched release never rewrites the stored setting.
  */
-export function EasyMixSlider({ value, onChange }: { value: number; onChange: (ratio: number) => void }) {
+export function EasyMixSlider({ value, onChange }: { value: number; onChange: (ratio: number) => void | Promise<void> }) {
   // The input is deliberately UNCONTROLLED: the browser owns the thumb during
   // interaction. A controlled `value={pct}` loses keystrokes under load — any
   // interleaved re-render (this surface re-renders on every event-doc echo of
@@ -42,6 +42,12 @@ export function EasyMixSlider({ value, onChange }: { value: number; onChange: (r
   // keyboard walk). `pct` state drives only the bubble/aria text.
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [pct, setPct] = useState(snapPct(value));
+  const [error, setError] = useState('');
+  const active = useRef(true);
+  const request = useRef(0);
+  const observed = useRef(value);
+  observed.current = value;
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   // Dedup against the LAST REQUESTED ratio, not the `value` prop: `onChange`
   // writes Firestore asynchronously, so `value` stays stale until the write
   // round-trips — a second release at the same position would otherwise write
@@ -70,7 +76,22 @@ export function EasyMixSlider({ value, onChange }: { value: number; onChange: (r
     const ratio = next / 100;
     if (ratio === lastCommitted.current) return false;
     lastCommitted.current = ratio;
-    onChange(ratio);
+    const attempt = ++request.current;
+    setError('');
+    const failed = () => {
+      // A slow rejection cannot undo a later release or touch retired Admin
+      // chrome. Rapid keyboard releases remain independent writes.
+      if (!active.current || attempt !== request.current) return;
+      const committed = snapPct(observed.current);
+      lastCommitted.current = committed / 100;
+      if (inputRef.current && Number(inputRef.current.value) === next) {
+        inputRef.current.value = String(committed);
+        setPct(committed);
+      }
+      setError('Easy mix save failed. Try again.');
+    };
+    try { void Promise.resolve(onChange(ratio)).catch(failed); }
+    catch { failed(); }
     return true;
   };
   // Blur ends the interaction: commit the thumb (the AT path), and if that was
@@ -115,6 +136,7 @@ export function EasyMixSlider({ value, onChange }: { value: number; onChange: (r
           <span key={v}>{v}%</span>
         ))}
       </div>
+      {error && <div className="error" role="alert">{error}</div>}
     </div>
   );
 }
