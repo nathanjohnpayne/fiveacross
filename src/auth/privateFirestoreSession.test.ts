@@ -493,6 +493,60 @@ describe('private facade scheduled bootstrap readiness (#1675)', () => {
     expect((await wrapper.awaitPrivateFirestore('alice', true)).uid).toBe('alice');
   });
 
+  it.each(['offline', 'account'] as const)('a current retry refused by an unannounced %s change exhausts readiness promptly', async (boundary) => {
+    const originalOnline = Object.getOwnPropertyDescriptor(navigator, 'onLine');
+    try {
+      H.failure = 'auth'; const wrapper = await import('../privateFirestore');
+      const sessions = wrapper.privateFirestoreSessions(); managers.push(sessions);
+      const waiting = wrapper.awaitPrivateFirestore('alice', true).then(() => null, (error: unknown) => error);
+      H.idToken!(H.primary.currentUser); await vi.advanceTimersByTimeAsync(0);
+      const failed = sessions.getSnapshot();
+      expect(failed).toMatchObject({ failed: true, retryPending: true });
+      if (boundary === 'offline') Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+      else H.primary.currentUser = { uid: 'bob', token: 'bob' };
+      // Deliberately omit connection/Auth publication before the scheduled callback.
+      await vi.advanceTimersByTimeAsync(250);
+      expect(sessions.getSnapshot()).toEqual({ ...failed, retryPending: false });
+      if (boundary === 'offline') expect(await waiting).toMatchObject({ code: 'unavailable' });
+      else expect(await waiting).toMatchObject({ message: 'Private session changed.' });
+      expect(vi.getTimerCount()).toBe(0); expect(H.apps).toHaveLength(1); expect(H.functionsCalls).toHaveLength(0);
+      await expect(wrapper.awaitPrivateFirestore(H.primary.currentUser!.uid, true)).rejects.toMatchObject({ code: 'unavailable' });
+      expect(vi.getTimerCount()).toBe(0); expect(H.functionsCalls).toHaveLength(0);
+      H.failure = null; Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+      wrapper.retryPrivateFirestoreSession(); await vi.advanceTimersByTimeAsync(0);
+      expect((await wrapper.awaitPrivateFirestore(H.primary.currentUser!.uid, true)).uid).toBe(H.primary.currentUser!.uid);
+      expect(H.apps).toHaveLength(2);
+    } finally {
+      if (originalOnline) Object.defineProperty(navigator, 'onLine', originalOnline);
+      else Reflect.deleteProperty(navigator, 'onLine');
+    }
+  });
+
+  it.each(['failed', 'ready', 'recovery', 'stop'] as const)('an obsolete retry callback cannot change a newer %s scope or its timer', async (state) => {
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    try {
+      H.failure = 'auth'; const wrapper = await import('../privateFirestore');
+      const sessions = wrapper.privateFirestoreSessions(); managers.push(sessions);
+      H.idToken!(H.primary.currentUser); await vi.advanceTimersByTimeAsync(0);
+      const oldRetry = timers.mock.calls.find(([, delay]) => delay === 250)?.[0];
+      if (typeof oldRetry !== 'function') throw new Error('Scheduled retry was not captured');
+      if (state === 'stop') sessions.stop();
+      else {
+        if (state !== 'failed') H.failure = null;
+        if (state === 'recovery') { H.recovered = false; sessions.refreshRecovery(); }
+        else sessions.retry();
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      const current = sessions.getSnapshot(); const apps = H.apps.length;
+      expect(current.retryPending).toBe(state === 'failed');
+      expect(vi.getTimerCount()).toBe(state === 'failed' ? 1 : 0);
+      oldRetry(); await vi.advanceTimersByTimeAsync(0);
+      expect(sessions.getSnapshot()).toBe(current); expect(H.apps).toHaveLength(apps); expect(H.functionsCalls).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(state === 'failed' ? 1 : 0);
+      sessions.stop(); expect(vi.getTimerCount()).toBe(0);
+    } finally { timers.mockRestore(); }
+  });
+
   it('keeps one absolute five-second deadline and never captures a late successful retry', async () => {
     let release!: () => void;
     H.cloneWaits = [() => Promise.reject(new Error('transient')), () => new Promise<void>((resolve) => { release = resolve; })];

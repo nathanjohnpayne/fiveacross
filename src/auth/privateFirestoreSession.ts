@@ -149,8 +149,14 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
         const retryPending = delay !== undefined && config.primaryAuth.currentUser?.uid === user.uid && config.online?.() !== false;
         if (retryPending) {
           retryTimer = setTimeout(() => {
+            if (stopped || attempt !== generation) return;
             retryTimer = null;
-            if (stopped || attempt !== generation || config.primaryAuth.currentUser?.uid !== user.uid || config.online?.() === false) return;
+            if (config.primaryAuth.currentUser?.uid !== user.uid || config.online?.() === false) {
+              // This current retry is no longer scheduled, even without an
+              // Auth/connection publication. Exhaust its readiness metadata.
+              publish({ ...snapshot, retryPending: false });
+              return;
+            }
             // A failed bridge cannot carry a previously confirmed private set,
             // even if React never observed its intermediate failed publication.
             void synchronize(config.primaryAuth.currentUser, 'auth', retryIndex + 1);
