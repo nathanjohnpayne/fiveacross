@@ -2154,7 +2154,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // errors retain it. The facade additionally fences the captured lease.
     if (isOnline() && dealErrorReason === 'connection') {
       const failure = dealState.privateReadFailure;
-      retryPrivateFirestoreSession(user.uid, failure?.attempt === profileAttemptRef.current ? failure.read : null);
+      if (failure && failure.attempt !== profileAttemptRef.current) return;
+      retryPrivateFirestoreSession(user.uid, failure?.read);
     }
     if (!isOnline()) {
       // OFFLINE Retry → the CACHE-FIRST path, NEVER the transaction bootstrap

@@ -18,6 +18,7 @@ const H = vi.hoisted(() => ({
   serverFailure: null as Error | null, profileFailure: null as Error | null,
   profileExists: true, profileCommitFailure: null as Error | null,
   profileCommitSteps: [] as Array<() => Promise<void>>,
+  profileReadSteps: [] as Array<() => Promise<void>>,
   serverSteps: [] as Array<() => Promise<void>>,
   gameplayTransactions: 0, heldJoin: true, releaseJoin: null as (() => void) | null,
   pairListeners: [] as Array<{ target: Ref; next: (snapshot: unknown) => void; error: (error: Error) => void; stop: ReturnType<typeof vi.fn> }>,
@@ -67,6 +68,7 @@ vi.mock('firebase/firestore', async (original) => {
         get: async (ref) => {
           if (ref.path.startsWith('users/')) {
             H.profileReads.push(ref);
+            await (H.profileReadSteps.shift() ?? (() => Promise.resolve()))();
             if (H.profileFailure) throw H.profileFailure;
             return snapshot(H.profileExists ? { attestedAdultAt: 123 } : null);
           }
@@ -123,6 +125,7 @@ beforeEach(() => {
   H.cloneFailures = 0; H.cloneSteps = []; H.apps = []; H.services = []; H.profileReads = []; H.serverReads = []; H.serverFailure = null;
   H.profileFailure = null;
   H.profileExists = true; H.profileCommitFailure = null; H.profileCommitSteps = [];
+  H.profileReadSteps = [];
   H.serverSteps = []; H.gameplayTransactions = 0; H.heldJoin = true; H.releaseJoin = null; H.pairListeners = []; H.writes = [];
   Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
   Object.defineProperty(navigator, 'locks', { configurable: true, value: {
@@ -135,8 +138,10 @@ async function mount() {
   const { AuthProvider, useAuth } = await import('./AuthContext');
   const { privateFirestoreSessions, capturePrivateFirestore } = await import('../privateFirestore');
   const { useHiddenUids } = await import('../hooks/useBlocks');
+  let publishedRetry!: () => void;
   function Probe() {
     const auth = useAuth(); const blocks = useHiddenUids();
+    publishedRetry = auth.retryDeal;
     return <div>
       <output data-testid="error">{auth.dealErrorReason ?? 'none'}</output>
       <output data-testid="blocks">{blocks.ready ? [...blocks.hidden].join(',') : 'withheld'}</output>
@@ -146,7 +151,7 @@ async function mount() {
   const tree = render(<AuthProvider><Probe /></AuthProvider>);
   await act(async () => { H.authChanged!(H.primary.currentUser); await vi.advanceTimersByTimeAsync(0); });
   sessions = privateFirestoreSessions();
-  return { capture: () => capturePrivateFirestore(true), rerender: () => tree.rerender(<AuthProvider><Probe /></AuthProvider>) };
+  return { capture: () => capturePrivateFirestore(true), retry: () => publishedRetry, rerender: () => tree.rerender(<AuthProvider><Probe /></AuthProvider>) };
 }
 async function confirmBlocks() {
   expect(H.pairListeners).toHaveLength(1);
@@ -294,6 +299,53 @@ it('a failed replacement bridge retires the old lease and blocks until Retry get
 
 // #1732: only explicitly current private reads can replace an initialized client.
 describe('private reads failing while the bridge remains initialized', () => {
+  it('a timed-out profile read that later succeeds disarms replacement while its commit is still pending', async () => {
+    let releaseRead!: () => void; let releaseCommit!: () => void;
+    H.profileExists = false; H.heldJoin = false;
+    H.profileReadSteps = [() => new Promise<void>(resolve => { releaseRead = resolve; })];
+    H.profileCommitSteps = [() => new Promise<void>(resolve => { releaseCommit = resolve; })];
+    const view = await mount(); const before = sessions!.getSnapshot(); const lease = view.capture();
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(screen.getByTestId('error')).toHaveTextContent('connection'); expect(H.writes).toHaveLength(0);
+    await act(async () => { releaseRead(); await vi.advanceTimersByTimeAsync(0); });
+    expect(H.writes).toHaveLength(1); expect(H.serverReads).toHaveLength(0);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry' })); await vi.advanceTimersByTimeAsync(0); });
+    expect(sessions!.getSnapshot()).toBe(before); expect(H.apps).toHaveLength(1); expect(() => lease.assertCurrent()).not.toThrow();
+    expect(H.gameplayTransactions).toBe(1); expect(screen.getByTestId('error')).toHaveTextContent('none');
+    await act(async () => { releaseCommit(); await vi.advanceTimersByTimeAsync(0); });
+    expect(H.gameplayTransactions).toBe(1); expect(H.apps).toHaveLength(1); expect(screen.getByTestId('error')).toHaveTextContent('none');
+  });
+
+  it('a newer same-client authority attempt cannot rotate from the previous attempt private failure', async () => {
+    H.serverFailure = Object.assign(new Error('old private read unavailable'), { code: 'unavailable' });
+    H.heldJoin = false; const view = await mount(); const before = sessions!.getSnapshot(); const lease = view.capture();
+    const previousRetry = view.retry();
+    let release!: () => void; H.serverFailure = null;
+    H.serverSteps = [() => new Promise<void>(resolve => { release = resolve; })];
+    await act(async () => { H.authChanged!(H.primary.currentUser); await vi.advanceTimersByTimeAsync(0); });
+    expect(H.serverReads).toHaveLength(2); expect(H.gameplayTransactions).toBe(0);
+    await act(async () => { previousRetry(); await vi.advanceTimersByTimeAsync(0); });
+    expect(sessions!.getSnapshot()).toBe(before); expect(H.apps).toHaveLength(1); expect(() => lease.assertCurrent()).not.toThrow();
+    expect(H.gameplayTransactions).toBe(0); expect(screen.getByTestId('error')).toHaveTextContent('none');
+    await act(async () => { release(); await vi.advanceTimersByTimeAsync(0); });
+    expect(sessions!.getSnapshot()).toBe(before); expect(H.apps).toHaveLength(1); expect(H.gameplayTransactions).toBe(1);
+  });
+
+  it('an old private read failure cannot cancel a newer still-initializing private candidate', async () => {
+    H.serverFailure = Object.assign(new Error('old private unavailable'), { code: 'unavailable' });
+    H.heldJoin = false; await mount(); H.serverFailure = null;
+    let release!: () => void;
+    H.cloneSteps = [() => new Promise<void>(resolve => { release = resolve; })];
+    const { retryPrivateFirestoreSession } = await import('../privateFirestore');
+    await act(async () => { retryPrivateFirestoreSession(); await vi.advanceTimersByTimeAsync(0); });
+    const initializing = sessions!.getSnapshot();
+    expect(initializing.db).toBeNull(); expect(H.apps).toHaveLength(2);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry' })); await vi.advanceTimersByTimeAsync(0); });
+    expect(sessions!.getSnapshot()).toBe(initializing); expect(H.apps).toHaveLength(2); expect(H.gameplayTransactions).toBe(0);
+    await act(async () => { release(); await vi.advanceTimersByTimeAsync(0); });
+    expect(H.apps).toHaveLength(2); expect(H.gameplayTransactions).toBe(1); expect(screen.getByTestId('error')).toHaveTextContent('none');
+  });
+
   it('a profile write connection error does not become private-read replacement authority', async () => {
     H.profileExists = false; H.heldJoin = false;
     H.profileCommitFailure = Object.assign(new Error('profile commit unavailable'), { code: 'unavailable' });
