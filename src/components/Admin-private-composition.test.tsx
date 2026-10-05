@@ -64,7 +64,6 @@ vi.mock('./admin/AdminHub', () => ({ default: () => null }));
 vi.mock('./admin/SchedulePanel', () => ({ default: () => null }));
 vi.mock('./admin/PromptPool', () => ({ default: () => null }));
 vi.mock('./admin/PlayersPanel', () => ({ default: () => null }));
-
 import Admin from './Admin';
 
 const snapshot = (pending = false, event = H.event) => ({ exists: () => true, data: () => event, metadata: { fromCache: false, hasPendingWrites: pending } });
@@ -76,7 +75,7 @@ beforeEach(async () => {
   H.primary.currentUser = { uid: 'alice', token: 'initial' };
   H.manager = createPrivateFirestoreSessions({ primaryAuth: H.primary as unknown as Auth, options: {}, recovered: () => true, online: () => true });
   H.idToken!(H.primary.currentUser as User);
-  for (let index = 0; index < 12; index++) await Promise.resolve();
+  await waitFor(() => expect(H.manager!.getSnapshot().db).not.toBeNull());
   H.transaction.mockImplementation(async (database: unknown, operation: (transaction: unknown) => Promise<unknown>) => {
     expect(database).toBe(H.db);
     const transaction = {
