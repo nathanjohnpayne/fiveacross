@@ -3,6 +3,8 @@ import { unblockPlayer } from '../data/blocks';
 import { useMyBlocks } from '../hooks/useBlocks';
 import { useLeaderboard } from '../hooks/useData';
 import { useOnline } from '../hooks/useOnline';
+import { usePrivateFirestore } from '../hooks/usePrivateFirestore';
+import { privateCacheRecoveryHref } from '../auth/privateCacheRecoveryNavigation';
 import { trackIfCurrentEvent } from '../eventScopedAnalytics';
 import { EVENT_ID } from '../firebase';
 import { editionBrand } from '../editions';
@@ -20,12 +22,13 @@ type Outcome = { kind: 'done' | 'still-hidden' | 'error'; name: string };
  *
  * Unblocking is deliberately NOT optimistic: `unblockPlayer` sends server-only
  * transactions, so it needs a connection. While the browser reports offline the
- * button is disabled with a note rather than started (`useOnline` can only
+ * private rows are withheld with reconnect guidance rather than an unblock started (`useOnline` can only
  * trust a `false`); started online, the row reads "Unblocking…" until the
  * server answers. An existing row with a pending in-process re-block intent reads "Saving this
  * block…" with Unblock disabled until commit and pair observation, since the server-only unblock
- * cannot safely reverse an uncommitted intent, and an empty list reads "Loading…" rather than "no blocks"
- * until the server has answered the listener. Every settle is reported here, at the panel level, because a
+ * cannot safely reverse an uncommitted intent, and every first unconfirmed list is withheld. The online first-answer wait is
+ * bounded; cache/pending first answers never establish row or action authority.
+ * Recovery guidance comes before rows; the attended recovery flow is unchanged. Every settle is reported here, at the panel level, because a
  * landed unblock removes its row from the listener: "Unblocked", the
  * `stillHidden` note (worded as likely, not proven, since an orphaned pair or an
  * unanswered listing reports the same), or, for any error `unblockPlayer`
@@ -33,7 +36,15 @@ type Outcome = { kind: 'done' | 'still-hidden' | 'error'; name: string };
  * retry note with the row left in place.
  */
 export default function BlockedPlayersPanel({ uid }: { uid: string | null }) {
-  const { data: blocks, loading, error, confirmed, pendingTargets } = useMyBlocks(uid);
+  const { generation } = usePrivateFirestore();
+  // More can remain open across scope changes. Remount its private outcomes and
+  // confirmation state alongside the raw listener; old operations cannot reappear.
+  return <BlockedPlayersForScope key={JSON.stringify([uid, EVENT_ID, generation])} uid={uid} />;
+}
+
+function BlockedPlayersForScope({ uid }: { uid: string | null }) {
+  const { data: blocks, loading, error, confirmed, pendingTargets, denied, retry } = useMyBlocks(uid);
+  const { recoveryRequired } = usePrivateFirestore();
   const { players, hasServerData: rosterConfirmed } = useLeaderboard();
   const online = useOnline();
   const [confirming, setConfirming] = useState<string | null>(null);
@@ -68,7 +79,7 @@ export default function BlockedPlayersPanel({ uid }: { uid: string | null }) {
     .sort((a, b) => b.createdAt - a.createdAt);
   // An empty list is "no blocks" only once the server has answered; a cache-only
   // empty snapshot (a first open while offline) keeps the panel loading.
-  const awaitingServer = rows.length === 0 && !confirmed;
+  const awaitingServer = !confirmed;
   // A server-observed row with a queued re-block intent cannot be reversed yet: the unblock's
   // server-only transactions would not see it, fail, and the block would land after.
   const reversible = (target: string) => online && nameKnown(target) && !pendingTargets.has(target);
@@ -120,6 +131,16 @@ export default function BlockedPlayersPanel({ uid }: { uid: string | null }) {
     (outcome ? statusRef : rootRef).current?.focus();
   }, [pending, outcome]);
 
+  if (recoveryRequired) return (
+    <div className="blocked-panel ph-no-capture">
+      <p>Complete device recovery to see your blocked players and undo a block.</p>
+      <p className="muted">Reconnect, verify queued Marks for every account, and close other app tabs before clearing the legacy device cache.</p>
+      <a className="btn" href={privateCacheRecoveryHref(window.location.href)}>Open device recovery</a>
+    </div>
+  );
+  if (!uid) return <p className="muted">Sign in to see your blocked players.</p>;
+  if (!online) return <p className="muted">Reconnect to see your blocked players and unblock someone.</p>;
+
   return (
     <div className="blocked-panel ph-no-capture" ref={rootRef} tabIndex={-1}>
       <p className="muted">
@@ -139,13 +160,13 @@ export default function BlockedPlayersPanel({ uid }: { uid: string | null }) {
           {outcome.kind === 'error' && `Couldn’t unblock ${outcome.name}. Check your connection and try again.`}
         </p>
       )}
-      {!online && (rows.length > 0 || awaitingServer) && (
-        <p className="muted">You&rsquo;re offline. Unblocking needs a connection.</p>
-      )}
       {loading ? (
         <p className="muted">Loading…</p>
       ) : error ? (
-        <p className="block-error">Couldn&rsquo;t load your blocked players. Check your connection and try again.</p>
+        <div>
+          <p className="block-error">Couldn’t load your blocked players. {denied ? 'Check your access and try again.' : 'Check your connection and try again.'}</p>
+          {retry && <button type="button" className="btn" onClick={retry}>Retry</button>}
+        </div>
       ) : awaitingServer ? (
         <p className="muted">Loading…</p>
       ) : rows.length === 0 ? (
