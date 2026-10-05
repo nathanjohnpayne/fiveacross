@@ -364,11 +364,15 @@ function ScheduleRow({
           disabled={locked}
           aria-disabled={locked || themeBusy}
           aria-busy={themeBusy}
-          // A pending select must keep focus without opening/changing its native
-          // picker. Tab/Escape retain the sheet's navigation and dismissal.
+          // Keep native picker/value input unavailable without swallowing
+          // browser shortcuts, history navigation or the sheet's Tab/Escape.
           onPointerDown={(e) => { if (themePending.current) e.preventDefault(); }}
           onKeyDown={(e) => {
-            if (themePending.current && e.key !== 'Tab' && e.key !== 'Escape') e.preventDefault();
+            if (!themePending.current || e.metaKey || e.ctrlKey) return;
+            const opensPicker = e.altKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp');
+            const changesValue = !e.altKey && (e.key.length === 1 ||
+              ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', 'Enter'].includes(e.key));
+            if (opensPicker || changesValue) e.preventDefault();
           }}
           onChange={(e) => {
             if (locked || themePending.current) { e.currentTarget.value = day.theme; return; }

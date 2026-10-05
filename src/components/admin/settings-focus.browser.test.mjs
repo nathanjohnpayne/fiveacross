@@ -174,3 +174,29 @@ test('busy Day theme remains in AdminSheet Tab order and a later Day lock remain
   await page.evaluate(()=>window.fixture.reject()); await expect(select).toHaveJSProperty('disabled',true);
  } finally {await page.close();}
 });
+
+
+test('pending Day theme preserves browser modifier/history commands while blocking native value input', async () => {
+ const page=await fixture();
+ try {
+  const control=page.getByRole('combobox',{name:'Day 1 theme'});
+  await tabTo(page,control);await control.selectOption('confetti-hour');
+  await expect(control).toBeFocused();
+  await page.evaluate(()=>{
+   window.keyProbe=[];
+   window.addEventListener('keydown',event=>window.keyProbe.push({key:event.key,meta:event.metaKey,ctrl:event.ctrlKey,alt:event.altKey,prevented:event.defaultPrevented}));
+  });
+  // Browser event-default regression: a separate headed Chromium/OS Cmd-F
+  // comparison proves this cancellation blocked the actual native Find bar.
+  for(const shortcut of ['Meta+f','Control+f','Meta+l','Control+l','Meta+r','Control+r','Alt+ArrowLeft','Alt+ArrowRight']) await page.keyboard.press(shortcut);
+  const commands=await page.evaluate(()=>window.keyProbe.splice(0).filter(event=>['f','l','r','ArrowLeft','ArrowRight'].includes(event.key)));
+  assert.equal(commands.length,8);
+  assert.ok(commands.every(event=>!event.prevented),JSON.stringify(commands));
+  for(const key of ['ArrowDown','ArrowUp','ArrowLeft','ArrowRight','Home','End','PageUp','PageDown','Enter','Space','a','Alt+ArrowDown','Alt+ArrowUp']) await page.keyboard.press(key);
+  const changes=await page.evaluate(()=>window.keyProbe.filter(event=>!['Alt'].includes(event.key)));
+  assert.equal(changes.length,13);
+  assert.ok(changes.every(event=>event.prevented),JSON.stringify(changes));
+  assert.equal(await writes(page),1);await expect(control).toHaveValue('marquee');
+  await expect(control).toBeFocused();
+ } finally {await page.close();}
+});
