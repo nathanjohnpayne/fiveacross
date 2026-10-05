@@ -132,6 +132,8 @@ export function createPrivateFirestoreSessions(config: SessionOptions) {
         copiedUser = latest;
       }
       if (stopped || attempt !== generation || config.primaryAuth.currentUser?.uid !== user.uid || config.online?.() === false) {
+        // Release only this attempt before disposal yields to a newer bootstrap.
+        if (attempt === generation) initializingUid = null;
         await dispose(candidate);
         return;
       }

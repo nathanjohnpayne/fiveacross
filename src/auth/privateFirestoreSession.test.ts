@@ -18,6 +18,7 @@ const H = vi.hoisted(() => ({
   deleted: [] as App[], terminated: [] as ClientDb[],
   clones: [] as Array<{ auth: ClientAuth; subject: Subject }>,
   cloneWaits: [] as Array<() => Promise<void>>,
+  terminateWaits: [] as Array<() => Promise<void>>,
   failure: null as 'auth' | 'firestore' | 'app-check' | null,
   providers: [] as Array<{ app: App; getToken: () => Promise<{ token: string; expireTimeMillis: number }>; autoRefresh: boolean }>,
   primaryToken: '', primaryTokenWait: null as Promise<void> | null, recovered: true, online: true, emulators: false,
@@ -57,7 +58,11 @@ vi.mock('firebase/firestore', () => ({
     if (H.failure === 'firestore') throw new Error('Firestore initialization refused');
     const db = { app, cache: options.localCache }; H.dbs.push(db); return db;
   },
-  terminate: async (db: ClientDb) => { H.terminated.push(db); },
+  terminate: async (db: ClientDb) => {
+    H.terminated.push(db);
+    const wait = H.terminateWaits.shift();
+    if (wait) await wait();
+  },
   connectFirestoreEmulator: vi.fn(),
 }));
 vi.mock('firebase/app-check', () => ({
@@ -100,7 +105,7 @@ beforeEach(() => {
   vi.useFakeTimers({ now: 1_700_000_000_000 }); vi.resetModules();
   H.primary.currentUser = { uid: 'alice', token: 'initial' };
   H.before = null; H.abort = null; H.idToken = null;
-  H.apps = []; H.auths = []; H.dbs = []; H.deleted = []; H.terminated = []; H.clones = []; H.cloneWaits = [];
+  H.apps = []; H.auths = []; H.dbs = []; H.deleted = []; H.terminated = []; H.clones = []; H.cloneWaits = []; H.terminateWaits = [];
   H.failure = null; H.providers = []; H.primaryToken = tokenFor(1_700_000_030); H.primaryTokenWait = null;
   H.recovered = true; H.online = true; H.emulators = false; H.tokenCalls = []; H.functionsCalls = [];
 });
@@ -183,6 +188,97 @@ describe('private named memory lifecycle', () => {
     release(); await settle();
     expect(sessions.capture().uid).toBe('alice'); expect(H.auths[0].currentUser?.token).toBe('mutated');
     expect(H.apps).toHaveLength(1); expect(H.clones.map((clone) => clone.subject.token)).toEqual(['initial', 'mutated']);
+  });
+
+  it.each([
+    ['token', 'offline'], ['abort', 'offline'], ['token', 'UID mismatch'], ['abort', 'UID mismatch'],
+  ] as const)('a %s callback restarts a bootstrap refused %s without a transition publication', async (resume, refusal) => {
+    let release!: () => void;
+    H.cloneWaits = [() => new Promise<void>((resolve) => { release = resolve; })];
+    const sessions = manager(); H.idToken!(H.primary.currentUser);
+    await vi.waitFor(() => expect(H.clones).toHaveLength(1));
+    const refused = sessions.getSnapshot();
+    if (refusal === 'offline') H.online = false;
+    else H.primary.currentUser = { uid: 'bob', token: 'unpublished' };
+    release();
+    await vi.waitFor(() => expect(H.deleted).toContain(H.apps[0]));
+    expect(sessions.getSnapshot()).toBe(refused);
+    expect(sessions.getSnapshot()).toMatchObject({ db: null, failed: false, retryPending: false });
+    H.online = true; H.primary.currentUser = { uid: 'alice', token: 'latest' };
+    if (resume === 'token') H.idToken!(H.primary.currentUser);
+    else H.abort!();
+    expect(H.apps).toHaveLength(2);
+    await vi.waitFor(() => expect(sessions.getSnapshot().db).toBe(H.dbs[1]));
+    expect(sessions.capture().uid).toBe('alice');
+    expect(H.auths[1].currentUser?.token).toBe('latest');
+  });
+
+  it('old candidate disposal cannot clear a newer held same-UID bootstrap', async () => {
+    let releaseOld!: () => void; let releaseNew!: () => void; let disposeOld!: () => void;
+    H.cloneWaits = [
+      () => new Promise<void>((resolve) => { releaseOld = resolve; }),
+      () => new Promise<void>((resolve) => { releaseNew = resolve; }),
+    ];
+    H.terminateWaits = [() => new Promise<void>((resolve) => { disposeOld = resolve; })];
+    const sessions = manager(); H.idToken!(H.primary.currentUser);
+    await vi.waitFor(() => expect(H.clones).toHaveLength(1));
+    H.online = false; releaseOld();
+    await vi.waitFor(() => expect(H.terminated).toContain(H.dbs[0]));
+    H.online = true; H.primary.currentUser = { uid: 'alice', token: 'new-bootstrap' };
+    H.idToken!(H.primary.currentUser);
+    expect(H.apps).toHaveLength(2);
+    await vi.waitFor(() => expect(H.clones).toHaveLength(2));
+    const initializing = sessions.getSnapshot();
+    disposeOld(); await vi.waitFor(() => expect(H.deleted).toContain(H.apps[0]));
+    expect(sessions.getSnapshot()).toBe(initializing);
+    expect(sessions.getSnapshot().db).toBeNull();
+    H.primary.currentUser = { uid: 'alice', token: 'latest' }; H.idToken!(H.primary.currentUser); H.abort!();
+    expect(H.apps).toHaveLength(2);
+    releaseNew(); await vi.waitFor(() => expect(sessions.getSnapshot().db).toBe(H.dbs[1]));
+    expect(sessions.capture().uid).toBe('alice'); expect(H.auths[1].currentUser?.token).toBe('latest');
+    expect(H.deleted).toEqual([H.apps[0]]);
+  });
+
+  it('superseded bootstrap cleanup cannot clear a newer held account initialization', async () => {
+    let releaseOld!: () => void; let releaseNew!: () => void; let disposeOld!: () => void;
+    H.cloneWaits = [
+      () => new Promise<void>((resolve) => { releaseOld = resolve; }),
+      () => new Promise<void>((resolve) => { releaseNew = resolve; }),
+    ];
+    H.terminateWaits = [() => new Promise<void>((resolve) => { disposeOld = resolve; })];
+    const sessions = manager(); H.idToken!(H.primary.currentUser);
+    await vi.waitFor(() => expect(H.clones).toHaveLength(1));
+    H.before!({ uid: 'bob', token: 'new-bootstrap' });
+    H.primary.currentUser = { uid: 'bob', token: 'new-bootstrap' }; H.idToken!(H.primary.currentUser);
+    await vi.waitFor(() => expect(H.clones).toHaveLength(2));
+    const initializing = sessions.getSnapshot();
+    releaseOld(); await vi.waitFor(() => expect(H.terminated).toContain(H.dbs[0]));
+    H.idToken!(H.primary.currentUser); H.abort!(); expect(H.apps).toHaveLength(2);
+    disposeOld(); await vi.waitFor(() => expect(H.deleted).toContain(H.apps[0]));
+    expect(sessions.getSnapshot()).toBe(initializing);
+    H.primary.currentUser = { uid: 'bob', token: 'latest' }; H.idToken!(H.primary.currentUser); H.abort!();
+    expect(H.apps).toHaveLength(2);
+    releaseNew(); await vi.waitFor(() => expect(sessions.getSnapshot().db).toBe(H.dbs[1]));
+    expect(sessions.capture().uid).toBe('bob'); expect(H.auths[1].currentUser?.token).toBe('latest');
+    expect(H.deleted).toEqual([H.apps[0]]);
+  });
+
+  it.each(['copy', 'disposal'] as const)('stop prevents a held %s from reviving bootstrap', async (stage) => {
+    let release!: () => void; let disposeOld!: () => void;
+    H.cloneWaits = [() => new Promise<void>((resolve) => { release = resolve; })];
+    H.terminateWaits = [() => new Promise<void>((resolve) => { disposeOld = resolve; })];
+    const sessions = manager(); H.idToken!(H.primary.currentUser);
+    await vi.waitFor(() => expect(H.clones).toHaveLength(1));
+    if (stage === 'copy') sessions.stop();
+    else H.online = false;
+    release(); await vi.waitFor(() => expect(H.terminated).toContain(H.dbs[0]));
+    if (stage === 'disposal') sessions.stop();
+    const stopped = sessions.getSnapshot();
+    H.online = true; H.primary.currentUser = { uid: 'alice', token: 'latest' };
+    H.idToken!(H.primary.currentUser); H.abort!();
+    disposeOld(); await vi.waitFor(() => expect(H.deleted).toContain(H.apps[0]));
+    expect(H.apps).toHaveLength(1); expect(sessions.getSnapshot()).toBe(stopped);
+    expect(sessions.getSnapshot().db).toBeNull(); expect(() => sessions.capture()).toThrow(/expired/);
   });
 
   it('a refresh held across account retirement cannot publish into the replacement actor', async () => {
@@ -443,18 +539,23 @@ describe('private facade scheduled bootstrap readiness (#1675)', () => {
   });
 
   it.each(['offline', 'stop'] as const)('%s retirement cancels scheduled work and the bounded wait cannot capture', async (retirement) => {
-    H.failure = 'auth'; const wrapper = await import('../privateFirestore');
-    const sessions = wrapper.privateFirestoreSessions(); managers.push(sessions);
-    const waiting = wrapper.awaitPrivateFirestore('alice', true);
-    const rejected = expect(waiting).rejects.toMatchObject({ code: 'unavailable' });
-    H.idToken!(H.primary.currentUser); await vi.advanceTimersByTimeAsync(0);
-    H.failure = null;
-    if (retirement === 'offline') {
-      Object.defineProperty(navigator, 'onLine', { configurable: true, value: false }); sessions.refreshConnection();
-    } else sessions.stop();
-    await vi.advanceTimersByTimeAsync(5_000); await rejected;
-    expect(H.apps).toHaveLength(1); expect(H.functionsCalls).toHaveLength(0);
-    Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+    const originalOnline = Object.getOwnPropertyDescriptor(navigator, 'onLine');
+    try {
+      H.failure = 'auth'; const wrapper = await import('../privateFirestore');
+      const sessions = wrapper.privateFirestoreSessions(); managers.push(sessions);
+      const waiting = wrapper.awaitPrivateFirestore('alice', true);
+      const rejected = expect(waiting).rejects.toMatchObject({ code: 'unavailable' });
+      H.idToken!(H.primary.currentUser); await vi.advanceTimersByTimeAsync(0);
+      H.failure = null;
+      if (retirement === 'offline') {
+        Object.defineProperty(navigator, 'onLine', { configurable: true, value: false }); sessions.refreshConnection();
+      } else sessions.stop();
+      await vi.advanceTimersByTimeAsync(5_000); await rejected;
+      expect(H.apps).toHaveLength(1); expect(H.functionsCalls).toHaveLength(0);
+    } finally {
+      if (originalOnline) Object.defineProperty(navigator, 'onLine', originalOnline);
+      else Reflect.deleteProperty(navigator, 'onLine');
+    }
   });
 });
 
