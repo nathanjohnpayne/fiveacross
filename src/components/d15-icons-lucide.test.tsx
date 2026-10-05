@@ -30,6 +30,10 @@ const H = vi.hoisted(() => ({
   signOutUser: vi.fn(),
 }));
 
+vi.mock('../hooks/usePrivateFirestore', () => ({
+  usePrivateFirestore: () => ({ recoveryRequired: false }),
+}));
+
 vi.mock('../auth/AuthContext', () => ({
   useAuth: () => ({ user: H.user, signOutUser: H.signOutUser }),
 }));

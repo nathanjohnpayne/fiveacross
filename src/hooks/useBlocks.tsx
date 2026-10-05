@@ -103,8 +103,8 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
   const confirmed = useRef<{ key: string; generation: number; authGeneration: number; hidden: ReadonlySet<string> } | null>(null);
   // A discarded render cannot erase committed state. Only an actual connection
   // transition (or an offline session) may carry it across private generations;
-  // ordinary token rotation requires a fresh answer under refreshed credentials.
-  // The persistent Auth stamp catches an offline rotation even if React misses
+  // actual Auth retirement requires a fresh answer from the replacement client.
+  // The retained Auth stamp catches an offline retirement even if React misses
   // its publication. Keep rendering offline; re-confirm when back online.
   const witness = confirmed.current?.key === key && session.uid === uid && !session.failed &&
     (confirmed.current.authGeneration === session.authGeneration || !navigator.onLine) && (

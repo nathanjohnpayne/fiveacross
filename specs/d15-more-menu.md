@@ -16,6 +16,7 @@ Feature: the Phase 1.5 build-out of the More tab's actual content, implementing 
 
 ## Acceptance criteria
 
+- The ordinary Support → Device recovery shortcut appears only while the current device's private-session state reports `recoveryRequired`. It disappears when recovery completes and remains absent on an already-recovered mount. Recovery-required devices retain the same fresh-document link to attended recovery; this presentation gate does not clear a cache or change the dedicated flow's ALL-account queued-Mark recovery and other-tab confirmations.
 - Given a signed-in Player, when they open More, then they see Profile, Theme, Play (schedule / suggest / how-to-play / install-when-installable), Support (bug / 18+ / blocked players), Sign out, and a version footer, in that order.
 - Given a non-admin Player, when they open More, then no Admin row renders.
 - Given an admin with 3 pending items, when they open More, then the Admin row shows a "3" badge; given an admin with 0 pending items, then the row renders with no badge.
