@@ -990,13 +990,14 @@ describe('Admin Game settings (specs/d15-admin-proof-claims.md rows, re-housed a
     expect(H.setVisionGate).toHaveBeenCalledWith(false);
   });
 
-  it('the report-threshold stepper reads the current value and +/- invoke setReportHideThreshold', () => {
+  it('the report-threshold stepper reads the current value and +/- invoke setReportHideThreshold', async () => {
     H.event = { ...H.event, settings: { reportHideThreshold: 4 } } as unknown as EventDoc;
     renderAdmin('/more/admin/settings');
     const stepperRow = row('Auto-hide after reports');
     expect(within(stepperRow).getByText('4')).toBeInTheDocument();
     fireEvent.click(within(stepperRow).getByRole('button', { name: 'Increase auto-hide threshold' }));
     expect(H.setReportHideThreshold).toHaveBeenCalledWith(5);
+    await waitFor(() => expect(within(stepperRow).getByRole('button', { name: 'Decrease auto-hide threshold' })).toBeEnabled());
     fireEvent.click(within(stepperRow).getByRole('button', { name: 'Decrease auto-hide threshold' }));
     expect(H.setReportHideThreshold).toHaveBeenCalledWith(3);
   });

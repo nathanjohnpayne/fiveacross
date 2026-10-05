@@ -18,6 +18,8 @@ This repo was scaffolded from—and tracks—the **mergepath** template, the can
 
 Private profiles, Admin data and block read listeners use the isolated memory client described in `specs/private-cache-isolation.md`. Preserve the staged attended legacy-cache recovery boundary, queued gameplay Marks and durable block batches; only already-confirmed same-account/Event block sets carry shared Feed/Tally rendering into an offline session. Cold offline reloads show explicit reconnect states under ADR 0006.
 
+Admin settings feedback follows [`admin-async-feedback`](../../specs/admin-async-feedback.md): retain committed private Event values during pending writes, catch settings/Day-theme rejections inline, preserve force-adult confirmation ownership, and allow an identical failed Easy mix release to retry without serializing rapid keyboard releases. Retired private scopes must not receive old action feedback.
+
 When the recovery query key is absent, the credential-safe entry starts loading the application graph without first awaiting the recovery-navigation import. Preserve deferred recovery selection and credential capture before application or recovery imports.
 
 Proof media (#1410): preserve the network-only/no-store policy and legacy proof-cache and cache-scoped Workbox expiration-record purge. Never clear Firestore IndexedDB or queued offline Marks as part of a media-cache migration. Source verification does not establish deployment or recall previously cached/downloaded copies; token/moderation policy remains owner-decided under #806/#1356.
