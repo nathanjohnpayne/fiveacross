@@ -22,12 +22,23 @@ export interface HiddenUids {
    * Mid-use offline retains that same scope's confirmed set in memory; cold
    * offline starts and unreadable first answers withhold Feed/Tally. */
   ready: boolean;
-  /** A failed bridge or queue-drain budget is actionable instead of loading forever. */
+  /** A failed bridge, drain or first-answer budget is actionable instead of loading forever. */
   failed?: boolean;
   retry?: () => void;
 }
 
+// One visibility episode stays on its captured memory client. Ship Wi-Fi may
+// drain slowly: later attempts allow more time without rotating private Auth.
+const DRAIN_WAIT_MS = [5_000, 10_000, 20_000] as const;
+const READINESS_BACKOFF_MS = [1_000, 2_000] as const;
+const FIRST_ANSWER_WAIT_MS = 10_000;
+
 const EMPTY: ReadonlySet<string> = new Set();
+
+function readinessRetryable(error: unknown): boolean {
+  const code = (error as { code?: string } | null)?.code;
+  return code !== 'permission-denied' && code !== 'unauthenticated';
+}
 
 // Session publication and effect execution can straddle retirement. Refuse
 // that race without starting a listener against a different account/database.
@@ -101,6 +112,12 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
   // scope change. Same-scope remounts keep process-local unfinished intent.
   useEffect(() => { retirePendingBlocksOutsideScope(uid, eventId); }, [uid, eventId]);
   const confirmed = useRef<{ key: string; generation: number; authGeneration: number; hidden: ReadonlySet<string> } | null>(null);
+  const [retryEpisode, setRetryEpisode] = useState(0);
+  const restart = useRef<{ key: string; generation: number; run: () => void } | null>(null);
+  const retryReadiness = () => {
+    const current = restart.current;
+    if (current?.key === key && current.generation === session.generation) current.run();
+  };
   // A discarded render cannot erase committed state. Only an actual connection
   // transition (or an offline session) may carry it across private generations;
   // actual Auth retirement requires a fresh answer from the replacement client.
@@ -123,171 +140,210 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
     const lease = captureMatchingLease(uid, session.db, true);
     if (!lease) return;
     let active = true;
-    let unsubscribe: (() => void) | null = null;
-    let draining = true;
-    const isCurrent = () => {
+    let visibilityFailed = false;
+    let backoffTimer: ReturnType<typeof setTimeout> | null = null;
+    let retireAttempt = () => {};
+    const scopeCurrent = () => {
       if (!active || EVENT_ID !== eventId || !navigator.onLine) return false;
       try { lease.assertCurrent(); return true; } catch { return false; }
     };
-    const failVisibility = () => {
-      if (!isCurrent()) return;
-      confirmed.current = null;
-      setState({ key, generation: session.generation, hidden: EMPTY, ready: false, failed: true });
+    const stopEpisode = () => {
+      active = false;
+      if (backoffTimer !== null) clearTimeout(backoffTimer);
+      backoffTimer = null;
+      retireAttempt();
     };
-    const failDrain = () => {
-      if (!draining) return;
-      draining = false;
-      clearTimeout(drainTimer);
-      failVisibility();
+    const restartHere = {
+      key, generation: session.generation,
+      run: () => {
+        if (!scopeCurrent()) return;
+        stopEpisode(); // Retire old continuations before React commits the retry.
+        // A healthy local Retry does not erase known same-scope offline
+        // filtering. It cannot admit online content without a fresh answer.
+        setState(initial(uid, key, session.generation));
+        setRetryEpisode((episode) => episode + 1);
+      },
     };
-    // A reloaded process has no pending-target relay, but its persistent SDK
-    // queue may still contain block writes. Never seed visibility from a private
-    // server answer taken before that queue drains. No extra disk hint is used.
-    const drainTimer = setTimeout(failDrain, 5_000);
-    let confirmedThisSubscription = false;
-    let lastCommitted: ReadonlySet<string> = carried?.hidden ?? EMPTY;
-    // The counterparts of the previous snapshot (pending or settled), so a
-    // pair DISAPPEARING from a server-confirmed snapshot can be seen.
-    let previous: ReadonlySet<string> = EMPTY;
-    // Whether `repairMissingPairs` has checked the viewer's own directions in
-    // THIS subscription's lifetime. Per subscription, not per session (Codex
-    // P1 on #1300): a gap while unsubscribed (signed out, another Event) can
-    // hide a lost pair that no later snapshot would show disappearing.
-    let repairChecked = false;
-    // Whether this subscription has had its first server-confirmed answer.
-    let reconcileSeeded = false;
-    // A pair disappearance seen on ANY snapshot, owed a repair on the next
-    // server-confirmed one. `previous` advances on pending and cache
-    // snapshots too, so a loss seen there would otherwise be forgotten before
-    // a settled snapshot could act on it (Phase 4b on #1300).
-    let repairOwed = false;
-    // The latest server-confirmed counterparts and whether the listener is
-    // server-backed now, for a timer-driven repair retry.
-    let latestServer: ReadonlySet<string> = EMPTY;
-    let serverBacked = false;
-    let retryTimer: ReturnType<typeof setTimeout> | null = null;
-    let retriesLeft = REPAIR_RETRY_ATTEMPTS;
-    let retryDelay = REPAIR_RETRY_BASE_MS;
-    const clearRetry = () => {
-      if (retryTimer !== null) clearTimeout(retryTimer);
-      retryTimer = null;
-    };
-    const runRepair = () => {
-      clearRetry();
-      repairChecked = true;
-      repairMissingPairs({ me: uid, knownCounterparts: latestServer, eventId }).then(
-        () => {
-          retriesLeft = REPAIR_RETRY_ATTEMPTS;
-          retryDelay = REPAIR_RETRY_BASE_MS;
+    restart.current = restartHere;
+    const startAttempt = (attempt: number) => {
+      if (!scopeCurrent()) return;
+      let current = true;
+      let draining = true;
+      let unsubscribe: (() => void) | null = null;
+      let deadline: ReturnType<typeof setTimeout> | null = null;
+      const isCurrent = () => current && scopeCurrent();
+      const clearDeadline = () => {
+        if (deadline !== null) clearTimeout(deadline);
+        deadline = null;
+      };
+      const retire = () => {
+        current = false;
+        draining = false;
+        clearDeadline();
+        clearRetry();
+        unsubscribe?.();
+      };
+      retireAttempt = retire;
+      const failAttempt = (retryable = true) => {
+        if (!isCurrent()) return;
+        visibilityFailed = true;
+        if (!retryable) confirmed.current = null;
+        setState({ key, generation: session.generation, hidden: EMPTY, ready: false, failed: true });
+        retire();
+        if (retryable && attempt < READINESS_BACKOFF_MS.length) {
+          backoffTimer = setTimeout(() => {
+            backoffTimer = null;
+            startAttempt(attempt + 1);
+          }, READINESS_BACKOFF_MS[attempt]);
+        }
+      };
+      let confirmedThisSubscription = false;
+      let lastCommitted: ReadonlySet<string> = carried?.hidden ?? EMPTY;
+      // The counterparts of the previous snapshot (pending or settled), so a
+      // pair DISAPPEARING from a server-confirmed snapshot can be seen.
+      let previous: ReadonlySet<string> = EMPTY;
+      // Whether `repairMissingPairs` has checked the viewer's own directions in
+      // THIS subscription's lifetime. Per subscription, not per session (Codex
+      // P1 on #1300): a gap while unsubscribed (signed out, another Event) can
+      // hide a lost pair that no later snapshot would show disappearing.
+      let repairChecked = false;
+      // Whether this subscription has had its first server-confirmed answer.
+      let reconcileSeeded = false;
+      // A pair disappearance seen on ANY snapshot, owed a repair on the next
+      // server-confirmed one. `previous` advances on pending and cache
+      // snapshots too, so a loss seen there would otherwise be forgotten before
+      // a settled snapshot could act on it (Phase 4b on #1300).
+      let repairOwed = false;
+      // The latest server-confirmed counterparts and whether the listener is
+      // server-backed now, for a timer-driven repair retry.
+      let latestServer: ReadonlySet<string> = EMPTY;
+      let serverBacked = false;
+      let retryTimer: ReturnType<typeof setTimeout> | null = null;
+      let retriesLeft = REPAIR_RETRY_ATTEMPTS;
+      let retryDelay = REPAIR_RETRY_BASE_MS;
+      const clearRetry = () => {
+        if (retryTimer !== null) clearTimeout(retryTimer);
+        retryTimer = null;
+      };
+      const runRepair = () => {
+        clearRetry();
+        repairChecked = true;
+        repairMissingPairs({ me: uid, knownCounterparts: latestServer, eventId }).then(
+          () => {
+            if (!isCurrent()) return;
+            retriesLeft = REPAIR_RETRY_ATTEMPTS;
+            retryDelay = REPAIR_RETRY_BASE_MS;
+          },
+          () => {
+            if (!isCurrent()) return;
+            // Re-armed for the next server snapshot in every case...
+            repairChecked = false;
+            // ...and, while the listener is server-backed, retried on a
+            // doubling timer (offline, the reconnection snapshot re-runs it).
+            if (!serverBacked || retriesLeft <= 0 || retryTimer !== null) return;
+            retriesLeft -= 1;
+            retryTimer = setTimeout(() => {
+              retryTimer = null;
+              if (isCurrent() && serverBacked && !repairChecked) runRepair();
+            }, retryDelay);
+            retryDelay *= 2;
+          },
+        );
+      };
+      const subscribe = () => onSnapshot(
+        query(blockPairsCol(eventId, lease.db), where('uids', 'array-contains', uid)),
+        { includeMetadataChanges: true },
+        (snap) => {
+          if (!isCurrent()) return;
+          const current = hiddenUidsFromPairs(snap.docs.map((d) => d.data()), uid);
+          if ([...previous].some((other) => !current.has(other))) repairOwed = true;
+          // A pair that APPEARS after this subscription's first server answer
+          // (a new block, or a repair write that landed after an unblock and so
+          // recreated an orphan; Codex P1 on #1300) is offered to the orphan
+          // reconciler again, whatever an earlier offer this session said.
+          if (reconcileSeeded) {
+            for (const other of current) {
+              if (!previous.has(other)) reconcileAttempted.delete(`${key}|${other}`);
+            }
+          }
+          previous = current;
+          // A cache snapshot means the listener lost the server (an outage, or
+          // the SDK's offline fallback). A pair created AND deleted during that
+          // gap never shows as disappearing, so the direction check re-arms for
+          // the next server snapshot (Codex P1 on #1300): one listing per
+          // reconnection.
+          if (snap.metadata.fromCache) repairChecked = false;
+          serverBacked = !snap.metadata.fromCache;
+          const settled = !snap.metadata.fromCache && !snap.metadata.hasPendingWrites;
+          if (settled) {
+            clearDeadline();
+            visibilityFailed = false;
+            confirmedThisSubscription = true;
+            lastCommitted = current;
+            confirmed.current = { key, generation: session.generation, authGeneration: session.authGeneration, hidden: current };
+            observeConfirmedBlockTargets(uid, eventId, current);
+          }
+          // Server-confirmed pairs only (offline the delete could not run, and
+          // the attempt would be spent): offer each one to the reconciler once.
+          if (!snap.metadata.fromCache && !snap.metadata.hasPendingWrites) {
+            for (const other of current) {
+              const attempt = `${key}|${other}`;
+              if (reconcileAttempted.has(attempt)) continue;
+              reconcileAttempted.add(attempt);
+              void reconcileOrphanPair({ me: uid, target: other, eventId });
+            }
+            reconcileSeeded = true;
+            // ...and restore the pair behind any own direction that lost it to
+            // a concurrent delete (see `repairMissingPairs`): once per
+            // subscription, and again whenever a pair has disappeared on any
+            // snapshot since the last server-confirmed one, which is the only
+            // way that race shows on a live listener (Codex P1 on #1300).
+            // An ordinary unblock also removes a pair, so it costs one server
+            // listing; a failed run re-arms the next snapshot and, while the
+            // listener stays server-backed, a bounded backoff timer.
+            latestServer = current;
+            if (!repairChecked || repairOwed) {
+              repairOwed = false;
+              runRepair();
+            }
+          }
+          setState({
+            key, generation: session.generation,
+            hidden: computeHiddenSet(current, lastCommitted, !settled),
+            ready: settled || confirmedThisSubscription,
+            ...(!confirmedThisSubscription && visibilityFailed ? { failed: true } : {}),
+          });
         },
-        () => {
-          if (!active) return;
-          // Re-armed for the next server snapshot in every case...
-          repairChecked = false;
-          // ...and, while the listener is server-backed, retried on a
-          // doubling timer (offline, the reconnection snapshot re-runs it).
-          if (!serverBacked || retriesLeft <= 0 || retryTimer !== null) return;
-          retriesLeft -= 1;
-          retryTimer = setTimeout(() => {
-            retryTimer = null;
-            if (active && serverBacked && !repairChecked) runRepair();
-          }, retryDelay);
-          retryDelay *= 2;
+        (err) => {
+          if (!isCurrent()) return;
+          console.error('[blocks] hidden-set listener failed; withholding until a confirmed answer is available', err);
+          // Denial cannot qualify a later offline witness. It is terminal for
+          // automatic retry; an explicit local Retry may seek a new permitted answer.
+          failAttempt(readinessRetryable(err));
         },
       );
+      const subscribeAfterDrain = () => {
+        if (!draining || !isCurrent()) return;
+        draining = false;
+        clearDeadline();
+        deadline = setTimeout(() => failAttempt(), FIRST_ANSWER_WAIT_MS);
+        try { unsubscribe = subscribe(); }
+        catch (error) { failAttempt(readinessRetryable(error)); }
+      };
+      const failDrain = (error?: unknown) => { if (draining) failAttempt(readinessRetryable(error)); };
+      // The persistent gameplay queue may contain reloaded block writes. Only
+      // its drain followed by a fresh private answer can establish readiness.
+      // Timed-out SDK waiters cannot be cancelled; their attempt fence retires them.
+      deadline = setTimeout(failDrain, DRAIN_WAIT_MS[attempt]);
+      try { void waitForPendingWrites(gameplayDb).then(subscribeAfterDrain, failDrain); }
+      catch (error) { failDrain(error); }
     };
-    const subscribe = () => onSnapshot(
-      query(blockPairsCol(eventId, lease.db), where('uids', 'array-contains', uid)),
-      { includeMetadataChanges: true },
-      (snap) => {
-        if (!isCurrent()) return;
-        const current = hiddenUidsFromPairs(snap.docs.map((d) => d.data()), uid);
-        if ([...previous].some((other) => !current.has(other))) repairOwed = true;
-        // A pair that APPEARS after this subscription's first server answer
-        // (a new block, or a repair write that landed after an unblock and so
-        // recreated an orphan; Codex P1 on #1300) is offered to the orphan
-        // reconciler again, whatever an earlier offer this session said.
-        if (reconcileSeeded) {
-          for (const other of current) {
-            if (!previous.has(other)) reconcileAttempted.delete(`${key}|${other}`);
-          }
-        }
-        previous = current;
-        // A cache snapshot means the listener lost the server (an outage, or
-        // the SDK's offline fallback). A pair created AND deleted during that
-        // gap never shows as disappearing, so the direction check re-arms for
-        // the next server snapshot (Codex P1 on #1300): one listing per
-        // reconnection.
-        if (snap.metadata.fromCache) repairChecked = false;
-        serverBacked = !snap.metadata.fromCache;
-        const settled = !snap.metadata.fromCache && !snap.metadata.hasPendingWrites;
-        if (settled) {
-          confirmedThisSubscription = true;
-          lastCommitted = current;
-          confirmed.current = { key, generation: session.generation, authGeneration: session.authGeneration, hidden: current };
-          observeConfirmedBlockTargets(uid, eventId, current);
-        }
-        // Server-confirmed pairs only (offline the delete could not run, and
-        // the attempt would be spent): offer each one to the reconciler once.
-        if (!snap.metadata.fromCache && !snap.metadata.hasPendingWrites) {
-          for (const other of current) {
-            const attempt = `${key}|${other}`;
-            if (reconcileAttempted.has(attempt)) continue;
-            reconcileAttempted.add(attempt);
-            void reconcileOrphanPair({ me: uid, target: other, eventId });
-          }
-          reconcileSeeded = true;
-          // ...and restore the pair behind any own direction that lost it to
-          // a concurrent delete (see `repairMissingPairs`): once per
-          // subscription, and again whenever a pair has disappeared on any
-          // snapshot since the last server-confirmed one, which is the only
-          // way that race shows on a live listener (Codex P1 on #1300).
-          // An ordinary unblock also removes a pair, so it costs one server
-          // listing; a failed run re-arms the next snapshot and, while the
-          // listener stays server-backed, a bounded backoff timer.
-          latestServer = current;
-          if (!repairChecked || repairOwed) {
-            repairOwed = false;
-            runRepair();
-          }
-        }
-        setState({
-          key, generation: session.generation,
-          hidden: computeHiddenSet(current, lastCommitted, !settled),
-          ready: settled || confirmedThisSubscription,
-        });
-      },
-      (err) => {
-        if (!isCurrent()) return;
-        // A denial retires the visibility witness. Only a connection loss
-        // may carry a confirmed same-scope set; an unreadable listener cannot
-        // qualify this session (including a later offline transition).
-        confirmed.current = null;
-        confirmedThisSubscription = false;
-        serverBacked = false;
-        clearRetry();
-        console.error('[blocks] hidden-set listener failed; withholding until a confirmed answer is available', err);
-        setState({ key, generation: session.generation, hidden: EMPTY, ready: false });
-      },
-    );
-    const subscribeAfterDrain = () => {
-      if (!draining) return;
-      draining = false;
-      clearTimeout(drainTimer);
-      if (!isCurrent()) return;
-      try { unsubscribe = subscribe(); }
-      catch { failVisibility(); }
-    };
-    try { void waitForPendingWrites(gameplayDb).then(subscribeAfterDrain, failDrain); }
-    catch { failDrain(); }
+    startAttempt(0);
     return () => {
-      active = false;
-      draining = false;
-      clearTimeout(drainTimer);
-      clearRetry();
-      unsubscribe?.();
+      stopEpisode();
+      if (restart.current === restartHere) restart.current = null;
     };
-  }, [key, uid, eventId, session.db, session.generation, session.authGeneration, session.transition, session.uid, session.recoveryRequired, session.failed]);
+  }, [key, uid, eventId, session.db, session.generation, session.authGeneration, session.transition, session.uid, session.recoveryRequired, session.failed, retryEpisode]);
   // With no key there is no listener, so the answer follows from `uid` alone,
   // derived on THIS render (Codex P1 on #1300): comparing keys would let a
   // sign-in while not yet enabled (null key before and after) return the
@@ -297,7 +353,7 @@ export function useHiddenUidsSubscription(uid: string | null, enabled: boolean):
   const sameSession = session.uid === uid && !session.failed;
   if (!sameSession || (state.generation !== session.generation && (navigator.onLine || !witness))) return { hidden: EMPTY, ready: false };
   if (!session.db && (navigator.onLine || !witness)) return { hidden: EMPTY, ready: false };
-  if (state.key === key && state.failed) return { hidden: EMPTY, ready: false, failed: true, retry: retryPrivateFirestoreSession };
+  if (state.key === key && state.failed) return { hidden: EMPTY, ready: false, failed: true, retry: retryReadiness };
   return state.key === key
     ? { hidden: state.ready && pending.size > 0 ? computeHiddenSet(pending, state.hidden, true) : state.hidden, ready: state.ready }
     : { hidden: EMPTY, ready: false };
