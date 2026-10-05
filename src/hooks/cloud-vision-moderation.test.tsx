@@ -10,7 +10,7 @@ import { renderHook, act } from '@testing-library/react';
 // REAL hook runs with Firestore's onSnapshot stubbed so the proofs snapshot is
 // hand-delivered.
 
-const H = vi.hoisted(() => ({ onSnapshot: vi.fn() }));
+const H = vi.hoisted(() => ({ onSnapshot: vi.fn(), snapshots: new Map<unknown, unknown>() }));
 
 // Private queue fixtures use an authenticated, recovered memory session.
 vi.mock('./usePrivateFirestore', () => ({ usePrivateFirestore: () => ({
@@ -39,6 +39,8 @@ vi.mock('firebase/firestore', () => {
     query: (...args: unknown[]) => makeRef('query', args),
     where: (...args: unknown[]) => makeRef('where', args),
     onSnapshot: H.onSnapshot,
+    waitForPendingWrites: async () => {},
+    getDocsFromServer: async (target: unknown) => H.snapshots.get(target),
   };
 });
 
@@ -46,6 +48,7 @@ import { useReportedProofs } from './useData';
 import type { ProofDoc } from '../types';
 
 beforeEach(() => {
+  H.snapshots.clear();
   H.onSnapshot.mockReset();
   H.onSnapshot.mockReturnValue(() => {});
 });
@@ -53,13 +56,19 @@ beforeEach(() => {
 // useReportedProofs opens exactly one broad collection subscription and no event
 // doc (it filters by nothing the Event owns), so a single capture slot suffices.
 function capture() {
+  let target: unknown;
   let onNext: ((snap: unknown) => void) | null = null;
   H.onSnapshot.mockImplementation((_t: unknown, _o: unknown, next: (snap: unknown) => void) => {
+    target = _t;
     onNext = next;
     return () => {};
   });
   return (docs: object[]) =>
-    act(() => onNext?.({ docs: docs.map((d) => ({ data: () => d })), metadata: { fromCache: false } }));
+    act(async () => {
+      const snap = { docs: docs.map((d, index) => ({ id: String(Reflect.get(d, 'id') ?? index), data: () => d })), metadata: { fromCache: false, hasPendingWrites: false } };
+      H.snapshots.set(target, snap);
+      onNext?.(snap);
+    });
 }
 
 const proof = (id: string, over: Partial<ProofDoc> = {}): ProofDoc =>
@@ -83,11 +92,11 @@ const proof = (id: string, over: Partial<ProofDoc> = {}): ProofDoc =>
   }) as ProofDoc;
 
 describe('useReportedProofs — the AI-screened Proof stays reachable for its whole lifecycle', () => {
-  it('queues a Vision-flagged Proof at every stage, including after an admin Restore', () => {
+  it('queues a Vision-flagged Proof at every stage, including after an admin Restore', async () => {
     const fire = capture();
     const { result } = renderHook(() => useReportedProofs());
 
-    fire([
+    await fire([
       proof('flagged', { status: 'flagged', visionFlag: 'violence' }), // scanned, hide not landed yet
       proof('vision-hidden', { status: 'hidden', visionFlag: 'violence' }), // auto-hidden
       proof('restored', { status: 'active', visionFlag: 'violence' }), // admin override — the #133 arm
@@ -101,20 +110,20 @@ describe('useReportedProofs — the AI-screened Proof stays reachable for its wh
     ]);
   });
 
-  it('queues a Proof carrying a non-auto-hide verdict too (racy as a synthetic stand-in) — reviewable, never auto-hidden', () => {
+  it('queues a Proof carrying a non-auto-hide verdict too (racy as a synthetic stand-in) — reviewable, never auto-hidden', async () => {
     const fire = capture();
     const { result } = renderHook(() => useReportedProofs());
 
-    fire([proof('racy', { status: 'active', visionFlag: 'racy' }), proof('clean')]);
+    await fire([proof('racy', { status: 'active', visionFlag: 'racy' }), proof('clean')]);
 
     expect(result.current.flagged.map((p) => p.id)).toEqual(['racy']);
   });
 
-  it('leaves the three pre-existing arms intact — reported, flagged, and hard-hidden still queue', () => {
+  it('leaves the three pre-existing arms intact — reported, flagged, and hard-hidden still queue', async () => {
     const fire = capture();
     const { result } = renderHook(() => useReportedProofs());
 
-    fire([
+    await fire([
       proof('reported', { reportCount: 2 }),
       proof('admin-hidden', { status: 'hidden' }),
       proof('clean'),

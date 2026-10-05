@@ -20,7 +20,7 @@ vi.mock('firebase/firestore', () => {
     } };
 });
 import { useAdminEventDoc, useMyUser, usePendingClaims, usePendingItems, useAllItems, useReportedProofs, usePendingItemCount, useMyClaims, useMyPendingItems } from './useData';
-const snapshot = (fromCache = false) => ({ docs: [{ data: () => ({ uid: 'alice', status: 'pending', createdAt: 1, reportCount: 1 }) }], metadata: { fromCache, hasPendingWrites: false } });
+const snapshot = (fromCache = false) => ({ docs: [{ id: 'row-alice', data: () => ({ uid: 'alice', status: 'pending', createdAt: 1, reportCount: 1 }) }], metadata: { fromCache, hasPendingWrites: false } });
 const docSnapshot = (data: object | null, fromCache = false, hasPendingWrites = false) => ({
   exists: () => data !== null, data: () => data, metadata: { fromCache, hasPendingWrites },
 });
@@ -32,6 +32,83 @@ beforeEach(() => {
   H.serverRead.mockReset().mockImplementation(async () => snapshot());
 });
 describe('private hook cache and actor boundaries (#1411)', () => {
+  it.each(['first empty', 'first rows', 'addition', 'modification', 'metadata only'] as const)(
+    'narrow barrier: publishes %s without a drain or extra server read', async (kind) => {
+      const view = renderHook(() => usePendingItems());
+      const listener = H.subscriptions[0];
+      if (!kind.startsWith('first')) await act(async () => listener.next(snapshot()));
+      const docs = kind === 'first empty' ? [] : snapshot().docs;
+      if (kind === 'addition') docs.push({ id: 'row-bob', data: () => ({ uid: 'bob', status: 'pending', createdAt: 2, reportCount: 1 }) });
+      if (kind === 'modification') docs[0] = { id: 'row-alice', data: () => ({ uid: 'alice', status: 'pending', createdAt: 3, reportCount: 2 }) };
+      await act(async () => listener.next({ docs, metadata: { fromCache: false, hasPendingWrites: false } }));
+      expect(view.result.current.items).toHaveLength(docs.length);
+      expect(view.result.current.hasServerData).toBe(true);
+      expect(H.pendingWrites).not.toHaveBeenCalled();
+      expect(H.serverRead).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['drain', 'server read'] as const)(
+    'narrow barrier: a non-denial %s failure preserves committed rows and later retries', async (phase) => {
+      const view = renderHook(() => usePendingItems());
+      const listener = H.subscriptions[0];
+      await act(async () => listener.next(snapshot()));
+      const committed = view.result.current.items;
+      const error = Object.assign(new Error('connection lost'), { code: 'unavailable' });
+      if (phase === 'drain') H.pendingWrites.mockRejectedValueOnce(error);
+      else H.serverRead.mockRejectedValueOnce(error);
+      const removal = { docs: [], metadata: { fromCache: false, hasPendingWrites: false } };
+      await act(async () => listener.next(removal));
+      expect(view.result.current.items).toEqual(committed);
+      expect(view.result.current.hasServerData).toBe(true);
+      expect(view.result.current.failed).toBe(false);
+      H.serverRead.mockResolvedValueOnce(removal);
+      await act(async () => listener.next(removal));
+      expect(view.result.current.items).toEqual([]);
+      expect(view.result.current.hasServerData).toBe(true);
+    },
+  );
+
+  it.each(['drain', 'server read'] as const)(
+    'narrow barrier: a permission-denied %s retires committed rows without first-answer barriers', async (phase) => {
+      const view = renderHook(() => usePendingItems());
+      const listener = H.subscriptions[0];
+      await act(async () => listener.next(snapshot()));
+      const error = Object.assign(new Error('access revoked'), { code: 'permission-denied' });
+      if (phase === 'drain') H.pendingWrites.mockRejectedValueOnce(error);
+      else H.serverRead.mockRejectedValueOnce(error);
+      await act(async () => listener.next({ docs: [], metadata: { fromCache: false, hasPendingWrites: false } }));
+      expect(view.result.current.items).toEqual([]);
+      expect(view.result.current.hasServerData).toBe(false);
+      expect(view.result.current.failed).toBe(true);
+      expect(H.pendingWrites).toHaveBeenCalledTimes(1);
+      expect(H.serverRead).toHaveBeenCalledTimes(phase === 'drain' ? 0 : 1);
+      await act(async () => listener.next({ ...snapshot(), metadata: { fromCache: false, hasPendingWrites: true } }));
+      expect(view.result.current.items).toEqual([]);
+      expect(view.result.current.hasServerData).toBe(false);
+    },
+  );
+
+  it('narrow barrier: uses snapshot document IDs even when mapped rows are identical', async () => {
+    const view = renderHook(() => usePendingItems());
+    const listener = H.subscriptions[0];
+    await act(async () => listener.next(snapshot()));
+    const committed = view.result.current.items;
+    const replacement = { ...snapshot(), docs: [{ ...snapshot().docs[0], id: 'replacement' }] };
+    let drain!: () => void;
+    H.pendingWrites.mockImplementationOnce(() => new Promise<void>((resolve) => { drain = resolve; }));
+    H.serverRead.mockResolvedValueOnce(replacement);
+    await act(async () => listener.next(replacement));
+    expect(view.result.current.items).toEqual(committed);
+    expect(H.pendingWrites).toHaveBeenCalledTimes(1);
+    await act(async () => drain());
+    expect(H.serverRead).toHaveBeenCalledTimes(1);
+    // Repeating the replacement membership must not retain the retired ID.
+    await act(async () => listener.next(replacement));
+    expect(H.pendingWrites).toHaveBeenCalledTimes(1);
+    expect(H.serverRead).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps a real native false-pending query removal until drain and a fresh server answer', async () => {
     const view = renderHook(() => usePendingItems());
     const listener = H.subscriptions[0];
@@ -67,17 +144,14 @@ describe('private hook cache and actor boundaries (#1411)', () => {
     expect(view.result.current.hasServerData).toBe(true);
   });
 
-  it('a first apparently settled empty query cannot qualify before its queue drains', async () => {
-    let drain!: () => void;
-    H.pendingWrites.mockImplementationOnce(() => new Promise<void>((resolve) => { drain = resolve; }));
+  it('a first settled empty query publishes directly without a queue barrier', async () => {
     const view = renderHook(() => usePendingClaims());
     await act(async () => H.subscriptions[0].next({ docs: [], metadata: { fromCache: false, hasPendingWrites: false } }));
-    expect(view.result.current.hasServerData).toBe(false);
-    expect(view.result.current.loading).toBe(true);
-    expect(H.serverRead).not.toHaveBeenCalled();
-    await act(async () => drain());
-    expect(view.result.current.claims).toHaveLength(1);
+    expect(view.result.current.claims).toEqual([]);
     expect(view.result.current.hasServerData).toBe(true);
+    expect(view.result.current.loading).toBe(false);
+    expect(H.pendingWrites).not.toHaveBeenCalled();
+    expect(H.serverRead).not.toHaveBeenCalled();
   });
 
   it('a newer pending callback invalidates an older fresh server-read completion', async () => {
@@ -141,9 +215,10 @@ describe('private hook cache and actor boundaries (#1411)', () => {
     const view = renderHook(() => usePendingClaims());
     const listener = H.subscriptions[0];
     await act(async () => listener.next(snapshot()));
-    if (phase === 'drain') H.pendingWrites.mockRejectedValueOnce(new Error('auth retired'));
-    else H.serverRead.mockRejectedValueOnce(new Error('permission denied'));
-    await act(async () => listener.next(snapshot()));
+    const error = Object.assign(new Error('access revoked'), { code: 'permission-denied' });
+    if (phase === 'drain') H.pendingWrites.mockRejectedValueOnce(error);
+    else H.serverRead.mockRejectedValueOnce(error);
+    await act(async () => listener.next({ docs: [], metadata: { fromCache: false, hasPendingWrites: false } }));
     expect(view.result.current.claims).toEqual([]);
     expect(view.result.current.hasServerData).toBe(false);
     expect(view.result.current.failed).toBe(true);
@@ -154,7 +229,7 @@ describe('private hook cache and actor boundaries (#1411)', () => {
     const listener = H.subscriptions[0];
     await act(async () => listener.next(snapshot()));
     H.serverRead.mockResolvedValueOnce({ docs: [], metadata: { fromCache: origin === 'cache', hasPendingWrites: origin === 'pending' } });
-    await act(async () => listener.next(snapshot()));
+    await act(async () => listener.next({ docs: [], metadata: { fromCache: false, hasPendingWrites: false } }));
     expect(view.result.current.claims).toHaveLength(origin === 'cache' ? 0 : 1);
     expect(view.result.current.hasServerData).toBe(origin !== 'cache');
   });
@@ -164,7 +239,7 @@ describe('private hook cache and actor boundaries (#1411)', () => {
     await act(async () => H.subscriptions.forEach((listener) => listener.next(snapshot())));
     H.pendingWrites.mockImplementation(() => new Promise(() => {}));
     await act(async () => {
-      H.subscriptions[0].next({ docs: [{ data: () => ({ uid: 'alice', status: 'confirmed', createdAt: 1, reportCount: 1 }) }], metadata: { fromCache: false, hasPendingWrites: true } });
+      H.subscriptions[0].next({ docs: [{ id: 'row-alice', data: () => ({ uid: 'alice', status: 'confirmed', createdAt: 1, reportCount: 1 }) }], metadata: { fromCache: false, hasPendingWrites: true } });
       H.subscriptions.slice(1).forEach((listener) => listener.next({ docs: [], metadata: { fromCache: false, hasPendingWrites: false } }));
     });
     expect(view.result.current.claims.claims[0].status).toBe('pending');
@@ -271,7 +346,7 @@ describe('private hook cache and actor boundaries (#1411)', () => {
     expect(view.result.current.hasServerData).toBe(false);
     await act(async () => listener.next(snapshot()));
     const committed = rows();
-    await act(async () => listener.next({ docs: [{ data: () => ({ uid: 'bob', status: 'pending', createdAt: 2, reportCount: 2 }) }], metadata: { fromCache: false, hasPendingWrites: true } }));
+    await act(async () => listener.next({ docs: [{ id: 'row-alice', data: () => ({ uid: 'bob', status: 'pending', createdAt: 2, reportCount: 2 }) }], metadata: { fromCache: false, hasPendingWrites: true } }));
     expect(rows()).toEqual(committed);
     await act(async () => listener.next({ docs: [], metadata: { fromCache: false, hasPendingWrites: true } }));
     expect(rows()).toEqual(committed);

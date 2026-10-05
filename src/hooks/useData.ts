@@ -234,14 +234,15 @@ function useColSub<T>(q: Query<T> | null, key: string, clearOnError = false, ret
   // discipline — `fromCache` is cache-vs-server, `hasPendingWrites` is
   // local-optimistic-vs-server-committed for the documents still in the query.
   // Both false do not prove a local query exit/delete has settled: private
-  // collection publication below also drains writes and fetches a fresh server
-  // answer. The public pool-recovery watcher (#70, Codex P2 on PR #124 round 2)
+  // collection publication below drains writes and fetches a fresh server
+  // answer only when a committed document ID disappears. The public pool-recovery watcher (#70, Codex P2 on PR #124 round 2)
   // needs this: a local optimistic prompt-add arrives with `fromCache === false` AND
   // `hasPendingWrites === true`, so a `fromCache`-only gate would treat that
   // not-yet-committed local echo as a server crossing and fire before the write acks.
   useEffect(() => {
     let active = true;
     let committed: T[] | null = null;
+    let committedIds = new Set<string>();
     let observation = 0;
     // Drop the previous query's rows when the key changes so stale results can't
     // render against the new subscription.
@@ -264,9 +265,17 @@ function useColSub<T>(q: Query<T> | null, key: string, clearOnError = false, ret
             hasServerData: committed !== null && !metadata.fromCache,
             fromCache: metadata.fromCache, hasPendingWrites: metadata.hasPendingWrites,
           });
-          if (snap.metadata.fromCache) committed = null;
+          if (snap.metadata.fromCache) { committed = null; committedIds.clear(); }
           publishCommitted(snap.metadata);
           if (snap.metadata.fromCache || snap.metadata.hasPendingWrites) return;
+          const candidateIds = new Set(snap.docs.map((doc) => doc.id));
+          const missingCommittedId = [...committedIds].some((id) => !candidateIds.has(id));
+          if (!missingCommittedId) {
+            committed = data;
+            committedIds = candidateIds;
+            publishCommitted(snap.metadata);
+            return;
+          }
           // A local delete/query exit can have pending=false: the SDK counts only
           // mutations on documents still in the query. Drain this captured memory
           // client's writes, then obtain a FRESH server answer; promoting the
@@ -278,13 +287,21 @@ function useColSub<T>(q: Query<T> | null, key: string, clearOnError = false, ret
               if (!isCurrent()) return;
               const fresh = await getDocsFromServer(q);
               if (!isCurrent()) return;
-              if (fresh.metadata.fromCache) committed = null;
-              else if (!fresh.metadata.hasPendingWrites) committed = fresh.docs.map((d) => d.data() as T);
+              if (fresh.metadata.fromCache) { committed = null; committedIds.clear(); }
+              else if (!fresh.metadata.hasPendingWrites) {
+                committed = fresh.docs.map((d) => d.data() as T);
+                committedIds = new Set(fresh.docs.map((doc) => doc.id));
+              }
               publishCommitted(fresh.metadata);
-            } catch {
+            } catch (error) {
               if (!isCurrent()) return;
-              committed = null;
-              setState({ ...emptyCollectionState<T>(key, false), failed: true });
+              if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'permission-denied') {
+                committed = null;
+                committedIds.clear();
+                setState({ ...emptyCollectionState<T>(key, false), failed: true });
+              }
+              // A transient barrier failure leaves the same-scope committed
+              // answer visible; a later settled removal may retry the barrier.
             }
           })();
           return;
@@ -303,6 +320,7 @@ function useColSub<T>(q: Query<T> | null, key: string, clearOnError = false, ret
         if (!active) return;
         observation += 1;
         committed = null;
+        committedIds.clear();
         setState((previous) =>
           previous.key === key && !clearOnError
             ? { ...previous, loading: false, failed: true }

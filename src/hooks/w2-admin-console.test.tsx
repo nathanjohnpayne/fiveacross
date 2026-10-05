@@ -15,7 +15,7 @@ import { renderHook, act } from '@testing-library/react';
 // the REAL hooks with Firestore's onSnapshot stubbed so we can hand-deliver the
 // event doc (carrying the threshold) alongside the proofs/items snapshots.
 
-const H = vi.hoisted(() => ({ onSnapshot: vi.fn() }));
+const H = vi.hoisted(() => ({ onSnapshot: vi.fn(), snapshots: new Map<unknown, unknown>() }));
 
 // Private queue fixtures use an authenticated, recovered memory session.
 vi.mock('./usePrivateFirestore', () => ({ usePrivateFirestore: () => ({
@@ -47,6 +47,8 @@ vi.mock('firebase/firestore', () => {
     query: (...args: unknown[]) => makeRef('query', args),
     where: (...args: unknown[]) => makeRef('where', args),
     onSnapshot: H.onSnapshot,
+    waitForPendingWrites: async () => {},
+    getDocsFromServer: async (target: unknown) => H.snapshots.get(target),
   };
 });
 
@@ -54,6 +56,7 @@ import { isReportHidden, useProofFeed, useItems, useAllItems, useReportedProofs,
 import type { ItemDoc, ProofDoc } from '../types';
 
 beforeEach(() => {
+  H.snapshots.clear();
   H.onSnapshot.mockReset();
   H.onSnapshot.mockReturnValue(() => {}); // unsubscribe fn
 });
@@ -76,25 +79,26 @@ function capture() {
     col: null,
   };
   H.onSnapshot.mockImplementation((target: unknown, _o: unknown, onNext: SnapCb) => {
+    const deliver: SnapCb = (snap) => { H.snapshots.set(target, snap); onNext(snap); };
     if (target && typeof target === 'object') {
       const ref = target as { kind?: string; args?: unknown[] };
       const querySource = ref.kind === 'query' && ref.args?.[0] && typeof ref.args[0] === 'object'
         ? (ref.args[0] as { kind?: string; args?: unknown[] })
         : undefined;
       if (ref.kind === 'query' && querySource?.kind === 'collectionGroup' && querySource.args?.[1] === 'markers') {
-        cbs.col = onNext;
+        cbs.col = deliver;
       }
-      else if (ref.kind === 'query' && querySource?.args?.includes('items')) cbs.prompts = onNext;
-      else if (ref.kind === 'query') cbs.query = onNext;
-      else if (ref.kind === 'doc') cbs.docs.push(onNext);
-      else cbs.col = onNext;
+      else if (ref.kind === 'query' && querySource?.args?.includes('items')) cbs.prompts = deliver;
+      else if (ref.kind === 'query') cbs.query = deliver;
+      else if (ref.kind === 'doc') cbs.docs.push(deliver);
+      else cbs.col = deliver;
     }
     return () => {};
   });
   return {
     fireDoc: (s: unknown) => act(() => cbs.docs.forEach((cb) => cb(s))),
     fireQuery: (s: unknown) => act(() => { cbs.query?.(s); cbs.prompts?.(s); }),
-    fireCol: (s: unknown) => act(() => cbs.col?.(s)),
+    fireCol: (s: unknown) => act(async () => { cbs.col?.(s); }),
   };
 }
 
@@ -106,12 +110,12 @@ const eventSnap = (threshold: number | undefined) => ({
     threshold === undefined
       ? { admins: [] }
       : { admins: [], settings: { reportHideThreshold: threshold } },
-  metadata: { fromCache: false },
+  metadata: { fromCache: false, hasPendingWrites: false },
 });
 // A collection/query snapshot in the shape useColSub reads.
 const colSnap = (docs: object[]) => ({
-  docs: docs.map((d) => ({ data: () => d })),
-  metadata: { fromCache: false },
+  docs: docs.map((d, index) => ({ id: String(Reflect.get(d, 'id') ?? index), data: () => d })),
+  metadata: { fromCache: false, hasPendingWrites: false },
 });
 
 const proof = (id: string, reportCount: number, over: Partial<ProofDoc> = {}): ProofDoc =>
@@ -215,13 +219,13 @@ describe('useProofFeed — the public Feed excludes threshold-hidden Proofs', ()
 });
 
 describe('useFeed — the merged Feed hides threshold-hidden Proofs on the proof side', () => {
-  it('excludes an at/over-threshold Proof from the merged stream (Moments untouched)', () => {
+  it('excludes an at/over-threshold Proof from the merged stream (Moments untouched)', async () => {
     const cap = capture();
     const { result } = renderHook(() => useFeed());
 
     cap.fireDoc(eventSnap(4));
     cap.fireQuery(colSnap([proof('p1', 4), proof('p2', 1)])); // p1 hidden, p2 shown
-    cap.fireCol(colSnap([])); // moments empty
+    await cap.fireCol(colSnap([])); // moments empty
 
     const proofIds = result.current.entries
       .filter((e) => e.feedKind === 'proof')
@@ -269,29 +273,29 @@ describe('useItems — the live Prompt pool excludes threshold-hidden Prompts', 
 });
 
 describe('Admin views stay UNfiltered — threshold-hidden content is reachable', () => {
-  it('useAllItems includes a Prompt at/over the threshold', () => {
+  it('useAllItems includes a Prompt at/over the threshold', async () => {
     const cap = capture();
     const { result } = renderHook(() => useAllItems());
 
     // useAllItems opens NO event subscription (it never filters), so there is no
     // threshold to deliver — only the admin items collection.
-    cap.fireCol(colSnap([item('i1', 9), item('i2', 0)]));
+    await cap.fireCol(colSnap([item('i1', 9), item('i2', 0)]));
 
     expect(result.current.items.map((i) => i.id).sort()).toEqual(['i1', 'i2']);
   });
 
-  it('useReportedProofs includes a threshold-hidden Proof so an Admin can restore it', () => {
+  it('useReportedProofs includes a threshold-hidden Proof so an Admin can restore it', async () => {
     const cap = capture();
     const { result } = renderHook(() => useReportedProofs());
 
-    cap.fireCol(colSnap([proof('p1', 9), proof('p2', 4), proof('p3', 0)]));
+    await cap.fireCol(colSnap([proof('p1', 9), proof('p2', 4), proof('p3', 0)]));
 
     // p1 and p2 are at/over the seeded threshold of 4 (hidden on the Feed) but
     // still surface in the report queue; p3 is unreported so it is not queued.
     expect(result.current.flagged.map((p) => p.id).sort()).toEqual(['p1', 'p2']);
   });
 
-  it('useReportedProofs includes a hard-hidden ZERO-count Proof — clear-then-restore can never orphan it (Codex P2, PR #107 round 2)', () => {
+  it('useReportedProofs includes a hard-hidden ZERO-count Proof — clear-then-restore can never orphan it (Codex P2, PR #107 round 2)', async () => {
     // The clear-then-restore ordering trap: Clear reports on a doubly-hidden Proof
     // (status 'hidden' AND over threshold) zeroes reportCount FIRST. There is no
     // all-proofs admin list (unlike Prompts' useAllItems), so if membership were
@@ -300,7 +304,7 @@ describe('Admin views stay UNfiltered — threshold-hidden content is reachable'
     const cap = capture();
     const { result } = renderHook(() => useReportedProofs());
 
-    cap.fireCol(
+    await cap.fireCol(
       colSnap([
         proof('p-cleared', 0, { status: 'hidden' }), // cleared first, not yet restored → MUST stay queued
         proof('p-flagged', 0, { status: 'flagged' }),
