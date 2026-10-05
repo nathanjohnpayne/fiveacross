@@ -52,6 +52,7 @@ beforeEach(() => {
   H.primary.currentUser = { uid: 'alice' };
   H.snapshot = { uid: 'alice', db: { app: { name: 'memory-alice' } }, generation: 1, failed: false };
   H.recovered = true; H.emulators = false;
+  Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
 });
 afterEach(() => { vi.useRealTimers(); });
 
@@ -174,5 +175,33 @@ describe('captured private service transport', () => {
     [...H.listeners].forEach((listener) => listener());
     await rejection;
     expect(H.getFunctions).not.toHaveBeenCalled(); expect(H.getStorage).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('gameplay Retry restarts only an unavailable current-actor bridge (#1687)', () => {
+  it('keeps a healthy current actor bridge even while ordinary UI is quarantined for recovery', async () => {
+    H.recovered = false;
+    const wrapper = await import('./privateFirestore');
+    wrapper.retryPrivateFirestoreSession('alice');
+    expect(H.retry).not.toHaveBeenCalled(); expect(H.factory).toHaveBeenCalledOnce();
+    expect(H.captures).not.toHaveBeenCalled(); expect(H.getFunctions).not.toHaveBeenCalled();
+  });
+
+  it.each(['failed', 'initializing', 'wrong-session'] as const)('starts exactly one fresh episode for %s availability', async (state) => {
+    if (state === 'failed') H.snapshot = { ...H.snapshot, failed: true, db: null, uid: null };
+    if (state === 'initializing') H.snapshot = { ...H.snapshot, db: null };
+    if (state === 'wrong-session') H.snapshot = { ...H.snapshot, uid: 'old-actor' };
+    const wrapper = await import('./privateFirestore'); wrapper.retryPrivateFirestoreSession('alice');
+    expect(H.retry).toHaveBeenCalledOnce(); expect(H.captures).not.toHaveBeenCalled();
+    expect(H.getFunctions).not.toHaveBeenCalled(); expect(H.getStorage).not.toHaveBeenCalled();
+  });
+
+  it.each(['offline', 'signed-out', 'changed-actor'] as const)('refuses %s gameplay restart before creating a manager', async (state) => {
+    if (state === 'offline') Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    if (state === 'signed-out') H.primary.currentUser = null;
+    if (state === 'changed-actor') H.primary.currentUser = { uid: 'bob' };
+    const wrapper = await import('./privateFirestore'); wrapper.retryPrivateFirestoreSession('alice');
+    expect(H.factory).not.toHaveBeenCalled(); expect(H.retry).not.toHaveBeenCalled();
   });
 });
