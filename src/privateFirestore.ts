@@ -50,13 +50,14 @@ export function capturePrivateFirestore(allowRecovery = false) {
   return { ...lease, functions, storage };
 }
 
-/** A bounded readiness wait for bootstrap, never a lookup after capturing an action. */
+/** One bounded bootstrap wait spans scheduled bridge retries. It never replaces
+ * a captured action lease, and no publication resets the absolute deadline. */
 export async function awaitPrivateFirestore(uid: string, allowRecovery = false) {
   const manager = privateFirestoreSessions();
-  // A caller arriving after failure must not miss the prior publication and
-  // wait five seconds. The bridge retries independently with a bounded budget.
+  // Exhaustion rejects promptly, including callers arriving after publication.
+  // A still-scheduled retry may recover within this same five-second wait.
   if (auth.currentUser?.uid !== uid) throw new Error('Private session changed.');
-  if (manager.getSnapshot().failed) throw privateUnavailable();
+  if (manager.getSnapshot().failed && !manager.getSnapshot().retryPending) throw privateUnavailable();
   const ready = () => {
     const snapshot = manager.getSnapshot();
     return snapshot.uid === uid && snapshot.db !== null;
@@ -64,11 +65,14 @@ export async function awaitPrivateFirestore(uid: string, allowRecovery = false) 
   if (!ready()) await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => { unsubscribe(); reject(privateUnavailable()); }, 5_000);
     const unsubscribe = manager.subscribe(() => {
-      if (auth.currentUser?.uid !== uid || manager.getSnapshot().failed) {
+      if (auth.currentUser?.uid !== uid || (manager.getSnapshot().failed && !manager.getSnapshot().retryPending)) {
         clearTimeout(timer); unsubscribe(); reject(auth.currentUser?.uid !== uid ? new Error('Private session changed.') : privateUnavailable());
       } else if (ready()) { clearTimeout(timer); unsubscribe(); resolve(); }
     });
   });
+  // A ready publication and a primary-account change can both precede this
+  // continuation. Refuse before constructing another account's services.
+  if (auth.currentUser?.uid !== uid) throw new Error('Private session changed.');
   const lease = capturePrivateFirestore(allowRecovery);
   if (lease.uid !== uid) throw new Error('Private account changed.');
   return lease;

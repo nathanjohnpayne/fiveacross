@@ -349,6 +349,115 @@ describe('bounded private bridge retries', () => {
   });
 });
 
+describe('private facade scheduled bootstrap readiness (#1675)', () => {
+  it('keeps gameplay bootstrap waiting through a first clone failure and captures scheduled success once', async () => {
+    H.cloneWaits = [() => Promise.reject(new Error('transient first clone'))];
+    const wrapper = await import('../privateFirestore');
+    const sessions = wrapper.privateFirestoreSessions(); managers.push(sessions);
+    let outcome = 'pending';
+    const waiting = wrapper.awaitPrivateFirestore('alice', true);
+    void waiting.then(() => { outcome = 'ready'; }, () => { outcome = 'failed'; });
+    H.idToken!(H.primary.currentUser);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sessions.getSnapshot().failed).toBe(true);
+    expect(outcome).toBe('pending');
+    expect(H.functionsCalls).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(250);
+    const lease = await waiting;
+    expect(lease.db).toBe(H.dbs[1]);
+    expect(lease.uid).toBe('alice');
+    expect(H.functionsCalls).toEqual([{ app: H.apps[1], region: 'us-central1' }]);
+    expect(outcome).toBe('ready');
+  });
+
+  it('also recovers a bootstrap arriving after the failed publication', async () => {
+    H.cloneWaits = [() => Promise.reject(new Error('transient first clone'))];
+    const wrapper = await import('../privateFirestore');
+    const sessions = wrapper.privateFirestoreSessions(); managers.push(sessions);
+    H.idToken!(H.primary.currentUser); await vi.advanceTimersByTimeAsync(0);
+    expect(sessions.getSnapshot()).toMatchObject({ failed: true, retryPending: true });
+    const waiting = wrapper.awaitPrivateFirestore('alice', true);
+    await vi.advanceTimersByTimeAsync(250);
+    expect((await waiting).db).toBe(H.dbs[1]);
+  });
+
+  it('exhausts the scheduled episode promptly and leaves explicit Retry available', async () => {
+    H.failure = 'auth';
+    const wrapper = await import('../privateFirestore');
+    const sessions = wrapper.privateFirestoreSessions(); managers.push(sessions);
+    const waiting = wrapper.awaitPrivateFirestore('alice', true);
+    const rejected = expect(waiting).rejects.toMatchObject({ code: 'unavailable' });
+    H.idToken!(H.primary.currentUser); await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(3_250); await rejected;
+    expect(sessions.getSnapshot()).toMatchObject({ failed: true, retryPending: false });
+    expect(H.apps).toHaveLength(4); expect(vi.getTimerCount()).toBe(0);
+    expect(H.functionsCalls).toHaveLength(0);
+    H.failure = null; wrapper.retryPrivateFirestoreSession();
+    await vi.advanceTimersByTimeAsync(0);
+    expect((await wrapper.awaitPrivateFirestore('alice', true)).uid).toBe('alice');
+  });
+
+  it('keeps one absolute five-second deadline and never captures a late successful retry', async () => {
+    let release!: () => void;
+    H.cloneWaits = [() => Promise.reject(new Error('transient')), () => new Promise<void>((resolve) => { release = resolve; })];
+    const wrapper = await import('../privateFirestore');
+    const sessions = wrapper.privateFirestoreSessions(); managers.push(sessions);
+    const waiting = wrapper.awaitPrivateFirestore('alice', true);
+    const rejected = expect(waiting).rejects.toMatchObject({ code: 'unavailable' });
+    let outcome = 'pending'; void waiting.catch(() => { outcome = 'failed'; });
+    H.idToken!(H.primary.currentUser); await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(4_999); expect(outcome).toBe('pending');
+    await vi.advanceTimersByTimeAsync(1); await rejected;
+    release(); await vi.advanceTimersByTimeAsync(0);
+    expect(sessions.getSnapshot().db).toBe(H.dbs[1]);
+    expect(H.functionsCalls).toHaveLength(0); expect(outcome).toBe('failed');
+  });
+
+  it('rejects an old actor while a retry is held without binding services to the new account', async () => {
+    let release!: () => void;
+    H.cloneWaits = [() => Promise.reject(new Error('transient')), () => new Promise<void>((resolve) => { release = resolve; })];
+    const wrapper = await import('../privateFirestore');
+    const sessions = wrapper.privateFirestoreSessions(); managers.push(sessions);
+    const waiting = wrapper.awaitPrivateFirestore('alice', true);
+    const rejected = expect(waiting).rejects.toThrow(/changed/);
+    H.idToken!(H.primary.currentUser); await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(250);
+    H.before!({ uid: 'bob', token: 'bob' }); H.primary.currentUser = { uid: 'bob', token: 'bob' }; H.idToken!(H.primary.currentUser);
+    await vi.advanceTimersByTimeAsync(0); await rejected;
+    const bob = sessions.capture(); release(); await vi.advanceTimersByTimeAsync(0);
+    expect(sessions.capture().db).toBe(bob.db); expect(H.functionsCalls).toHaveLength(0);
+  });
+
+  it('scheduled success preserves recovery quarantine while own gameplay bootstrap may capture', async () => {
+    H.recovered = false; H.cloneWaits = [() => Promise.reject(new Error('transient'))];
+    const wrapper = await import('../privateFirestore');
+    const sessions = wrapper.privateFirestoreSessions(); managers.push(sessions);
+    const ordinary = wrapper.awaitPrivateFirestore('alice');
+    const refused = expect(ordinary).rejects.toThrow(/recovery/);
+    const bootstrap = wrapper.awaitPrivateFirestore('alice', true);
+    H.idToken!(H.primary.currentUser); await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(250); await refused;
+    expect((await bootstrap).db).toBe(H.dbs[1]);
+    expect(sessions.getSnapshot().recoveryRequired).toBe(true);
+    expect(H.functionsCalls).toHaveLength(1);
+  });
+
+  it.each(['offline', 'stop'] as const)('%s retirement cancels scheduled work and the bounded wait cannot capture', async (retirement) => {
+    H.failure = 'auth'; const wrapper = await import('../privateFirestore');
+    const sessions = wrapper.privateFirestoreSessions(); managers.push(sessions);
+    const waiting = wrapper.awaitPrivateFirestore('alice', true);
+    const rejected = expect(waiting).rejects.toMatchObject({ code: 'unavailable' });
+    H.idToken!(H.primary.currentUser); await vi.advanceTimersByTimeAsync(0);
+    H.failure = null;
+    if (retirement === 'offline') {
+      Object.defineProperty(navigator, 'onLine', { configurable: true, value: false }); sessions.refreshConnection();
+    } else sessions.stop();
+    await vi.advanceTimersByTimeAsync(5_000); await rejected;
+    expect(H.apps).toHaveLength(1); expect(H.functionsCalls).toHaveLength(0);
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+  });
+});
+
 describe('forwarded primary App Check', () => {
   it('preserves the signed token expiration rather than extending it by a minute', async () => {
     const sessions = manager(true); H.idToken!(H.primary.currentUser); await settle();
