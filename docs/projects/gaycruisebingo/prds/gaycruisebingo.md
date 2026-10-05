@@ -3,7 +3,7 @@ generated_by: scripts/project-doc-sync.sh
 do_not_edit: true
 source_repo: nathanjohnpayne/docs
 source_path: projects/gaycruisebingo/prds/gaycruisebingo.md
-source_ref: 9a5ae82
+source_ref: 023a69b
 project: gaycruisebingo
 document_class: prd
 document_slug: gaycruisebingo
@@ -18,8 +18,8 @@ tags:
 # Gay Cruise Bingo
 
 **Author:** Nathan Payne
-**Status:** Active—Phase 0 live at gaycruisebingo.com with the fast-follow social layer; parts of Phase 1 deployed (server auto-hide, moderation email, flag-gated Vision); Phase 1.5 "Daily Cards" specced 2026-07-11 with its backlog heading to project #7
-**Last Updated:** 2026-08-17
+**Status:** Complete—the Event (`med-2026`) sailed July 15–24, 2026 at gaycruisebingo.com with Phase 0, the fast-follow social layer, parts of Phase 1 (server auto-hide, moderation email, flag-gated Vision), and Phase 1.5 "Daily Cards" shipped. This is the founding PRD for the Gay Cruise Bingo Edition; the platform is now Five Across ([fiveacrossbingo.md](fiveacrossbingo.md)), and the app repo's `CONTEXT.md` and ADRs win where they differ.
+**Last Updated:** 2026-10-05
 
 ## Problem Statement
 
@@ -36,7 +36,7 @@ The printed Atlantis Cruise Bingo card (and its 12-card PDF) is fun but static: 
 ## Non-Goals
 
 - **Real verification / anti-cheat.** The proof system is flavor, not enforcement; integrity is never guaranteed even in stricter claim modes. (Not the point of the product.)
-- ~~**Full multi-tenant "rooms" product.** The schema is event-scoped, so future cruises are cheap, but v1 ships a single active event with no room-browsing or join-code UI. (Avoids data-model and UX scope before it's needed.)~~ **Superseded 2026-08-17** by the Five Across platform PRD (`projects/fiveacrossbingo/prds/fiveacrossbingo.md`) Phase 5, which makes self-service, organizer-driven event creation an explicit goal. This non-goal deferred the work "before it's needed"; that condition has now expired on its own terms. Gay Cruise Bingo itself remains a single-Event edition **by product choice** (`fiveacrossbingo.md` § Launch Edition: Gay Cruise Bingo), not by platform limitation. What the original line ruled out that is *still* ruled out—no public directory of other organizers' events, no join-code room-hopping, no cross-event browsing for a player who is not a member—survives in `fiveacrossbingo.md` § Non-Goals, "A public event marketplace." See also `specs/path-addressing-and-root.md` in the application repository, which decides how historical events are addressed once the root becomes a create-Event page.
+- ~~**Full multi-tenant "rooms" product.** The schema is event-scoped, so future cruises are cheap, but v1 ships a single active event with no room-browsing or join-code UI. (Avoids data-model and UX scope before it's needed.)~~ **Superseded 2026-08-17** by the Five Across platform PRD (`projects/gaycruisebingo/prds/fiveacrossbingo.md`) Phase 5, which makes self-service, organizer-driven event creation an explicit goal. This non-goal deferred the work "before it's needed"; that condition has now expired on its own terms. Gay Cruise Bingo itself remains a single-Event edition **by product choice** (`fiveacrossbingo.md` § Launch Edition: Gay Cruise Bingo), not by platform limitation. What the original line ruled out that is *still* ruled out—no public directory of other organizers' events, no join-code room-hopping, no cross-event browsing for a player who is not a member—survives in `fiveacrossbingo.md` § Non-Goals, "A public event marketplace." See also `specs/path-addressing-and-root.md` in the application repository, which decides how historical events are addressed once the root becomes a create-Event page.
 - **Payments, tickets, or Atlantis affiliation.** No commerce and no implication of endorsement by Atlantis Events; avoid their marks. (Out of scope and a trademark risk.)
 - **Native App Store / Play Store apps.** PWA only. (A store build buys nothing for a one-cruise audience.)
 - **Heavy pre-moderation.** Moderation is reactive (report / hide / admin takedown) plus automated flagging for illegal/extreme content only—not a review queue that gates posting. (Friction would kill the vibe.) *Phase 1.5 narrows this for Prompts only: new pool submissions queue for admin approval before they can be dealt; proofs and marks remain reactive.*
@@ -64,7 +64,7 @@ React single-page app (Vite) in TypeScript, end-to-end, hosted on Firebase Hosti
 
 Phase 0 (pre-cruise MVP) is deliberately Cloud Functions-free: each player writes their own board, marks, and denormalized stats, and the leaderboard is a client-side sort. This is intentional, not a gap—the game is honor-system by design (no cheater is in the threat model; the live feed and the group are the verification), so self-written stats are a feature and no server authority over marks is needed. Phase 0 also carries the social core: the per-prompt **tally** (public, attributed marker records—"who else got this"), broadcast **moments** (first-bingo + blackout) merged into the feed, **doubts** (social proof-demands a proof satisfies), on-device **share cards** handed to the native share sheet, a client-side auto-hide once a report count crosses the event threshold, a persisted 18+ attestation, and the offline cache above. Marking supports three event-level claim modes—a friction/vibe knob, not a trust hierarchy: `honor` (default), `proof_required` (proof-to-mark), and `admin_confirmed` (marks go pending and create a claim an admin confirms; renamed from the misleading `verified`). Phase 1 adds a `functions/` package only for what genuinely needs a server: Cloud Vision SafeSearch flagging tuned for extreme/illegal content—not raciness—plus `sharp` thumbnails and server-authoritative moderation (flip `status`), and App Check (reCAPTCHA Enterprise). Dropped from the original plan: the Cloud Run Playwright OG service and crawler-facing public `share` pages (replaced by on-device share cards—the audience shares images into a private group chat, not links to a public crawler), and server-side stat recomputation as anti-cheat (pointless under the honor model—it would only re-derive stats from the same player-written board).
 
-### Phase 1.5—Daily Cards (specced 2026-07-11)
+### Phase 1.5—Daily Cards (specced 2026-07-11; shipped)
 
 A pre-embarkation redesign that makes the card daily. Each cruise day has a date, port, and party theme and unlocks a fresh themed Board at 8:00 a.m. ship time (`Europe/Rome`—the whole itinerary is CEST). A scheduled function stamps a per-Day snapshot of the approved pool at unlock, so admin-approved player submissions enter every not-yet-unlocked Day; players deal lazily from the snapshot, with no prompt repeating across a player's cruise until the pool exhausts. Locked future Days show full themed chrome, the party's dress-code tease, and blank squares behind a lock. The two non-party days become tutorial days with curated pools and their own themes: **Welcome Aboard** (embark, live pre-cruise, teaches the game with easy on-ship squares) and **So Long, Farewell** (disembark, a reflective goodbye card). Scoring: one cruise-long leaderboard that sums all cards, a pinned "First to BINGO per Day," and a two-beat finale—last-call standings Moment at 20:00 on the final sea day, then a freeze + podium when the farewell card unlocks (farewell marks are ceremonial). The Feed gains **Tally Cards** (a live, aggregated entry per Prompt per Day—"Nathan Payne, Sterling Tadlock +12 got 'Balcony or porthole photo'"—bumped to the top as players mark, with claim-from-the-feed buttons). Chrome changes: the header shows today's port + theme beside the title; the tab bar becomes Card / Feed / Ranks / More (the More tab wears the player's avatar); a More menu absorbs profile, theme (new auto-match-the-day default), text size (S/M/L with an always-fits guard), schedule, suggest-a-square, tutorial replay, install, bug report, the 18+ advisory, admin, and sign out. The claim sheet resolves repo issue #190 (camera or library, with a 🖼️ Feed badge on library picks) and introduces a new Proof & Claims admin panel that surfaces the photo-source policy, EXIF stripping, the Vision gate toggle, and the report threshold. Iconography standardizes on Lucide for Chrome, emoji for camp. The model is event-scoped and admin-editable end-to-end, so future cruises reuse it wholesale.
 
@@ -72,13 +72,13 @@ A pre-embarkation redesign that makes the card daily. Each cruise day has a date
 
 Resolved decisions (2026-07-11): farewell unlocks at 08:00 on Day 10 (standard rule, no special case); cruise-wide First to BINGO excludes tutorial days; tutorial theme names/palettes as specced; #190 photo source defaults to camera-or-library with the transparency badge (camera-only as an event-level override); winners announced via the two-beat finale.
 
-Canonical spec: `plans/daily-cards-spec.md` in the app repo, with `plans/daily-cards-wireframes.html` (22 iPhone 15 Pro frames; the `data-lucide` attributes are the icon spec). Phase 1.5 tickets are filed on project #7 under `phase-1.5`.
+Canonical spec: `plans/daily-cards-spec.md` in the app repo, with `plans/daily-cards-wireframes.html` (22 iPhone 15 Pro frames; the `data-lucide` attributes are the icon spec). Phase 1.5 tickets are filed on project #7 under `phase-1.5`; the shipped implementation contracts are the app repo's `specs/d15-*.md`.
 
 ## Dependencies & Risks
 
 | Dependency / Risk | Impact | Mitigation |
 |---|---|---|
-| Sailing is ~8 days out (embark July 15) | High | Ship a ruthless Phase 0 by embarkation; land the fast-follow social layer (moments, share cards, doubts) and Phase 1 (server moderation) as live updates during the cruise. |
+| Sailing was ~8 days out when this PRD was written (embark July 15) | Resolved | The Event sailed July 15–24, 2026 with Phase 0 live (see Status). Original mitigation: ship a ruthless Phase 0 by embarkation; land the fast-follow social layer (moments, share cards, doubts) and Phase 1 (server moderation) as live updates during the cruise. |
 | Public app + user-generated photos/audio/names + adult content | Medium-High | Persisted one-time 18+ attestation, report/hide with a Phase-0 client-side auto-hide at threshold, multi-admin takedown console (round-the-clock coverage), `noindex`, Storage MIME/size limits, and Phase-1 Cloud Vision flagging for extreme/illegal content only. |
 | Custom domain from Cloudflare → Firebase Hosting SSL can take up to ~24h | Medium | Do the domain connection first; set Cloudflare records to DNS-only (unproxied) so Firebase can issue the cert. |
 | ~~Playwright OG rendering cost/latency~~ (dropped) |—| Replaced by on-device share cards (client render → native share sheet); no server render, no public share pages. See ADR 0005. |
@@ -87,7 +87,7 @@ Canonical spec: `plans/daily-cards-spec.md` in the app repo, with `plans/daily-c
 
 ## Resolved Decisions
 
-Settled in the 2026-07-07 design review; full rationale in the `gaycruisebingo` repo's ADRs (`docs/adr/0001-0006`).
+Settled in the 2026-07-07 design review; full rationale in the app repo's ADRs (`nathanjohnpayne/fiveacross`, renamed from `gaycruisebingo` 2026-08-27) (`docs/adr/0001-0006`).
 
 - [x] **18+ gate:** keep the soft one-time acknowledgment, and **persist it** as a timestamped attestation on the user profile—an unrecorded gate isn't doing its job.
 - [x] **Claim modes are event-level only**—`honor` (default) + optional proof, with **no** per-prompt proof requirement. They're a friction/vibe knob, not a trust hierarchy (ADR 0001); `verified` is renamed **admin-confirmed**.

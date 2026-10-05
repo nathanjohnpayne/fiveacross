@@ -316,8 +316,9 @@ function TextSizeSwitcher() {
 /** Elements the Tab-trap below will cycle between while a panel is open —
  *  mirrors AcceptableUse.tsx's `FOCUSABLE_SELECTOR`, minus disabled controls:
  *  the browser skips a disabled button, so counting one as `first`/`last` (the
- *  Blocked players panel disables Unblock offline or mid-request) would let
- *  Tab stall or Shift+Tab escape into the obscured More menu. */
+ *  Blocked players panel disables Unblock mid-request) would let
+ *  Tab stall or Shift+Tab escape into the obscured More menu. Offline, that
+ *  panel withholds rows and Unblock controls entirely. */
 const FOCUSABLE_SELECTOR =
   'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 

@@ -1018,16 +1018,16 @@ describe('useMyBlocks', () => {
     act(() => sub.listener(own([{ row: direction('alice') }])));
     expect(view.result.current.data).toEqual([]);
   });
-  it('an empty cache-only snapshot is not confirmed; the first server snapshot latches it', () => {
+  it('cache-only snapshots never qualify an own-panel answer, including after prior confirmation', () => {
     const view = renderHook(() => useMyBlocks('bob'));
     const sub = H.subscriptions[0];
     act(() => sub.listener(own([], true)));
-    expect(view.result.current).toMatchObject({ data: [], loading: false, confirmed: false });
+    expect(view.result.current).toMatchObject({ data: [], loading: true, confirmed: false });
     act(() => sub.listener(own([], false)));
     expect(view.result.current.confirmed).toBe(true);
-    // A later memory-cache answer within this admitted listener retains its confirmation.
+    // An own private panel has no offline witness: cache retires its answer.
     act(() => sub.listener(own([], true)));
-    expect(view.result.current.confirmed).toBe(true);
+    expect(view.result.current.confirmed).toBe(false);
   });
 
   it('names the rows that are still an uncommitted local block, until the server commits them', () => {
@@ -1051,7 +1051,8 @@ describe('useMyBlocks', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const view = renderHook(() => useMyBlocks('bob'));
     act(() => H.subscriptions[0].onError(new Error('denied')));
-    expect(view.result.current).toEqual({ data: [], loading: false, error: true, confirmed: false, pendingTargets: new Set() });
+    expect(view.result.current).toMatchObject({ data: [], loading: false, error: true, confirmed: false, pendingTargets: new Set() });
+    expect(view.result.current.retry).toEqual(expect.any(Function));
   });
 });
 

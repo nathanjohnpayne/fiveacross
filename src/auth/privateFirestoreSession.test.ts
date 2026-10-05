@@ -111,6 +111,128 @@ beforeEach(() => {
 });
 afterEach(async () => { managers.splice(0).forEach((value) => value.stop()); await settle(); vi.useRealTimers(); });
 
+describe('active same-UID Auth-copy deadline (#1700)', () => {
+  it('recovers a hung current copy after five seconds without waiting for it or losing the queued newest subject', async () => {
+    const wrapper = await import('../privateFirestore');
+    const sessions = wrapper.privateFirestoreSessions(); managers.push(sessions);
+    H.idToken!(H.primary.currentUser); await settle();
+    const before = sessions.getSnapshot(); const old = wrapper.capturePrivateFirestore();
+    H.cloneWaits = [() => new Promise<void>(() => {})];
+    H.primary.currentUser = { uid: 'alice', token: 'hung' }; H.idToken!(H.primary.currentUser); await settle();
+    H.primary.currentUser = { uid: 'alice', token: 'newest' }; H.idToken!(H.primary.currentUser); await settle();
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(sessions.getSnapshot()).toBe(before); expect(() => old.assertCurrent()).not.toThrow();
+    expect(H.apps).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    const current = await wrapper.awaitPrivateFirestore('alice');
+    expect(H.apps).toHaveLength(2); expect(current.db).not.toBe(old.db);
+    expect(H.auths[1].currentUser?.token).toBe('newest');
+    expect(sessions.getSnapshot().generation).toBeGreaterThan(before.generation);
+    expect(sessions.getSnapshot().authGeneration).toBeGreaterThan(before.authGeneration);
+    expect(() => old.assertCurrent()).toThrow(/expired/);
+    expect(H.clones.filter((clone) => clone.auth === H.auths[0]).map((clone) => clone.subject.token)).toEqual(['initial', 'hung']);
+    expect(H.functionsCalls.at(-1)?.app).toBe(current.db.app);
+  });
+
+  it.each(['success', 'rejection'] as const)('a timed-out SDK copy’s late %s cannot replace the fresh client or its newest credentials', async (late) => {
+    const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
+    const old = sessions.capture();
+    let complete!: () => void; let finishDisposal!: () => void;
+    H.cloneWaits = [() => new Promise<void>((resolve, reject) => {
+      complete = () => late === 'success' ? resolve() : reject(new Error('late retired copy failure'));
+    })];
+    H.terminateWaits = [() => new Promise<void>((resolve) => { finishDisposal = resolve; })];
+    H.primary.currentUser = { uid: 'alice', token: 'old-copy' }; H.idToken!(H.primary.currentUser); await settle();
+    H.primary.currentUser = { uid: 'alice', token: 'newest' }; H.idToken!(H.primary.currentUser);
+    await vi.advanceTimersByTimeAsync(5_000);
+    const current = sessions.getSnapshot(); const lease = sessions.capture();
+    expect(lease.db).not.toBe(old.db); expect(H.apps).toHaveLength(2);
+    expect(H.auths[1].currentUser?.token).toBe('newest');
+    expect(H.terminated).toContain(old.db); expect(H.deleted).not.toContain(H.apps[0]);
+    complete(); await settle(); finishDisposal(); await settle();
+    expect(sessions.getSnapshot()).toBe(current); expect(H.apps).toHaveLength(2);
+    expect(H.auths[1].currentUser?.token).toBe('newest');
+    expect(() => lease.assertCurrent()).not.toThrow(); expect(() => old.assertCurrent()).toThrow(/expired/);
+    expect(H.deleted).toContain(H.apps[0]); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('a copy completing below its deadline keeps the snapshot and lease and leaves no timeout behind', async () => {
+    const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
+    const before = sessions.getSnapshot(); const lease = sessions.capture();
+    let release!: () => void;
+    H.cloneWaits = [() => new Promise<void>((resolve) => { release = resolve; })];
+    H.primary.currentUser = { uid: 'alice', token: 'timely' }; H.idToken!(H.primary.currentUser); await settle();
+    await vi.advanceTimersByTimeAsync(4_999); release(); await settle();
+    expect(H.auths[0].currentUser?.token).toBe('timely');
+    expect(sessions.getSnapshot()).toBe(before); expect(() => lease.assertCurrent()).not.toThrow();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(sessions.getSnapshot()).toBe(before); expect(H.apps).toHaveLength(1);
+  });
+
+  it('a queued copy gets its full deadline only when it becomes active', async () => {
+    const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
+    const before = sessions.getSnapshot();
+    let releaseFirst!: () => void; let releaseSecond!: () => void;
+    H.cloneWaits = [
+      () => new Promise<void>((resolve) => { releaseFirst = resolve; }),
+      () => new Promise<void>((resolve) => { releaseSecond = resolve; }),
+    ];
+    H.primary.currentUser = { uid: 'alice', token: 'first' }; H.idToken!(H.primary.currentUser); await settle();
+    H.primary.currentUser = { uid: 'alice', token: 'second' }; H.idToken!(H.primary.currentUser);
+    await vi.advanceTimersByTimeAsync(4_000); releaseFirst(); await settle();
+    expect(H.clones.map((clone) => clone.subject.token)).toEqual(['initial', 'first', 'second']);
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(sessions.getSnapshot()).toBe(before); expect(H.apps).toHaveLength(1);
+    releaseSecond(); await settle();
+    expect(H.auths[0].currentUser?.token).toBe('second'); expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(5_000); expect(H.apps).toHaveLength(1);
+  });
+
+  it.each(['account', 'offline', 'recovery', 'stop'] as const)('%s retirement cancels an active deadline and fences its late SDK failure', async (reason) => {
+    const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
+    const old = sessions.capture(); let rejectOld!: (error: Error) => void;
+    H.cloneWaits = [() => new Promise<void>((_resolve, reject) => { rejectOld = reject; })];
+    H.primary.currentUser = { uid: 'alice', token: 'retiring' }; H.idToken!(H.primary.currentUser); await settle();
+    expect(vi.getTimerCount()).toBe(1);
+    if (reason === 'account') {
+      H.before!({ uid: 'bob', token: 'bob' }); H.primary.currentUser = { uid: 'bob', token: 'bob' }; H.idToken!(H.primary.currentUser);
+    } else if (reason === 'offline') { H.online = false; sessions.refreshConnection(); }
+    else if (reason === 'recovery') { H.recovered = false; sessions.refreshRecovery(); }
+    else sessions.stop();
+    await settle(); const retired = sessions.getSnapshot(); const apps = H.apps.length;
+    expect(vi.getTimerCount()).toBe(0); expect(() => old.assertCurrent()).toThrow(/expired/);
+    rejectOld(new Error('late SDK failure after retirement')); await settle();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(sessions.getSnapshot()).toBe(retired); expect(H.apps).toHaveLength(apps);
+    if (reason === 'account') expect(sessions.capture().uid).toBe('bob');
+    else if (reason === 'recovery') expect(() => sessions.capture()).toThrow(/recovery/);
+    else expect(sessions.getSnapshot().db).toBeNull();
+  });
+
+  it('a current timeout starts the existing bounded fresh-client failure episode', async () => {
+    const sessions = manager(); H.idToken!(H.primary.currentUser); await settle(); const old = sessions.capture();
+    H.cloneWaits = [() => new Promise<void>(() => {})];
+    H.idToken!(H.primary.currentUser); await settle(); H.failure = 'auth';
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(sessions.getSnapshot()).toMatchObject({ db: null, failed: true, retryPending: true });
+    expect(() => old.assertCurrent()).toThrow(/expired/);
+    await vi.advanceTimersByTimeAsync(3_250);
+    expect(H.apps).toHaveLength(5);
+    expect(sessions.getSnapshot()).toMatchObject({ db: null, failed: true, retryPending: false });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not apply the active-copy deadline to an initial bootstrap clone', async () => {
+    let release!: () => void;
+    H.cloneWaits = [() => new Promise<void>((resolve) => { release = resolve; })];
+    const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(H.apps).toHaveLength(1); expect(sessions.getSnapshot()).toMatchObject({ db: null, failed: false });
+    release(); await settle(); expect(sessions.capture().db).toBe(H.dbs[0]);
+  });
+});
+
 describe('private named memory lifecycle', () => {
   it('same-UID token refresh updates Auth without replacing the memory app or retiring leases', async () => {
     const sessions = manager(); H.idToken!(H.primary.currentUser); await settle();
