@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it, vi } from 'vitest';
 import { deleteApp, initializeApp, type FirebaseApp } from 'firebase/app';
 import {
   connectAuthEmulator, createUserWithEmailAndPassword, inMemoryPersistence,
-  initializeAuth, signOut, updateCurrentUser, type Auth,
+  initializeAuth, getAuth, getIdToken, signOut, updateCurrentUser, type Auth,
 } from 'firebase/auth';
 import {
   collection, connectFirestoreEmulator, disableNetwork, doc, enableNetwork, getDocFromCache,
@@ -94,6 +94,44 @@ describe('private-cache named-app Auth feasibility (#1411)', () => {
     expect(reloaded.auth.currentUser).toBeNull();
     await expect(getDocFromCache(doc(reloaded.db, aPath))).rejects.toMatchObject({ code: 'unavailable' });
     await signOut(primary.auth);
+  });
+
+  it('a real same-UID token refresh keeps the memory client, listener and captured action alive', async () => {
+    const primary = client('token-lifetime-primary');
+    const user = (await createUserWithEmailAndPassword(primary.auth, runScopedEmail('token-lifetime'), 'passw0rd!')).user;
+    await seedPrivateMembership(user.uid);
+    const [host, port] = (process.env.FIRESTORE_EMULATOR_HOST ?? '127.0.0.1:8080').split(':');
+    const manager = createPrivateFirestoreSessions({ primaryAuth: primary.auth, options, recovered: () => true, online: () => true,
+      emulator: { authUrl: `http://${process.env.FIREBASE_AUTH_EMULATOR_HOST ?? '127.0.0.1:9099'}`, firestoreHost: host, firestorePort: Number(port) },
+    });
+    let unsubscribe = () => {};
+    try {
+      await vi.waitFor(() => expect(manager.getSnapshot().db).not.toBeNull(), { timeout: 5000 });
+      const before = manager.getSnapshot(); const lease = manager.capture();
+      const path = `events/${eventId}/memberships/${user.uid}`;
+      const snapshots: Array<{ fromCache: boolean; hasPendingWrites: boolean }> = [];
+      unsubscribe = onSnapshot(doc(lease.db, path), { includeMetadataChanges: true }, (snapshot) => {
+        snapshots.push({ ...snapshot.metadata });
+      });
+      await vi.waitFor(() => expect(snapshots.some((snapshot) => !snapshot.fromCache)).toBe(true), { timeout: 5000 });
+      const oldToken = await getIdToken(user);
+      // The emulator JWT iat is second-granular. Ensure force refresh changes
+      // its bytes, so this is an actual onIdTokenChanged event, not a no-op.
+      await new Promise<void>((resolve) => setTimeout(resolve, 1100));
+      const refreshedToken = await getIdToken(user, true);
+      expect(refreshedToken).not.toBe(oldToken);
+      await vi.waitFor(async () => {
+        expect(await getIdToken(getAuth(lease.db.app).currentUser!)).toBe(refreshedToken);
+      }, { timeout: 5000 });
+      expect(manager.getSnapshot()).toBe(before); expect(manager.capture().db).toBe(lease.db);
+      expect(() => lease.assertCurrent()).not.toThrow();
+      expect((await lease.guard(() => getDocFromServer(doc(lease.db, path)))).exists()).toBe(true);
+      // Confirmed listeners survive a healthy credential-stream restart.
+      const after = snapshots.slice(snapshots.findIndex((snapshot) => !snapshot.fromCache));
+      expect(after.every((snapshot) => !snapshot.fromCache)).toBe(true);
+      await signOut(primary.auth);
+      expect(() => lease.assertCurrent()).toThrow('expired');
+    } finally { unsubscribe(); manager.stop(); }
   });
 
   it('the shipped session manager isolates account caches and fences late actions and offline access', async () => {

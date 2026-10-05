@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ReactElement } from 'react';
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import type { User } from 'firebase/auth';
 import type { BoardDoc, Cell, ClaimDoc, EventDoc, PlayerDoc } from '../types';
@@ -241,10 +241,11 @@ describe('Admin — Claim Mode control (specs/w3-claim-modes.md)', () => {
     expect(screen.getByRole('button', { name: 'Admin-confirmed' }).className).not.toContain('on');
   });
 
-  it('writes the chosen mode when an Admin picks it', () => {
+  it('writes the chosen mode when an Admin picks it', async () => {
     renderAdmin('/more/admin/settings');
     fireEvent.click(screen.getByRole('button', { name: 'Admin-confirmed' }));
     expect(H.setClaimMode).toHaveBeenCalledWith('admin_confirmed');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Proof-to-mark' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: 'Proof-to-mark' }));
     expect(H.setClaimMode).toHaveBeenCalledWith('proof_required');
   });
