@@ -27,6 +27,7 @@ vi.mock('../firebase', () => ({ db: {}, EVENT_ID: 'test-event' }));
 vi.mock('../analytics', () => ({ track: H.track }));
 vi.mock('../data/blocks', () => ({ blockPlayer: vi.fn(), unblockPlayer: H.unblockPlayer }));
 vi.mock('../hooks/useBlocks', () => ({ useMyBlocks: () => H.myBlocks }));
+vi.mock('../hooks/usePrivateFirestore', () => ({ usePrivateFirestore: () => ({ recoveryRequired: false }) }));
 vi.mock('../hooks/useData', () => ({ useLeaderboard: () => ({ players: H.players, loading: false, hasServerData: H.rosterConfirmed }),
 }));
 vi.mock('../hooks/useOnline', () => ({ useOnline: () => H.online }));
@@ -301,8 +302,8 @@ describe('BlockedPlayersPanel', () => {
     H.myBlocks = { ...H.myBlocks, confirmed: false };
     const { rerender } = render(<BlockedPlayersPanel uid="viewer" />);
     expect(screen.queryByText('You haven’t blocked anyone.')).toBeNull();
-    expect(screen.getByText('Loading…')).toBeTruthy();
-    expect(screen.getByText('You’re offline. Unblocking needs a connection.')).toBeTruthy();
+    expect(screen.queryByText('Loading…')).toBeNull();
+    expect(screen.getByText('Reconnect to see your blocked players and unblock someone.')).toBeTruthy();
     H.online = true;
     H.myBlocks = { ...H.myBlocks, confirmed: true };
     rerender(<BlockedPlayersPanel uid="viewer" />);
@@ -377,8 +378,8 @@ describe('BlockedPlayersPanel', () => {
     H.online = false;
     H.myBlocks.data = [direction('bea', 1)];
     render(<BlockedPlayersPanel uid="viewer" />);
-    expect(screen.getByText('You’re offline. Unblocking needs a connection.')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Unblock A player' })).toBeDisabled();
+    expect(screen.getByText('Reconnect to see your blocked players and unblock someone.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Unblock A player' })).toBeNull();
     expect(H.unblockPlayer).not.toHaveBeenCalled();
   });
 

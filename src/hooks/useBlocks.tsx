@@ -3,6 +3,7 @@ import { onSnapshot, query, waitForPendingWrites, where } from 'firebase/firesto
 import { db as gameplayDb, EVENT_ID } from '../firebase';
 import { capturePrivateFirestore, retryPrivateFirestoreSession } from '../privateFirestore';
 import { usePrivateFirestore } from './usePrivateFirestore';
+import { useOnline } from './useOnline';
 import { blockPairsCol, blocksCol } from '../data/paths';
 import { computeHiddenSet, hiddenUidsFromPairs, reconcileOrphanPair, repairMissingPairs, subscribePendingBlocks, pendingBlockTargets, observeConfirmedBlockTargets, retirePendingBlocksOutsideScope } from '../data/blocks';
 import { eventScopeKey } from '../data/eventScope';
@@ -382,84 +383,107 @@ export interface MyBlocks {
   data: BlockDoc[];
   loading: boolean;
   error: boolean;
-  /** The server has answered this listener at least once, so an empty `data` means no blocks. */
+  /** A committed server answer qualified this current memory listener. */
   confirmed: boolean;
   /** In-process pending block targets plus pending memory-snapshot rows; no direction rows are synthesized. */
   pendingTargets: ReadonlySet<string>;
+  denied?: boolean;
+  retry?: () => void;
 }
 
 const NO_PENDING: ReadonlySet<string> = new Set();
 
 /**
- * The viewer's OWN direction records (`where('ownerUid', '==', uid)`), the
- * only readable ones: the Blocked-players panel lists these only from the
- * recovered own-memory lease. Retirement clears this private panel. An error settles
- * to an empty list with `error: true` and a console.error, never a hung
- * spinner, so the panel can say it could not load rather than "no blocks".
- *
- * The listener includes metadata changes, for two answers the panel acts on.
- * `confirmed` latches once a snapshot comes from the server: a first open while
- * not yet server-backed can deliver an empty memory-cache snapshot, which is not proof the
- * viewer has blocked nobody. `pendingTargets` also uses the scoped in-process
- * batch relay to disable an existing row while its new block is unresolved.
- * New direction rows are never synthesized from queued intent: they appear
- * only when this memory listener returns them. `unblockPlayer` is server-only.
+ * Own directions stay quarantined until recovery. A current committed memory
+ * answer qualifies rows; server-backed pending updates retain only that answer.
+ * Cache, denial and scope retirement clear it. An unanswered online listener
+ * becomes unavailable after ten seconds; Retry replaces only this listener.
+ * Pending target IDs still come from the own snapshot and in-process batch relay,
+ * never synthesized rows or the reciprocal filter's offline witness.
  */
 export function useMyBlocks(uid: string | null): MyBlocks {
   const session = usePrivateFirestore();
+  const online = useOnline();
   const eventId = EVENT_ID;
   const key = uid !== null ? `${eventScopeKey(eventId, 'my-blocks', uid)}|generation:${session.generation}` : null;
   const pending = useSyncExternalStore(subscribePendingBlocks, () => uid ? pendingBlockTargets(uid, eventId) : EMPTY);
-  const [state, setState] = useState<MyBlocks & { key: string | null }>(() => ({
-    key,
-    data: [],
-    loading: uid !== null,
-    error: false,
-    confirmed: uid === null,
-    pendingTargets: NO_PENDING,
-  }));
+  const [retryEpisode, setRetryEpisode] = useState(0);
+  const retireCurrent = useRef<(() => void) | null>(null);
+  const empty = (): MyBlocks => ({
+    data: [], loading: uid !== null, error: false, confirmed: uid === null, pendingTargets: NO_PENDING,
+  });
+  const [state, setState] = useState(() => ({ ...empty(), key }));
+  const retryRead = () => {
+    // Fence callbacks immediately, before React installs the replacement effect.
+    retireCurrent.current?.();
+    setState({ ...empty(), key });
+    setRetryEpisode(episode => episode + 1);
+  };
   useEffect(() => {
-    setState({ key, data: [], loading: uid !== null, error: false, confirmed: uid === null, pendingTargets: NO_PENDING });
-    if (key === null || uid === null || !session.db || session.uid !== uid || session.recoveryRequired) return;
-    const lease = captureMatchingLease(uid, session.db);
-    if (!lease) return;
+    setState({ ...empty(), key });
+    if (key === null || uid === null || !online || session.recoveryRequired || session.failed) return;
     let active = true;
-    const unsub = onSnapshot(
-      query(blocksCol(eventId, lease.db), where('ownerUid', '==', uid)),
-      { includeMetadataChanges: true },
-      (snap) => {
-        if (!active) return;
-        try { lease.assertCurrent(); } catch { return; }
-        const data = snap.docs.map((d) => d.data());
-        const pending = snap.docs.filter((d) => d.metadata.hasPendingWrites).map((d) => d.data().targetUid);
-        setState((prev) => ({
-          key,
-          data,
-          loading: false,
-          error: false,
-          confirmed: (prev.key === key && prev.confirmed) || !snap.metadata.fromCache,
-          pendingTargets: pending.length > 0 ? new Set(pending) : NO_PENDING,
-        }));
-      },
-      (err) => {
-        if (!active) return;
-        try { lease.assertCurrent(); } catch { return; }
-        console.error('[blocks] own-blocks listener failed', err);
-        setState({ key, data: [], loading: false, error: true, confirmed: false, pendingTargets: NO_PENDING });
-      },
-    );
-    return () => {
-      active = false;
-      unsub();
+    let unsubscribe: (() => void) | null = null;
+    let deadline: ReturnType<typeof setTimeout> | null = null;
+    const clearDeadline = () => { if (deadline !== null) clearTimeout(deadline); deadline = null; };
+    const retire = () => { active = false; clearDeadline(); unsubscribe?.(); unsubscribe = null; };
+    retireCurrent.current = retire;
+    const fail = (denied = false) => {
+      retire();
+      setState({ key, data: [], loading: false, error: true, confirmed: false, pendingTargets: NO_PENDING, denied });
     };
-  }, [key, uid, eventId, session.db, session.generation, session.uid, session.recoveryRequired]);
-  return state.key === key && session.uid === uid && !!session.db && !session.recoveryRequired
-    ? {
-        data: state.data,
-        loading: state.loading,
-        error: state.error,
-        confirmed: state.confirmed,
-        pendingTargets: pending.size > 0 ? computeHiddenSet(pending, state.pendingTargets, true) : state.pendingTargets,
-      }
-    : { data: [], loading: uid !== null, error: false, confirmed: uid === null, pendingTargets: NO_PENDING };
+    const awaitAnswer = () => { if (deadline === null) deadline = setTimeout(() => { if (active) fail(); }, FIRST_ANSWER_WAIT_MS); };
+    awaitAnswer();
+    // A not-yet-ready bridge is also bounded, but its Retry must restart the bridge.
+    const lease = session.db && session.uid === uid ? captureMatchingLease(uid, session.db) : null;
+    if (lease) {
+      const current = () => {
+        if (!active || navigator.onLine === false) return false;
+        try { lease.assertCurrent(); return true; } catch { return false; }
+      };
+      unsubscribe = onSnapshot(
+        query(blocksCol(eventId, lease.db), where('ownerUid', '==', uid)),
+        { includeMetadataChanges: true },
+        snap => {
+          if (!current()) return;
+          if (snap.metadata.fromCache) {
+            setState({ ...empty(), key });
+            awaitAnswer();
+            return;
+          }
+          const pendingRows = snap.docs.filter(doc => doc.metadata.hasPendingWrites).map(doc => doc.data().targetUid);
+          if (snap.metadata.hasPendingWrites || pendingRows.length > 0) {
+            setState(prev => prev.key === key && prev.confirmed
+              ? { ...prev, pendingTargets: pendingRows.length ? new Set(pendingRows) : NO_PENDING }
+              : { ...empty(), key, pendingTargets: pendingRows.length ? new Set(pendingRows) : NO_PENDING });
+            return;
+          }
+          clearDeadline();
+          setState({ key, data: snap.docs.map(doc => doc.data()), loading: false, error: false, confirmed: true, pendingTargets: NO_PENDING });
+        },
+        error => {
+          if (!current()) return;
+          console.error('[blocks] own-blocks listener failed', error);
+          fail(!readinessRetryable(error));
+        },
+      );
+      if (!active) { unsubscribe(); unsubscribe = null; }
+    }
+    return () => { retire(); if (retireCurrent.current === retire) retireCurrent.current = null; };
+  }, [key, uid, eventId, online, session.db, session.generation, session.uid, session.recoveryRequired, session.failed, retryEpisode]);
+  const { key: _stateKey, ...answer } = state;
+  if (uid !== null && session.failed && !session.recoveryRequired && online) {
+    return { ...empty(), loading: false, error: true, retry: retryPrivateFirestoreSession };
+  }
+  if (state.key !== key || !online || session.uid !== uid || !session.db || session.recoveryRequired) {
+    if (state.key === key && state.error && online && !session.recoveryRequired) {
+      return { ...answer, retry: retryPrivateFirestoreSession };
+    }
+    return empty();
+  }
+  return {
+    ...answer,
+    ...(state.error ? { retry: retryRead } : {}),
+    pendingTargets: pending.size > 0 ? computeHiddenSet(pending, state.pendingTargets, true) : state.pendingTargets,
+  };
 }
