@@ -179,7 +179,7 @@ describe('captured private service transport', () => {
 });
 
 
-describe('gameplay Retry restarts only an unavailable current-actor bridge (#1687)', () => {
+describe('gameplay Retry without private-read provenance restarts only an unavailable current-actor bridge (#1687)', () => {
   it('keeps a healthy current actor bridge even while ordinary UI is quarantined for recovery', async () => {
     H.recovered = false;
     const wrapper = await import('./privateFirestore');
