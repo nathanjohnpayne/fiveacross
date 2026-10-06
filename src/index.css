@@ -2290,6 +2290,12 @@ textarea.input {
   color: var(--ink);
   font-size: 12px;
 }
+/* Busy settings stay in the keyboard path (#1715); native safety locks
+   remain disabled. Do not suppress pointer events: the control guards them. */
+.admin-section [aria-busy="true"][aria-disabled="true"] {
+  opacity: 0.6;
+  cursor: wait;
+}
 .tonight-input:disabled {
   opacity: 0.55;
 }
