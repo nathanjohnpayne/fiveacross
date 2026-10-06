@@ -168,6 +168,36 @@ describe('actual private Admin settings save feedback (#1678)', () => {
     expect(slider.value).toBe('70'); expect(screen.queryByRole('alert')).toBeNull();
   });
 
+  it('follows an earlier committed Easy mix echo after the latest focused release fails', async () => {
+    renderAdmin(); await act(async () => emit());
+    const slider = screen.getByRole('slider') as HTMLInputElement;
+    slider.focus();
+    for (const pct of [60, 65]) {
+      fireEvent.change(slider, { target: { value: String(pct) } }); fireEvent.keyUp(slider);
+    }
+    await waitFor(() => expect(H.writes).toHaveLength(2));
+    expect(H.writes.map(write => write.fields)).toEqual([
+      { 'settings.easyMixRatio': 0.6 }, { 'settings.easyMixRatio': 0.65 },
+    ]);
+    await reject(1);
+    expect(slider.value).toBe('50'); expect(slider).toHaveFocus();
+    expect(screen.getByRole('alert')).toHaveTextContent('Easy mix save failed. Try again.');
+    // Promise fulfillment alone is not committed private Event authority.
+    await act(async () => H.writes[0]!.resolve());
+    expect(slider.value).toBe('50');
+    await act(async () => { H.event = applyFields(H.writes[0]!.fields); emit(); });
+    expect(slider.value).toBe('60'); expect(slider).toHaveFocus();
+    expect(slider).toHaveAttribute('aria-valuetext', '60% · 14 of 24 squares');
+    expect(screen.getByText('60% · 14 of 24 squares')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('Easy mix save failed. Try again.');
+    fireEvent.pointerUp(slider); fireEvent.keyUp(slider); act(() => slider.blur());
+    expect(H.writes).toHaveLength(2);
+    fireEvent.change(slider, { target: { value: '65' } }); fireEvent.pointerUp(slider);
+    await waitFor(() => expect(H.writes).toHaveLength(3));
+    expect(H.writes[2]!.fields).toEqual({ 'settings.easyMixRatio': 0.65 });
+    expect(screen.queryByRole('alert')).toBeNull(); await acknowledge(2);
+  });
+
   it('does not clobber a new uncommitted slider adjustment when its prior release rejects', async () => {
     renderAdmin(); await act(async () => emit());
     const slider = screen.getByRole('slider') as HTMLInputElement;
@@ -195,6 +225,44 @@ describe('actual private Admin settings save feedback (#1678)', () => {
     expect(H.writes[1]!.fields).toEqual({ 'settings.easyMixRatio': 0.6 });
     expect(screen.queryByRole('alert')).toBeNull(); await acknowledge();
     expect(slider.value).toBe('60');
+  });
+
+  it.each(['uid', 'generation', 'event', 'denial'] as const)('retires focused slider recovery on %s before an old success/echo', async (retirement) => {
+    const view = renderAdmin(); await act(async () => emit());
+    const oldSlider = screen.getByRole('slider') as HTMLInputElement;
+    oldSlider.focus();
+    for (const pct of [60, 65]) {
+      fireEvent.change(oldSlider, { target: { value: String(pct) } }); fireEvent.keyUp(oldSlider);
+    }
+    await waitFor(() => expect(H.writes).toHaveLength(2)); await reject(1);
+    expect(oldSlider.value).toBe('50'); expect(screen.getByRole('alert')).toBeInTheDocument();
+    const oldListener = H.listeners.at(-1)!;
+    await act(async () => {
+      if (retirement === 'denial') oldListener.error();
+      else {
+        if (retirement === 'uid') H.uid = 'bob';
+        if (retirement === 'generation') H.generation++;
+        if (retirement === 'event') H.eventId = 'other';
+        view.rerender(<MemoryRouter><Admin /></MemoryRouter>);
+      }
+    });
+    expect(screen.queryByRole('slider')).toBeNull(); expect(screen.queryByRole('alert')).toBeNull();
+    if (retirement !== 'denial') await act(async () => emit());
+    await act(async () => {
+      H.writes[0]!.resolve();
+      // A terminal listener error has no subsequent SDK snapshot; only the
+      // held writer may settle. Other retired scopes also refuse stale echoes.
+      if (retirement !== 'denial') oldListener.next(snapshot(false, { ...H.event, settings: { ...H.event.settings, easyMixRatio: 0.6 } }));
+    });
+    expect(screen.queryByRole('alert')).toBeNull(); expect(H.writes).toHaveLength(2);
+    if (retirement === 'denial') expect(screen.queryByRole('slider')).toBeNull();
+    else {
+      const current = screen.getByRole('slider') as HTMLInputElement;
+      expect(current).not.toBe(oldSlider); expect(current.value).toBe('50'); current.focus();
+      await act(async () => { H.event = { ...H.event, settings: { ...H.event.settings, easyMixRatio: 0.7 } }; emit(); });
+      expect(current.value).toBe('50'); act(() => current.blur()); expect(current.value).toBe('70');
+      expect(H.writes).toHaveLength(2);
+    }
   });
 
   it('holds Day-theme feedback through the private transaction denial and preserves the Day lock', async () => {
