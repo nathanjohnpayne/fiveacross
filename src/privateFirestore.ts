@@ -31,15 +31,35 @@ export function privateFirestoreSessions() {
   return sessions;
 }
 
+/** A captured SDK read, never a whole profile transaction/write. Its outcome
+ * changes only when that exact SDK read settles; success or a terminal authority
+ * rejection disarms Retry. */
+export type PrivateReadOperation = {
+  kind: 'profile-read' | 'attestation-read';
+  lease: ReturnType<ReturnType<typeof privateFirestoreSessions>['capture']>;
+  outcome: 'pending' | 'failed' | 'succeeded';
+  /** A successful SDK read or permanent authority rejection disarms old proof. */
+  retryEligible: boolean;
+};
+
 /** Explicit private-UI retry starts one fresh bounded bridge episode.
- * Gameplay supplies its actor UID to restart only an unavailable bridge;
- * a healthy current client retains its subscriptions and captured leases. */
-export function retryPrivateFirestoreSession(unavailableForUid?: string): void {
+ * Gameplay supplies its actor UID and optional current private-read failure;
+ * a healthy current client retains its subscriptions and captured leases unless
+ * an explicitly failed/timed-out SDK read still belongs to that client. */
+export function retryPrivateFirestoreSession(unavailableForUid?: string, failedRead?: PrivateReadOperation | null): void {
   if (unavailableForUid !== undefined) {
     if (auth.currentUser?.uid !== unavailableForUid || navigator.onLine === false) return;
     const manager = privateFirestoreSessions();
     const snapshot = manager.getSnapshot();
-    if (snapshot.uid === unavailableForUid && snapshot.db !== null && !snapshot.failed) return;
+    if (failedRead) {
+      if (!failedRead.retryEligible || !['profile-read', 'attestation-read'].includes(failedRead.kind) ||
+          !['pending', 'failed'].includes(failedRead.outcome) ||
+          failedRead.lease.uid !== unavailableForUid || failedRead.lease.db !== snapshot.db ||
+          failedRead.lease.generation !== snapshot.generation) return;
+      try { failedRead.lease.assertCurrent(); } catch { return; }
+    } else if (snapshot.uid === unavailableForUid && snapshot.db !== null && !snapshot.failed) {
+      return;
+    }
     manager.retry();
     return;
   }
