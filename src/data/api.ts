@@ -24,7 +24,7 @@ import {
 import type { User } from 'firebase/auth';
 import { httpsCallable } from 'firebase/functions';
 import { db, functions, EVENT_ID, auth, firebaseConfig } from '../firebase';
-import { awaitPrivateFirestore } from '../privateFirestore';
+import { awaitPrivateFirestore, type PrivateReadOperation } from '../privateFirestore';
 import { hasOfflineAttestation, recordOfflineAttestation } from '../auth/offlineAttestationWitness';
 import { honorDisplayName, markerDisplayName } from './attribution';
 import { isReportHidden, isBanned, isExplicitWithheld } from './moderation';
@@ -83,6 +83,27 @@ async function ownProfileLease(uid: string) {
   const lease = await awaitPrivateFirestore(uid, true);
   lease.assertCurrent();
   return lease;
+}
+
+// Authority callers observe only the SDK read interval. A transaction commit,
+// bridge wait, profile write or offline-witness lock is not a private read.
+export type PrivateReadObserver = (operation: PrivateReadOperation | null) => void;
+async function observedPrivateRead<T>(lease: PrivateReadOperation['lease'], kind: PrivateReadOperation['kind'],
+  read: () => Promise<T>, observe?: PrivateReadObserver): Promise<T> {
+  return lease.guard(async () => {
+    const operation: PrivateReadOperation = { kind, lease, outcome: 'pending', retryEligible: true };
+    observe?.(operation);
+    try {
+      const result = await read();
+      operation.outcome = 'succeeded';
+      operation.retryEligible = false;
+      observe?.(null);
+      return result;
+    } catch (error) {
+      operation.outcome = 'failed';
+      throw error;
+    }
+  });
 }
 
 // Only ordering metadata in this process: each named memory database belongs to
@@ -277,12 +298,12 @@ function bootstrapProfile(u: User, now: number = Date.now()) {
  * original bug — it replaced the whole row with the Google-sourced defaults.
  * Pinned by src/data/auth-profile-race.test.ts.
  */
-export async function ensureUserProfile(u: User): Promise<void> {
+export async function ensureUserProfile(u: User, observe?: PrivateReadObserver): Promise<void> {
   const lease = await ownProfileLease(u.uid);
   const ref = rawUser(u.uid, lease.db);
   await lease.guard(() => runTransaction(lease.db, async (tx) => {
     lease.assertCurrent();
-    const snap = await lease.guard(() => tx.get(ref));
+    const snap = await observedPrivateRead(lease, 'profile-read', () => tx.get(ref), observe);
     if (snap.exists()) return;
     tx.set(ref, bootstrapProfile(u));
   }));
@@ -390,11 +411,11 @@ export async function readAdultAttestationFromCache(uid: string): Promise<number
  * but cannot change the witness; a later absence still revokes. A
  * confirmed stamp records only its boolean, never this timestamp/profile.
  */
-export async function readAdultAttestationFromServer(uid: string): Promise<number | null> {
+export async function readAdultAttestationFromServer(uid: string, observe?: PrivateReadObserver): Promise<number | null> {
   const lease = await ownProfileLease(uid);
   const readRevision = {};
   attestationWitnessRevision.set(lease.db, readRevision);
-  const snap = await lease.guard(() => getDocFromServer(rawUser(uid, lease.db)));
+  const snap = await observedPrivateRead(lease, 'attestation-read', () => getDocFromServer(rawUser(uid, lease.db)), observe);
   const v = snap.exists() ? (snap.data() as Partial<UserDoc>).attestedAdultAt : undefined;
   // Each result remains server authority for its caller. Only the latest-started
   // read or committed attest may update the offline render witness: an older
