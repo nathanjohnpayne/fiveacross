@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type SyntheticEvent, type KeyboardEvent } from 'react';
 import { EasyMixSlider } from '../EasyMixSlider';
 import {
   setClaimMode,
@@ -27,13 +27,15 @@ function ReportThresholdStepper({ value, onChange, busy }: { value: number; onCh
       <button
         className="iconbtn"
         aria-label="Decrease auto-hide threshold"
-        disabled={busy || value <= 1}
+        disabled={value <= 1}
+        aria-disabled={busy || value <= 1}
+        aria-busy={busy}
         onClick={() => onChange(Math.max(1, value - 1))}
       >
         −
       </button>
       <span style={{ minWidth: 20, textAlign: 'center' }}>{value}</span>
-      <button className="iconbtn" aria-label="Increase auto-hide threshold" disabled={busy} onClick={() => onChange(Math.max(1, value + 1))}>
+      <button className="iconbtn" aria-label="Increase auto-hide threshold" aria-disabled={busy} aria-busy={busy} onClick={() => onChange(Math.max(1, value + 1))}>
         +
       </button>
     </div>
@@ -67,8 +69,24 @@ function useSettingFeedback() {
       if (active.current) setBusy(new Set(pending.current));
     }
   };
-  const error = (key: SettingKey) => errors[key] ? <div className="error" role="alert">{errors[key]}</div> : null;
-  return { run, busy, error };
+  // aria-disabled preserves focus, but does not suppress native checkbox
+  // activation. Use the same immediate ref as the writer guard, before React
+  // publishes the busy render; prevent click/Space from showing a false toggle.
+  const checkboxPendingProps = (key: SettingKey) => ({
+    'aria-disabled': busy.has(key),
+    'aria-busy': busy.has(key),
+    onClick: (event: SyntheticEvent<HTMLInputElement>) => {
+      if (pending.current.has(key)) event.preventDefault();
+    },
+    onKeyDown: (event: KeyboardEvent<HTMLInputElement>) => {
+      if (pending.current.has(key) && (event.key === ' ' || event.key === 'Enter')) event.preventDefault();
+    },
+  });
+  const feedback = (key: SettingKey) => <>
+    {busy.has(key) && <span className="visually-hidden" role="status">{SETTING_LABELS[key]} saving…</span>}
+    {errors[key] && <div className="error" role="alert">{errors[key]}</div>}
+  </>;
+  return { run, busy, feedback, checkboxPendingProps };
 }
 
 /**
@@ -99,7 +117,7 @@ export default function GameSettings({
   pendingClaims: readonly ClaimDoc[];
   pendingClaimsLoaded: boolean;
 }) {
-  const { run, busy, error } = useSettingFeedback();
+  const { run, busy, feedback, checkboxPendingProps } = useSettingFeedback();
   const modes: ClaimMode[] = ['honor', 'proof_required', 'admin_confirmed'];
   const modeLabel: Record<ClaimMode, string> = { honor: 'Honor', proof_required: 'Proof-to-mark', admin_confirmed: 'Admin-confirmed' };
   const photoSource = event?.settings?.photoProofSource ?? 'camera_or_library';
@@ -142,14 +160,15 @@ export default function GameSettings({
                 key={m}
                 className={'seg-btn' + (event?.claimMode === m ? ' on' : '')}
                 aria-pressed={event?.claimMode === m}
-                disabled={busy.has('claimMode')}
+                aria-disabled={busy.has('claimMode')}
+                aria-busy={busy.has('claimMode')}
                 onClick={() => void run('claimMode', () => setClaimMode(m))}
               >
                 {modeLabel[m]}
               </button>
             ))}
           </div>
-          {error('claimMode')}
+          {feedback('claimMode')}
         </div>
         <div className="row">
           <div className="grow">
@@ -160,7 +179,8 @@ export default function GameSettings({
             <button
               className={'seg-btn' + (photoSource === 'camera_or_library' ? ' on' : '')}
               aria-pressed={photoSource === 'camera_or_library'}
-              disabled={busy.has('photoSource')}
+              aria-disabled={busy.has('photoSource')}
+              aria-busy={busy.has('photoSource')}
               onClick={() => void run('photoSource', () => setPhotoProofSource('camera_or_library'))}
             >
               Camera or library
@@ -168,13 +188,14 @@ export default function GameSettings({
             <button
               className={'seg-btn' + (photoSource === 'camera_only' ? ' on' : '')}
               aria-pressed={photoSource === 'camera_only'}
-              disabled={busy.has('photoSource')}
+              aria-disabled={busy.has('photoSource')}
+              aria-busy={busy.has('photoSource')}
               onClick={() => void run('photoSource', () => setPhotoProofSource('camera_only'))}
             >
               Camera only
             </button>
           </div>
-          {error('photoSource')}
+          {feedback('photoSource')}
         </div>
         <div className="row">
           <div className="grow">
@@ -186,12 +207,12 @@ export default function GameSettings({
               type="checkbox"
               checked={stripExif}
               aria-label="Strip location data"
-              disabled={busy.has('stripExif')}
+              {...checkboxPendingProps('stripExif')}
               onChange={(e) => { const next = e.target.checked; void run('stripExif', () => setStripPhotoExif(next)); }}
             />{' '}
             On
           </label>
-          {error('stripExif')}
+          {feedback('stripExif')}
         </div>
         <div className="row">
           <div className="grow">
@@ -203,12 +224,12 @@ export default function GameSettings({
               type="checkbox"
               checked={visionGate}
               aria-label="AI image screen"
-              disabled={busy.has('visionGate')}
+              {...checkboxPendingProps('visionGate')}
               onChange={(e) => { const next = e.target.checked; void run('visionGate', () => setVisionGate(next)); }}
             />{' '}
             On
           </label>
-          {error('visionGate')}
+          {feedback('visionGate')}
         </div>
         <div className="row">
           <div className="grow">
@@ -224,7 +245,7 @@ export default function GameSettings({
               type="checkbox"
               checked={forceAdult}
               aria-label="Adults only"
-              disabled={busy.has('forceAdult')}
+              {...checkboxPendingProps('forceAdult')}
               onChange={(e) => {
                 // Read the value NOW, not inside the deferred write: the confirm
                 // parks the action, and this controlled checkbox has re-rendered
@@ -235,7 +256,7 @@ export default function GameSettings({
             />{' '}
             On
           </label>
-          {error('forceAdult')}
+          {feedback('forceAdult')}
         </div>
         <div className="row">
           <div className="grow">
@@ -243,7 +264,7 @@ export default function GameSettings({
             <div className="sub">Reports needed for automatic hiding. Admin overrides stay in effect.</div>
           </div>
           <ReportThresholdStepper value={threshold} busy={busy.has('threshold')} onChange={(next) => void run('threshold', () => setReportHideThreshold(next))} />
-          {error('threshold')}
+          {feedback('threshold')}
         </div>
       </div>
 
@@ -266,14 +287,15 @@ export default function GameSettings({
             <button
               key={t.id}
               className={'chip' + (event?.defaultTheme === t.id ? ' active' : '')}
-              disabled={busy.has('theme')}
+              aria-disabled={busy.has('theme')}
+              aria-busy={busy.has('theme')}
               onClick={() => void run('theme', () => setEventTheme(t.id))}
             >
               {t.emoji} {t.label}
             </button>
           ))}
         </div>
-        {error('theme')}
+        {feedback('theme')}
       </div>
 
       {/* Last, because it is the one control here that ends the Event rather

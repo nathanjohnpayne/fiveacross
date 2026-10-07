@@ -27,13 +27,16 @@ function snapPct(ratio: number): number {
  * directly to the async Firestore value would stick), and the value is COMMITTED
  * once on release (pointer/key up, plus blur for assistive-tech value changes
  * that fire neither) — so one adjustment is one `settings.easyMixRatio` write.
- * Re-syncs to the event doc whenever the committed value changes elsewhere
- * (another admin, or first load). A stored off-grid ratio is normalized to the
+ * Committed value changes re-sync outside a focused adjustment; the latest
+ * failed fallback may follow them during focus until a newer draft/request or
+ * blur ends its ownership. A stored off-grid ratio is normalized to the
  * 5% grid for display — the native range coerces off-grid DOM values itself, so
  * the label must agree with the thumb — and the dedup ref syncs to the SNAPPED
  * value, so an untouched release never rewrites the stored setting.
  * A rejected latest release resets dedup to the committed React prop and offers an
- * identical retry. Earlier failures cannot undo a later release or new draft.
+ * identical retry. A later committed echo repairs an owned fallback without
+ * clearing the failure alert or sending a write. Earlier failures cannot undo
+ * a later release or new draft.
  */
 export function EasyMixSlider({ value, onChange }: { value: number; onChange: (ratio: number) => void | Promise<void> }) {
   // The input is deliberately UNCONTROLLED: the browser owns the thumb during
@@ -48,28 +51,32 @@ export function EasyMixSlider({ value, onChange }: { value: number; onChange: (r
   const active = useRef(true);
   const request = useRef(0);
   const draftRevision = useRef(0);
+  const failedFallback = useRef<{ request: number; draft: number } | null>(null);
   const observed = useRef(value);
   // Only committed React work can establish the failure fallback. A layout
   // effect publishes it before parent layout effects can invoke a release.
   useLayoutEffect(() => { observed.current = value; }, [value]);
-  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
+  useEffect(() => { active.current = true; return () => { active.current = false; failedFallback.current = null; }; }, []);
   // Dedup against the LAST REQUESTED ratio, not the `value` prop: `onChange`
   // writes Firestore asynchronously, so `value` stays stale until the write
   // round-trips — a second release at the same position would otherwise write
   // the same ratio again.
   const lastCommitted = useRef(snapPct(value) / 100);
   useEffect(() => {
-    // Never re-sync while the admin is MID-ADJUSTMENT (input focused): with
+    // Ordinary focused adjustments keep their local draft: with
     // several commits in flight — a rapid keyboard walk writes once per keyup
     // — the echo of write N−1 differs from the LAST requested ratio, so an
     // equality check alone misreads it as external and yanks the thumb back
     // mid-sequence (caught by the e2e keyboard walk). Echoes settle to the
-    // final write once the interaction ends.
-    if (inputRef.current && document.activeElement === inputRef.current) return;
+    // final write once the interaction ends. Only the latest failure's fallback
+    // may follow a committed echo while it still owns the unchanged draft.
+    const fallback = failedFallback.current;
+    const ownsFallback = active.current && fallback !== null && fallback.request === request.current && fallback.draft === draftRevision.current;
+    if (inputRef.current && document.activeElement === inputRef.current && !ownsFallback) return;
     const snapped = snapPct(value);
-    // Our OWN write echoing back off the subscription must not touch the
-    // thumb either — only an EXTERNAL change (another admin, or a first load
-    // with a different value) re-syncs the input and bubble.
+    // A value already represented by dedup needs no repaint. Other committed
+    // changes can resync outside an ordinary focused draft, including the
+    // still-owned latest-failure fallback.
     if (snapped / 100 === lastCommitted.current) return;
     lastCommitted.current = snapped / 100;
     setPct(snapped);
@@ -80,6 +87,7 @@ export function EasyMixSlider({ value, onChange }: { value: number; onChange: (r
   const commit = (next: number): boolean => {
     const ratio = next / 100;
     if (ratio === lastCommitted.current) return false;
+    failedFallback.current = null;
     lastCommitted.current = ratio;
     const attempt = ++request.current;
     const releasedDraft = draftRevision.current;
@@ -95,6 +103,7 @@ export function EasyMixSlider({ value, onChange }: { value: number; onChange: (r
       if (draftRevision.current === releasedDraft && inputRef.current && Number(inputRef.current.value) === next) {
         inputRef.current.value = String(committed);
         setPct(committed);
+        failedFallback.current = { request: attempt, draft: releasedDraft };
       }
       setError('Easy mix save failed. Try again.');
     };
@@ -107,6 +116,7 @@ export function EasyMixSlider({ value, onChange }: { value: number; onChange: (r
   // thumb would stay stale until remount (Codex P2, PR #410). When the commit
   // DID write, the user's own adjustment wins and its echo settles the state.
   const onBlurCommit = (next: number) => {
+    failedFallback.current = null;
     if (commit(next)) return;
     const snapped = snapPct(value);
     if (snapped / 100 === lastCommitted.current) return;
@@ -129,7 +139,7 @@ export function EasyMixSlider({ value, onChange }: { value: number; onChange: (r
         list="easymix-detents"
         aria-label="Easy mix percentage"
         aria-valuetext={squaresPhrase(pct)}
-        onChange={(e) => { draftRevision.current++; setPct(Number(e.target.value)); }}
+        onChange={(e) => { failedFallback.current = null; draftRevision.current++; setPct(Number(e.target.value)); }}
         onPointerUp={(e) => commit(Number((e.target as HTMLInputElement).value))}
         onKeyUp={(e) => commit(Number((e.target as HTMLInputElement).value))}
         onBlur={(e) => onBlurCommit(Number((e.target as HTMLInputElement).value))}

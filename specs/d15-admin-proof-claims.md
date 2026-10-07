@@ -20,6 +20,7 @@ Implements `plans/daily-cards-spec.md` § "Admin console" (the "Proof & Claims" 
 ## Acceptance criteria
 
 - The panel shows the current Claim mode, Photo proof source, Strip-location-data state, AI-image-screen state, report-hide threshold, and pending-claims count on load; all six rows are independently writable and no caption claims trust/verification language for Claim mode.
+- While a settings save is pending, the current control retains keyboard focus but cannot dispatch another write or change the displayed committed value; saving is announced and rejection keeps the existing inline retry alert. The threshold decrement remains natively disabled at 1.
 - Changing Photo proof source to Camera only calls `setPhotoProofSource('camera_only')`; stepping Auto-hide-after-reports calls `setReportHideThreshold` with the new number and never produces a value below 1.
 
 ## Test coverage
