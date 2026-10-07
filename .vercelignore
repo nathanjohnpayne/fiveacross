@@ -19,7 +19,9 @@
 # The build runs `npm run build` (Vite) on Vercel and installs its own
 # dependencies, so this is the complete set of inputs. Adding a root-level
 # build input means adding a `!` line here, and the deploy will fail loudly
-# if you forget rather than shipping something wrong.
+# if you forget rather than shipping something wrong. app-ci also builds the
+# tracked admission set in an empty directory to catch missing inputs on PRs
+# (#1674); that local compile does not verify Vercel upload traversal.
 
 # Deny everything at the repo root, recursively.
 /*
