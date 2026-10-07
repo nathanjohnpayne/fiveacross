@@ -39,6 +39,7 @@ Run the main application test/build gates CI runs. This part of [`app-ci`](.gith
 | `npm run typecheck` | `tsc --noEmit` — strict TypeScript is the primary static gate |
 | `npm test` | Game-logic unit + component tests (Vitest, jsdom) |
 | `npm run build` | Production Vite build; must succeed |
+| `node scripts/check-vercel-upload-build.mjs` | Builds only the tracked files `.vercelignore` admits, after a fresh `npm ci` in an empty directory, so a client import the Vercel mirrors would not receive fails here |
 | `npm run test:deploy` | Fixture-only deployment safety harness; never touches a live project |
 | `npm run test:ensure-java` | The shared JDK probe's own suite (`scripts/lib/ensure-java.sh`); pure shell, no emulator |
 | `npm run test:functions` | Cloud Functions notifier suite (installs `functions/` deps first; no emulator) |

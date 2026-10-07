@@ -47,7 +47,7 @@ const files = (root, prefix = '') => fs.readdirSync(root, { withFileTypes: true 
   const relative = path.join(prefix, entry.name);
   return entry.isDirectory() ? files(path.join(root, entry.name), relative) : [relative];
 });
-fs.appendFileSync(process.env.UPLOAD_FIXTURE_LOG, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), files: files(process.cwd()), githubActions: process.env.GITHUB_ACTIONS, githubSha: process.env.GITHUB_SHA }) + '\\n');
+fs.appendFileSync(process.env.UPLOAD_FIXTURE_LOG, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), files: files(process.cwd()), githubActions: process.env.GITHUB_ACTIONS, githubSha: process.env.GITHUB_SHA, targetBuild: process.env.DEPLOY_TARGET_BUILD, targetEdition: process.env.DEPLOY_TARGET_STATIC_EDITION }) + '\\n');
 if (process.argv[2] === 'ci' && process.env.UPLOAD_FAIL_INSTALL) { console.error('fixture install diagnostic'); process.exit(23); }
 if (process.argv[2] === 'run' && (process.env.UPLOAD_FAIL_BUILD || !fs.existsSync('functions/src/publicHostnameFields.ts'))) { console.error('Could not resolve "../functions/src/publicHostnameFields.ts" from "src/entry.js"'); process.exit(29); }
 if (process.argv[2] === 'ci') {
@@ -81,6 +81,17 @@ describe('tracked Vercel upload-set build', () => {
     expect(calls[0]).toMatchObject({ githubActions: 'true', githubSha: 'fixture-head' });
     expect(result.stdout).toContain('functions/src/publicHostnameFields.ts');
     expect(readdirSync(f.temporary)).toEqual([]);
+  });
+
+  it('establishes the generic compile-only build environment outside GitHub Actions', () => {
+    const f = fixture();
+    const result = f.run({ GITHUB_ACTIONS: undefined, DEPLOY_TARGET_BUILD: '1', DEPLOY_TARGET_STATIC_EDITION: 'fixture-edition' });
+    expect(result.status, result.stderr).toBe(0);
+    for (const call of f.calls()) {
+      expect(call).toMatchObject({ githubActions: 'true', githubSha: 'fixture-head' });
+      expect(call.targetBuild).toBeUndefined();
+      expect(call.targetEdition).toBeUndefined();
+    }
   });
 
   it('does not let .gitignore hide tracked inputs or copy untracked checkout artifacts', () => {

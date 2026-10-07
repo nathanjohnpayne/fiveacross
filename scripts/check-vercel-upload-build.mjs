@@ -66,11 +66,17 @@ export function checkUploadBuild(root = process.cwd()) {
   for (const entry of entries) {
     if (!entry.path.startsWith('src/') && !entry.path.startsWith('public/')) console.log(JSON.stringify(entry.path));
   }
+  // Always app-ci's generic compile-only build, wherever this runs: the
+  // blank-key guard exempts it via GITHUB_ACTIONS, and stripping the target
+  // variables keeps a deploy-shaped target build from being selected instead.
+  const env = { ...process.env, GITHUB_ACTIONS: 'true' };
+  delete env.DEPLOY_TARGET_BUILD;
+  delete env.DEPLOY_TARGET_STATIC_EDITION;
   const stage = mkdtempSync(join(tmpdir(), 'fiveacross-upload-build-'));
   try {
     for (const entry of entries) copyEntry(root, stage, entry);
     for (const args of [['ci'], ['run', 'build']]) {
-      const child = spawnSync('npm', args, { cwd: stage, env: process.env, stdio: 'inherit' });
+      const child = spawnSync('npm', args, { cwd: stage, env, stdio: 'inherit' });
       if (child.error) throw child.error;
       if (child.status !== 0) {
         console.error(`Vercel upload build: npm ${args.join(' ')} failed (${child.signal ?? child.status})`);
