@@ -19,6 +19,17 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('proof object URL lifetime', () => {
+  it('publishes a selected group only after its winner and fallback reads settle', async () => {
+    let winner!: (blob: Blob) => void;
+    M.load.mockImplementation((requested: string) => requested === path
+      ? new Promise<Blob>(resolve => { winner = resolve; }) : Promise.resolve(new Blob(['fallback'])));
+    const { result } = renderHook(() => useProofMediaUrls([path, 'proofs/A/alice/fallback.jpg'], 'alice'));
+    await act(async () => {});
+    expect(result.current.urls.size).toBe(0);
+    await act(async () => winner(new Blob(['winner'])));
+    expect(result.current.urls.size).toBe(2);
+  });
+
   it('renders shared media during recovery without relaxing actor retirement', async () => {
     M.session = { ...M.session, recoveryRequired: true };
     const { result, rerender } = renderHook(() => useProofMediaUrls([path], 'alice'));

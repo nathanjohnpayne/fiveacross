@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { loadProofMediaBlob } from './proofMedia';
+import { createProofMediaReads, loadProofMediaBlob } from './proofMedia';
 
 const M = vi.hoisted(() => ({
   eventId: 'A', storage: {}, getBlob: vi.fn(), assertCurrent: vi.fn(), capture: vi.fn(),
@@ -21,7 +21,7 @@ describe('authenticated proof media reads (#1532)', () => {
     expect(blob.size).toBe(5);
     expect(M.capture).toHaveBeenCalledExactlyOnceWith(true);
     expect(M.getBlob).toHaveBeenCalledExactlyOnceWith({ storage: M.storage, path: 'proofs/A/alice/p.jpg' }, 12 * 1024 * 1024);
-    expect(M.assertCurrent).toHaveBeenCalledOnce();
+    expect(M.assertCurrent).toHaveBeenCalledTimes(2);
   });
 
   it.each(['storage/unauthorized', 'storage/object-not-found'])('propagates %s without a bearer fallback', async code => {
@@ -46,10 +46,38 @@ describe('authenticated proof media reads (#1532)', () => {
   });
 
   it('bounds a stalled SDK read', async () => {
-    vi.useFakeTimers(); M.getBlob.mockReturnValue(new Promise(() => {}));
+    vi.useFakeTimers();
+    let finish!: (blob: Blob) => void;
+    M.getBlob.mockReturnValue(new Promise<Blob>(resolve => { finish = resolve; }));
     const result = loadProofMediaBlob('proofs/A/alice/p.jpg');
     const check = expect(result).rejects.toThrow('unavailable');
     await vi.advanceTimersByTimeAsync(8_000);
     await check;
+    finish(new Blob(['late'])); await Promise.resolve();
+  });
+
+  it('shares an unfinished request across re-entry and bounds queued work across transports', async () => {
+    const read = createProofMediaReads(1, 1), transport = {};
+    let finish!: (blob: Blob) => void;
+    const start = vi.fn(() => new Promise<Blob>(resolve => { finish = resolve; }));
+    const first = read(transport, 'one', start);
+    expect(read(transport, 'one', start)).toBe(first);
+    const queuedStart = vi.fn(async () => new Blob(['two']));
+    const second = read({}, 'two', queuedStart);
+    await expect(read({}, 'three', queuedStart)).rejects.toThrow('busy');
+    await Promise.resolve();
+    expect(start).toHaveBeenCalledOnce(); expect(queuedStart).not.toHaveBeenCalled();
+    finish(new Blob(['one'])); await first; await second;
+    expect(queuedStart).toHaveBeenCalledOnce();
+  });
+
+  it('expires queued work without starting another SDK request', async () => {
+    vi.useFakeTimers(); const read = createProofMediaReads(1, 1);
+    let finish!: (blob: Blob) => void;
+    const first = read({}, 'one', () => new Promise<Blob>(resolve => { finish = resolve; }));
+    const start = vi.fn(async () => new Blob(['unused']));
+    const queued = expect(read({}, 'two', start)).rejects.toThrow('unavailable');
+    await vi.advanceTimersByTimeAsync(8_000); await queued;
+    expect(start).not.toHaveBeenCalled(); finish(new Blob()); await first;
   });
 });

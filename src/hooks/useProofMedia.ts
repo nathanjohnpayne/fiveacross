@@ -16,14 +16,15 @@ export function useProofMediaUrls(paths: readonly (string | null | undefined)[],
     if (!ready) return;
     let current = true;
     const urls = new Map<string, string>();
-    for (const path of JSON.parse(pathKey) as string[]) {
-      void loadProofMediaBlob(path).then(blob => {
+    const reads = (JSON.parse(pathKey) as string[]).map(path =>
+      loadProofMediaBlob(path).then(blob => {
         if (!current) return;
         const url = URL.createObjectURL(blob);
         urls.set(path, url);
-        setResult({ key, urls: new Map(urls) });
-      }).catch(() => { /* Missing, denied or unavailable: withhold media. */ });
-    }
+      }).catch(() => { /* Missing, denied or unavailable: withhold media. */ }));
+    // Publish the selected group atomically. Pending winner reads must not
+    // briefly become a highlights fallback or an incomplete co-winner award.
+    void Promise.all(reads).then(() => { if (current) setResult({ key, urls: new Map(urls) }); });
     return () => {
       current = false;
       for (const url of urls.values()) URL.revokeObjectURL(url);
