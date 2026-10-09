@@ -2,7 +2,7 @@
 spec_id: posthog-source-maps
 status: proposed
 tested: false
-reason: Private uploads and fresh deployed exception symbolication still require operational acceptance.
+reason: Reviewed production deployment and fresh exception symbolication still require operational acceptance.
 ---
 
 # Private source maps
