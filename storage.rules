@@ -16,16 +16,16 @@ service firebase.storage {
     // phase the archive snapshot is taken during, so media that could still land
     // through it would be media the record never sees (Codex P1, PR #1139).
     //
-    // Two Firestore accesses, which is the whole per-evaluation budget Storage
-    // Rules allow. Reading the document ONCE and passing its data to
-    // `closedToPlay` is what keeps it at two: unlike `firestore.rules`, Storage
+    // At most two Firestore accesses, the per-evaluation Storage budget.
+    // One Event fetch serves the freeze and admission; one membership fetch
+    // is needed only for enforced non-Admins. Storage
     // Rules make no promise of deduplicating a repeated `firestore.get()` on the
     // same path, so a second inline read of the same document could spend the
     // budget and fail the write closed. The `'active'` / `false` defaults keep an
     // Event document carrying neither key OPEN.
     //
     // A MISSING Event document is CLOSED for proof media (see
-    // `eventOpenForProofMedia` below): the Firestore half of a Proof already
+    // `openAndAdmittedProofMedia` below): the Firestore half of a Proof already
     // requires the Event (`admitted()` reads it), so media under an Event id
     // that names no Event is media no Proof document can ever point at — and a
     // server-side scanner would otherwise spend work on it.
@@ -94,8 +94,8 @@ service firebase.storage {
     // Storage Rules allow two Firestore accesses per evaluation and make no
     // promise of deduplicating a repeated `firestore.get()` on one path, so a
     // helper that read its own would spend three beside the `exists()` and fail
-    // every legitimate delete closed. That threading is what #806 has to reclaim
-    // (`specs/event-membership.md` § "Storage has zero headroom").
+    // every legitimate delete closed. D10 retains this complete delete budget
+    // (`specs/event-membership.md`): orphan cleanup does not add admission.
     //
     // `{file}` is `<proofId>.<ext>` — `uploadProofMedia` writes that shape and
     // only that shape (`src/data/storage.ts`), and `firestore.rules` pins the
@@ -130,7 +130,7 @@ service firebase.storage {
     // costs the app nothing: the OWNER's orphan delete never reads the Event at
     // all, so a legacy Event — or media under an Event document that was never
     // written — stays clearable by the party that uploaded it: a delete never
-    // needs the Event to exist (an UPLOAD does — `eventOpenForProofMedia`). Media
+    // needs the Event to exist (an UPLOAD does — `openAndAdmittedProofMedia`). Media
     // whose Proof document exists under a missing Event document is denied one
     // step earlier still, by `proofDocMissing` itself.
     function proofMediaDeleteOk(event) {
@@ -170,13 +170,19 @@ service firebase.storage {
       return (file.matches('^[A-Za-z0-9-]{1,40}[.]jpg$') && okJpeg())
         || (file.matches('^[A-Za-z0-9-]{1,40}[.](webm|m4a)$') && okAudio());
     }
-    // Proof media lands only under an Event that EXISTS and is open. The
-    // `exists()` answers the first question and gates the `get()` for the
-    // second, so the arm still spends at most the two Firestore accesses
-    // Storage Rules allow (see `closedToPlay` above).
-    function eventOpenForProofMedia(eventId) {
-      return firestore.exists(/databases/(default)/documents/events/$(eventId))
-        && !closedToPlay(firestore.get(/databases/(default)/documents/events/$(eventId)).data);
+    // Reads and creates spend ONE Event get, threaded through admission and
+    // the upload freeze, plus at most ONE membership get. A missing Event
+    // errors to deny. D-A precedes the membership lookup so a backfill-missed
+    // Admin is admitted without touching a missing membership document.
+    function admittedProofMedia(event, eventId) {
+      return event.get('membershipEnforcement', 'off') != 'enforced'
+        // TRANSITIONAL D-A: remove with the Firestore admission disjunct.
+        || request.auth.uid in event.get('admins', [])
+        || firestore.get(/databases/(default)/documents/events/$(eventId)/memberships/$(request.auth.uid))
+             .data.status == 'active';
+    }
+    function openAndAdmittedProofMedia(event, eventId) {
+      return !closedToPlay(event) && admittedProofMedia(event, eventId);
     }
     function okAudio() {
       return request.resource.contentType.matches('audio/.*')
@@ -192,8 +198,11 @@ service firebase.storage {
     }
 
     // Proof media (Phase 1). Path scoped to the uploading user.
+    // A missing Event now denies even absent/off reads. Proof publication
+    // requires an Event; leftover orphan cleanup uses the separate delete arm.
     match /proofs/{eventId}/{uid}/{file} {
-      allow read: if signedIn();
+      allow read: if signedIn() && admittedProofMedia(
+        firestore.get(/databases/(default)/documents/events/$(eventId)).data, eventId);
       // Content-validate uploads, but keep delete separate: a delete carries no
       // request.resource, so okJpeg()/okAudio() would reject it and leave the
       // blob orphaned when deleteProof() removes the doc. An ORPHANED object —
@@ -235,7 +244,7 @@ service firebase.storage {
       // `firestore.rules` refuses the Proof create while its
       // `proofStorageDeletes` row stands, and asking that question HERE would be
       // a third Firestore access this arm has no budget for
-      // (`eventOpenForProofMedia` already spends both).
+      // (`openAndAdmittedProofMedia` already spends both).
       //
       // `resource == null` IS THE PREDICATE, not an `allow create` without
       // `update`. The two are supposed to be equivalent — `create` is documented
@@ -268,7 +277,12 @@ service firebase.storage {
       allow create, update: if isOwner(uid)
         && resource == null
         && okProofMedia(file)
-        && eventOpenForProofMedia(eventId);
+        && openAndAdmittedProofMedia(
+          firestore.get(/databases/(default)/documents/events/$(eventId)).data, eventId);
+      // D10: orphan cleanup is exempt from admission. Proof-document deletion
+      // is admission-gated in Firestore; this arm never removes live Proof
+      // media and grants no read or create authority. Preserve its one/two
+      // accesses (Proof exists + optional Event get to check whether any non-owner is on the Admin roster).
       allow delete: if mayDeleteProofMedia(eventId, uid, file);
     }
 

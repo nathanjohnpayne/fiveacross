@@ -377,7 +377,15 @@ describe('storage.rules — private bug-report evidence', () => {
   });
 });
 
-describe('Storage ↔ Firestore Proof pinning (lockstep)', () => {
+describe.each(['off', 'enforced'] as const)('Storage ↔ Firestore Proof pinning (lockstep, %s)', (enforcement) => {
+  beforeEach(async () => {
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await setDoc(doc(ctx.firestore(), `events/${EVENT}`), {
+        admins: [ADMIN], membershipEnforcement: enforcement,
+      });
+      await setDoc(doc(ctx.firestore(), `events/${EVENT}/memberships/${OWNER}`), { status: 'active' });
+    });
+  });
   // A Proof object that satisfies storage.rules must also satisfy the Firestore
   // `proofs` create rule: identical proofs/{eventId}/{uid}/{proofId}.{ext} path.
   const mediaURL = (ext: string) =>
@@ -437,8 +445,8 @@ describe('Storage ↔ Firestore Proof pinning (lockstep)', () => {
   });
 
   it('rejects a mismatched proof path: Storage accepts the object, but Firestore denies pinning it to a different proof', async () => {
-    // storage.rules only checks ownership + content type on the proofs path
-    // (the {file} segment is a free wildcard), so an object NOT named after
+    // Storage validates the upload filename without tying it to a Proof
+    // document id, so an object NOT named after
     // the target proofId still uploads successfully. The Firestore create
     // rule additionally pins storagePath to the exact
     // proofs/{eventId}/{uid}/{proofId}.{ext} object, so pointing the PROOF
@@ -455,4 +463,89 @@ describe('Storage ↔ Firestore Proof pinning (lockstep)', () => {
       ),
     );
   });
+});
+
+
+// D10 deliberately exempts orphan cleanup from content admission. The matrix
+// exercises both decisions independently; no identity may delete live media.
+describe.each(['enforced', 'off', undefined] as const)('Storage admission (%s)', enforcement => {
+  beforeEach(async () => {
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await setDoc(doc(ctx.firestore(), `events/${EVENT}`), {
+        admins: [ADMIN], ...(enforcement === undefined ? {} : { membershipEnforcement: enforcement }),
+      });
+      await setDoc(doc(ctx.firestore(), 'events/foreign'), { membershipEnforcement: 'enforced', admins: [] });
+      await setDoc(doc(ctx.firestore(), `events/${EVENT}/memberships/${OWNER}`), { status: 'active' });
+      await setDoc(doc(ctx.firestore(), `events/foreign/memberships/${OTHER}`), { status: 'active' });
+      await setDoc(doc(ctx.firestore(), `events/${EVENT}/memberships/revoked`), { status: 'revoked' });
+      await put(ctx, photoPath, TINY, IMAGE);
+      await put(ctx, 'proofs/foreign/bob/a.jpg', TINY, IMAGE);
+    });
+  });
+
+  it.each([
+    [OWNER, true], [OTHER, false], ['stranger', false], [ADMIN, true], ['revoked', false],
+  ] as const)('%s reads and creates only when admitted; updates always fail', async (uid, member) => {
+    const ctx = testEnv.authenticatedContext(uid);
+    const check = enforcement !== 'enforced' || member ? assertSucceeds : assertFails;
+    await check(getMetadata(ref(ctx.storage(), photoPath)));
+    const path = `proofs/${EVENT}/${uid}/new.jpg`;
+    await check(put(ctx, path, TINY, IMAGE));
+    // Seed as server so this denial is an UPDATE even for a non-member.
+    await testEnv.withSecurityRulesDisabled(server => put(server, path, TINY, IMAGE));
+    await assertFails(put(ctx, path, TINY, IMAGE));
+    // Foreign Event membership never grants access to this Event.
+    if (uid === OWNER) await assertFails(getMetadata(ref(ctx.storage(), 'proofs/foreign/bob/a.jpg')));
+  });
+
+  it.each([OWNER, OTHER, 'stranger', ADMIN, 'revoked'])('%s may clear their own orphan without admission', async uid => {
+    const path = `proofs/${EVENT}/${uid}/orphan.jpg`;
+    await testEnv.withSecurityRulesDisabled(ctx => put(ctx, path, TINY, IMAGE));
+    await assertSucceeds(deleteObject(ref(testEnv.authenticatedContext(uid).storage(), path)));
+  });
+
+  it('only the owner or roster Admin may delete another owner’s orphan', async () => {
+    for (const uid of ['stranger', 'revoked', OTHER]) {
+      await assertFails(deleteObject(ref(testEnv.authenticatedContext(uid).storage(), photoPath)));
+    }
+    await assertSucceeds(deleteObject(ref(testEnv.authenticatedContext(ADMIN).storage(), photoPath)));
+  });
+
+  it('D-A still bypasses a revoked Admin membership for content reads and creates', async () => {
+    await testEnv.withSecurityRulesDisabled(ctx =>
+      setDoc(doc(ctx.firestore(), `events/${EVENT}/memberships/${ADMIN}`), { status: 'revoked' }));
+    const admin = testEnv.authenticatedContext(ADMIN);
+    await assertSucceeds(getMetadata(ref(admin.storage(), photoPath)));
+    await assertSucceeds(put(admin, `proofs/${EVENT}/${ADMIN}/admin.jpg`, TINY, IMAGE));
+  });
+
+  it('every identity, including an Admin owner, is denied a live-Proof delete', async () => {
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await setDoc(doc(ctx.firestore(), `events/${EVENT}/proofs/${PROOF}`), { uid: OWNER });
+      await setDoc(doc(ctx.firestore(), `events/${EVENT}/proofs/admin`), { uid: ADMIN });
+      await put(ctx, `proofs/${EVENT}/${ADMIN}/admin.jpg`, TINY, IMAGE);
+    });
+    for (const uid of [OWNER, OTHER, 'stranger', ADMIN, 'revoked']) {
+      await assertFails(deleteObject(ref(testEnv.authenticatedContext(uid).storage(), photoPath)));
+    }
+    await assertFails(deleteObject(ref(testEnv.authenticatedContext(ADMIN).storage(), `proofs/${EVENT}/${ADMIN}/admin.jpg`)));
+  });
+
+  it('denies unauthenticated read, upload and orphan deletion', async () => {
+    const ctx = testEnv.unauthenticatedContext();
+    await assertFails(getMetadata(ref(ctx.storage(), photoPath)));
+    await assertFails(put(ctx, `proofs/${EVENT}/${OWNER}/new.jpg`, TINY, IMAGE));
+    await assertFails(deleteObject(ref(ctx.storage(), photoPath)));
+  });
+});
+
+
+it('missing Event denies media reads/creates but retains the owner orphan cleanup path', async () => {
+  const path = `proofs/missing/${OWNER}/orphan.jpg`;
+  await testEnv.withSecurityRulesDisabled(ctx => put(ctx, path, TINY, IMAGE));
+  const owner = testEnv.authenticatedContext(OWNER);
+  await assertFails(getMetadata(ref(owner.storage(), path)));
+  await assertFails(put(owner, `proofs/missing/${OWNER}/new.jpg`, TINY, IMAGE));
+  await assertFails(deleteObject(ref(testEnv.authenticatedContext(ADMIN).storage(), path)));
+  await assertSucceeds(deleteObject(ref(owner.storage(), path)));
 });

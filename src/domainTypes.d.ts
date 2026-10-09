@@ -1811,11 +1811,12 @@ export interface OccasionDef {
 // § "Rules / indexes / hosting implications"). These types describe the
 // separate, non-self-writable record that CAN authorize it.
 //
-// SCOPE. Ticket #802 ships the vocabulary and the pure predicates only. No
-// rule enforces any of this yet (#804 Firestore, #806 Storage), nothing writes
-// a membership yet (#803 invitations, #805 backfill), and no Event is enforced
-// (`membershipEnforcement` is absent everywhere). The contract lands first
-// precisely so those five tickets implement one shape rather than five.
+// SCOPE. Ticket #802 introduced this vocabulary and the pure predicates.
+// Firestore admission is implemented by #804; #1380 gates Storage reads and
+// creates within its two-access budget, with the D10 orphan-delete exemption.
+// Invitation grants and backfill implement the same record contract. Source
+// support does not prove live backfill or an Event enforcement flip: those
+// operational steps require their own acceptance evidence.
 
 /**
  * What a membership grant conferred. Admin is the ONLY privileged role today
