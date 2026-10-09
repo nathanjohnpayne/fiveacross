@@ -9,7 +9,9 @@ export async function loadProofMediaBlob(storagePath: string): Promise<Blob> {
     || !/^proofs\/[^/]+\/[^/]+\/[^/]+$/.test(storagePath)) {
     throw new Error('Invalid proof media path.');
   }
-  const lease = capturePrivateFirestore();
+  // Shared Feed media may render during attended recovery, like its reciprocal
+  // block filter. This memory-only transport reads no quarantined private docs.
+  const lease = capturePrivateFirestore(true);
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const blob = await Promise.race([

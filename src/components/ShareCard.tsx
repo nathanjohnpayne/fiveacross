@@ -534,8 +534,8 @@ function buildFarewellCardNode(data: FarewellShareCardData): HTMLDivElement {
 }
 
 /** How long `img.decode()` may take before the render falls back to the
- *  photo-less composition (#661) — mirrors `HERO_PHOTO_FETCH_TIMEOUT_MS` in
- *  FarewellPodium.tsx: the fetch that produces the hero's object URL is
+ *  photo-less composition (#661) — matches the SDK download bound in
+ *  loadProofMediaBlob(): the download that produces the hero's object URL is
  *  already bounded, but a stalled decode of an already-fetched image would
  *  otherwise hang this await forever, wedging both the warmed promise and a
  *  tapped share action behind an unresolvable render. */

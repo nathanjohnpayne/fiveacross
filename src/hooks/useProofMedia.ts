@@ -10,7 +10,7 @@ export function useProofMediaUrls(paths: readonly (string | null | undefined)[],
   const pathKey = JSON.stringify([...new Set(paths.filter((path): path is string => !!path))]);
   const key = JSON.stringify([scope, pathKey]);
   const [result, setResult] = useState<{ key: string; urls: ReadonlyMap<string, string> }>();
-  const ready = !!session.db && !session.recoveryRequired && !session.failed
+  const ready = !!session.db && !session.failed
     && !!session.uid && (viewerUid === undefined || viewerUid === session.uid);
   useEffect(() => {
     if (!ready) return;

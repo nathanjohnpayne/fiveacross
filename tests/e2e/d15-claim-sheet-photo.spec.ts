@@ -16,7 +16,7 @@
 // closed that with the flag-gated canonicalize/resolve pair in
 // `src/data/proofMediaUrl.ts` — the emulator download URL is rewritten to its
 // production-shaped twin at proof-write (so the regex is exercised FOR REAL,
-// not relaxed) and inverted at render. The deeper media assertions — the
+// not relaxed) and downloaded through the authenticated SDK at render. The deeper media assertions — the
 // stored URL against the literal rules regex, the rendered <img>/<audio> src
 // against the emulator origin, decoded pixels, and the audio half via the fake
 // mic — live in `tests/e2e/d15-proof-media.spec.ts`; this case just proves the

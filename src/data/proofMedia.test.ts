@@ -19,6 +19,7 @@ describe('authenticated proof media reads (#1532)', () => {
   it('downloads bounded bytes from the captured account’s Storage ref', async () => {
     const blob = await loadProofMediaBlob('proofs/A/alice/p.jpg');
     expect(blob.size).toBe(5);
+    expect(M.capture).toHaveBeenCalledExactlyOnceWith(true);
     expect(M.getBlob).toHaveBeenCalledExactlyOnceWith({ storage: M.storage, path: 'proofs/A/alice/p.jpg' }, 12 * 1024 * 1024);
     expect(M.assertCurrent).toHaveBeenCalledOnce();
   });

@@ -69,7 +69,8 @@ export function retryPrivateFirestoreSession(unavailableForUid?: string, failedR
 function privateUnavailable() { return Object.assign(new Error('Private session unavailable.'), { code: 'unavailable' }); }
 
 /** Capture once before awaiting. Gameplay bootstrap may read its own profile and
- * reciprocal block filter in memory during recovery; ordinary private UI
+ * reciprocal block filter in memory during recovery. Shared proof-media bytes
+ * also use this memory-only authenticated transport; ordinary private UI
  * and Admin actions remain closed. */
 export function capturePrivateFirestore(allowRecovery = false) {
   const lease = privateFirestoreSessions().capture(allowRecovery);

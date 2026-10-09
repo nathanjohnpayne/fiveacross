@@ -19,6 +19,16 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('proof object URL lifetime', () => {
+  it('renders shared media during recovery without relaxing actor retirement', async () => {
+    M.session = { ...M.session, recoveryRequired: true };
+    const { result, rerender } = renderHook(() => useProofMediaUrls([path], 'alice'));
+    await waitFor(() => expect(result.current.urls.get(path)).toBe('blob:photo'));
+    M.session = { ...M.session, uid: 'bob', generation: 2 }; rerender();
+    expect(result.current.urls.size).toBe(0);
+    expect(M.revoke).toHaveBeenCalledWith('blob:photo');
+    expect(M.load).toHaveBeenCalledOnce();
+  });
+
   it('owns URLs until replacement or unmount and does not reload unchanged paths', async () => {
     const { result, rerender, unmount } = renderHook(({ paths }) => useProofMediaUrls(paths, 'alice'), { initialProps: { paths: [path] } });
     await waitFor(() => expect(result.current.urls.get(path)).toBe('blob:photo'));

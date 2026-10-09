@@ -9,14 +9,10 @@
 // locally, and every existing spec routed around it via the honor pledge or a
 // text Callout.
 //
-// `src/data/proofMediaUrl.ts` closes that gap WITHOUT relaxing the rule: under
-// the e2e build only, the emulator download URL is canonicalized to its
-// production-shaped twin at proof-write, so the regex is exercised FOR REAL, and
-// inverted at render so the Feed loads the bytes back from the emulator. Both
-// halves are asserted below — the stored value against the literal rules regex,
-// and the rendered `<img>`/`<audio>` `src` against the emulator origin — because
-// a bridge that only satisfied one half would either 403 again or render a
-// broken image.
+// `src/data/proofMediaUrl.ts` preserves the production-shaped write contract
+// in the emulator build. Renderers then download authenticated SDK bytes from
+// storagePath and create app-origin blob URLs. The cases below pin both the
+// canonical persisted URL and real decoded media through that SDK read path.
 //
 // The fake camera/mic Chromium flags below are what make the AUDIO half
 // drivable at all: `ProofSheet.startRec` calls `navigator.mediaDevices
@@ -26,7 +22,7 @@ import { test, expect, type Page } from '@playwright/test';
 import { seedDailyEvent, dismissCoach, readDealtDayGrid } from './support/daily';
 import { joinViaSharedLink, signedInUid } from './support/join';
 import { waitForBoardServerConfirmed } from './support/board';
-import { EVENT_ID, STORAGE_PORT } from './support/env';
+import { EVENT_ID } from './support/env';
 
 // Worker-scoped, so it must sit at file level (Playwright forbids launchOptions
 // inside a describe). Harmless for the photo case, load-bearing for the audio one.
@@ -47,7 +43,6 @@ const TINY_PNG = Buffer.from(
   'base64',
 );
 
-const EMULATOR_DOWNLOAD_ORIGIN = `http://127.0.0.1:${STORAGE_PORT}/`;
 
 /** The LITERAL `mediaURL` shape firestore.rules' proof-create rule pins, bound
  *  to one proof's own event/uid/id. Kept in the spec verbatim so a rules edit
@@ -114,7 +109,7 @@ function captureSubmitAlert(page: Page): () => string | null {
 }
 
 test.describe('photo/audio Proof media round trip', () => {
-  test('a photo Proof commits a production-canonical mediaURL and renders from the emulator', async ({
+  test('a photo Proof commits a production-canonical mediaURL and renders authenticated SDK bytes', async ({
     page,
   }) => {
     const { testEnv } = await seedDailyEvent();
@@ -148,12 +143,12 @@ test.describe('photo/audio Proof media round trip', () => {
       // just makes the thing under test legible at the assertion site.
       expect(stored.mediaURL).toMatch(rulesMediaUrlPattern(uid, stored.id, 'jpg'));
 
-      // The render half: the Feed points the <img> back at the emulator that
-      // actually holds the bytes, and the browser really decodes them.
+      // The Feed renders an object URL from authenticated SDK bytes; the
+      // browser must still decode the real emulator-backed media.
       await page.locator('nav.tabs a', { hasText: 'Feed' }).click();
       const photo = page.locator('img.proof-media');
       await expect(photo).toBeVisible({ timeout: 15_000 });
-      expect(await photo.getAttribute('src')).toContain(EMULATOR_DOWNLOAD_ORIGIN);
+      expect(await photo.getAttribute('src')).toMatch(/^blob:/);
       await expect
         .poll(async () => photo.evaluate((el: HTMLImageElement) => el.naturalWidth), {
           timeout: 15_000,
@@ -208,9 +203,9 @@ test.describe('photo/audio Proof media round trip', () => {
       const audio = page.locator('.proof-audio');
       await expect(audio).toBeVisible({ timeout: 15_000 });
       const audioSrc = await page.locator('.proof-audio audio').getAttribute('src');
-      expect(audioSrc).toContain(EMULATOR_DOWNLOAD_ORIGIN);
+      expect(audioSrc).toMatch(/^blob:/);
       // Real, decodable audio: the element reports a finite duration only once
-      // the browser has fetched and parsed the clip from the emulator.
+      // the browser has parsed the SDK-downloaded clip from its object URL.
       await expect
         .poll(
           async () =>
