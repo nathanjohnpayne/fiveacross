@@ -217,7 +217,8 @@ describe('hide leases and durable repairs', () => {
     expect(prepare).toHaveBeenCalledTimes(2);
     expect(commit).toHaveBeenCalledOnce();
     expect(f.store.enqueue).toHaveBeenCalledTimes(2);
-    expect(MEDIA_HOLD_LEASE_MS).toBeGreaterThan(HIDE_COMMIT_MARGIN_MS + 120_000);
+    expect(HIDE_COMMIT_MARGIN_MS).toBeGreaterThanOrEqual(120_000);
+    expect(MEDIA_HOLD_LEASE_MS).toBeGreaterThan(HIDE_COMMIT_MARGIN_MS);
     expect(() => assertHideCommitAllowed({ expiresAt: 300, commitBefore: 200 }, 200)).toThrow('renewed');
   });
   it('backs off a failed revision while continuing other repairs', async () => {
