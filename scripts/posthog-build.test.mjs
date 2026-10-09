@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const roots = [];
 afterEach(() => roots.splice(0).forEach(root => rmSync(root, { recursive: true, force: true })));
-function fixture({ failUpload = false, strayMap = false } = {}) {
+function fixture({ failUpload = false, strayMap = false, visibleAppMap = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'private-maps-build-')); roots.push(root);
   mkdirSync(join(root, 'node_modules', '.bin'), { recursive: true });
   for (const name of readdirSync(join(repo, 'node_modules'))) {
@@ -16,7 +16,8 @@ function fixture({ failUpload = false, strayMap = false } = {}) {
   }
   for (const name of ['src', 'functions']) symlinkSync(join(repo, name), join(root, name));
   for (const name of ['package.json', 'tsconfig.json']) copyFileSync(join(repo, name), join(root, name));
-  const config = readFileSync(join(repo, 'vite.config.ts'), 'utf8').replace("srcDir: 'src'", "srcDir: 'fixture-src'");
+  let config = readFileSync(join(repo, 'vite.config.ts'), 'utf8').replace("srcDir: 'src'", "srcDir: 'fixture-src'");
+  if (visibleAppMap) config = config.replace('...(maps ? [mapInjection(maps)] : []),', '...(maps ? [mapInjection(maps, true)] : []),');
   writeFileSync(join(root, 'vite.config.ts'), config);
   writeFileSync(join(root, 'index.html'), readFileSync(join(repo, 'index.html'), 'utf8').replace('/src/entry.tsx', '/entry.ts'));
   writeFileSync(join(root, 'entry.ts'), "import {registerSW} from 'virtual:pwa-register'; registerSW(); new Worker(new URL('./fixture-worker.ts', import.meta.url), {type:'module'}); console.log('fixture app');");
@@ -59,6 +60,11 @@ describe('private production source-map pipeline', () => {
     const f = fixture({ failUpload: true }); expect(f.result.status).not.toBe(0);
     expect(f.result.stderr).toContain('PostHog upload failed (23)');
     expect(f.files().some(p => p.endsWith('.map'))).toBe(true);
+  }, 40_000);
+  it('refuses a visible map URL rather than rewriting an already-hashed asset', () => {
+    const f = fixture({ visibleAppMap: true }); expect(f.result.status).not.toBe(0);
+    expect(f.result.stderr).toContain('Unexpected source-map URL in a hashed asset');
+    expect(() => readFileSync(join(f.root, 'upload.json'))).toThrow();
   }, 40_000);
   it('refuses a public map before uploading any artifact', () => {
     const f = fixture({ strayMap: true }); expect(f.result.status).not.toBe(0);

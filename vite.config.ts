@@ -205,7 +205,10 @@ function privateSourceMapGuard(options: ReturnType<typeof posthogSourceMapOption
         for (const path of chunks) {
           const code = readFileSync(path, 'utf8');
           const hidden = code.replace(/^\/\/# sourceMappingURL=.*$/gm, '');
-          if (hidden !== code) writeFileSync(path, hidden);
+          if (hidden !== code) {
+            if (path !== resolvePath(outDir, 'sw.js')) throw new Error('Unexpected source-map URL in a hashed asset');
+            writeFileSync(path, hidden);
+          }
         }
         await new Promise<void>((done, reject) => {
           const child = spawn(resolvePath('node_modules/.bin/posthog-cli'), [
