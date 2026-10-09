@@ -253,3 +253,7 @@ A `'hidden'` Proof carrying no marker is NOT published by a Confirm either: sinc
 - **No stat or Mark effect** (ADR 0001). Hiding is not authorization; `recomputeStats` is neither re-added nor repurposed.
 - **No raciness hiding** (ADR 0004), and no Prompt-side Vision path — SafeSearch scans proof media, and Prompts carry no media.
 - **No producer POLICY change.** What SafeSearch scores as extreme, `moderateProof`'s `ENABLE_VISION_MODERATION` gate, and its region pin are untouched; enabling the Cloud Vision API and flipping that flag remain #132's human provisioning. What changed is only where the verdict is written — never onto a Proof that does not exist — and that the safety hold is written with it.
+
+## Thumbnail hold reconciliation (#1524)
+
+A successful thumbnail save starts with `faHold: true` and immediately reconciles the current Proof, including on redelivery and when the runtime Vision gate is off. This closes the ordering gap where the Proof-write listing preceded the thumbnail. Save/decode failures remain best effort, but a hold-reconciliation failure escapes so the Storage event retries. Existing Vision verdict and hide policy is unchanged.

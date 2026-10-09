@@ -34,6 +34,7 @@ export interface ProofMediaHoldStore {
 export interface HoldRepairStore extends ProofMediaHoldStore {
   due(): Promise<HoldRepair[]>;
   acknowledge(job: HoldRepair): Promise<void>;
+  defer(job: HoldRepair, dueAt: number): Promise<void>;
 }
 
 /** Lossless, lexically ordered Firestore time, including pre-1970 timestamps. */
@@ -51,7 +52,7 @@ export function wantedProofMediaHold(proof: HoldProof): 'true' | 'false' {
 
 function scopeValid(scope: HoldScope): void {
   for (const value of [scope.eventId, scope.proofId]) {
-    if (!value || value === '.' || value === '..' || /[/\\\x00-\x1f]/.test(value)) throw new Error('Invalid hold scope');
+    if (typeof value !== 'string' || !value || value === '.' || value === '..' || /[/\\\x00-\x1f]/.test(value)) throw new Error('Invalid hold scope');
   }
 }
 function isProofObject(path: string, scope: HoldScope): boolean {
@@ -192,7 +193,11 @@ export async function runProofMediaHoldRepairs(store: HoldRepairStore): Promise<
     try {
       await reconcileProofMediaHold(job, store);
       await store.acknowledge(job);
-    } catch { failed = true; /* Keep this job; continue independent repairs. */ }
+    } catch {
+      failed = true;
+      // Back off this revision so persistent failures cannot monopolize the page.
+      try { await store.defer(job, store.now() + 60_000); } catch { /* Leave durable job for retry. */ }
+    }
   }
   if (failed) throw new Error('Media hold repairs remain pending');
 }
@@ -245,13 +250,31 @@ export function adminProofMediaHoldStore(bucket: ReturnType<Storage['bucket']>, 
       });
     },
     async due() {
-      const jobs = await db.collection(REPAIRS).where('dueAt', '<=', Date.now()).limit(100).get();
-      return jobs.docs.map(doc => {
-        const row = doc.data();
-        const job = { key: doc.id, eventId: row.eventId, proofId: row.proofId, revision: row.revision };
-        scopeValid(job);
-        if (!Number.isSafeInteger(job.revision) || job.revision < 1) throw new Error('Invalid repair revision');
-        return job;
+      const jobs = await db.collection(REPAIRS).where('dueAt', '<=', Date.now()).orderBy('dueAt').limit(100).get();
+      const valid: HoldRepair[] = [];
+      for (const doc of jobs.docs) {
+        try {
+          const row = doc.data();
+          const job = { key: doc.id, eventId: row.eventId, proofId: row.proofId, revision: row.revision };
+          scopeValid(job);
+          if (!Number.isSafeInteger(job.revision) || job.revision < 1) throw new Error('Invalid repair revision');
+          valid.push(job);
+        } catch {
+          console.error('Discarding malformed media hold repair', doc.id);
+          // Only retire the malformed snapshot, never a concurrently repaired row.
+          try { await doc.ref.delete({ lastUpdateTime: doc.updateTime }); } catch { /* Retry next scan. */ }
+        }
+      }
+      return valid;
+    },
+    async defer(job, dueAt) {
+      const ref = db.collection(REPAIRS).doc(job.key);
+      await db.runTransaction(async tx => {
+        const current = await tx.get(ref);
+        if (current.data()?.revision === job.revision) {
+          if (job.revision === Number.MAX_SAFE_INTEGER) throw new Error('Repair revision exhausted');
+          tx.update(ref, { dueAt, revision: job.revision + 1 });
+        }
       });
     },
     async acknowledge(job) {

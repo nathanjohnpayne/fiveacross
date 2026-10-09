@@ -40,6 +40,10 @@ function fixture() {
     }),
     due: vi.fn(async () => [...jobs].filter(([, job]) => job.dueAt <= now)
       .map(([key, job]) => ({ ...job, key }))),
+    defer: vi.fn(async (job, dueAt) => {
+      const current = jobs.get(job.key);
+      if (current?.revision === job.revision) jobs.set(job.key, { ...current, dueAt, revision: job.revision + 1 });
+    }),
     acknowledge: vi.fn(async job => {
       if (jobs.get(job.key)?.revision === job.revision) jobs.delete(job.key);
     }),
@@ -216,6 +220,26 @@ describe('hide leases and durable repairs', () => {
     expect(MEDIA_HOLD_LEASE_MS).toBeGreaterThan(HIDE_COMMIT_MARGIN_MS + 120_000);
     expect(() => assertHideCommitAllowed({ expiresAt: 300, commitBefore: 200 }, 200)).toThrow('renewed');
   });
+  it('backs off a failed revision while continuing other repairs', async () => {
+    const f = fixture();
+    f.jobs.set('bad', { ...scope, dueAt: 0, revision: 1 });
+    f.store.proof = vi.fn(async () => { throw new Error('offline'); });
+    await expect(runProofMediaHoldRepairs(f.store)).rejects.toThrow('pending');
+    expect(f.jobs.get('bad')).toMatchObject({ dueAt: f.store.now() + 60_000, revision: 2 });
+    expect(await f.store.due()).toEqual([]);
+    await f.store.acknowledge({ ...scope, key: 'bad', revision: 1 });
+    expect(f.jobs.has('bad')).toBe(true);
+  });
+  it('repairs a thumbnail saved after an earlier reconcile, including replacement redelivery', async () => {
+    const f = fixture(); f.objects.delete(thumb);
+    f.setProof({ ...active(), data: { status: 'hidden', storagePath: main } });
+    await reconcileProofMediaHold(scope, f.store);
+    for (const generation of ['1', '2']) {
+      f.objects.set(thumb, { generation, metageneration: '1', metadata: { faHold: 'true' } });
+      await reconcileProofMediaHold(scope, f.store);
+      expect(f.objects.get(thumb)?.metadata).toMatchObject({ faHold: 'true', faSrc: version(1) });
+    }
+  });
   it('keeps a repair re-enqueued under a new lease instead of deleting its newer revision', async () => {
     const f = fixture(); const lease = await preHoldProofMedia(scope, f.store);
     f.setNow(lease.expiresAt);
@@ -246,5 +270,38 @@ describe('Storage hold adapter listing', () => {
     const store = adminProofMediaHoldStore({ getFiles } as never, {} as never);
     expect(await store.objects(target)).toEqual([path]);
     expect(getFiles).toHaveBeenCalledWith({ prefix: `proofs/${target.eventId}/`, autoPaginate: false, maxResults: 100 });
+  });
+});
+
+
+describe('Durable repair adapter', () => {
+  it('orders due work and retires only the malformed snapshot while returning valid jobs', async () => {
+    const deleted = vi.fn(async () => undefined);
+    const stamp = { seconds: 100, nanoseconds: 9 };
+    const query = { where: vi.fn(), orderBy: vi.fn(), limit: vi.fn(), get: vi.fn(async () => ({ docs: [
+      { id: 'bad', data: () => ({ eventId: 'bad/path', proofId: 'proof', revision: 1 }),
+        ref: { delete: deleted }, updateTime: stamp },
+      { id: 'good', data: () => ({ ...scope, revision: 2 }) },
+    ] })) };
+    query.where.mockReturnValue(query); query.orderBy.mockReturnValue(query); query.limit.mockReturnValue(query);
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const store = adminProofMediaHoldStore({} as never, { collection: () => query } as never);
+      expect(await store.due()).toEqual([{ ...scope, key: 'good', revision: 2 }]);
+      expect(query.orderBy).toHaveBeenCalledWith('dueAt');
+      expect(deleted).toHaveBeenCalledWith({ lastUpdateTime: stamp });
+      expect(log).toHaveBeenCalledWith('Discarding malformed media hold repair', 'bad');
+    } finally { log.mockRestore(); }
+  });
+  it('defers only the failed revision and cannot overwrite a newer scheduled repair', async () => {
+    const ref = {}; let revision = 1;
+    const tx = { get: vi.fn(async () => ({ data: () => ({ revision }) })), update: vi.fn() };
+    const db = { collection: () => ({ doc: () => ref }), runTransaction: async (fn: (t: typeof tx) => Promise<void>) => fn(tx) };
+    const store = adminProofMediaHoldStore({} as never, db as never);
+    await store.defer({ ...scope, key: 'job', revision: 1 }, 200);
+    expect(tx.update).toHaveBeenCalledWith(ref, { dueAt: 200, revision: 2 });
+    tx.update.mockClear(); revision = 3;
+    await store.defer({ ...scope, key: 'job', revision: 1 }, 200);
+    expect(tx.update).not.toHaveBeenCalled();
   });
 });

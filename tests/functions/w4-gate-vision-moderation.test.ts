@@ -336,7 +336,7 @@ describe('shouldScanProof — the RUNTIME admin toggle (#268)', () => {
   });
 });
 
-it('the real thumbnail writer stamps no-store metadata before the disabled scan returns (#1410)', async () => {
+it('the real thumbnail writer starts held and reconciles before a disabled scan, retrying hold failures', async () => {
   process.env.ENABLE_VISION_MODERATION = 'true';
   const mod = await importIndex();
   const { getStorage } = functionsRequire('firebase-admin/storage') as typeof import('firebase-admin/storage');
@@ -355,7 +355,13 @@ it('the real thumbnail writer stamps no-store metadata before the disabled scan 
   const files = vi.spyOn(bucket, 'file').mockImplementation(name => name.endsWith('_thumb.jpg') ? thumbnail : source);
   const buckets = vi.spyOn(storage, 'bucket').mockReturnValue(bucket);
   const docs = vi.spyOn(getFirestore(), 'doc').mockReturnValue(eventRef);
-  const get = vi.spyOn(eventRef, 'get').mockResolvedValue({ exists: true, get: () => false } as unknown as Awaited<ReturnType<typeof eventRef.get>>);
+  const get = vi.spyOn(eventRef, 'get').mockResolvedValue({ exists: true, get: () => false,
+    data: () => ({ status: 'hidden', storagePath: source.name }),
+    updateTime: { seconds: 100, nanoseconds: 1 }, readTime: { seconds: 100, nanoseconds: 2 },
+  } as unknown as Awaited<ReturnType<typeof eventRef.get>>);
+  const listing = vi.spyOn(bucket, 'getFiles').mockResolvedValue([[thumbnail], null] as never);
+  const metadata = vi.spyOn(thumbnail, 'getMetadata').mockResolvedValue([{ generation: '1', metageneration: '1', metadata: { faHold: 'true' } }] as never);
+  const patch = vi.spyOn(thumbnail, 'setMetadata').mockResolvedValue([] as never);
   const scan = vi.spyOn(ImageAnnotatorClient.prototype, 'safeSearchDetection').mockImplementation(() => { throw new Error('Vision must not be invoked'); });
   try {
     if (!mod.moderateProof) throw new Error('Expected the locally enabled thumbnail handler');
@@ -363,11 +369,18 @@ it('the real thumbnail writer stamps no-store metadata before the disabled scan 
     expect(download).toHaveBeenCalledOnce();
     expect(save).toHaveBeenCalledWith(expect.any(Buffer), {
       contentType: 'image/jpeg',
-      metadata: { cacheControl: 'private, no-store, max-age=0' },
+      metadata: { cacheControl: 'private, no-store, max-age=0', metadata: { faHold: 'true' } },
     });
+    expect(patch).toHaveBeenCalledWith(expect.objectContaining({ metadata: expect.objectContaining({
+      faHold: 'true', faSrc: '062135596900.000000001', firebaseStorageDownloadTokens: null,
+    }) }), { ifMetagenerationMatch: '1', ifGenerationMatch: '1' });
+    expect(save.mock.invocationCallOrder[0]).toBeLessThan(patch.mock.invocationCallOrder[0]);
     expect(scan).not.toHaveBeenCalled();
+    patch.mockRejectedValueOnce(new Error('hold unavailable'));
+    await expect(mod.moderateProof.run({ data: { name: source.name, bucket: bucket.name } } as unknown as Parameters<typeof mod.moderateProof.run>[0]))
+      .rejects.toThrow('hold unavailable');
   } finally {
-    for (const spy of [download, save, files, buckets, docs, get, scan]) spy.mockRestore();
+    for (const spy of [download, save, files, buckets, docs, get, listing, metadata, patch, scan]) spy.mockRestore();
     delete process.env.ENABLE_VISION_MODERATION;
   }
 });

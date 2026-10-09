@@ -314,16 +314,25 @@ async function moderateProofHandler(event: StorageEvent): Promise<void> {
   const bucket = getStorage().bucket(event.data.bucket);
   const [buf] = await bucket.file(path).download();
 
+  let thumbnailSaved = false;
   try {
     const thumb = await sharp(buf).resize(400, 400, { fit: 'inside' }).jpeg({ quality: 78 }).toBuffer();
     await bucket.file(path.replace(/\.jpg$/, '_thumb.jpg')).save(thumb, {
       contentType: 'image/jpeg',
       // Match the client upload policy; Functions is a separate runtime/build.
-      metadata: { cacheControl: 'private, no-store, max-age=0' },
+      metadata: { cacheControl: 'private, no-store, max-age=0', metadata: { faHold: 'true' } },
     });
+    thumbnailSaved = true;
   } catch {
     /* thumbnail is best-effort */
   }
+
+  // A thumbnail can arrive after the Proof-write listing or overwrite it on
+  // redelivery. Reconcile every successful save, even with Vision scanning off.
+  // Hold failures escape so the Storage event retries instead of losing repair.
+  if (thumbnailSaved) await reconcileProofMediaHold(
+    { eventId, proofId }, adminProofMediaHoldStore(bucket, db),
+  );
 
   // #268 (daily-cards-spec § "Admin console"): the event-level
   // `settings.visionGate` is the ADMIN toggle — consulted at RUNTIME

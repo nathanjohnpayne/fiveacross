@@ -61,7 +61,7 @@ const put = (
   ctx: RulesTestContext,
   path: string,
   data: Uint8Array,
-  meta: { contentType: string },
+  meta: { contentType: string; customMetadata?: Record<string, string> },
 ) => uploadBytes(ref(ctx.storage(), path), data, meta);
 
 beforeAll(async () => {
@@ -108,6 +108,16 @@ afterAll(async () => {
 });
 
 describe('storage.rules — okJpeg / okAudio upload caps (ADR 0004)', () => {
+  it.each(['faSrc', 'faHold', 'faLease'])('refuses server-owned %s on client media uploads', async key => {
+    const owner = testEnv.authenticatedContext(OWNER);
+    await assertFails(put(owner, photoPath, TINY, { ...IMAGE,
+      customMetadata: { [key]: key === 'faSrc' ? '315537897599.999999999' : 'true' },
+    }));
+  });
+  it('retains unrelated client metadata without trusting server decision keys', async () => {
+    const owner = testEnv.authenticatedContext(OWNER);
+    await assertSucceeds(put(owner, photoPath, TINY, { ...IMAGE, customMetadata: { caption: 'kept' } }));
+  });
   // EACH CAP IS MEASURED ON ITS OWN FRESH PATH (#1153, Codex round 3 P2).
   // These cases used to allow the under-cap object and then deny the over-cap
   // one at the SAME path, which made the denial an UPDATE. Proof objects are
