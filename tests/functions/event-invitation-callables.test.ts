@@ -360,6 +360,22 @@ describe("Event Invitation callable success responses", () => {
   });
 
   it.each(["mint", "redeem", "revoke"] as const)(
+    "withholds malformed %s retry timestamps from the public error",
+    async (operation) => {
+      for (const retryAt of [undefined, 'secret', NaN, Infinity, -1, 1.5]) {
+        const malformed = async () => ({ ok: false, reason: 'rate-limited', retryAt }) as never;
+        const handlers = createEventInvitationCallableHandlers(DEPS, {
+          operations: operations({ [operation]: malformed }),
+        });
+        const error = await rejectionOf(invokeHandler(handlers, operation));
+        expect(error.code).toBe('internal');
+        expect(error.message).toBe('The invitation service is unavailable. Try again.');
+        expect(error.details).toBeUndefined();
+      }
+    },
+  );
+
+  it.each(["mint", "redeem", "revoke"] as const)(
     "sanitizes an undefined %s operation result",
     async (operation) => {
       const malformed = async (): Promise<never> => undefined as never;
@@ -483,7 +499,7 @@ describe("Event Invitation callable public error mapping", () => {
     "maps mint %s to safe %s",
     async (reason, code, message) => {
       const handlers = createEventInvitationCallableHandlers(DEPS, {
-        operations: operations({ mint: async () => ({ ok: false, reason }) }),
+        operations: operations({ mint: async () => reason === 'rate-limited' ? ({ ok: false, reason, retryAt: 1_800_000_000_000 }) : ({ ok: false, reason }) }),
       });
       const error = await rejectionOf(
         handlers.mint(request({ eventId: EVENT_ID })),
@@ -496,7 +512,7 @@ describe("Event Invitation callable public error mapping", () => {
       }).toEqual({
         code,
         message,
-        details: undefined,
+        details: reason === 'rate-limited' ? { retryAt: 1_800_000_000_000 } : undefined,
       });
     },
   );
@@ -566,7 +582,7 @@ describe("Event Invitation callable public error mapping", () => {
     "maps redeem %s to safe %s",
     async (reason, code, message) => {
       const handlers = createEventInvitationCallableHandlers(DEPS, {
-        operations: operations({ redeem: async () => ({ ok: false, reason }) }),
+        operations: operations({ redeem: async () => reason === 'rate-limited' ? ({ ok: false, reason, retryAt: 1_800_000_000_000 }) : ({ ok: false, reason }) }),
       });
       const error = await rejectionOf(
         handlers.redeem(request({ code: CODE, expectedEventId: EVENT_ID })),
@@ -579,7 +595,7 @@ describe("Event Invitation callable public error mapping", () => {
       }).toEqual({
         code,
         message,
-        details: undefined,
+        details: reason === 'rate-limited' ? { retryAt: 1_800_000_000_000 } : undefined,
       });
     },
   );
@@ -679,7 +695,7 @@ describe("Event Invitation callable public error mapping", () => {
     "maps revoke %s to safe %s",
     async (reason, code, message) => {
       const handlers = createEventInvitationCallableHandlers(DEPS, {
-        operations: operations({ revoke: async () => ({ ok: false, reason }) }),
+        operations: operations({ revoke: async () => reason === 'rate-limited' ? ({ ok: false, reason, retryAt: 1_800_000_000_000 }) : ({ ok: false, reason }) }),
       });
       const error = await rejectionOf(
         handlers.revoke(
@@ -694,7 +710,7 @@ describe("Event Invitation callable public error mapping", () => {
       }).toEqual({
         code,
         message,
-        details: undefined,
+        details: reason === 'rate-limited' ? { retryAt: 1_800_000_000_000 } : undefined,
       });
     },
   );

@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  PRODUCTION_EVENT_INVITATION_POLICY,
   invitationIdForCode,
   invitationPath,
   invitationRatePath,
@@ -458,7 +459,7 @@ describe('mintEventInvitation', () => {
 
     expect(await attempt()).toEqual({ ok: false, reason: 'not-authorized' });
     const readsBeforeExhaustedAttempt = db.reads.length;
-    expect(await attempt()).toEqual({ ok: false, reason: 'rate-limited' });
+    expect(await attempt()).toEqual({ ok: false, reason: 'rate-limited', retryAt: NOW + 60_000 });
     expect(db.reads.slice(readsBeforeExhaustedAttempt)).toEqual([
       invitationRatePath('mint', MEMBER),
     ]);
@@ -528,7 +529,7 @@ describe('redeemEventInvitation', () => {
     expect(await redeemEventInvitation(
       { uid: MEMBER, code: CODE, expectedEventId: EVENT_ID },
       deps(db, { policy: twoAttempts }),
-    )).toEqual({ ok: false, reason: 'rate-limited' });
+    )).toEqual({ ok: false, reason: 'rate-limited', retryAt: NOW + 60_000 });
     expect(db.reads.slice(readsBeforeExhaustedAttempt)).toEqual([
       invitationRatePath('redeem', MEMBER),
     ]);
@@ -796,7 +797,7 @@ describe('redeemEventInvitation', () => {
     expect(await attempt()).toEqual({ ok: false, reason: 'unknown-invitation' });
     expect(await attempt()).toEqual({ ok: false, reason: 'unknown-invitation' });
     const readsBeforeExhaustedAttempt = db.reads.length;
-    expect(await attempt()).toEqual({ ok: false, reason: 'rate-limited' });
+    expect(await attempt()).toEqual({ ok: false, reason: 'rate-limited', retryAt: NOW + 60_000 });
     expect(db.reads.slice(readsBeforeExhaustedAttempt)).toEqual([
       invitationRatePath('redeem', MEMBER),
     ]);
@@ -819,7 +820,7 @@ describe('redeemEventInvitation', () => {
     );
 
     expect(await attempt()).toEqual({ ok: false, reason: 'unknown-invitation' });
-    expect(await attempt()).toEqual({ ok: false, reason: 'rate-limited' });
+    expect(await attempt()).toEqual({ ok: false, reason: 'rate-limited', retryAt: NOW + 60_000 });
     now += 60_000;
     expect(await attempt()).toEqual({ ok: false, reason: 'unknown-invitation' });
     expect(db.data(invitationRatePath('redeem', MEMBER))?.attemptMs).toEqual([now]);
@@ -953,7 +954,7 @@ describe('revokeEventInvitation', () => {
 
     expect(await attempt()).toEqual({ ok: false, reason: 'not-authorized' });
     const readsBeforeExhaustedAttempt = db.reads.length;
-    expect(await attempt()).toEqual({ ok: false, reason: 'rate-limited' });
+    expect(await attempt()).toEqual({ ok: false, reason: 'rate-limited', retryAt: NOW + 60_000 });
     expect(db.reads.slice(readsBeforeExhaustedAttempt)).toEqual([
       invitationRatePath('revoke', MEMBER),
     ]);
@@ -1126,5 +1127,62 @@ describe('revokeEventInvitation', () => {
     expect(db.data(invitationPath(invitation.invitationId))?.status).toBe('revoked');
     expect(db.data(membershipPath(EVENT_ID, MEMBER))?.status).not.toBe('active');
     expect(db.conflicts).toBeGreaterThan(0);
+  });
+});
+
+describe('owner-accepted production policy (#803)', () => {
+  it('mints a member-only single-use grant for 24 hours and revokes its provenance atomically', async () => {
+    const db = new RetryFirestore(baseSeed());
+    const production = deps(db, { policy: PRODUCTION_EVENT_INVITATION_POLICY });
+    const invite = await mintEventInvitation({ uid: ADMIN, eventId: EVENT_ID }, production);
+    expect(invite.ok).toBe(true);
+    if (!invite.ok) throw new Error('mint failed');
+    expect(invite.expiresAt).toBe(NOW + 24 * 60 * 60 * 1_000);
+    expect(db.data(invitationPath(invite.invitationId))).toMatchObject({ role: 'member', maxUses: 1 });
+    await expect(redeemEventInvitation({ uid: MEMBER, code: CODE, expectedEventId: EVENT_ID }, production))
+      .resolves.toMatchObject({ ok: true, outcome: 'membership-created' });
+    await expect(redeemEventInvitation({ uid: OTHER_MEMBER, code: CODE, expectedEventId: EVENT_ID }, production))
+      .resolves.toMatchObject({ ok: false, reason: 'invitation-unavailable' });
+    await expect(revokeEventInvitation({ uid: ADMIN, eventId: EVENT_ID, invitationId: invite.invitationId }, production))
+      .resolves.toMatchObject({ ok: true, membershipAccess: 'pending-enforcement' });
+    expect(db.data(membershipPath(EVENT_ID, MEMBER))).toMatchObject({ status: 'revoked', invitationId: invite.invitationId });
+  });
+
+  it.each(['mint', 'redeem', 'revoke'] as const)('bounds %s to 30 failed attempts per caller per ten minutes with an exact retry time', async operation => {
+    const db = new RetryFirestore(baseSeed());
+    let now = NOW;
+    const production = deps(db, { policy: PRODUCTION_EVENT_INVITATION_POLICY, now: () => now });
+    const attempt = (eventId = EVENT_ID, uid = MEMBER) => {
+      if (operation === 'mint') return mintEventInvitation({ uid, eventId }, production);
+      if (operation === 'redeem') return redeemEventInvitation({ uid, code: 'z'.repeat(43), expectedEventId: eventId }, production);
+      return revokeEventInvitation({ uid, eventId, invitationId: 'a'.repeat(64) }, production);
+    };
+    for (let i = 0; i < 30; i++) expect((await attempt()).ok).toBe(false);
+    expect(await attempt(OTHER_EVENT_ID)).toEqual({ ok: false, reason: 'rate-limited', retryAt: NOW + 600_000 });
+    // Switching accounts grants the other UID its own bucket, but returning to
+    // the first UID cannot reset its server-owned history.
+    expect(await attempt(EVENT_ID, OTHER_MEMBER)).not.toMatchObject({ reason: 'rate-limited' });
+    expect(await attempt()).toEqual({ ok: false, reason: 'rate-limited', retryAt: NOW + 600_000 });
+    // A separate operation never inherits this exhausted bucket.
+    const other = operation === 'redeem'
+      ? await mintEventInvitation({ uid: MEMBER, eventId: EVENT_ID }, production)
+      : await redeemEventInvitation({ uid: MEMBER, code: 'z'.repeat(43), expectedEventId: EVENT_ID }, production);
+    expect(other).not.toMatchObject({ reason: 'rate-limited' });
+    now = NOW + 600_000;
+    expect(await attempt()).not.toMatchObject({ reason: 'rate-limited' });
+  });
+
+  it('computes the release time from the limiting attempts even if stored order or a smaller cap changes', async () => {
+    const bucket = invitationRatePath('redeem', MEMBER);
+    const db = new RetryFirestore({ ...baseSeed(), [bucket]: {
+      schemaVersion: 1, operation: 'redeem', attemptMs: [NOW - 100, NOW - 300, NOW - 200],
+    } });
+    const limited = policy({ rate: {
+      mint: { maxAttempts: 2, windowMs: 60_000 },
+      redeem: { maxAttempts: 2, windowMs: 60_000 },
+      revoke: { maxAttempts: 2, windowMs: 60_000 },
+    } });
+    await expect(redeemEventInvitation({ uid: MEMBER, code: CODE, expectedEventId: EVENT_ID }, deps(db, { policy: limited })))
+      .resolves.toEqual({ ok: false, reason: 'rate-limited', retryAt: NOW - 200 + 60_000 });
   });
 });

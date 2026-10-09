@@ -10,6 +10,9 @@ import { getStorage } from 'firebase-admin/storage';
 import vision from '@google-cloud/vision';
 import sharp from 'sharp';
 import { APPROVE_PROMPTS_APP_CHECK, SUBMIT_PROMPT_APP_CHECK, AUTH_HANDOFF_APP_CHECK, BUG_REPORT_APP_CHECK, RESEND_API_KEY } from './params';
+import { PRODUCTION_EVENT_INVITATION_POLICY } from './eventInvitations';
+import { createEventInvitationCallableHandlers } from './eventInvitationCallables';
+import { eventInvitationFirestore } from './eventInvitationFirestore';
 import { approvePromptsCallable } from './approvePrompts';
 import { submitPromptCallable } from './submitPrompt';
 import {
@@ -100,6 +103,17 @@ const visionClient = new vision.ImageAnnotatorClient();
 // at the scheduler step (found on the sibling fix PR #590, closed for this one).
 const RUNTIME_PROJECT_ID = resolveProjectId() ?? 'gaycruisebingo';
 const ADMIN_SDK_SERVICE_ACCOUNT = `firebase-adminsdk-fbsvc@${RUNTIME_PROJECT_ID}.iam.gserviceaccount.com`;
+
+const invitationHandlers = createEventInvitationCallableHandlers({
+  db: eventInvitationFirestore(db),
+  now: Date.now,
+  timestamp: ms => Timestamp.fromMillis(ms),
+  policy: PRODUCTION_EVENT_INVITATION_POLICY,
+});
+const invitationOptions = { timeoutSeconds: 60, serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT };
+export const mintEventInvitation = onCall(invitationOptions, invitationHandlers.mint);
+export const redeemEventInvitation = onCall(invitationOptions, invitationHandlers.redeem);
+export const revokeEventInvitation = onCall(invitationOptions, invitationHandlers.revoke);
 
 /**
  * Private, authenticated bug intake; App Check enforcement follows #44's

@@ -29,6 +29,8 @@ export type EventInvitationAdminFailureReason =
 interface EventInvitationAdminFailure {
   ok: false;
   reason: EventInvitationAdminFailureReason;
+  /** Server rolling-window release time, when provided for a rate limit. */
+  retryAt?: number;
 }
 
 export type MintEventInvitationResult =
@@ -75,6 +77,7 @@ export type RedeemEventInvitationResult =
   | {
       ok: false;
       reason: RedeemEventInvitationFailureReason;
+      retryAt?: number;
     };
 
 interface RedeemEventInvitationResponse {
@@ -115,6 +118,19 @@ function safeErrorCode(error: unknown): string {
   }
 }
 
+function rateLimitedFailure(error: unknown): { ok: false; reason: 'rate-limited'; retryAt?: number } {
+  try {
+    const details = (error as { details?: unknown } | null)?.details;
+    if (typeof details === 'object' && details !== null && !Array.isArray(details)) {
+      const retryAt = (details as { retryAt?: unknown }).retryAt;
+      if (typeof retryAt === 'number' && Number.isSafeInteger(retryAt) && retryAt > 0) {
+        return { ok: false, reason: 'rate-limited', retryAt };
+      }
+    }
+  } catch { /* Ignore malformed details; never expose SDK payloads. */ }
+  return { ok: false, reason: 'rate-limited' };
+}
+
 function safeFailure(error: unknown): RedeemEventInvitationResult {
   switch (safeErrorCode(error)) {
     // The callable deliberately collapses unknown, expired, revoked,
@@ -125,7 +141,7 @@ function safeFailure(error: unknown): RedeemEventInvitationResult {
     case 'unauthenticated':
       return { ok: false, reason: 'authentication-required' };
     case 'resource-exhausted':
-      return { ok: false, reason: 'rate-limited' };
+      return rateLimitedFailure(error);
     default:
       return { ok: false, reason: 'unavailable' };
   }
@@ -142,7 +158,7 @@ function safeAdminFailure(error: unknown): EventInvitationAdminFailure {
     case 'permission-denied':
       return { ok: false, reason: 'not-permitted' };
     case 'resource-exhausted':
-      return { ok: false, reason: 'rate-limited' };
+      return rateLimitedFailure(error);
     default:
       return { ok: false, reason: 'unavailable' };
   }

@@ -1,5 +1,5 @@
 /**
- * Decision-neutral callable boundary for Event Invitations (#803).
+ * Policy-injected callable boundary for Event Invitations (#803).
  *
  * Production policy and Firebase runtime objects stay injected. This module
  * only translates the verified callable identity and untrusted payload into
@@ -89,6 +89,7 @@ export interface EventInvitationCallableOptions {
 interface PublicFailure {
   code: FunctionsErrorCode;
   message: string;
+  details?: { retryAt: number };
 }
 
 class PublicFailureSignal {
@@ -232,7 +233,15 @@ function payloadOf(value: unknown): Record<string, unknown> {
 }
 
 function publicError(failure: PublicFailure): HttpsError {
-  return new HttpsError(failure.code, failure.message);
+  return new HttpsError(failure.code, failure.message, failure.details);
+}
+
+function failureForResult(base: PublicFailure, result: Record<string, unknown>): PublicFailure {
+  if (result.reason !== 'rate-limited') return base;
+  if (!isPositiveEpoch(result.retryAt) || !Number.isSafeInteger(result.retryAt)) {
+    throw new Error('Malformed invitation retry time.');
+  }
+  return { ...base, details: { retryAt: result.retryAt } };
 }
 
 function rejectWith(failure: PublicFailure): never {
@@ -321,7 +330,7 @@ export function createEventInvitationCallableHandlers(
             throw new Error("Malformed mint failure.");
           }
           safelyLogRejected(logger, "mint", result.reason);
-          rejectWith(MINT_FAILURES[result.reason]);
+          rejectWith(failureForResult(MINT_FAILURES[result.reason], result));
         }
         if (
           !isEventId(result.eventId) ||
@@ -365,7 +374,7 @@ export function createEventInvitationCallableHandlers(
             throw new Error("Malformed redeem failure.");
           }
           safelyLogRejected(logger, "redeem", result.reason);
-          rejectWith(REDEEM_FAILURES[result.reason]);
+          rejectWith(failureForResult(REDEEM_FAILURES[result.reason], result));
         }
         if (
           !isEventId(result.eventId) ||
@@ -397,7 +406,7 @@ export function createEventInvitationCallableHandlers(
             throw new Error("Malformed revoke failure.");
           }
           safelyLogRejected(logger, "revoke", result.reason);
-          rejectWith(REVOKE_FAILURES[result.reason]);
+          rejectWith(failureForResult(REVOKE_FAILURES[result.reason], result));
         }
         if (
           !isEventId(result.eventId) ||
