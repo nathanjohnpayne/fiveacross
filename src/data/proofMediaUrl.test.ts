@@ -47,17 +47,10 @@ describe('proofMediaUrl — under the e2e emulator build', () => {
     ).toBe(CANONICAL_URL);
   });
 
-  it('produces a value that satisfies the shape firestore.rules pins mediaURL to', async () => {
+  it('canonicalizes public avatar URLs, whose stored host pin remains active', async () => {
     const { canonicalizeProofMediaUrl } = await loadUnderEmulator();
-    // The literal regex from firestore.rules' proof-create rule, with the
-    // eventId/uid/proofId placeholders bound to this fixture. THIS is what the
-    // whole bridge exists to make reachable from the emulator stack.
-    const rulesRegex = new RegExp(
-      '^https://firebasestorage[.]googleapis[.]com/v0/b/[^/]+/o/proofs%2Fe2e%2Fuid1%2Fp1[.]jpg([?].*)?$',
-    );
-    expect(canonicalizeProofMediaUrl(EMULATOR_URL)).toMatch(rulesRegex);
-    // …and the raw emulator URL does NOT — the 403 this issue is about.
-    expect(EMULATOR_URL).not.toMatch(rulesRegex);
+    const avatar = 'http://127.0.0.1:9199/v0/b/demo-bucket/o/avatars%2Fuid1.jpg?alt=media&token=t';
+    expect(canonicalizeProofMediaUrl(avatar)).toBe('https://firebasestorage.googleapis.com/v0/b/demo-bucket/o/avatars%2Fuid1.jpg?alt=media&token=t');
   });
 
   it('resolves a canonicalized URL back to the emulator origin at render', async () => {

@@ -48,7 +48,7 @@ export async function uploadProofMedia(
   // #211: strip EXIF/GPS from photo proofs so a library pick's geotags never
   // leave the phone. Default true (event `stripPhotoExif`); inert for audio.
   opts: { stripExif?: boolean; eventId?: string } = {},
-): Promise<{ path: string; url: string }> {
+): Promise<{ path: string }> {
   // `EVENT_ID` is a live binding. Capture the action's scope before image
   // decoding or any other await so a delayed Event A upload cannot land under B.
   const eventId = opts.eventId ?? EVENT_ID;
@@ -72,16 +72,8 @@ export async function uploadProofMedia(
   // #1410: new sensitive proof media must not enter shared or browser HTTP
   // caches. This changes new uploads only, not metadata on existing objects.
   await uploadBytes(r, payload, { contentType, cacheControl: PROOF_MEDIA_CACHE_CONTROL });
-  // #335: identity in every real build. Under the Playwright e2e build ONLY, the
-  // Storage emulator hands back its own origin (`http://127.0.0.1:9199/v0/b/…`),
-  // which firestore.rules' proof-create `mediaURL` regex — which pins the
-  // production `firebasestorage.googleapis.com` host on purpose — can never
-  // match, so a real photo/audio Proof used to 403 in the emulator stack. The
-  // canonicalization writes the production-shaped URL the rule actually expects,
-  // so e2e exercises that regex for real; ProofFeed reads storagePath via the SDK
-  // (loadProofMediaBlob) to load authenticated bytes from the emulator.
-  const url = canonicalizeProofMediaUrl(await getDownloadURL(r));
-  return { path, url };
+  // Authenticated readers resolve this object by path; no bearer URL is minted.
+  return { path };
 }
 
 export async function uploadAvatar(
@@ -101,8 +93,8 @@ export async function uploadAvatar(
   assertCurrent();
   // Identity in every real build. Under the e2e emulator build the download URL
   // is rewritten to its production-shaped twin, because `firestore.rules`'
-  // `photoUrlOk` pins stored avatars to the production Storage host just as the
-  // proof-create rule pins `mediaURL`; `Avatar` resolves it back to render.
+  // `photoUrlOk` pins stored avatars to the production Storage host;
+  // `Avatar` resolves it back to render. Avatars retain the D9 URL policy.
   const url = await getDownloadURL(r);
   assertCurrent();
   return canonicalizeProofMediaUrl(url);

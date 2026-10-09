@@ -2,11 +2,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const H = vi.hoisted(() => ({
   uid: 'alice', generation: 1, recovered: true, event: 'event-a',
-  memoryDb: { kind: 'memory' }, durableDb: { kind: 'durable' }, privateStorage: { kind: 'private-storage' },
+  memoryDb: { kind: 'memory' }, durableDb: { kind: 'durable' }, privateStorage: { kind: 'private-storage', app: { options: { storageBucket: 'private-bucket' } } },
   capture: vi.fn(), get: vi.fn(), set: vi.fn(), delete: vi.fn(), run: vi.fn(),
   storageDelete: vi.fn(), metadata: vi.fn(), purge: vi.fn(),
 }));
-vi.mock('../firebase', () => ({ db: H.durableDb, get EVENT_ID() { return H.event; } }));
+vi.mock('../firebase', () => ({ db: H.durableDb, storage: { app: { options: { storageBucket: 'durable-bucket' } } }, get EVENT_ID() { return H.event; } }));
 vi.mock('../privateFirestore', () => ({ capturePrivateFirestore: H.capture }));
 vi.mock('./storage', () => ({ uploadProofMedia: vi.fn(), deleteStoragePath: H.storageDelete, proofMediaGeneration: H.metadata }));
 vi.mock('./proofMediaCache', () => ({ purgeProofMediaFromCaches: H.purge }));
@@ -78,7 +78,7 @@ describe('private Admin proof moderation (#1411)', () => {
       expect(client).toBe(H.privateStorage);
     });
     await expect(moderate('alice', 'P', proof.storagePath)).rejects.toThrow('expired');
-    expect(H.purge).toHaveBeenCalledWith('media-url');
+    expect(H.purge).toHaveBeenCalledWith('media-url', 'https://firebasestorage.googleapis.com/v0/b/private-bucket/o/proofs%2Fevent-a%2Fowner%2FP.jpg');
   });
   it('rejects stale Admin attribution before metadata or transaction IO', async () => {
     await expect(moderate('bob', 'P', proof.storagePath)).rejects.toThrow('account changed');
@@ -115,7 +115,7 @@ describe('private Admin proof moderation (#1411)', () => {
     await expect(moderate('alice', 'P', proof.storagePath)).rejects.toThrow('expired');
     expect(H.set.mock.calls.some(([ref]) => ref.path.endsWith('/proofStorageDeletes/P'))).toBe(true);
     expect(H.storageDelete).not.toHaveBeenCalled();
-    expect(H.purge).toHaveBeenCalledWith('media-url');
+    expect(H.purge).toHaveBeenCalledWith('media-url', 'https://firebasestorage.googleapis.com/v0/b/private-bucket/o/proofs%2Fevent-a%2Fowner%2FP.jpg');
   });
   it('keeps the Event captured before metadata awaits', async () => {
     H.metadata.mockImplementation(async () => { H.event = 'event-b'; return '123'; });

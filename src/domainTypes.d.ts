@@ -1107,6 +1107,7 @@ export interface ProofDoc {
   cellIndex: number;
   itemText: string;
   storagePath?: string | null;
+  /** Legacy proof-media bearer URL. New creates write null; readers use storagePath. */
   mediaURL?: string | null;
   thumbURL?: string | null;
   text?: string | null;

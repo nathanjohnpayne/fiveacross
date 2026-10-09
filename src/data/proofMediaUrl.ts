@@ -1,32 +1,12 @@
-// proofMediaUrl — the emulator↔production bridge for a Proof's `mediaURL` (#335).
+// proofMediaUrl — emulator/production origin bridge for public avatars and
+// legacy Proof cache purge (#335, #1533). New Proof writes persist only a
+// storagePath; their readers use authenticated SDK bytes (#1532).
 //
-// THE PROBLEM. `firestore.rules`' proof-create rule pins `mediaURL` to the exact
-// Storage object this Proof owns, host included:
-//
-//   ^https://firebasestorage[.]googleapis[.]com/v0/b/[^/]+/o/proofs%2F…
-//
-// That host pin is deliberate — it is what stops a client claiming an arbitrary
-// off-Storage URL as proof media. Against REAL Storage, `getDownloadURL()`
-// returns exactly that shape and the rule matches. Against the local Storage
-// EMULATOR it returns the emulator's own origin (`http://127.0.0.1:9199/v0/b/…`,
-// same path and query), which never matches — so every real photo/audio Proof
-// 403s in the emulator stack, and no e2e spec could ever drive the media path.
-// The regex the coverage exists to protect was the one thing e2e could not
-// exercise (#335).
-//
-// THE BRIDGE. Two inverse origin rewrites, both inert outside the e2e emulator
-// build:
-//
-//   * `canonicalizeProofMediaUrl` runs at PROOF-WRITE (`uploadProofMedia`), and
-//     turns the emulator download URL into its production-canonical twin. The
-//     value written to Firestore is then the same shape production writes, so
-//     the rules regex is exercised FOR REAL rather than relaxed or bypassed.
-//   * `resolveProofMediaUrl` remains for legacy cache purge and avatar reads.
-//     Proof rendering now uses authenticated SDK bytes from storagePath (#1532),
-//     so the Storage SDK handles emulator routing directly.
-//
-// Only the ORIGIN is rewritten; `/v0/b/<bucket>/o/<encoded path>?alt=media&token=…`
-// is byte-identical between the two hosts, which is what makes the pair lossless.
+// Avatar writes still canonicalize emulator download URLs to the production
+// Storage host required by photoUrlOk (D9); Avatar resolves them back to the
+// emulator. deleteProof resolves legacy exact URLs and tokenless bucket/path
+// purge identities to the same browser origin. Only the origin is rewritten;
+// the encoded object path and query remain byte-identical.
 //
 // WHY THIS IS SAFE IN PRODUCTION. `EMULATOR_STORAGE_WIRED` repeats — deliberately,
 // rather than importing — the same statically-foldable gate `src/firebase.ts`
@@ -39,19 +19,8 @@
 // the gate LOCAL to this module is the point: a cross-module import would make
 // the fold depend on the bundler propagating a constant between chunks.
 //
-// SCOPE. Proof media, and custom avatars. `uploadAvatar` canonicalizes too,
-// because `firestore.rules`' `photoUrlOk` pins every stored avatar URL to the
-// same production Storage host (or Google's photo host), and `Avatar` resolves
-// the stored value back to the emulator to render it (see `./photoUrl.ts`).
-// The service worker's network-only proof-media route
-// (`PROOF_MEDIA_URL_PATTERN`, ./proofMediaCache.ts) matches the PRODUCTION host,
-// so under the e2e build the resolved emulator request simply misses the route
-// and uses the emulator network directly. `deleteProof`'s legacy cache purge
-// still resolves its old persisted key, preserving the
-// pre-upgrade own-device purge contract.
-//
-// Proof media sinks now sanitize their SDK-derived object URLs last (#1532).
-// This legacy URL bridge supplies no bearer fallback for those sinks.
+// This bridge supplies no bearer fallback for Proof rendering. Its remaining
+// URL sinks sanitize after origin resolution.
 
 /**
  * The Storage emulator's host/port, mirroring `firebase.json`'s `emulators.storage`
@@ -89,7 +58,7 @@ const EMULATOR_STORAGE_WIRED =
 
 /**
  * Rewrite a Storage-EMULATOR download URL into its production-canonical form, so
- * the value written to a Proof doc matches `firestore.rules`' `mediaURL` regex.
+ * the stored avatar URL matches `firestore.rules`' `photoUrlOk` host pin.
  * Identity outside the e2e emulator build, and identity on any URL that is not
  * an emulator download URL (a production URL passes through untouched).
  */

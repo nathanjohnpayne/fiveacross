@@ -10,7 +10,7 @@ import {
 // service worker's proof-media route and uploadProofMedia's Cache-Control share.
 // The RegExp decides which cross-origin proof fetches bypass all caches — so it gets a positive/negative URL matrix.
 
-// The shape getDownloadURL actually returns for a proof upload: the object path
+// The legacy shape getDownloadURL returned for a proof upload: the object path
 // URL-encoded under /o/, then the token query.
 const proofUrl =
   'https://firebasestorage.googleapis.com/v0/b/gaycruisebingo.firebasestorage.app/o/proofs%2Fsummer-2026%2Fu123%2Fp456.jpg?alt=media&token=abc-def';
@@ -68,10 +68,12 @@ describe('proof-media cache policy constants (#363)', () => {
 describe('purgeProofMediaFromCaches — best-effort local purge of the deleting device’s own cached copy (#373)', () => {
   const cacheDelete = vi.fn();
   const cachesOpen = vi.fn();
+  const cacheKeys = vi.fn();
 
   beforeEach(() => {
     cacheDelete.mockReset().mockResolvedValue(true);
-    cachesOpen.mockReset().mockResolvedValue({ delete: cacheDelete });
+    cacheKeys.mockReset().mockResolvedValue([]);
+    cachesOpen.mockReset().mockResolvedValue({ delete: cacheDelete, keys: cacheKeys });
     vi.stubGlobal('caches', { open: cachesOpen });
   });
 
@@ -93,6 +95,28 @@ describe('purgeProofMediaFromCaches — best-effort local purge of the deleting 
     await purgeProofMediaFromCaches('');
 
     expect(cachesOpen).not.toHaveBeenCalled();
+  });
+  it('purges path-only identities and every token variant, preserving other buckets, paths and origins', async () => {
+    const objectURL = proofUrl.split('?')[0];
+    const matching = [new Request(proofUrl), new Request(objectURL.replaceAll('%2F', '%2f') + '?alt=media&token=other')];
+    const foreign = [
+      objectURL.replace('gaycruisebingo.firebasestorage.app', 'another-bucket'),
+      objectURL.replace('p456.jpg', 'other.jpg'),
+      objectURL.replace('summer-2026', 'other-event'),
+      objectURL.replace('proofs%2F', 'avatars%2F'),
+      objectURL.replace('firebasestorage.googleapis.com', 'example.test'),
+    ].map(url => new Request(url));
+    cacheKeys.mockResolvedValue([...matching, ...foreign]);
+    await purgeProofMediaFromCaches(null, objectURL);
+    expect(cacheDelete.mock.calls.map(([request]) => request)).toEqual(matching);
+  });
+  it('continues path purging after a failed legacy deletion and swallows per-entry failures', async () => {
+    const key = new Request(proofUrl);
+    cacheKeys.mockResolvedValue([key]);
+    cacheDelete.mockRejectedValue(new Error('cache unavailable'));
+    await expect(purgeProofMediaFromCaches(proofUrl, proofUrl.split('?')[0])).resolves.toBeUndefined();
+    expect(cacheDelete).toHaveBeenCalledWith(proofUrl);
+    expect(cacheDelete).toHaveBeenCalledWith(key);
   });
 
   it('no-ops when `caches` is unsupported (e.g. Safari private mode, non-SW context)', async () => {

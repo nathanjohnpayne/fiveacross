@@ -46,7 +46,7 @@ let testEnv: RulesTestEnvironment;
 const db = (uid: string) => testEnv.authenticatedContext(uid).firestore();
 const at = (p: string) => `events/${EVENT}/${p}`;
 
-// A fully-valid `photo` Proof whose storagePath + mediaURL are pinned to this
+// A fully-valid `photo` Proof whose storagePath is pinned to this
 // proof's OWN doc id (proofs/{event}/{uid}/{id}.jpg); `over` mutates one field.
 const photoProof = (id: string, over: Record<string, unknown> = {}) => ({
   uid: ALICE,
@@ -56,7 +56,7 @@ const photoProof = (id: string, over: Record<string, unknown> = {}) => ({
   cellIndex: 5,
   itemText: 'Saw a drag show',
   storagePath: `proofs/${EVENT}/${ALICE}/${id}.jpg`,
-  mediaURL: `https://firebasestorage.googleapis.com/v0/b/demo-bucket/o/proofs%2F${EVENT}%2F${ALICE}%2F${id}.jpg?alt=media&token=t`,
+  mediaURL: null,
   thumbURL: null,
   text: null,
   createdAt: NOW(),
@@ -228,12 +228,12 @@ describe('firestore.rules — honor-system invariants', () => {
 
   it('proofs media is pinned to the proof’s own Storage object', async () => {
     await assertSucceeds(setDoc(doc(db(ALICE), at('proofs/p1')), photoProof('p1'))); // matching pin
-    // Fresh create at a distinct id whose mediaURL points at a DIFFERENT object.
+    // Fresh create at a distinct id whose storagePath names a different object.
     await assertFails(
       setDoc(
         doc(db(ALICE), at('proofs/p2')),
         photoProof('p2', {
-          mediaURL: `https://firebasestorage.googleapis.com/v0/b/demo-bucket/o/proofs%2F${EVENT}%2F${ALICE}%2Fp2.png?alt=media&token=t`,
+          storagePath: `proofs/${EVENT}/${ALICE}/p2.png`,
         }),
       ),
     );

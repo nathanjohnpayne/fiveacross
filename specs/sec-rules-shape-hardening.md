@@ -23,7 +23,7 @@ Every stored avatar field — `users/{uid}.photoURL`, `players/{uid}.photoURL`, 
 
 ## Proof ids, Callout text and media objects
 
-A Proof create requires the id to match `^[A-Za-z0-9-]{1,40}$` — `attachProof` mints 20-character alphanumeric auto-ids — because the media arms splice the id into `matches()` patterns, where `.`, `|`, `*` or `(` would widen the `mediaURL` pin to another object. `text` is absent, `null`, or a string of at most 1000 characters. In `storage.rules` a proof object's name must be `<id>.jpg` (content type exactly `image/jpeg`) or `<id>.webm` / `<id>.m4a` (audio), under an Event document that EXISTS and is open; avatars must be `image/jpeg`. `image/svg+xml` and every other image type are refused.
+A Proof create requires the id to match `^[A-Za-z0-9-]{1,40}$` — `attachProof` mints 20-character alphanumeric auto-ids — keeping object-name validation in lockstep with Storage. The former mediaURL regex pin is replaced by null media URL fields and exact storagePath equality (#1533). `text` is absent, `null`, or a string of at most 1000 characters. In `storage.rules` a proof object's name must be `<id>.jpg` (content type exactly `image/jpeg`) or `<id>.webm` / `<id>.m4a` (audio), under an Event document that EXISTS and is open; avatars must be `image/jpeg`. `image/svg+xml` and every other image type are refused.
 
 - **Given** an id with regex metacharacters, `_`, spaces or over 40 characters **then** the Proof create and the media upload are DENIED.
 - **Given** a `.jpg` object of any type other than `image/jpeg`, or an object named with another extension **then** the upload is DENIED; **given** a proof upload under an Event id with no document **then** it is DENIED.

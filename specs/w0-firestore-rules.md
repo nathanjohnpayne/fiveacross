@@ -37,9 +37,9 @@ A player Report atomically pairs a single `reportCount` increment with a fresh p
 
 ## Proof media is pinned to the proof's own Storage object
 
-The existing `proofs/{proofId}` create payload is kept intact: the uploader owns the doc, the proof starts visible and unreported, and `storagePath`/`mediaURL` are pinned to the object named after the proof's own doc id so a client cannot point the record at a different, unscanned object.
+The uploader owns `proofs/{proofId}`, which starts visible and unreported. New creates require null `mediaURL` and `thumbURL`; `storagePath` pins the exact Event/actor/Proof object and supported extension. Rendering and moderation resolve that same path. Legacy documents are unchanged; stale token-bearing creates are denied in both enforcement states (#1533).
 
-- **Given** a proof create **When** the payload's storagePath + mediaURL match the proof's own object **Then** it is ALLOWED, while a mediaURL pointing at a different object is DENIED. (Test: "proofs media is pinned to the proof's own Storage object".)
+- **Given** a proof create **When** storagePath names the proof's own object and media URL fields are null **Then** it is ALLOWED. A foreign object path or any non-null mediaURL is DENIED. (Test: "proofs media is pinned to the proof's own Storage object".)
 
 ## Honor-system 18+ self-attestation (ADR 0001)
 

@@ -1,6 +1,6 @@
 import { collection, doc, increment, runTransaction, updateDoc, type Firestore, type Transaction } from 'firebase/firestore';
 import { allowedPhotoUrlOrNull } from './photoUrl';
-import { db, EVENT_ID } from '../firebase';
+import { db, EVENT_ID, storage } from '../firebase';
 import { capturePrivateFirestore } from '../privateFirestore';
 import { runPrivateTransaction } from './privateTransaction';
 import { uploadProofMedia, deleteStoragePath, proofMediaGeneration } from './storage';
@@ -226,10 +226,9 @@ export interface AttachProofResult {
  *     offline (the read-modify-write folds onto the LIVE board/player so a
  *     concurrent admin resolve / another of the owner's tabs isn't clobbered),
  *     and
- *   - a photo/audio proof is unwritable before its media exists: firestore.rules
- *     pins `storagePath`/`mediaURL` to the EXACT uploaded Storage object, and a
- *     Storage upload needs signal — so a media proof doc can't be queued ahead of
- *     its upload. (A text proof carries no media, but still rides the same
+ *   - the client awaits the Storage upload before committing its path-only
+ *     Proof. Upload needs signal; rules pin the exact object name and null media
+ *     URL fields but cannot prove object existence. (A text proof carries no media, but still rides the same
  *     rejecting transaction.)
  * The offline-durable path is therefore the bare honor Mark; the Proof and its
  * media attach when connectivity returns (ADR 0006: "marks queue, proof media
@@ -259,7 +258,7 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
   const proofId = pRef.id;
 
   let storagePath: string | null = null;
-  let mediaURL: string | null = null;
+  const mediaURL = null;
   if ((proof.type === 'photo' || proof.type === 'audio') && proof.blob) {
     // Only photos carry EXIF/GPS; the strip flag is inert for audio.
     const up = await uploadProofMedia(uid, proofId, proof.blob, proof.type, {
@@ -267,7 +266,6 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
       eventId,
     });
     storagePath = up.path;
-    mediaURL = up.url;
   }
 
   const pending = claimMode === 'admin_confirmed';
@@ -495,9 +493,8 @@ export async function attachProof(args: AttachProofArgs): Promise<AttachProofRes
     };
   }).catch(async (err: unknown) => {
     // ROLL THE UPLOAD BACK WHEN THE TRANSACTION LOSES (Codex P1, PR #1157).
-    // The media is uploaded BEFORE the transaction and has to be — the Proof
-    // document's `storagePath`/`mediaURL` are pinned to the exact object by
-    // `firestore.rules`, so there is nothing to write until the object exists.
+    // The client awaits media upload BEFORE committing the path-only Proof.
+    // Rules pin the exact object name but cannot establish object existence.
     // Every rejection therefore leaves a blob no document points at, and the
     // freeze made one of those rejections routine: an Admin committing
     // `archiving: true` in the window between `uploadProofMedia` resolving and
@@ -666,6 +663,18 @@ async function deleteProofInDatabase(
   // document could not be read, where there is no stored value to prefer and
   // the argument is all a retried takedown has left.
   let revokePath: string | null = null;
+  const mediaBucket = (privateLease?.storage ?? storage)?.app?.options.storageBucket;
+  const purgeLocalMedia = () => {
+    const legacyURL = resolveProofMediaUrl(mediaURL);
+    if (mediaBucket && revokePath?.startsWith('proofs/')) {
+      const objectURL = resolveProofMediaUrl(
+        `https://firebasestorage.googleapis.com/v0/b/${encodeURIComponent(mediaBucket)}/o/${encodeURIComponent(revokePath)}`,
+      );
+      void purgeProofMediaFromCaches(legacyURL, objectURL);
+    } else {
+      void purgeProofMediaFromCaches(legacyURL);
+    }
+  };
 
   // THE GENERATION OF THE OBJECT THIS TAKEDOWN IS ABOUT (#1153, Phase 4b P1).
   // `storagePath` names a slot rather than a blob, and the sweeper below may run
@@ -982,7 +991,7 @@ async function deleteProofInDatabase(
   }).catch((error: unknown) => {
     // Retirement after an actual SDK commit withholds acknowledgment and
     // Storage work, but must still retire this device's legacy media copy.
-    if (committed) void purgeProofMediaFromCaches(resolveProofMediaUrl(mediaURL));
+    if (committed) purgeLocalMedia();
     throw error;
   });
 
@@ -1025,14 +1034,13 @@ async function deleteProofInDatabase(
     // attempt, not just the committed one). purgeProofMediaFromCaches already
     // swallows every failure internally, so this is never awaited in a way
     // that could let a purge rejection propagate to deleteProof's caller.
-    // `resolveProofMediaUrl` keeps the purge key equal to the URL the browser
-    // actually fetched (#335): identity in every real build, and under the e2e
-    // emulator build the emulator-origin twin of the canonicalized stored value.
+    // Legacy exact URLs and tokenless bucket/path identities are resolved to
+    // the same origin the browser fetched (including the e2e emulator).
     //
     // In a `finally` because the commit is what the purge follows, not the
     // Storage delete: once the Proof document is gone this device must stop
     // serving the deleted photo out of its own cache whether or not the blob
     // itself could be revoked on this attempt (#373).
-    void purgeProofMediaFromCaches(resolveProofMediaUrl(mediaURL));
+    purgeLocalMedia();
   }
 }

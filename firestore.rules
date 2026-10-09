@@ -2679,14 +2679,8 @@ service cloud.firestore {
           // nothing, because
           // `attachProof` mints a fresh auto-id per capture and never re-posts
           // under an id it has already used.
-          // THE ID IS AN AUTO-ID. `attachProof` mints `doc(rawProofs())`, a
-          // 20-character alphanumeric Firestore auto-id, and the media arms
-          // below splice this id into both an exact `storagePath` and a
-          // `matches()` pattern — so a caller-chosen id carrying regex
-          // metacharacters (`.*`, `|`, `(`) would widen the very pattern that
-          // pins `mediaURL` to this Proof's own object. Alphanumerics (and `-`,
-          // which is literal outside a character class) only, and bounded;
-          // `storage.rules` holds the object name to the same shape.
+          // The client uses a fresh auto-id. Keep the bounded object-name shape
+          // in lockstep with storage.rules; storagePath below pins this exact id.
           && proofId.matches('^[A-Za-z0-9-]{1,40}$')
           && !exists(/databases/$(database)/documents/events/$(eventId)/proofStorageDeletes/$(proofId))
           && request.resource.data.uid == request.auth.uid
@@ -2741,44 +2735,25 @@ service cloud.firestore {
           && request.resource.data.reportCount == 0
           && request.resource.data.visionFlag == null
           && request.resource.data.thumbURL == null
-          // Proof media must be the EXACT Storage object named after this proof's
-          // OWN doc id — proofs/{eventId}/{uid}/{proofId}.{ext} — which is what
-          // uploadProofMedia() writes (jpg for photo; webm OR m4a for audio,
-          // matching whatever the recording browser's MediaRecorder actually
-          // produced — iOS Safari records MP4/AAC, not WebM, #295) and what
-          // moderateProof() scans (photos only). Pinning to the exact object (not
-          // just the uploader's folder) stops a client from setting storagePath to
-          // one object and mediaURL to a DIFFERENT, unscanned object in their
-          // folder (e.g. an unscanned .png) to bypass the Storage size/content-type
-          // rules and the moderateProof Vision scan. The client-supplied mediaURL
-          // must be the getDownloadURL for that same object. Text proofs carry no
-          // media. Residual gap (not expressible here): rules can't confirm the
-          // object actually exists or that the URL token is valid, and this pins
-          // the standard getDownloadURL host (firebasestorage.googleapis.com); the
-          // Storage rules + moderation trigger cover the object side.
+          // New Proofs persist object identity only. Stale clients carrying a
+          // mediaURL are denied in both enforcement states; legacy docs remain.
+          && request.resource.data.mediaURL == null
+          // The exact Event/actor/Proof path is also the Vision scan target.
+          // With no client media URL, a second unscanned object cannot be
+          // substituted for rendering. Rules cannot prove object existence.
           && (
                (request.resource.data.type == 'text'
-                 && request.resource.data.storagePath == null
-                 && request.resource.data.mediaURL == null)
+                 && request.resource.data.storagePath == null)
                ||
                (request.resource.data.type == 'photo'
-                 && request.resource.data.storagePath == 'proofs/' + eventId + '/' + request.auth.uid + '/' + proofId + '.jpg'
-                 && request.resource.data.mediaURL is string
-                 && request.resource.data.mediaURL.matches('^https://firebasestorage[.]googleapis[.]com/v0/b/[^/]+/o/proofs%2F' + eventId + '%2F' + request.auth.uid + '%2F' + proofId + '[.]jpg([?].*)?$'))
+                 && request.resource.data.storagePath == 'proofs/' + eventId + '/' + request.auth.uid + '/' + proofId + '.jpg')
                ||
                (request.resource.data.type == 'audio'
-                 && (
-                      (request.resource.data.storagePath == 'proofs/' + eventId + '/' + request.auth.uid + '/' + proofId + '.webm'
-                        && request.resource.data.mediaURL is string
-                        && request.resource.data.mediaURL.matches('^https://firebasestorage[.]googleapis[.]com/v0/b/[^/]+/o/proofs%2F' + eventId + '%2F' + request.auth.uid + '%2F' + proofId + '[.]webm([?].*)?$'))
-                      ||
-                      // #295: iOS Safari's MediaRecorder produces MP4/AAC, so
-                      // uploadProofMedia() names that object `.m4a` — accept the
-                      // SAME exact-pin shape for it, not just `.webm`.
-                      (request.resource.data.storagePath == 'proofs/' + eventId + '/' + request.auth.uid + '/' + proofId + '.m4a'
-                        && request.resource.data.mediaURL is string
-                        && request.resource.data.mediaURL.matches('^https://firebasestorage[.]googleapis[.]com/v0/b/[^/]+/o/proofs%2F' + eventId + '%2F' + request.auth.uid + '%2F' + proofId + '[.]m4a([?].*)?$'))
-                    ))
+                 && request.resource.data.storagePath in [
+                      'proofs/' + eventId + '/' + request.auth.uid + '/' + proofId + '.webm',
+                      // Safari MP4/AAC recordings retain the .m4a path (#295).
+                      'proofs/' + eventId + '/' + request.auth.uid + '/' + proofId + '.m4a'
+                    ])
              );
         // Report = increment reportCount by 1 only (same as /items). `status` is
         // SERVER-AUTHORITATIVE for the community-hide transition (#43, ADR 0004
