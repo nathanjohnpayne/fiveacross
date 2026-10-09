@@ -1,18 +1,8 @@
 // The photo/audio Proof round trip, end to end against the emulator stack (#335).
 //
-// Until this spec, NO e2e case could drive a real media Proof. `firestore.rules`'
-// proof-create rule pins `mediaURL` to the production Storage download host
-// (`^https://firebasestorage[.]googleapis[.]com/v0/b/[^/]+/o/proofs%2F…`) — the
-// pin that stops a client claiming an arbitrary off-Storage URL as proof media —
-// while the Storage EMULATOR's `getDownloadURL()` hands back its own origin
-// (`http://127.0.0.1:9199/v0/b/…`). Every real photo/audio submit therefore 403'd
-// locally, and every existing spec routed around it via the honor pledge or a
-// text Callout.
-//
-// `src/data/proofMediaUrl.ts` preserves the production-shaped write contract
-// in the emulator build. Renderers then download authenticated SDK bytes from
-// storagePath and create app-origin blob URLs. The cases below pin both the
-// canonical persisted URL and real decoded media through that SDK read path.
+// Photo and audio create path-only Proofs with null media URL fields. Feed
+// renderers download authenticated SDK bytes by storagePath and own app-origin
+// blob URLs. These cases assert the stored contract and real decoded playback.
 //
 // The fake camera/mic Chromium flags below are what make the AUDIO half
 // drivable at all: `ProofSheet.startRec` calls `navigator.mediaDevices
@@ -44,19 +34,11 @@ const TINY_PNG = Buffer.from(
 );
 
 
-/** The LITERAL `mediaURL` shape firestore.rules' proof-create rule pins, bound
- *  to one proof's own event/uid/id. Kept in the spec verbatim so a rules edit
- *  that loosened the host pin fails here. */
-function rulesMediaUrlPattern(uid: string, proofId: string, ext: 'jpg' | 'webm' | 'm4a'): RegExp {
-  return new RegExp(
-    `^https://firebasestorage[.]googleapis[.]com/v0/b/[^/]+/o/proofs%2F${EVENT_ID}%2F${uid}%2F${proofId}[.]${ext}([?].*)?$`,
-  );
-}
-
 interface StoredProof {
   id: string;
   type: string;
-  mediaURL: string;
+  mediaURL: null;
+  thumbURL: null;
   storagePath: string;
 }
 
@@ -109,7 +91,7 @@ function captureSubmitAlert(page: Page): () => string | null {
 }
 
 test.describe('photo/audio Proof media round trip', () => {
-  test('a photo Proof commits a production-canonical mediaURL and renders authenticated SDK bytes', async ({
+  test('a photo Proof commits only its path and renders authenticated SDK bytes', async ({
     page,
   }) => {
     const { testEnv } = await seedDailyEvent();
@@ -138,10 +120,8 @@ test.describe('photo/audio Proof media round trip', () => {
       const stored = await readOwnProof(testEnv, uid);
       expect(stored.type).toBe('photo');
       expect(stored.storagePath).toBe(`proofs/${EVENT_ID}/${uid}/${stored.id}.jpg`);
-      // The write half: the committed value matches the rule's own regex. The
-      // emulator ENFORCED that rule to let this doc exist at all — this line
-      // just makes the thing under test legible at the assertion site.
-      expect(stored.mediaURL).toMatch(rulesMediaUrlPattern(uid, stored.id, 'jpg'));
+      expect(stored.mediaURL).toBeNull();
+      expect(stored.thumbURL).toBeNull();
 
       // The Feed renders an object URL from authenticated SDK bytes; the
       // browser must still decode the real emulator-backed media.
@@ -197,7 +177,8 @@ test.describe('photo/audio Proof media round trip', () => {
       // Chromium records WebM/Opus; the .m4a branch of the same rule is iOS
       // Safari's (#295) and is not reachable from this browser.
       expect(stored.storagePath).toBe(`proofs/${EVENT_ID}/${uid}/${stored.id}.webm`);
-      expect(stored.mediaURL).toMatch(rulesMediaUrlPattern(uid, stored.id, 'webm'));
+      expect(stored.mediaURL).toBeNull();
+      expect(stored.thumbURL).toBeNull();
 
       await page.locator('nav.tabs a', { hasText: 'Feed' }).click();
       const audio = page.locator('.proof-audio');
