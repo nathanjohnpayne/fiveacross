@@ -70,6 +70,9 @@ function deployInvocationForConfig(target, config, deployArgs, inheritedEnv, wra
         ? 'scripts/firebase/op-firebase-deploy fiveacross --verify-fiveacross-hostnames && npm run build:fiveacross'
         : `npm run build:${target}`,
   };
+  // Wrap only the actual build; deploy.sh still runs every source/readiness guard first.
+  environment.BUILD_CMD = 'scripts/with-posthog-sourcemaps.sh -- bash -euo pipefail -c ' +
+    "'" + environment.BUILD_CMD.replaceAll("'", "'\"'\"'") + "'";
   environment.CF_ZONE_ID = config.cloudflareZoneId ?? '';
   environment.SYNTHETIC_URL = config.syntheticUrl;
   // Pins the Cloud Run invoker reconciliation to the SELECTED target (#768).

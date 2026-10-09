@@ -244,7 +244,7 @@ describe('deploy target selection', () => {
       env: {
         KEEP_ME: 'yes',
         BUILD_CMD:
-          'scripts/firebase/op-firebase-deploy fiveacross --verify-fiveacross-hostnames && npm run build:fiveacross',
+          "scripts/with-posthog-sourcemaps.sh -- bash -euo pipefail -c 'scripts/firebase/op-firebase-deploy fiveacross --verify-fiveacross-hostnames && npm run build:fiveacross'",
         DEPLOY_TARGET_PROJECT: 'fiveacross',
         AUTH_HANDOFF_DEPLOY_READINESS_PROJECT: 'fiveacross',
       },
@@ -452,7 +452,7 @@ describe('deploy target selection', () => {
     expect(invocation.environment).toMatchObject({
       NODE_ENV: 'production',
       BUILD_CMD:
-        'scripts/firebase/op-firebase-deploy fiveacross --verify-fiveacross-hostnames && npm run build:fiveacross',
+        "scripts/with-posthog-sourcemaps.sh -- bash -euo pipefail -c 'scripts/firebase/op-firebase-deploy fiveacross --verify-fiveacross-hostnames && npm run build:fiveacross'",
       CF_ZONE_ID: '',
       SYNTHETIC_URL: 'https://bodega-bay.fiveacross.app/',
     });
@@ -467,7 +467,7 @@ describe('deploy target selection', () => {
     // reconciliation — it is the one project it's provisioned for (#768).
     expect(invocation.args).toEqual(['--', 'gaycruisebingo', '--only', 'hosting']);
     expect(invocation.environment).toMatchObject({
-      BUILD_CMD: 'npm run build:gaycruisebingo',
+      BUILD_CMD: "scripts/with-posthog-sourcemaps.sh -- bash -euo pipefail -c 'npm run build:gaycruisebingo'",
       CF_ZONE_ID: '8066dd2b105ad564c45bb8c898859343',
       SYNTHETIC_URL: 'https://gaycruisebingo.com/',
     });
@@ -524,7 +524,7 @@ describe('deploy target selection', () => {
       'hosting',
     ]);
     expect(invocation.environment).toMatchObject({
-      BUILD_CMD: 'npm run build:gaycruisebingo',
+      BUILD_CMD: "scripts/with-posthog-sourcemaps.sh -- bash -euo pipefail -c 'npm run build:gaycruisebingo'",
       CF_ZONE_ID: '8066dd2b105ad564c45bb8c898859343',
       SYNTHETIC_URL: 'https://gaycruisebingo.com/',
     });

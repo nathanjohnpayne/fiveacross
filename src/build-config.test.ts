@@ -95,3 +95,23 @@ describe('preview Firebase isolation (#1420)', () => {
     expect(() => assertPreviewFirebaseIsolation('serve', 'preview', '1')).not.toThrow();
   });
 });
+
+describe('private source-map configuration', () => {
+  const base = { command: 'build', mode: 'production', targetBuild: true, version: 'a'.repeat(40), apiKey: 'fixture-key' };
+  it('pins the private project, host and exact release for named and mirror production builds', async () => {
+    const { posthogSourceMapOptions } = await import('./build-config');
+    expect(posthogSourceMapOptions(base)).toMatchObject({ projectId: '503790', host: 'https://us.posthog.com', sourcemaps: { releaseVersion: base.version, deleteAfterUpload: true, releaseMode: 'symbol-set' } });
+    expect(posthogSourceMapOptions({ ...base, targetBuild: false, vercelEnv: 'production' })).not.toBeNull();
+  });
+  it('requires a key and exact commit for every deploy-shaped production build', async () => {
+    const { posthogSourceMapOptions } = await import('./build-config');
+    expect(() => posthogSourceMapOptions({ ...base, apiKey: '' })).toThrow(/1Password/);
+    expect(() => posthogSourceMapOptions({ ...base, version: 'unknown' })).toThrow(/exact/);
+  });
+  it('keeps generic CI, emulator builds and development credential-free', async () => {
+    const { posthogSourceMapOptions } = await import('./build-config');
+    expect(posthogSourceMapOptions({ ...base, targetBuild: false, apiKey: '' })).toBeNull();
+    expect(posthogSourceMapOptions({ ...base, mode: 'e2e', apiKey: '' })).toBeNull();
+    expect(posthogSourceMapOptions({ ...base, command: 'serve', apiKey: '' })).toBeNull();
+  });
+});

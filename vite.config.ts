@@ -1,10 +1,11 @@
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
+import posthog from '@posthog/rollup-plugin';
 import { VitePWA } from 'vite-plugin-pwa';
-import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
-import { assertDeployFirebaseApiKey, assertPreviewFirebaseIsolation, resolveAppVersion } from './src/build-config';
+import { assertDeployFirebaseApiKey, assertPreviewFirebaseIsolation, posthogSourceMapOptions, resolveAppVersion } from './src/build-config';
 // The SAME brand table the app renders the sign-in gate from (#580's one-table
 // rule, extended to the browser chrome in #586). Importing it rather than
 // restating four strings here is the whole point: a second copy is how the
@@ -163,6 +164,68 @@ function precacheExclusionGuard(): Plugin {
   };
 }
 
+/** Inject before hashing, but upload only after all nested builds and Workbox. */
+function mapInjection(options: NonNullable<ReturnType<typeof posthogSourceMapOptions>>, visible = false): Plugin {
+  const plugin = posthog({ ...options, sourcemaps: { ...options.sourcemaps, deleteAfterUpload: !visible } });
+  // Worker bundles are generated in memory, and Workbox subsequently rewrites
+  // the SW and its map. A single final upload must see those final bytes.
+  delete plugin.writeBundle;
+  return plugin;
+}
+
+/** Upload final JS/map pairs privately, then refuse every remaining map artifact. */
+function privateSourceMapGuard(options: ReturnType<typeof posthogSourceMapOptions>): Plugin {
+  let outDir = 'dist';
+  return {
+    name: 'private-source-map-artifacts', apply: 'build',
+    configResolved(config) { outDir = resolvePath(config.root, config.build.outDir); },
+    closeBundle: { order: 'post', sequential: true, async handler() {
+      const files: string[] = [];
+      const visit = (directory: string) => {
+        for (const entry of readdirSync(directory, { withFileTypes: true })) {
+          const path = resolvePath(directory, entry.name);
+          if (entry.isDirectory()) visit(path);
+          else files.push(path);
+        }
+      };
+      if (existsSync(outDir)) visit(outDir);
+      const maps = files.filter(path => /\.map(?:\.(?:gz|br))?$/i.test(path));
+      if (options) {
+        const chunks = files.filter(path => /\.(?:js|mjs|cjs)$/.test(path));
+        // Never upload arbitrary maps copied from public/. Every map must be
+        // paired with an instrumented JS chunk produced by this build.
+        if (maps.some(path => !path.endsWith('.map') || !chunks.includes(path.slice(0, -4)))
+          || chunks.some(path => !maps.includes(`${path}.map`)
+            || !/^\/\/# chunkId=[a-f0-9-]+$/m.test(readFileSync(path, 'utf8')))) {
+          throw new Error('Refusing unpaired or uninstrumented source-map artifacts');
+        }
+        // Workbox needed a visible map URL to update the SW mapping when it
+        // injected the precache. Remove only that trailing comment, preserving
+        // all mapped line/column offsets and already-hashed application bytes.
+        for (const path of chunks) {
+          const code = readFileSync(path, 'utf8');
+          const hidden = code.replace(/^\/\/# sourceMappingURL=.*$/gm, '');
+          if (hidden !== code) writeFileSync(path, hidden);
+        }
+        await new Promise<void>((done, reject) => {
+          const child = spawn(resolvePath('node_modules/.bin/posthog-cli'), [
+            'sourcemap', 'upload', '--stdin', '--release-name', 'fiveacross', '--release-version', options.sourcemaps.releaseVersion,
+          ], { stdio: ['pipe', 'inherit', 'inherit'], env: { ...process.env,
+            POSTHOG_CLI_API_KEY: options.personalApiKey, POSTHOG_CLI_PROJECT_ID: options.projectId,
+            POSTHOG_CLI_HOST: options.host, POSTHOG_RELEASE_MODE: 'symbol-set' } });
+          child.on('error', reject);
+          child.on('close', code => code === 0 ? done() : reject(new Error(`PostHog upload failed (${code})`)));
+          child.stdin.on('error', reject);
+          child.stdin.end(chunks.join('\n') + '\n');
+        });
+        for (const path of maps) unlinkSync(path);
+      }
+      const remaining = maps.filter(path => existsSync(path));
+      if (remaining.length) throw new Error(`Refusing public source-map artifacts: ${remaining.join(', ')}`);
+    } },
+  };
+}
+
 // https://vitejs.dev/config/
 export default defineConfig(({ command, mode }) => {
   // Check before loading any Firebase configuration; named production targets
@@ -213,21 +276,28 @@ export default defineConfig(({ command, mode }) => {
     projectId: env.VITE_FIREBASE_PROJECT_ID,
   });
 
+  const version = appVersion();
+  const maps = posthogSourceMapOptions({ command, mode, targetBuild,
+    vercelEnv: process.env.VERCEL_ENV, upload: process.env.POSTHOG_SOURCE_MAP_UPLOAD,
+    apiKey: process.env.POSTHOG_UPLOAD_API_KEY, version });
   return {
     // Disable Vite's automatic env-file reload for a named target. The target
     // wrapper supplied every VITE_* value above; allowing another load here
     // could reintroduce stale local Firebase, Event, or Edition values.
     ...(targetBuild ? { envDir: false } : {}),
     define: {
-      __APP_VERSION__: JSON.stringify(appVersion()),
+      __APP_VERSION__: JSON.stringify(version),
       // Ordered build stamp for the remote force-reload floor (#342): git SHAs
       // (__APP_VERSION__) identify a build but cannot answer "older than X?",
       // so the floor check compares this ISO timestamp against
       // public/build-floor.json instead.
       __BUILD_STAMP__: JSON.stringify(new Date().toISOString()),
     },
+    worker: { plugins: () => maps ? [mapInjection(maps)] : [] },
     plugins: [
       react(),
+      ...(maps ? [mapInjection(maps)] : []),
+      privateSourceMapGuard(maps),
       editionHtmlIdentity(brand),
       editionWebManifest(brand),
       precacheExclusionGuard(),
@@ -293,6 +363,8 @@ export default defineConfig(({ command, mode }) => {
         // stale shell must be able to read fresh, and precaching it would let a
         // stale worker answer its own eviction notice.
         injectManifest: {
+          // Workbox must update the map after replacing its manifest sentinel.
+          ...(maps ? { sourcemap: true, buildPlugins: { vite: [mapInjection(maps, true)] } } : {}),
           globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
           // Keep the unfurl artwork out of every client's precache — see the
           // includeAssets note above. Guarded by src/recon-share-og.test.ts.
