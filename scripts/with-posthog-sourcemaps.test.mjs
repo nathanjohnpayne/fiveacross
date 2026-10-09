@@ -12,9 +12,9 @@ function fixture(fail = false) {
   const root = mkdtempSync(join(tmpdir(), 'posthog-key-')); roots.push(root);
   const log = join(root, 'received.json');
   writeFileSync(join(root, 'op'), `#!/bin/sh\n${fail ? 'exit 19' : "printf 'fixture-secret'"}\n`); chmodSync(join(root, 'op'), 0o755);
-  const run = (args = ['space and $literal']) => spawnSync('bash', [wrapper, '--', process.execPath, '-e',
+  const run = (args = ['space and $literal'], extraEnv = {}) => spawnSync('bash', [wrapper, '--', process.execPath, '-e',
     "require('fs').writeFileSync(process.argv[1],JSON.stringify({key:process.env.POSTHOG_UPLOAD_API_KEY,args:process.argv.slice(2)}))", log, ...args],
-    { encoding: 'utf8', env: { ...process.env, PATH: root + ':' + process.env.PATH, POSTHOG_UPLOAD_API_KEY: 'ambient-must-not-win', POSTHOG_UPLOAD_OP_REF: 'op://fixture/item/credential' } });
+    { encoding: 'utf8', env: { ...process.env, PATH: root + ':' + process.env.PATH, POSTHOG_UPLOAD_API_KEY: 'ambient-must-not-win', POSTHOG_UPLOAD_OP_REF: 'op://fixture/item/credential', ...extraEnv } });
   return { log, run };
 }
 describe('1Password source-map build wrapper', () => {
@@ -28,5 +28,10 @@ describe('1Password source-map build wrapper', () => {
     const f = fixture(true); const result = f.run();
     expect(result.status).toBe(19);
     expect(() => readFileSync(f.log)).toThrow();
+  });
+  it('does not read 1Password or pass an ambient key to a Firebase validation build', () => {
+    const f = fixture(true); const result = f.run([], { FIREBASE_DRY_RUN: 'true' });
+    expect(result.status).toBe(0);
+    expect(JSON.parse(readFileSync(f.log))).toEqual({ args: [] });
   });
 });

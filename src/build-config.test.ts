@@ -114,4 +114,9 @@ describe('private source-map configuration', () => {
     expect(posthogSourceMapOptions({ ...base, mode: 'e2e', apiKey: '' })).toBeNull();
     expect(posthogSourceMapOptions({ ...base, command: 'serve', apiKey: '' })).toBeNull();
   });
+  it('emits no maps for Firebase validation, while Vercel Production still requires upload', async () => {
+    const { posthogSourceMapOptions } = await import('./build-config');
+    expect(posthogSourceMapOptions({ ...base, firebaseDryRun: 'true', apiKey: '' })).toBeNull();
+    expect(() => posthogSourceMapOptions({ ...base, firebaseDryRun: 'true', vercelEnv: 'production', apiKey: '' })).toThrow(/1Password/);
+  });
 });

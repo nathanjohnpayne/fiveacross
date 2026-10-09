@@ -210,12 +210,15 @@ function privateSourceMapGuard(options: ReturnType<typeof posthogSourceMapOption
             writeFileSync(path, hidden);
           }
         }
+        // A production release may not inherit the CLI's successful no-op mode.
+        const uploadEnv: NodeJS.ProcessEnv = { ...process.env,
+          POSTHOG_CLI_API_KEY: options.personalApiKey, POSTHOG_CLI_PROJECT_ID: options.projectId,
+          POSTHOG_CLI_HOST: options.host, POSTHOG_RELEASE_MODE: 'symbol-set' };
+        delete uploadEnv.POSTHOG_CLI_DRY_RUN;
         await new Promise<void>((done, reject) => {
           const child = spawn(resolvePath('node_modules/.bin/posthog-cli'), [
             'sourcemap', 'upload', '--stdin', '--release-name', 'fiveacross', '--release-version', options.sourcemaps.releaseVersion,
-          ], { stdio: ['pipe', 'inherit', 'inherit'], env: { ...process.env,
-            POSTHOG_CLI_API_KEY: options.personalApiKey, POSTHOG_CLI_PROJECT_ID: options.projectId,
-            POSTHOG_CLI_HOST: options.host, POSTHOG_RELEASE_MODE: 'symbol-set' } });
+          ], { stdio: ['pipe', 'inherit', 'inherit'], env: uploadEnv });
           child.on('error', reject);
           child.on('close', code => code === 0 ? done() : reject(new Error(`PostHog upload failed (${code})`)));
           child.stdin.on('error', reject);
@@ -282,7 +285,7 @@ export default defineConfig(({ command, mode }) => {
   const version = appVersion();
   const maps = posthogSourceMapOptions({ command, mode, targetBuild,
     vercelEnv: process.env.VERCEL_ENV, upload: process.env.POSTHOG_SOURCE_MAP_UPLOAD,
-    apiKey: process.env.POSTHOG_UPLOAD_API_KEY, version });
+    apiKey: process.env.POSTHOG_UPLOAD_API_KEY, version, firebaseDryRun: process.env.FIREBASE_DRY_RUN });
   return {
     // Disable Vite's automatic env-file reload for a named target. The target
     // wrapper supplied every VITE_* value above; allowing another load here

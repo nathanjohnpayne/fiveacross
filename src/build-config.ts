@@ -95,11 +95,12 @@ export function assertPreviewFirebaseIsolation(
   }
 }
 
-/** Private PostHog maps are mandatory for deploy-shaped production builds. */
+/** Private maps are mandatory for production releases; Firebase validation emits none. */
 export function posthogSourceMapOptions(input: {
   command: string; mode: string; targetBuild: boolean; vercelEnv?: string;
-  upload?: string; apiKey?: string; version: string;
+  upload?: string; apiKey?: string; version: string; firebaseDryRun?: string;
 }) {
+  if (input.targetBuild && input.vercelEnv !== 'production' && input.firebaseDryRun === 'true') return null;
   if (input.command !== 'build' || input.mode !== 'production'
     || !(input.targetBuild || input.vercelEnv === 'production' || input.upload === '1')) return null;
   if (!input.apiKey?.trim()) throw new Error(

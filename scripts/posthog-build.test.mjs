@@ -34,12 +34,13 @@ for(const path of paths){
  const code=fs.readFileSync(path,'utf8'); const map=JSON.parse(fs.readFileSync(path+'.map','utf8'));
  if(!code.includes('//# chunkId=')||code.includes('sourceMappingURL=')||!map.sourcesContent?.some(Boolean)) process.exit(9);
 }
+if(process.env.POSTHOG_CLI_DRY_RUN) process.exit(24);
 fs.writeFileSync('upload.json',JSON.stringify({paths:paths.map(p=>p.slice(p.indexOf('/dist/')+6)),args:process.argv.slice(2),project:process.env.POSTHOG_CLI_PROJECT_ID,host:process.env.POSTHOG_CLI_HOST}));
 process.exit(${failUpload ? 23 : 0});
 `); chmodSync(cli, 0o755);
   const result = spawnSync(process.execPath, [join(repo, 'node_modules', 'vite', 'bin', 'vite.js'), 'build'], {
     cwd: root, encoding: 'utf8', timeout: 30_000,
-    env: { ...process.env, GITHUB_ACTIONS: 'true', GITHUB_SHA: 'a'.repeat(40), POSTHOG_SOURCE_MAP_UPLOAD: '1', POSTHOG_UPLOAD_API_KEY: 'fixture-private-key', VERCEL: '', VERCEL_ENV: '' },
+    env: { ...process.env, GITHUB_ACTIONS: 'true', GITHUB_SHA: 'a'.repeat(40), POSTHOG_SOURCE_MAP_UPLOAD: '1', POSTHOG_UPLOAD_API_KEY: 'fixture-private-key', POSTHOG_CLI_DRY_RUN: 'true', VERCEL: '', VERCEL_ENV: '' },
   });
   const files = directory => readdirSync(directory, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? files(join(directory, entry.name)) : [join(directory, entry.name)]);
   return { root, result, files: () => files(join(root, 'dist')) };
