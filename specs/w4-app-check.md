@@ -9,7 +9,7 @@ reason: Console provisioning, request metrics and deployed-browser acceptance es
 
 Ticket #44 adds abuse protection for Cloud Firestore and Cloud Storage. It does not change Membership authority, honor-system Marks or reactive moderation. The owner deferred provisioning until 2026-08-01 in [#44's timing decision](https://github.com/nathanjohnpayne/fiveacross/issues/44#issuecomment-4919347400); that date has passed.
 
-The provisional scope is both existing Firebase projects, `gaycruisebingo` and `fiveacross`. Confirm the target inventory before changing live configuration. The current source already initializes `ReCaptchaEnterpriseProvider` in `src/firebaseCore.ts` when `VITE_RECAPTCHA_SITE_KEY` is nonempty, with token auto-refresh enabled. The private memory app receives the primary App Check token through its custom provider. No client rewrite is required.
+The owner-confirmed scope is both existing Firebase projects, `gaycruisebingo` and `fiveacross`. Inventory each target before changing live configuration. The current source already initializes `ReCaptchaEnterpriseProvider` in `src/firebaseCore.ts` when `VITE_RECAPTCHA_SITE_KEY` is nonempty, with token auto-refresh enabled. The private memory app receives the primary App Check token through its custom provider. No client rewrite is required.
 
 ## Provision and distribute, with enforcement off
 
@@ -34,6 +34,10 @@ Run a negative probe without an App Check token using an otherwise valid authent
 If legitimate requests fail after the flip, return the affected service to unenforced monitoring, verify that readback and repeat the smoke check. Keep the client attestation wiring and investigate the failed cohort before another flip.
 
 Callable-level App Check policy remains #1353. This ticket does not silently change `AUTH_HANDOFF_APP_CHECK`, `BUG_REPORT_APP_CHECK`, `APPROVE_PROMPTS_APP_CHECK` or `SUBMIT_PROMPT_APP_CHECK`, nor does its smoke check satisfy #1411's attended two-account device acceptance.
+
+## Live inventory — 2026-10-09
+
+The project-specific deploy service accounts reached Google APIs using their own 1Password-backed keys. Both projects returned `SERVICE_DISABLED` for Firebase App Check and reCAPTCHA Enterprise. The Gay Cruise Bingo deploy account has App Check config read/update permissions but lacks `serviceusage.services.enable`, `recaptchaenterprise.keys.create` and `recaptchaenterprise.keys.list`. No API was enabled, key created or enforcement changed. Owner console provisioning of both APIs and the two Enterprise website keys is pending; provider registration and monitoring resume afterward.
 
 ## Acceptance evidence
 
