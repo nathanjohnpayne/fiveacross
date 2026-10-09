@@ -157,6 +157,8 @@ describe('moderateProof export gating (#126)', () => {
     // Pinned to us-east1 to match the default Storage bucket (#132): a
     // us-central1 trigger on a us-east1 bucket fails deploy-plan validation.
     expect(mod.moderateProof.__endpoint.region).toContain('us-east1');
+    // A held thumbnail whose reconciliation fails must be redelivered.
+    expect(mod.moderateProof.__endpoint.eventTrigger.retry).toBe(true);
   });
 
   it('leaves the #101 notifiers exported and unaffected regardless of the flag', async () => {

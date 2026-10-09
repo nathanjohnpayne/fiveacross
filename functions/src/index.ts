@@ -389,7 +389,7 @@ export const moderateProof = VISION_ENABLED
       // compute identity has no data-plane access in this project — without
       // the Admin-SDK identity the toggle read would throw and FAIL OPEN,
       // silently ignoring an admin's visionGate: false.
-      { memory: '512MiB', region: 'us-east1', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+      { memory: '512MiB', region: 'us-east1', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT, retry: true },
       moderateProofHandler,
     )
   : undefined;
