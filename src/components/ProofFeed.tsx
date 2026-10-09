@@ -17,6 +17,7 @@ import Avatar from './Avatar';
 import BlockPlayerButton from './BlockPlayerButton';
 import { safeMediaUrl } from './safeMediaUrl';
 import { useProofMediaUrls } from '../hooks/useProofMedia';
+import { useNearViewport } from '../hooks/useNearViewport';
 import { tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen } from '../game/logic';
 import { isDoubtSatisfied, openDoubts, doubtStatusFor, raiseDoubt } from '../data/doubts';
 import { heartState, setHeart } from '../data/hearts';
@@ -300,10 +301,11 @@ function ProofCard({
     viewerUidRef.current = viewerUid;
     return () => { viewerUidRef.current = undefined; };
   }, [viewerUid]);
-  const { urls } = useProofMediaUrls([proof.storagePath], viewerUid ?? null);
+  const { ref: mediaCard, nearby } = useNearViewport();
+  const { urls } = useProofMediaUrls(nearby ? [proof.storagePath] : [], viewerUid ?? null);
   const media = safeMediaUrl(proof.storagePath ? urls.get(proof.storagePath) : undefined);
   return (
-    <div className="proof">
+    <div className="proof" ref={mediaCard}>
       <div className="row" style={{ border: 'none', background: 'none', padding: 0 }}>
         <Avatar name={proof.displayName} src={proof.photoURL} size={30} />
         <div className="grow">

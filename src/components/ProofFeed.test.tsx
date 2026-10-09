@@ -853,6 +853,32 @@ describe('failed shared Feed confirmation', () => {
 });
 
 // Authenticated media transport is covered at its loader/hook boundary.
+it('defers a Proof card’s authenticated media request until viewport proximity', () => {
+  const callbacks = new Map<Element, IntersectionObserverCallback>();
+  vi.stubGlobal('IntersectionObserver', class {
+    constructor(private callback: IntersectionObserverCallback) {}
+    observe(node: Element) { callbacks.set(node, this.callback); }
+    disconnect() {}
+  });
+  H.onSnapshot.mockReset();
+  const sub = captureOnNext();
+  const { container, unmount } = render(<ProofFeed />);
+  try {
+    sub.fire(emptyColSnap, {
+      docs: [{ id: 'media-proof', data: () => ({
+        uid: 'alice', displayName: 'Alice', type: 'photo', status: 'active',
+        createdAt: 1000, reportCount: 0, itemText: 'Photo', cellIndex: 0,
+        storagePath: 'proofs/test-event/alice/media-proof.jpg',
+      }) }], metadata: { fromCache: false },
+    });
+    const card = container.querySelector('.proof')!;
+    expect(card).toBeTruthy();
+    expect(card.querySelector('img.proof-media')).toBeNull();
+    act(() => callbacks.get(card)!([{ target: card, isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver));
+    expect(card.querySelector<HTMLImageElement>('img.proof-media')?.src).toContain('blob:');
+  } finally { unmount(); vi.unstubAllGlobals(); }
+});
+
 vi.mock('../hooks/useProofMedia', () => ({
   useProofMediaUrls: (paths: readonly (string | null | undefined)[]) => ({
     scope: 'test-account',

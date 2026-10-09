@@ -485,9 +485,10 @@ function FarewellPodiumInner({
   // drop from DISPLAY only; the award record is never touched.
   const displayable = award ? mostLovedDisplayWinners(award, proofs) : [];
 
-  const mediaProofs = displayable.length > 0
-    ? displayable.map(({ proof }) => proof)
-    : proofs.filter(proof => proof.type === 'photo').slice(0, 3);
+  const mediaProofs = [
+    ...displayable.map(({ proof }) => proof),
+    ...proofs.filter(proof => proof.type === 'photo').slice(0, 3),
+  ];
   const { scope: mediaScope, urls: mediaUrls } = useProofMediaUrls(mediaProofs.map(proof => proof.storagePath));
 
   // The in-app section's payload — shaped only once the proofs have LOADED so

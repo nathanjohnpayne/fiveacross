@@ -26,6 +26,7 @@ vi.mock('../analytics', () => ({ track }));
 const M = vi.hoisted(() => ({
   proofs: [] as unknown[],
   proofsLoading: false,
+  deniedMedia: new Set<string>(),
   proofFeedCalls: [] as Array<{
     max: number | null;
     moderation?: { threshold: number | undefined; bannedUids: readonly string[] };
@@ -334,6 +335,7 @@ describe('FarewellPodium wrapper — Most-Loved display gate + analytics (#561)'
     track.mockReset();
     M.proofs = [];
     M.proofsLoading = false;
+    M.deniedMedia.clear();
     M.proofFeedCalls = [];
     Object.defineProperty(window, 'localStorage', {
       value: memoryStorage(),
@@ -416,6 +418,23 @@ describe('FarewellPodium wrapper — Most-Loved display gate + analytics (#561)'
     expect(container.querySelector('.farewell-most-loved-title')?.textContent).toBe(
       'Most-loved photo of the cruise',
     );
+  });
+
+  it('loads the newest three highlights when a surviving winner’s SDK download fails', () => {
+    M.proofs = [
+      proofDoc({ id: 'h1', uid: 'cy', createdAt: 5000 }),
+      proofDoc({ id: 'h2', uid: 'di', createdAt: 4000 }),
+      proofDoc({ id: 'h3', uid: 'ed', createdAt: 3000 }),
+      proofDoc({ id: 'h4', uid: 'fi', createdAt: 2500 }),
+      proofDoc({ id: 'w1', uid: 'ana', createdAt: 1000 }),
+    ];
+    M.deniedMedia.add('proofs/test-event/ana/w1.jpg');
+    const { container } = render(<FarewellPodium players={[]} days={undefined} event={awardedEvent(AWARD)} />);
+    expect(container.querySelector('.farewell-most-loved-title')?.textContent).toBe('Photo highlights');
+    const photos = container.querySelectorAll<HTMLImageElement>('.farewell-most-loved-photo');
+    expect(photos).toHaveLength(3);
+    expect(photos[0].src).toContain('%2Fh1.jpg');
+    expect(photos[2].src).toContain('%2Fh3.jpg');
   });
 
   it('the explicit no-award record (winners: []) renders the highlights fallback', () => {
@@ -659,6 +678,6 @@ describe('FarewellPodium wrapper — a banned honoree is withheld, not handed do
 vi.mock('../hooks/useProofMedia', () => ({
   useProofMediaUrls: (paths: readonly (string | null | undefined)[]) => ({
     scope: 'test-account',
-    urls: new Map(paths.filter((path): path is string => !!path).map(path => [path, `blob:${encodeURIComponent(path)}`])),
+    urls: new Map(paths.filter((path): path is string => !!path && !M.deniedMedia.has(path)).map(path => [path, `blob:${encodeURIComponent(path)}`])),
   }),
 }));

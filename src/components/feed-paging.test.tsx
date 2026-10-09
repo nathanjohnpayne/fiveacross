@@ -149,11 +149,12 @@ describe('ProofFeed paging — the scroll trigger', () => {
     class StubIO {
       constructor(
         private cb: IntersectionObserverCallback,
-        options?: IntersectionObserverInit,
-      ) {
-        lastOptions = options;
-      }
+        private options?: IntersectionObserverInit,
+      ) {}
       observe(node: Element) {
+        // Media cards have their own proximity observers; this suite owns paging.
+        if (!node.matches('.feed-more')) return;
+        lastOptions = this.options;
         observed.push({
           node,
           fire: (isIntersecting: boolean) =>
