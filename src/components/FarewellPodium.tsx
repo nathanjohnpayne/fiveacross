@@ -532,18 +532,19 @@ function FarewellPodiumInner({
   // the roster array's identity: Board re-filters `players` every snapshot,
   // so an identity key would invalidate on every render even though the
   // frozen podium almost never changes. #561: the key swaps the hero's object
-  // URL for its proofId (object URLs differ per fetch; the photo does not).
+  // URL for its proofId and storagePath (object URLs differ per fetch).
   const warmedCard = useRef<WarmedCard | null>(null);
   // One eager render per mount, once sharing is allowed (see the effect
   // below) — the ref, not a `useEffect` dep list, is what makes it once.
   const eagerRenderStarted = useRef(false);
-  // The hero-photo fetch, cached by proofId so warm and tap share ONE fetch.
-  const heroPhoto = useRef<{ scope: string; proofId: string; promise: Promise<Blob | null> } | null>(null);
+  // The hero-photo fetch is scoped to the session, Proof and Storage object.
+  const heroPhoto = useRef<{ scope: string; proofId: string; storagePath: ProofDoc['storagePath']; promise: Promise<Blob | null> } | null>(null);
 
   const heroPhotoBlob = (proofId: string, proof: ProofDoc): Promise<Blob | null> => {
-    if (heroPhoto.current?.scope === mediaScope && heroPhoto.current.proofId === proofId) return heroPhoto.current.promise;
+    if (heroPhoto.current?.scope === mediaScope && heroPhoto.current.proofId === proofId
+      && heroPhoto.current.storagePath === proof.storagePath) return heroPhoto.current.promise;
     const promise = fetchHeroPhotoBlob(proof);
-    heroPhoto.current = { scope: mediaScope, proofId, promise };
+    heroPhoto.current = { scope: mediaScope, proofId, storagePath: proof.storagePath, promise };
     return promise;
   };
 
@@ -568,7 +569,7 @@ function FarewellPodiumInner({
             ),
           }
         : null;
-    const key = JSON.stringify({ ...base, mostLoved: heroMeta, mediaScope });
+    const key = JSON.stringify({ ...base, mostLoved: heroMeta, mediaScope, heroStoragePath: hero?.proof.storagePath ?? null });
     if (warmedCard.current?.key === key) return warmedCard.current.promise;
     // `.catch(() => null)` inside the cached promise (same rationale as the
     // Leaderboard's): a render failure degrades to the text/URL leg and can

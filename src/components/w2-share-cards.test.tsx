@@ -3090,6 +3090,20 @@ describe('FarewellPodium — photo-hero share (#534/#561)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('reloads and rasterizes a changed hero storagePath within the same Proof and session', async () => {
+    const user = userEvent.setup();
+    const view = render(<FarewellPodium players={[champ, early]} days={undefined} event={eventProp} />);
+    await waitFor(() => expect(toBlobMock).toHaveBeenCalledTimes(1));
+    expect(fetchMock).toHaveBeenCalledWith('proofs/test-event/ana/w1.jpg');
+
+    H.proofs = [{ ...liveProof('w1', 'ana', 1000), storagePath: 'proofs/test-event/ana/w1.webm' }, liveProof('w2', 'bea', 2000)];
+    view.rerender(<FarewellPodium players={[champ, early]} days={undefined} event={eventProp} />);
+    await user.hover(screen.getByRole('button', { name: 'Share final standings' }));
+    await waitFor(() => expect(toBlobMock).toHaveBeenCalledTimes(2));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenLastCalledWith('proofs/test-event/ana/w1.webm');
+  });
+
   it('a failed media fetch falls back to the photo-less composition — the documented fallback, never a broken hero', async () => {
     fetchMock.mockRejectedValue(Object.assign(new Error('denied'), { code: 'storage/unauthorized' }));
     const shareMock = vi.fn().mockResolvedValue(undefined);
