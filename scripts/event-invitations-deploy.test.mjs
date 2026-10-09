@@ -38,15 +38,15 @@ const EXPORTS_ALL = [
 ];
 
 describe("event-invitation deploy scope", () => {
-  it("does not claim services that the real Functions index does not export", async () => {
+  it("exports every production invitation callable that deployment must reconcile", async () => {
     const source = await readFile(
       resolve(repoRoot, "functions", "src", "index.ts"),
       "utf8",
     );
 
-    expect(source).not.toMatch(
-      /export\s+const\s+(?:mintEventInvitation|redeemEventInvitation|revokeEventInvitation)\b/,
-    );
+    for (const verb of ["mint", "redeem", "revoke"]) {
+      expect(source).toMatch(new RegExp(`export\\s+const\\s+${verb}EventInvitation\\b`));
+    }
   });
 
   it.each([
@@ -54,14 +54,14 @@ describe("event-invitation deploy scope", () => {
     { args: ["--only", "functions"] },
     { args: ["--only", "functions:default"] },
   ])(
-    "selects the family with every unexported service allowed absent for a full Functions release (#1335) ($args)",
+    "keeps all production invitation services strict for a full Functions release ($args)",
     async ({ args }) => {
       const result = await classify(args);
 
       expect(result).toMatchObject({
         eventInvitationsInvokerSelected: true,
-        eventInvitationsInvokerConservative: true,
-        eventInvitationsStrictServices: "",
+        eventInvitationsInvokerConservative: false,
+        eventInvitationsStrictServices: "mint,redeem,revoke",
       });
     },
   );
@@ -197,8 +197,10 @@ describe("event-invitation deploy scope", () => {
     "functions:someGroup",
     "functions:mintEventInvitation",
     "functions:default,functions:someGroup",
-  ])("treats %s against the real index as an allow-missing probe", async (only) => {
-    const result = await classify(["--only", only]);
+  ])("treats %s against an index without invitation exports as an allow-missing probe", async (only) => {
+    const result = await classifyCodebases([
+      { source: "functions", index: ["export const unrelated = 1;"] },
+    ], ["--only", only]);
 
     expect(result).toMatchObject({
       eventInvitationsInvokerSelected: true,
@@ -228,8 +230,8 @@ describe("event-invitation deploy scope", () => {
     // A no-op exclusion leaves a full release, which selects the family (#1335).
     expect(endpointQualifiedNoop).toMatchObject({
       eventInvitationsInvokerSelected: true,
-      eventInvitationsInvokerConservative: true,
-      eventInvitationsStrictServices: "",
+      eventInvitationsInvokerConservative: false,
+      eventInvitationsStrictServices: "mint,redeem,revoke",
     });
   });
 });
