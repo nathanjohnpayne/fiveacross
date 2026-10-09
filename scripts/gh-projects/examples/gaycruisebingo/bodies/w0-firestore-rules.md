@@ -6,7 +6,7 @@
 Reconcile `firestore.rules` to the ADRs and PROVE it with `@firebase/rules-unit-testing`. The load-bearing decision: the self-writable `boards/{uid}` and `players/{uid}` rules are INTENTIONAL (ADR 0001 — Marks are client-authoritative), so the tests ASSERT they are ALLOWED; "locking them down" is a misread. Add rules for the greenfield `tally`, `doubts`, and `moments` collections and `users.attestedAdultAt`, keep `items` report-only-increment, keep the `proofs` payload pinning, and validate `settings.reportHideThreshold`. Every Mark must be able to publish an attributed entry to the public per-Prompt Tally (ADR 0002). HOT-file owner of `firestore.rules`.
 
 ## Current state (scaffold)
-- **Exists:** helpers `signedIn/isOwner/isAdmin`; `users/{uid}` self-write (`:14-17`); `events/{eventId}` admin-write; `items/{itemId}` create-if-valid + report-only-increment update (`25-41`); `players/{uid}` self create/update `isOwner||isAdmin` (`45-49`, INTENTIONAL); `boards/{uid}` self read/write (`52-54`, INTENTIONAL); `proofs/{proofId}` (`57-125`) read active-only for non-admins + strict create payload with exact Storage-path/mediaURL regex pinning + report-only update; `claims/{claimId}` (`129-133`).
+- **Exists:** helpers `signedIn/isOwner/isAdmin`; `users/{uid}` self-write (`:14-17`); `events/{eventId}` admin-write; `items/{itemId}` create-if-valid + report-only-increment update (`25-41`); `players/{uid}` self create/update `isOwner||isAdmin` (`45-49`, INTENTIONAL); `boards/{uid}` self read/write (`52-54`, INTENTIONAL); `proofs/{proofId}` (`57-125`) read active-only for non-admins + strict create payload with exact Event/actor/Proof storagePath pinning with null mediaURL and thumbURL + report-only update; `claims/{claimId}` (`129-133`).
 - **Missing:** rules for `tally`, `doubts`, `moments`; a `users.attestedAdultAt` write allowance; `settings.reportHideThreshold` validation; any emulator tests.
 - **Contradicts:** none in the rules themselves — but `docs/app/phase-1-deploy.md` advising admin-only player-stat writes is the ADR-0001 misread this ticket must NOT follow.
 
@@ -25,7 +25,7 @@ Reconcile `firestore.rules` to the ADRs and PROVE it with `@firebase/rules-unit-
 - `tests/rules/firestore.test.ts` — owner write to `boards/{uid}` and `players/{uid}` ALLOWED; cross-uid DENIED (layer: rules-emulator; ADR 0001).
 - a Mark writes an owner-attributed `tally` entry ALLOWED; forged-uid attribution DENIED (layer: rules-emulator; ADR 0002).
 - an `items` update that only increments `reportCount` ALLOWED; mutating any other field DENIED (layer: rules-emulator; ADR 0004).
-- a `proofs` create with a valid pinned payload ALLOWED; a mismatched Storage-path/mediaURL DENIED (layer: rules-emulator).
+- a `proofs` create with a valid pinned payload ALLOWED; a foreign storagePath or any non-null mediaURL/ thumbURL DENIED (layer: rules-emulator).
 - `users/{uid}.attestedAdultAt` self-write ALLOWED; cross-user DENIED (layer: rules-emulator).
 
 ## Acceptance criteria

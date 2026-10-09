@@ -6,21 +6,9 @@
 // event-level `camera_only` override hides Library, leaving only Take photo,
 // in EVERY Claim Mode (never gated on claimMode itself).
 //
-// The Library pick's FULL round trip — submit → Storage upload → committed
-// Proof doc — is exercised too. It used to 403 here 100% deterministically:
-// Storage's EMULATOR `getDownloadURL()` returns a `http://127.0.0.1:9199/...`
-// URL, while firestore.rules' proof-create rule regex-pins `mediaURL` to the
-// PRODUCTION `https://firebasestorage.googleapis.com/...` host (by design — a
-// forged non-Storage URL must never pass as proof media), so the rule the
-// coverage exists to protect was the one thing e2e could not exercise. #335
-// closed that with the flag-gated canonicalize/resolve pair in
-// `src/data/proofMediaUrl.ts` — the emulator download URL is rewritten to its
-// production-shaped twin at proof-write (so the regex is exercised FOR REAL,
-// not relaxed) and downloaded through the authenticated SDK at render. The deeper media assertions — the
-// stored URL against the literal rules regex, the rendered <img>/<audio> src
-// as authenticated blob object URLs, decoded pixels, and the audio half via the fake
-// mic — live in `tests/e2e/d15-proof-media.spec.ts`; this case just proves the
-// affordance it is about actually completes a claim.
+// The Library pick's full round trip commits a path-only Proof with null media
+// URL fields. The deeper authenticated Blob rendering and decoded photo/audio
+// checks live in d15-proof-media.spec.ts; this case proves the claim affordance.
 import { test, expect, type Page } from '@playwright/test';
 import { seedDailyEvent, dismissCoach, readDealtDayGrid } from './support/daily';
 import { joinViaSharedLink, signedInUid } from './support/join';
@@ -132,9 +120,8 @@ test.describe('claim sheet photo affordances', () => {
       await expect(pageB.locator('.sheet-backdrop')).toHaveCount(0, { timeout: 20_000 });
       expect(alertText).toBeNull();
 
-      // Ground truth: the Proof doc landed, with the media pinned to the exact
-      // object this Proof owns — which is only possible because the committed
-      // `mediaURL` satisfied the proof-create rule's production-host regex.
+      // Ground truth: the Proof landed with its exact object identity and no
+      // persisted media download URL.
       await testEnv.withSecurityRulesDisabled(async (ctx) => {
         const { collection, getDocs, query, where } = await import('firebase/firestore');
         const snap = await getDocs(
@@ -145,9 +132,8 @@ test.describe('claim sheet photo affordances', () => {
         expect(proof.data().type).toBe('photo');
         expect(proof.data().source).toBe('library');
         expect(proof.data().storagePath).toBe(`proofs/${EVENT_ID}/${uidB}/${proof.id}.jpg`);
-        expect(proof.data().mediaURL).toMatch(
-          /^https:\/\/firebasestorage\.googleapis\.com\/v0\/b\/[^/]+\/o\/proofs%2F/,
-        );
+        expect(proof.data().mediaURL).toBeNull();
+        expect(proof.data().thumbURL).toBeNull();
       });
     } finally {
       await pageA?.context().close();

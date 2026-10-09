@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   assertFails,
   assertSucceeds,
@@ -9,7 +9,7 @@ import {
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
 import { deleteObject, getMetadata, ref, uploadBytes } from 'firebase/storage';
-import { deleteDoc, doc, setDoc } from 'firebase/firestore';
+import { deleteDoc, doc, getDoc, setDoc } from 'firebase/firestore';
 import { clearStorageDeep } from '../support/storage-emulator';
 
 // Storage security-rules coverage for storage.rules (ADR 0004): the okJpeg()
@@ -391,7 +391,7 @@ describe.each(['off', 'enforced'] as const)('Storage ↔ Firestore Proof pinning
   const mediaURL = (ext: string) =>
     `https://firebasestorage.googleapis.com/v0/b/demo-bucket/o/proofs%2F${EVENT}%2F${OWNER}%2F${PROOF}.${ext}?alt=media&token=t`;
 
-  const proofDoc = (type: 'photo' | 'audio', storagePath: string, url: string) => ({
+  const proofDoc = (type: 'photo' | 'audio', storagePath: string, url: string | null = null) => ({
     uid: OWNER,
     displayName: 'Alice',
     photoURL: null,
@@ -414,7 +414,7 @@ describe.each(['off', 'enforced'] as const)('Storage ↔ Firestore Proof pinning
     await assertSucceeds(
       setDoc(
         doc(owner.firestore(), `events/${EVENT}/proofs/${PROOF}`),
-        proofDoc('photo', photoPath, mediaURL('jpg')),
+        proofDoc('photo', photoPath),
       ),
     );
   });
@@ -425,7 +425,7 @@ describe.each(['off', 'enforced'] as const)('Storage ↔ Firestore Proof pinning
     await assertSucceeds(
       setDoc(
         doc(owner.firestore(), `events/${EVENT}/proofs/${PROOF}`),
-        proofDoc('audio', audioPath, mediaURL('webm')),
+        proofDoc('audio', audioPath),
       ),
     );
   });
@@ -439,9 +439,42 @@ describe.each(['off', 'enforced'] as const)('Storage ↔ Firestore Proof pinning
     await assertSucceeds(
       setDoc(
         doc(owner.firestore(), `events/${EVENT}/proofs/${PROOF}`),
-        proofDoc('audio', audioPathM4a, mediaURL('m4a')),
+        proofDoc('audio', audioPathM4a),
       ),
     );
+  });
+
+  it.each([
+    ['photo', photoPath, 'jpg'], ['audio', audioPath, 'webm'], ['audio', audioPathM4a, 'm4a'],
+  ] as const)('rejects stale %s creates carrying a token URL (%s)', async (kind, path, ext) => {
+    const owner = testEnv.authenticatedContext(OWNER);
+    await assertFails(setDoc(doc(owner.firestore(), `events/${EVENT}/proofs/${PROOF}`), proofDoc(kind, path, mediaURL(ext))));
+  });
+
+  it.each([
+    `proofs/foreign/${OWNER}/${PROOF}.jpg`, `proofs/${EVENT}/other/${PROOF}.jpg`,
+    `proofs/${EVENT}/${OWNER}/other.jpg`, `proofs/${EVENT}/${OWNER}/${PROOF}.png`,
+  ])('denies a path outside this Event/actor/Proof/extension: %s', async path => {
+    const owner = testEnv.authenticatedContext(OWNER);
+    await assertFails(setDoc(doc(owner.firestore(), `events/${EVENT}/proofs/${PROOF}`), proofDoc('photo', path)));
+  });
+
+  it('denies a non-null thumbnail URL on a path-only create', async () => {
+    const owner = testEnv.authenticatedContext(OWNER);
+    await assertFails(setDoc(doc(owner.firestore(), `events/${EVENT}/proofs/${PROOF}`), {
+      ...proofDoc('photo', photoPath), thumbURL: mediaURL('jpg'),
+    }));
+  });
+  it('keeps existing token-bearing Proofs readable and owner-deletable without migrating their fields', async () => {
+    const legacyURL = mediaURL('jpg');
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await setDoc(doc(ctx.firestore(), `events/${EVENT}/proofs/${PROOF}`), proofDoc('photo', photoPath, legacyURL));
+    });
+    const owner = testEnv.authenticatedContext(OWNER);
+    const legacy = doc(owner.firestore(), `events/${EVENT}/proofs/${PROOF}`);
+    expect((await assertSucceeds(getDoc(legacy))).data()?.mediaURL).toBe(legacyURL);
+    await assertSucceeds(deleteDoc(legacy));
+    expect((await assertSucceeds(getDoc(legacy))).exists()).toBe(false);
   });
 
   it('rejects a mismatched proof path: Storage accepts the object, but Firestore denies pinning it to a different proof', async () => {
@@ -454,12 +487,11 @@ describe.each(['off', 'enforced'] as const)('Storage ↔ Firestore Proof pinning
     // Firestore diverge outside the canonical path, not just agree on it.
     const owner = testEnv.authenticatedContext(OWNER);
     const mismatchedPath = `proofs/${EVENT}/${OWNER}/not-${PROOF}.jpg`;
-    const mismatchedURL = `https://firebasestorage.googleapis.com/v0/b/demo-bucket/o/proofs%2F${EVENT}%2F${OWNER}%2Fnot-${PROOF}.jpg?alt=media&token=t`;
     await assertSucceeds(put(owner, mismatchedPath, TINY, IMAGE));
     await assertFails(
       setDoc(
         doc(owner.firestore(), `events/${EVENT}/proofs/${PROOF}`),
-        proofDoc('photo', mismatchedPath, mismatchedURL),
+        proofDoc('photo', mismatchedPath),
       ),
     );
   });

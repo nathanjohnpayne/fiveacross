@@ -118,7 +118,7 @@ The trigger is exported **unconditionally**, unlike the `ENABLE_VISION_MODERATIO
 
 ## The scanner never creates the Proof
 
-`moderateProof` is a **Storage** trigger, and `attachProof` (`src/data/proofs.ts`) uploads the media *before* the transaction that writes the Proof document — it has to, because `firestore.rules` pins `storagePath`/`mediaURL` to the exact uploaded object, so a media Proof is unwritable until its media exists. The scan therefore runs on an object whose Proof may not have been created yet: the upload-before-document race the #101 notifier already accounts for on its own side (`onDocumentWritten`, so a Proof that arrives already `'flagged'` still alerts).
+`moderateProof` is a **Storage** trigger, and `attachProof` (`src/data/proofs.ts`) uploads the media *before* the transaction that writes the Proof document. The client awaits upload; rules pin `storagePath` to the exact object name and require null media URL fields, but cannot establish object existence. The scan therefore runs on an object whose Proof may not have been created yet: the upload-before-document race the #101 notifier already accounts for on its own side (`onDocumentWritten`, so a Proof that arrives already `'flagged'` still alerts).
 
 The producer used to close that gap by **merge-setting** the verdict, which creates the Proof when it is absent. That created document then broke the submission still on its way, differently for each kind of uploader and badly in both directions:
 

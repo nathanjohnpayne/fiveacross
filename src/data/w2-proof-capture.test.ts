@@ -25,6 +25,7 @@ type Snap = { data: () => unknown };
 
 const {
   activeEvent,
+  storageScope,
   reportContentSpy,
   txGet,
   txSet,
@@ -44,6 +45,7 @@ const {
   deleteDocSpy,
 } = vi.hoisted(() => ({
   activeEvent: { id: 'med-2026' },
+  storageScope: { app: undefined as { options: { storageBucket: string } } | undefined },
   reportContentSpy: vi.fn(async () => undefined),
   txGet: vi.fn(),
   txSet: vi.fn(),
@@ -63,7 +65,7 @@ vi.mock('../firebase', () => ({
   get EVENT_ID() {
     return activeEvent.id;
   },
-  storage: {},
+  storage: storageScope,
 }));
 // storage.ts talks to Cloud Storage; stub the two functions proofs.ts uses so we
 // never touch a real bucket (uploadProofMedia is exercised for real against the
@@ -149,6 +151,7 @@ function setPayload(frag: string): Record<string, unknown> | undefined {
 beforeEach(() => {
   vi.clearAllMocks();
   activeEvent.id = EVENT_ID;
+  storageScope.app = undefined;
   autoSeq = 0;
   vi.spyOn(Date, 'now').mockReturnValue(1000);
   boardState = { cells: dealt() };
@@ -246,7 +249,7 @@ describe('attachProof — posts an active Proof to the Feed and marks the cell (
     expect(proof.thumbURL).toBeNull();
     // The upload result is wired into the doc so the Feed can render the media.
     expect(proof.storagePath).toBe(`proofs/${EVENT_ID}/u1/UPLOADED.jpg`);
-    expect(proof.mediaURL).toContain('firebasestorage');
+    expect(proof.mediaURL).toBeNull();
     expect(proof.text).toBeNull();
 
     // The backing cell is marked-confirmed and references the proof.
@@ -805,9 +808,8 @@ describe('attachProof — ONLINE-only: it rejects offline rather than queuing (A
 });
 
 describe('attachProof — rolls the upload back when the transaction is refused (#134, #1157)', () => {
-  // Codex P1, PR #1157. The media has to be uploaded BEFORE the transaction —
-  // `firestore.rules` pins the Proof document's `storagePath`/`mediaURL` to the
-  // exact object — so every rejection leaves a blob no document points at. The
+  // Codex P1, PR #1157. The client awaits upload BEFORE the transaction, so
+  // every rejection leaves a blob no document points at. The
   // freeze made one of those rejections routine: an Admin committing
   // `archiving: true` between the upload resolving and the transaction reading
   // denies the write, and the archive keeps the blob forever. `storage.rules`
@@ -1684,6 +1686,14 @@ describe('deleteProof — purges the deleting device’s own cached copy after c
     await deleteProof('P');
 
     expect(purgeCacheSpy).toHaveBeenCalledWith(undefined);
+  });
+  it('purges a path-only Proof using the committed stored path and captured bucket', async () => {
+    storageScope.app = { options: { storageBucket: 'demo-bucket' } };
+    proofState = { uid: 'u1', cellIndex: 5, storagePath: `proofs/${EVENT_ID}/u1/P.jpg`, mediaURL: null };
+    await deleteProof('P', `proofs/${EVENT_ID}/u1/wrong.jpg`);
+    expect(purgeCacheSpy).toHaveBeenCalledWith(null,
+      `https://firebasestorage.googleapis.com/v0/b/demo-bucket/o/proofs%2F${EVENT_ID}%2Fu1%2FP.jpg`);
+    expect(Math.min(...purgeCacheSpy.mock.invocationCallOrder)).toBeGreaterThan(Math.max(...txDelete.mock.invocationCallOrder));
   });
 });
 

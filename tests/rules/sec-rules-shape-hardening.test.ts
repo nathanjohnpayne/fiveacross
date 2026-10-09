@@ -241,10 +241,8 @@ describe('proofs/{proofId} — the create holds the id, the Callout text and the
     }
   });
 
-  it('DENIES a photo Proof whose id would widen the mediaURL pattern to another object', async () => {
-    // Before the id check, `.` in the id reached `matches()` unescaped, so this
-    // pair — a storagePath for one name and a mediaURL for a DIFFERENT one — was
-    // admitted. It is refused on the id before the pattern is ever built.
+  it('DENIES an invalid photo Proof id even with null mediaURL and its own exact path', async () => {
+    // Path-only creation retains the bounded object-name rule.
     const id = 'pa.b';
     await assertFails(
       setDoc(doc(db(ALICE), at(`proofs/${id}`)), {
@@ -252,7 +250,7 @@ describe('proofs/{proofId} — the create holds the id, the Callout text and the
         type: 'photo',
         text: null,
         storagePath: `proofs/${EVENT}/${ALICE}/${id}.jpg`,
-        mediaURL: `https://firebasestorage.googleapis.com/v0/b/b/o/proofs%2F${EVENT}%2F${ALICE}%2FpaXb.jpg?alt=media`,
+        mediaURL: null,
       }),
     );
   });

@@ -38,7 +38,7 @@ const at = (p: string) => `events/${EVENT}/${p}`;
 const photoProof = (id: string, over: Record<string, unknown> = {}) => ({
   uid: ALICE, displayName: 'Alice', photoURL: null, type: 'photo', cellIndex: 5,
   itemText: 'Saw a drag show', storagePath: `proofs/${EVENT}/${ALICE}/${id}.jpg`,
-  mediaURL: `https://firebasestorage.googleapis.com/v0/b/demo-bucket/o/proofs%2F${EVENT}%2F${ALICE}%2F${id}.jpg?alt=media&token=t`,
+  mediaURL: null,
   thumbURL: null, text: null, createdAt: NOW(), reportCount: 0, status: 'active', visionFlag: null, ...over,
 });
 

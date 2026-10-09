@@ -91,11 +91,10 @@ describe('uploadProofMedia — audio extension/Content-Type follow the Blob’s 
     expect(H.uploadBytes.mock.calls[0][2]).toEqual({ contentType: 'audio/webm', cacheControl: CC });
   });
 
-  it('the download URL still resolves from the SAME ref the extension was derived for', async () => {
-    H.getDownloadURL.mockResolvedValueOnce('https://firebasestorage.example/P.m4a?alt=media');
-    const blob = new Blob(['clip'], { type: 'audio/mp4' });
-    const { url } = await uploadProofMedia('u1', 'P', blob, 'audio');
-    expect(url).toBe('https://firebasestorage.example/P.m4a?alt=media');
+  it('returns object identity only and never mints a proof download URL', async () => {
+    const result = await uploadProofMedia('u1', 'P', new Blob(['clip'], { type: 'audio/mp4' }), 'audio');
+    expect(result).toEqual({ path: 'proofs/med-2026/u1/P.m4a' });
+    expect(H.getDownloadURL).not.toHaveBeenCalled();
   });
 
   it('photo uploads are unaffected — always .jpg / image/jpeg regardless of this audio mapping', async () => {

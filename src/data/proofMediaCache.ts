@@ -32,14 +32,38 @@ export const PROOF_MEDIA_CACHE_NAME = 'proof-media';
  * longer stores proof responses and retires this legacy bucket plus its token-bearing Workbox expiration records on activation,
  * but an old worker may still own a cached copy on the deleting device. This
  * cannot recall another device's HTTP cache, old worker, or downloaded bytes.
+ * An optional tokenless object URL identifies the captured bucket/path without
+ * a persisted mediaURL. Query variants match only within that exact origin.
  * Every failure is swallowed so it can never fail the authoritative delete.
  */
-export async function purgeProofMediaFromCaches(mediaURL: string | null | undefined): Promise<void> {
-  if (!mediaURL) return;
+export async function purgeProofMediaFromCaches(
+  mediaURL: string | null | undefined,
+  objectURL?: string | null,
+): Promise<void> {
+  if (!mediaURL && !objectURL) return;
   if (typeof caches === 'undefined') return;
   try {
     const cache = await caches.open(PROOF_MEDIA_CACHE_NAME);
-    await cache.delete(mediaURL);
+    if (mediaURL) await cache.delete(mediaURL).catch(() => false);
+    if (!objectURL) return;
+    const identity = (value: string) => {
+      const url = new URL(value);
+      const match = /^\/v0\/b\/([^/]+)\/o\/(.+)$/.exec(url.pathname);
+      if (!match) return null;
+      const path = decodeURIComponent(match[2]);
+      return path.startsWith('proofs/')
+        ? { origin: url.origin, bucket: decodeURIComponent(match[1]), path }
+        : null;
+    };
+    const target = identity(objectURL);
+    if (!target) return;
+    const matching = (await cache.keys()).filter(request => {
+      try {
+        const key = identity(request.url);
+        return key?.origin === target.origin && key.bucket === target.bucket && key.path === target.path;
+      } catch { return false; }
+    });
+    await Promise.allSettled(matching.map(request => cache.delete(request)));
   } catch {
     // Best-effort, local-only purge (see doc comment above): swallow every
     // failure. The Storage delete already happened; this must never throw.

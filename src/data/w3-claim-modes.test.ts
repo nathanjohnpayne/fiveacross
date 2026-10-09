@@ -59,6 +59,7 @@ vi.mock('../privateFirestore', async () => {
 });
 vi.mock('../firebase', () => ({
   db: {},
+  storage: {},
   get EVENT_ID() {
     return eventScope.eventId;
   },
