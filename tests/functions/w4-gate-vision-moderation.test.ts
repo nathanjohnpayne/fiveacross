@@ -381,6 +381,14 @@ it('the real thumbnail writer starts held and reconciles before a disabled scan,
     patch.mockRejectedValueOnce(new Error('hold unavailable'));
     await expect(mod.moderateProof.run({ data: { name: source.name, bucket: bucket.name } } as unknown as Parameters<typeof mod.moderateProof.run>[0]))
       .rejects.toThrow('hold unavailable');
+    const savesBeforeRetiredSource = save.mock.calls.length;
+    download.mockRejectedValueOnce(Object.assign(new Error('source retired'), { code: 404 }));
+    await expect(mod.moderateProof.run({ data: { name: source.name, bucket: bucket.name } } as unknown as Parameters<typeof mod.moderateProof.run>[0]))
+      .resolves.toBeUndefined();
+    expect(save.mock.calls).toHaveLength(savesBeforeRetiredSource);
+    download.mockRejectedValueOnce(Object.assign(new Error('source temporarily unavailable'), { code: 503 }));
+    await expect(mod.moderateProof.run({ data: { name: source.name, bucket: bucket.name } } as unknown as Parameters<typeof mod.moderateProof.run>[0]))
+      .rejects.toThrow('source temporarily unavailable');
   } finally {
     for (const spy of [download, save, files, buckets, docs, get, listing, metadata, patch, scan]) spy.mockRestore();
     delete process.env.ENABLE_VISION_MODERATION;

@@ -312,7 +312,14 @@ async function moderateProofHandler(event: StorageEvent): Promise<void> {
   const proofId = parts[3].replace(/\.[^.]+$/, '');
 
   const bucket = getStorage().bucket(event.data.bucket);
-  const [buf] = await bucket.file(path).download();
+  let buf: Buffer;
+  try {
+    [buf] = await bucket.file(path).download();
+  } catch (error) {
+    // Rollback/delete may retire the source before its finalize event arrives.
+    if (isObjectAlreadyGone(error)) return;
+    throw error;
+  }
 
   let thumbnailSaved = false;
   try {
