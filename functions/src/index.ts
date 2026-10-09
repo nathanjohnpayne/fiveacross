@@ -27,7 +27,7 @@ import {
   type AlertableDoc,
   type BugReportDoc,
 } from './adminAlerts';
-import { visionModerationEnabled, shouldScanProof, resolveProjectId } from './visionGate';
+import { visionModerationEnabled, proofMediaHoldEnabled, shouldScanProof, resolveProjectId } from './visionGate';
 import { applyThresholdHide, applyThresholdBackfill, type ReportableDoc } from './autohide';
 import { applyVisionFlagHide, recordVisionVerdict, type VisionFlaggedDoc } from './visionHide';
 import {
@@ -39,6 +39,7 @@ import { handleSubmitBugReport } from './bugReports';
 import {
   hasActiveSweepLease,
   isObjectAlreadyGone,
+  isGenerationMismatch,
   isSameRevocation,
   revokeProofMedia,
   type ProofStorageDeleteInput,
@@ -126,19 +127,21 @@ export const submitBugReport = onCall(
   (request) => handleSubmitBugReport(request, BUG_REPORT_APP_CHECK.value()),
 );
 
-// Metadata-only reconciliation. Existing hide paths are not switched here.
-export const onProofMediaHoldWritten = onDocumentWritten(
+// Opt in only AFTER #1356's read/hide cutover and trusted legacy-key cleanup.
+// Discovery reads the same project dotenv gate as runtime; absent means OFF.
+const PROOF_MEDIA_HOLD_ENABLED = proofMediaHoldEnabled();
+export const onProofMediaHoldWritten = PROOF_MEDIA_HOLD_ENABLED ? onDocumentWritten(
   { document: 'events/{eventId}/proofs/{proofId}', retry: true, timeoutSeconds: 120,
     serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
   async event => {
     await reconcileProofMediaHold(event.params, adminProofMediaHoldStore(getStorage().bucket(), db));
   },
-);
-export const repairProofMediaHolds = onSchedule(
+) : undefined;
+export const repairProofMediaHolds = PROOF_MEDIA_HOLD_ENABLED ? onSchedule(
   { schedule: 'every 1 minutes', timeoutSeconds: 120, maxInstances: 1,
     serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
   async () => { await runProofMediaHoldRepairs(adminProofMediaHoldStore(getStorage().bucket(), db)); },
-);
+) : undefined;
 
 // --- Centralised-auth handoff (#548, ADR 0010, specs/auth-handoff.md) -----------
 //
@@ -326,18 +329,24 @@ async function moderateProofHandler(event: StorageEvent): Promise<void> {
     const thumb = await sharp(buf).resize(400, 400, { fit: 'inside' }).jpeg({ quality: 78 }).toBuffer();
     await bucket.file(path.replace(/\.jpg$/, '_thumb.jpg')).save(thumb, {
       contentType: 'image/jpeg',
+      // Never replace an existing thumbnail and erase an in-flight hide lease.
+      preconditionOpts: { ifGenerationMatch: 0 },
       // Match the client upload policy; Functions is a separate runtime/build.
-      metadata: { cacheControl: 'private, no-store, max-age=0', metadata: { faHold: 'true' } },
+      metadata: { cacheControl: 'private, no-store, max-age=0',
+        ...(PROOF_MEDIA_HOLD_ENABLED ? { metadata: { faHold: 'true' } } : {}),
+      },
     });
     thumbnailSaved = true;
-  } catch {
+  } catch (error) {
+    // The existing generation still needs current-state reconciliation.
+    thumbnailSaved = isGenerationMismatch(error);
     /* thumbnail is best-effort */
   }
 
-  // A thumbnail can arrive after the Proof-write listing or overwrite it on
-  // redelivery. Reconcile every successful save, even with Vision scanning off.
+  // A thumbnail can arrive after the Proof-write listing. Reconcile each saved
+  // or already-existing thumbnail, even with Vision scanning off.
   // Hold failures escape so the Storage event retries instead of losing repair.
-  if (thumbnailSaved) await reconcileProofMediaHold(
+  if (PROOF_MEDIA_HOLD_ENABLED && thumbnailSaved) await reconcileProofMediaHold(
     { eventId, proofId }, adminProofMediaHoldStore(bucket, db),
   );
 
@@ -349,9 +358,9 @@ async function moderateProofHandler(event: StorageEvent): Promise<void> {
   // all; this read gates whether an existing deployment SCANS. Read AFTER the
   // thumbnail save (Codex P3): the thumbnail is a display asset, not
   // moderation — a degraded Firestore must not cost an upload its thumb.
-  if (!(await shouldScanProof(db, eventId))) return;
-
   try {
+    // Optional scanning/verdict failures never redeliver the Storage event.
+    if (!(await shouldScanProof(db, eventId))) return;
     const [res] = await visionClient.safeSearchDetection({ image: { content: buf } });
     const s = res.safeSearchAnnotation;
     const flag = atLeast(s?.violence as string, 'LIKELY')
@@ -396,7 +405,8 @@ export const moderateProof = VISION_ENABLED
       // compute identity has no data-plane access in this project — without
       // the Admin-SDK identity the toggle read would throw and FAIL OPEN,
       // silently ignoring an admin's visionGate: false.
-      { memory: '512MiB', region: 'us-east1', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT, retry: true },
+      { memory: '512MiB', region: 'us-east1', serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT,
+        retry: PROOF_MEDIA_HOLD_ENABLED },
       moderateProofHandler,
     )
   : undefined;

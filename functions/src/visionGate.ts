@@ -42,12 +42,24 @@ export function visionModerationEnabled(
   env: NodeJS.ProcessEnv = process.env,
   cwd: string = process.cwd(),
 ): boolean {
+  return deploymentFlagEnabled('ENABLE_VISION_MODERATION', env, cwd);
+}
+
+/** Default-off until #1356 cutover and trusted legacy metadata cleanup. */
+export function proofMediaHoldEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+  cwd: string = process.cwd(),
+): boolean {
+  return deploymentFlagEnabled('ENABLE_PROOF_MEDIA_HOLD', env, cwd);
+}
+
+function deploymentFlagEnabled(key: string, env: NodeJS.ProcessEnv, cwd: string): boolean {
   // Runtime, emulator, or any context where the value is already in the
   // environment: trust it. This is the deployed-function path (the platform
   // injects the resolved .env values as real env vars) and keeps a truthy
   // string other than 'true' OFF.
-  if (env.ENABLE_VISION_MODERATION !== undefined) {
-    return env.ENABLE_VISION_MODERATION === 'true';
+  if (env[key] !== undefined) {
+    return env[key] === 'true';
   }
   // Only the deploy TRIGGER-DISCOVERY subprocess reaches here with the flag
   // unset; it is the one marked by FUNCTIONS_CONTROL_API. Everywhere else,
@@ -63,7 +75,7 @@ export function visionModerationEnabled(
   );
   let enabled = false;
   for (const file of files) {
-    const value = readEnvKey(join(cwd, file), 'ENABLE_VISION_MODERATION');
+    const value = readEnvKey(join(cwd, file), key);
     if (value !== undefined) {
       enabled = value === 'true';
     }
@@ -95,7 +107,7 @@ export function resolveProjectId(env: NodeJS.ProcessEnv = process.env): string |
 
 /**
  * Read one KEY from a dotenv file, or `undefined` if the file or key is
- * absent. Deliberately minimal — a single well-known boolean key — but honors
+ * absent. Deliberately minimal — one well-known boolean key per call — but honors
  * the `export ` prefix, surrounding whitespace, trailing comments, and simple
  * single/double quotes, matching the shapes firebase-tools' own parser accepts.
  * Never throws: a missing or malformed file resolves to `undefined` (→ OFF).
