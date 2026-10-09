@@ -23,3 +23,5 @@ Admin settings feedback follows [`admin-async-feedback`](../../specs/admin-async
 When the recovery query key is absent, the credential-safe entry starts loading the application graph without first awaiting the recovery-navigation import. Preserve deferred recovery selection and credential capture before application or recovery imports.
 
 Proof media (#1410): preserve the network-only/no-store policy and legacy proof-cache and cache-scoped Workbox expiration-record purge. Never clear Firestore IndexedDB or queued offline Marks as part of a media-cache migration. Source verification does not establish deployment or recall previously cached/downloaded copies; token/moderation policy remains owner-decided under #806/#1356.
+
+Proof-media token operations reuse `functions/src/proofMediaTokens.ts` (#1534): conditional metadata-only stripping, the existing private/no-store policy and transactional resumable progress. Retry one operation with its original sweep ID; a later revocation needs a new ID. No trigger or production sweep is implied by this primitive; see `specs/proof-media-token-revocation.md`.

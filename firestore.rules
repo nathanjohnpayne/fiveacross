@@ -3742,6 +3742,11 @@ service cloud.firestore {
       }
     }
 
+    // Server-only resumable proof-media token revocation progress (#1534).
+    match /proofMediaTokenSweeps/{sweepId} {
+      allow read, write: if false;
+    }
+
     // Event-filtered collection-group LIST for the Feed's Tally Cards
     // (#216/#294/#1072/#1089). Every delivered marker now carries `eventId`, and
     // the client proves one Event with `where('eventId', '==', capturedEventId)`.
