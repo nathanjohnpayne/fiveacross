@@ -505,7 +505,9 @@ describe.each(['enforced', 'off', undefined] as const)('Storage admission (%s)',
   });
 
   it('only the owner or roster Admin may delete another owner’s orphan', async () => {
-    await assertFails(deleteObject(ref(testEnv.authenticatedContext('stranger').storage(), photoPath)));
+    for (const uid of ['stranger', 'revoked', OTHER]) {
+      await assertFails(deleteObject(ref(testEnv.authenticatedContext(uid).storage(), photoPath)));
+    }
     await assertSucceeds(deleteObject(ref(testEnv.authenticatedContext(ADMIN).storage(), photoPath)));
   });
 
@@ -535,4 +537,15 @@ describe.each(['enforced', 'off', undefined] as const)('Storage admission (%s)',
     await assertFails(put(ctx, `proofs/${EVENT}/${OWNER}/new.jpg`, TINY, IMAGE));
     await assertFails(deleteObject(ref(ctx.storage(), photoPath)));
   });
+});
+
+
+it('missing Event denies media reads/creates but retains the owner orphan cleanup path', async () => {
+  const path = `proofs/missing/${OWNER}/orphan.jpg`;
+  await testEnv.withSecurityRulesDisabled(ctx => put(ctx, path, TINY, IMAGE));
+  const owner = testEnv.authenticatedContext(OWNER);
+  await assertFails(getMetadata(ref(owner.storage(), path)));
+  await assertFails(put(owner, `proofs/missing/${OWNER}/new.jpg`, TINY, IMAGE));
+  await assertFails(deleteObject(ref(testEnv.authenticatedContext(ADMIN).storage(), path)));
+  await assertSucceeds(deleteObject(ref(owner.storage(), path)));
 });

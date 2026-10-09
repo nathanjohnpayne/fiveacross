@@ -198,6 +198,8 @@ service firebase.storage {
     }
 
     // Proof media (Phase 1). Path scoped to the uploading user.
+    // A missing Event now denies even absent/off reads. Proof publication
+    // requires an Event; leftover orphan cleanup uses the separate delete arm.
     match /proofs/{eventId}/{uid}/{file} {
       allow read: if signedIn() && admittedProofMedia(
         firestore.get(/databases/(default)/documents/events/$(eventId)).data, eventId);
@@ -280,7 +282,7 @@ service firebase.storage {
       // D10: orphan cleanup is exempt from admission. Proof-document deletion
       // is admission-gated in Firestore; this arm never removes live Proof
       // media and grants no read or create authority. Preserve its one/two
-      // accesses (Proof exists + optional Event get for a non-owner Admin).
+      // accesses (Proof exists + optional Event get to check whether any non-owner is on the Admin roster).
       allow delete: if mayDeleteProofMedia(eventId, uid, file);
     }
 
