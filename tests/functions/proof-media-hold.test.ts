@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
-  assertHideCommitAllowed, HIDE_COMMIT_MARGIN_MS, MEDIA_HOLD_LEASE_MS,
+  adminProofMediaHoldStore, assertHideCommitAllowed, HIDE_COMMIT_MARGIN_MS, MEDIA_HOLD_LEASE_MS,
   preHoldProofMedia, proofMediaVersion, reconcileProofMediaHold, runProofMediaHoldRepairs,
   wantedProofMediaHold, withProofMediaHideLease,
   type HoldMetadata, type HoldProof, type HoldRepairStore,
@@ -225,5 +225,26 @@ describe('hide leases and durable repairs', () => {
     expect(f.objects.get(main)?.metadata?.faHold).toBe('true');
     f.setNow(lease.expiresAt + 1000); await runProofMediaHoldRepairs(f.store);
     expect(f.jobs.size).toBe(0);
+  });
+});
+
+
+describe('Storage hold adapter listing', () => {
+  it('filters at the server and follows even empty pages while retaining exact path checks', async () => {
+    const getFiles = vi.fn().mockResolvedValueOnce([[], { pageToken: 'next' }])
+      .mockResolvedValueOnce([[{ name: main }, { name: thumb }, { name: 'proofs/event/player/other.jpg' }], null]);
+    const store = adminProofMediaHoldStore({ getFiles } as never, {} as never);
+    expect(await store.objects(scope)).toEqual([main, thumb]);
+    const options = { prefix: 'proofs/event/', autoPaginate: false, maxResults: 100,
+      matchGlob: 'proofs/event/*/proof{.jpg,.webm,.m4a,_thumb.jpg}' };
+    expect(getFiles.mock.calls).toEqual([[options], [{ ...options, pageToken: 'next' }]]);
+  });
+  it.each([{ eventId: 'ev[ent', proofId: 'proof' }, { eventId: 'event', proofId: 'pr*of' },
+    { eventId: 'event', proofId: 'p'.repeat(1024) }])('falls back without interpreting unsafe or oversized IDs: %j', async target => {
+    const path = `proofs/${target.eventId}/player/${target.proofId}.jpg`;
+    const getFiles = vi.fn().mockResolvedValue([[{ name: path }, { name: main }], null]);
+    const store = adminProofMediaHoldStore({ getFiles } as never, {} as never);
+    expect(await store.objects(target)).toEqual([path]);
+    expect(getFiles).toHaveBeenCalledWith({ prefix: `proofs/${target.eventId}/`, autoPaginate: false, maxResults: 100 });
   });
 });

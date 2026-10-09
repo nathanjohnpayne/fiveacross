@@ -206,12 +206,19 @@ export function adminProofMediaHoldStore(bucket: ReturnType<Storage['bucket']>, 
       return { exists: snap.exists, data: snap.data(), updateTime: snap.updateTime, readTime: snap.readTime };
     },
     async objects(scope) {
+      scopeValid(scope);
       const paths: string[] = [];
+      // Common IDs use server-side filtering; legacy IDs containing glob syntax
+      // retain the exact post-filter below without interpreting their characters.
+      const pattern = `proofs/${scope.eventId}/*/${scope.proofId}{.jpg,.webm,.m4a,_thumb.jpg}`;
+      const matchGlob = [scope.eventId, scope.proofId].every(id => /^[A-Za-z0-9_.-]+$/.test(id))
+        && Buffer.byteLength(pattern, 'utf8') <= 1024 ? pattern : undefined;
       let pageToken: string | undefined;
       const seen = new Set<string>();
       do {
         const [files, next] = await bucket.getFiles({ prefix: `proofs/${scope.eventId}/`,
-          autoPaginate: false, maxResults: 100, ...(pageToken ? { pageToken } : {}),
+          autoPaginate: false, maxResults: 100, ...(matchGlob ? { matchGlob } : {}),
+          ...(pageToken ? { pageToken } : {}),
         });
         paths.push(...files.map(file => file.name).filter(path => isProofObject(path, scope)));
         pageToken = next?.pageToken;
