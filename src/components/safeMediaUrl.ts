@@ -1,20 +1,13 @@
 // safeMediaUrl — the sink guard for a Proof media element's `src` (<img>/<audio>).
 //
-// Proof media is only ever one of: an object URL minted by URL.createObjectURL
-// (`blob:`), a Firebase Storage download URL (`https:`, or `http:` under the local
-// emulator), or — defensively, for a future inline preview — an image/audio data
-// URL. Every other scheme, above all `javascript:` (and its friends `vbscript:`
-// and `data:text/html`), is rejected so a hostile value can never reach the DOM as
-// an active-scheme URL.
+// Proof readers and capture previews use app-owned blob: URLs. The shared guard
+// also accepts http(s) media and image/audio data URLs defensively for other
+// callers, while rejecting active schemes and HTML payloads at the DOM sink.
 //
-// This guards the CodeQL js/xss-through-dom class flagged on the Proof media sinks
-// (alerts #1 and #3), whose flagged flow is the photo preview: the file input's
-// `.files[0]` (a DOM source) → URL.createObjectURL → `photoUrl` state →
-// `<img src={photoUrl}>` (the sink). React auto-escapes JSX *text* but does NOT
-// sanitize a `src`/`href` attribute value, so scheme validation is the correct fix
-// at that sink. It is applied identically to the Feed's `mediaURL` (the more
-// genuinely untrusted input, resolved from a Firestore document) so a forged media
-// URL likewise cannot introduce an active scheme.
+// The CodeQL js/xss-through-dom alerts (#1 and #3) trace a preview from the file
+// input through URL.createObjectURL into an image src. React escapes text but
+// does not validate attribute schemes. Feed SDK-derived object URLs pass this
+// same final barrier; persisted Proof mediaURL/thumbURL values never reach it.
 //
 // Two barriers, in order, so the guard is legible to both humans and static
 // analysis:

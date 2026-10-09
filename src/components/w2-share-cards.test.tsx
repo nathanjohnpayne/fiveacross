@@ -3312,6 +3312,11 @@ describe('ShareCard — legacy oversized text', () => {
 
 // Media lifecycle and authority are tested at the loader/hook boundary.
 vi.mock('../hooks/useProofMedia', () => ({
+  useFirstAvailableProofMedia: (paths: readonly (string | null | undefined)[]) => ({
+    scope: 'test-account', settled: true,
+    path: paths.find(path => !!path),
+    unavailable: new Set(paths.filter(path => path && !(!!path))),
+  }),
   useProofMediaUrls: (paths: readonly (string | null | undefined)[]) => ({
     scope: 'test-account',
     urls: new Map(paths.filter((path): path is string => !!path).map(path => [path, `blob:${encodeURIComponent(path)}`])),

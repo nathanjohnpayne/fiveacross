@@ -9,7 +9,7 @@ Closes the DOM-XSS class flagged by CodeQL `js/xss-through-dom` (alerts #1 and #
 
 ## The flagged flow, and why the specific instance is inert
 
-The flagged sink (`<img src={photoUrl}>`) is fed only by `URL.createObjectURL(file)`, which by specification returns a `blob:` URL—it can never be coerced to `javascript:`. So the exact alert instance is not exploitable, and neither is any current text path: the text callout renders through auto-escaped JSX (`<blockquote>“{p.text}”</blockquote>` in the Feed; a controlled `<textarea>` in the sheet), so an HTML payload is shown as literal text, never parsed. The specific alert is therefore a false positive for a live exploit. The fix still hardens the whole *class* of sink defensively—most usefully the Feed's `mediaURL`, which is resolved from a Firestore document and is the genuinely untrusted input—so a forged non-media scheme cannot reach the DOM as an active-scheme URL.
+The flagged sink (`<img src={photoUrl}>`) is fed only by `URL.createObjectURL(file)`, which by specification returns a `blob:` URL—it can never be coerced to `javascript:`. So the exact alert instance is not exploitable, and neither is any current text path: the text callout renders through auto-escaped JSX (`<blockquote>“{p.text}”</blockquote>` in the Feed; a controlled `<textarea>` in the sheet), so an HTML payload is shown as literal text, never parsed. The specific alert is therefore a false positive for a live exploit. The fix still hardens the whole *class* of sink defensively—including the Feed's SDK-derived object URLs, whose `storagePath` comes from a Firestore document—so a forged non-media scheme cannot reach the DOM as an active-scheme URL.
 
 ### Re-fingerprinting, and the recognised barrier (alert #3)
 
@@ -33,8 +33,8 @@ The capture sheet keeps all three capture types working: a text callout stays li
 
 ## ProofFeed renders text Proofs inert and drops non-media schemes
 
-The Feed keeps rendering each capture type, and its stored `mediaURL` is scheme-guarded so a forged value cannot introduce an active scheme.
+The Feed keeps rendering each capture type, and authenticated SDK bytes produce object URLs that are scheme-guarded at the sink. Persisted `mediaURL` and `thumbURL` never supply a rendering fallback.
 
 - **Given** a text Proof whose text is an HTML payload **When** the Feed renders it **Then** it appears as a literal, inert quote and no `<img>` (or other element) is injected. (Test: "ProofFeed: a text Proof of an HTML payload renders as a literal, inert quote".)
-- **Given** a photo Proof **When** its `mediaURL` is an `https:` URL it renders the `<img>`, and **When** its `mediaURL` is a `javascript:` URL the image is dropped (no element). (Test: "ProofFeed: a photo Proof renders an https media URL and drops a javascript: media URL".)
-- **Given** an audio Proof with an `https:` media URL **When** the Feed renders it **Then** the `<audio>` element renders. (Test: "ProofFeed: an audio Proof renders an https media URL".)
+- **Given** a photo Proof **When** its authenticated SDK bytes resolve, **Then** the sanitized object URL renders the image; persisted hostile URLs are ignored. A denied download withholds the image. (Tests: the ProofFeed photo and denied-media cases in `src/components/sec-xss-proofsheet.test.tsx` and `src/components/ProofFeed.test.tsx`.)
+- **Given** an audio Proof **When** its authenticated SDK bytes resolve, **Then** the sanitized object URL renders the audio element. (Test: the ProofFeed audio case in `src/components/sec-xss-proofsheet.test.tsx`.)

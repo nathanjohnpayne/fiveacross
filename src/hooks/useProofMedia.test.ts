@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { useProofMediaUrls } from './useProofMedia';
+import { useFirstAvailableProofMedia, useProofMediaUrls } from './useProofMedia';
 
 const M = vi.hoisted(() => ({
   session: { uid: 'alice', db: {}, generation: 1, failed: false, recoveryRequired: false },
@@ -78,6 +78,28 @@ describe('proof object URL lifetime', () => {
     await waitFor(() => expect(result.current.urls.size).toBe(1));
     M.session = { ...M.session, uid: 'bob', generation: 2 }; rerender();
     expect(result.current.urls.size).toBe(0); expect(M.revoke).toHaveBeenCalledWith('blob:photo');
+    expect(M.load).toHaveBeenCalledOnce();
+  });
+});
+
+describe('podium availability probe', () => {
+  it('stops a 100-way tie at the first available winner without retaining object URLs', async () => {
+    const paths = Array.from({ length: 100 }, (_, i) => `proofs/A/alice/${i}.jpg`);
+    M.load.mockRejectedValueOnce(new Error('missing'));
+    const { result } = renderHook(() => useFirstAvailableProofMedia(paths));
+    await waitFor(() => expect(result.current.settled).toBe(true));
+    expect(result.current.path).toBe(paths[1]);
+    expect(M.load.mock.calls.map(call => call[0])).toEqual(paths.slice(0, 2));
+    expect(M.create).not.toHaveBeenCalled();
+  });
+  it('does not continue probing or publish across session retirement', async () => {
+    let finish!: (blob: Blob) => void;
+    M.load.mockReturnValue(new Promise<Blob>(resolve => { finish = resolve; }));
+    const { result, rerender } = renderHook(() => useFirstAvailableProofMedia([path, 'proofs/A/alice/next.jpg']));
+    M.session = { ...M.session, failed: true }; rerender();
+    await act(async () => finish(new Blob(['old'])));
+    expect(result.current.settled).toBe(false);
+    expect(result.current.path).toBeUndefined();
     expect(M.load).toHaveBeenCalledOnce();
   });
 });

@@ -1,5 +1,6 @@
+import * as proofMediaHooks from '../hooks/useProofMedia';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import type { DayDef, EventDoc, MostLovedPhotoAward, ProofDoc } from '../types';
 import TutorialBanner from './TutorialBanner';
 import FarewellPodium, { FarewellPodiumView, type FarewellMostLoved } from './FarewellPodium';
@@ -676,8 +677,39 @@ describe('FarewellPodium wrapper — a banned honoree is withheld, not handed do
 
 // Media lifecycle and authority are tested at the loader/hook boundary.
 vi.mock('../hooks/useProofMedia', () => ({
+  useFirstAvailableProofMedia: (paths: readonly (string | null | undefined)[]) => ({
+    scope: 'test-account', settled: true,
+    path: paths.find(path => !!path && !M.deniedMedia.has(path)),
+    unavailable: new Set(paths.filter(path => path && !(!!path && !M.deniedMedia.has(path)))),
+  }),
   useProofMediaUrls: (paths: readonly (string | null | undefined)[]) => ({
     scope: 'test-account',
     urls: new Map(paths.filter((path): path is string => !!path && !M.deniedMedia.has(path)).map(path => [path, `blob:${encodeURIComponent(path)}`])),
   }),
 }));
+
+it('loads only nearby images for a 100-way podium tie and releases them on exit', () => {
+  const observers: { callback: IntersectionObserverCallback; target?: Element }[] = [];
+  vi.stubGlobal('IntersectionObserver', class {
+    row: typeof observers[number];
+    constructor(callback: IntersectionObserverCallback) { this.row = { callback }; observers.push(this.row); }
+    observe(target: Element) { this.row.target = target; }
+    disconnect() { /* fixture */ }
+  });
+  const reads = vi.spyOn(proofMediaHooks, 'useProofMediaUrls');
+  try {
+    const tieProofs = Array.from({ length: 100 }, (_, i) => proofDoc({ id: `tie-${i}`, uid: 'ana', createdAt: 1000 + i }));
+    M.proofs = tieProofs;
+    const award = { ...AWARD, winnerCount: 100, winners: tieProofs.map(p => ({ ...AWARD.winners[0], proofId: p.id, proofCreatedAt: p.createdAt })) };
+    const { container } = render(<FarewellPodium players={[]} days={undefined} event={awardedEvent(award)} />);
+    expect(container.querySelectorAll('.farewell-most-loved-credit')).toHaveLength(100);
+    expect(reads.mock.calls.flatMap(([paths]) => paths).filter(Boolean)).toHaveLength(0);
+    const first = observers[0];
+    const signal = (isIntersecting: boolean) => first.callback([{ target: first.target!, isIntersecting } as IntersectionObserverEntry], {} as IntersectionObserver);
+    act(() => signal(true));
+    expect(new Set(reads.mock.calls.flatMap(([paths]) => paths).filter(Boolean)).size).toBe(1);
+    expect(container.querySelectorAll('.farewell-most-loved-photo')).toHaveLength(1);
+    act(() => signal(false));
+    expect(container.querySelectorAll('.farewell-most-loved-photo')).toHaveLength(0);
+  } finally { reads.mockRestore(); vi.unstubAllGlobals(); }
+});

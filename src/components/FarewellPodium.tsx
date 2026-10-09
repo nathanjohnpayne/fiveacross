@@ -18,7 +18,8 @@ import { EVENT_ID } from '../firebase';
 import { useProofFeed } from '../hooks/useData';
 import { useHiddenUids } from '../hooks/useBlocks';
 import { loadProofMediaBlob } from '../data/proofMedia';
-import { useProofMediaUrls } from '../hooks/useProofMedia';
+import { useFirstAvailableProofMedia, useProofMediaUrls } from '../hooks/useProofMedia';
+import { useNearViewport } from '../hooks/useNearViewport';
 import { safeMediaUrl } from './safeMediaUrl';
 import {
   renderFarewellShareCard,
@@ -72,11 +73,12 @@ function makeDayLabel(days: readonly DayDef[] | undefined): (dayIndex: number) =
   };
 }
 
-/** One photo of the Most-Loved section, shaped by the wrapper (`src` already
- *  resolved + sanitized) so the view stays payload-driven and testable. */
+/** Frozen attribution plus a live object path; each row owns its nearby SDK URL.
+ *  Fixture-driven views may instead supply an already sanitized src. */
 export interface FarewellMostLovedPhoto {
   proofId: string;
   src: string | undefined;
+  storagePath?: string | null;
   displayName: string;
   promptText: string;
   dayIndex: number | null;
@@ -93,27 +95,24 @@ export type FarewellMostLoved =
  *  `fx-podium-vacay`). Appreciation for a moment, never player rank: no ranks,
  *  no per-player stats, no streaks — the ONLY number anywhere is the frozen
  *  heart chip. */
-function MostLovedBlock({ mostLoved }: { mostLoved: FarewellMostLoved }) {
-  const award = mostLoved.kind === 'award';
+function MostLovedPhoto({ p, award, heartCount }: { p: FarewellMostLovedPhoto; award: boolean; heartCount?: number }) {
+  const { ref, nearby } = useNearViewport();
+  const { urls } = useProofMediaUrls(nearby && p.storagePath ? [p.storagePath] : []);
+  const src = safeMediaUrl(p.storagePath ? urls.get(p.storagePath) : p.src);
   return (
-    <div className="farewell-most-loved">
-      <p className="farewell-most-loved-title">
-        {award ? `Most-loved photo of the ${editionLexicon().occasion}` : 'Photo highlights'}
-      </p>
-      {mostLoved.photos.map((p) => (
-        <figure key={p.proofId} className="farewell-most-loved-item">
-          <div className="farewell-most-loved-frame">
-            <img
+        <figure className="farewell-most-loved-item">
+          <div ref={ref} className="farewell-most-loved-frame">
+            {src && <img
               className="farewell-most-loved-photo"
-              src={p.src}
+              src={src}
               alt={award ? `Most-loved photo by ${p.displayName}` : `Photo by ${p.displayName}`}
               loading="lazy"
-            />
+            />}
             {award && (
               <span className="farewell-most-loved-hearts">
                 {/* The FROZEN eligible count (never live heartState), shared by
                     every co-winner on a tie. EmojiText: captured surface. */}
-                <EmojiText text={`❤ ${mostLoved.heartCount}`} />
+                <EmojiText text={`❤ ${heartCount}`} />
               </span>
             )}
           </div>
@@ -125,7 +124,18 @@ function MostLovedBlock({ mostLoved }: { mostLoved: FarewellMostLoved }) {
             />
           </figcaption>
         </figure>
-      ))}
+  );
+}
+
+function MostLovedBlock({ mostLoved }: { mostLoved: FarewellMostLoved }) {
+  const award = mostLoved.kind === 'award';
+  return (
+    <div className="farewell-most-loved">
+      <p className="farewell-most-loved-title">
+        {award ? `Most-loved photo of the ${editionLexicon().occasion}` : 'Photo highlights'}
+      </p>
+      {mostLoved.photos.map(p => <MostLovedPhoto key={p.proofId} p={p} award={award}
+        heartCount={mostLoved.kind === 'award' ? mostLoved.heartCount : undefined} />)}
       {award && (
         <p className="farewell-most-loved-note">Frozen at {editionLexicon().occasion} end</p>
       )}
@@ -485,11 +495,13 @@ function FarewellPodiumInner({
   // drop from DISPLAY only; the award record is never touched.
   const displayable = award ? mostLovedDisplayWinners(award, proofs) : [];
 
-  const mediaProofs = [
-    ...displayable.map(({ proof }) => proof),
-    ...proofs.filter(proof => proof.type === 'photo').slice(0, 3),
-  ];
-  const { scope: mediaScope, urls: mediaUrls } = useProofMediaUrls(mediaProofs.map(proof => proof.storagePath));
+  // One ordered availability probe selects award vs fallback without retaining
+  // a 100-way tie's media. Each displayed row owns only its nearby image URL.
+  const winnerMedia = useFirstAvailableProofMedia(displayable.map(({ proof }) => proof.storagePath));
+  const mediaScope = winnerMedia.scope;
+  const fallback = displayable.length === 0 || (winnerMedia.settled && !winnerMedia.path);
+  const highlights = fallback ? proofs.filter(proof => proof.type === 'photo').slice(0, 3) : [];
+  const { urls: mediaUrls } = useProofMediaUrls(highlights.map(proof => proof.storagePath));
 
   // The in-app section's payload — shaped only once the proofs have LOADED so
   // the award never flashes as the highlights fallback while the join is still
@@ -504,6 +516,7 @@ function FarewellPodiumInner({
       proofId: winner?.proofId ?? p.id,
       // Keep the sink sanitizer last, including on SDK-derived object URLs.
       src: safeMediaUrl(p.storagePath ? mediaUrls.get(p.storagePath) : undefined),
+      storagePath: winner ? p.storagePath : undefined,
       displayName: winner?.displayName ?? p.displayName,
       promptText: winner?.promptText ?? p.itemText,
       // `null` is frozen attribution too: only a highlights fallback reads
@@ -511,11 +524,11 @@ function FarewellPodiumInner({
       dayIndex: winner ? winner.dayIndex : p.dayIndex ?? null,
     });
     const winnerPhotos = displayable
-      .map(({ winner, proof }) => shape(proof, winner))
-      .filter((p) => p.src !== undefined);
-    if (winnerPhotos.length > 0) {
+      .filter(({ proof }) => !proof.storagePath || !winnerMedia.unavailable.has(proof.storagePath))
+      .map(({ winner, proof }) => shape(proof, winner));
+    if (winnerMedia.path && winnerPhotos.length > 0) {
       mostLoved = { kind: 'award', heartCount: award.heartCount, photos: winnerPhotos };
-    } else {
+    } else if (fallback) {
       const highlights = proofs
         .filter((p) => p.type === 'photo')
         .map((p) => shape(p))
