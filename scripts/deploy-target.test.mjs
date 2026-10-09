@@ -227,6 +227,7 @@ describe('deploy target selection', () => {
       readyConfig,
       {
         KEEP_ME: 'yes',
+        POSTHOG_UPLOAD_API_KEY: 'ambient-key-must-not-reach-verifier',
         AUTH_HANDOFF_PROJECT: 'gaycruisebingo',
         AUTH_HANDOFF_REGION: 'elsewhere',
         AUTH_HANDOFF_MINT_SERVICE: 'wrong-mint',
@@ -244,13 +245,14 @@ describe('deploy target selection', () => {
       env: {
         KEEP_ME: 'yes',
         BUILD_CMD:
-          'scripts/firebase/op-firebase-deploy fiveacross --verify-fiveacross-hostnames && npm run build:fiveacross',
+          "scripts/firebase/op-firebase-deploy fiveacross --verify-fiveacross-hostnames && scripts/with-posthog-sourcemaps.sh -- npm run build:fiveacross",
         DEPLOY_TARGET_PROJECT: 'fiveacross',
         AUTH_HANDOFF_DEPLOY_READINESS_PROJECT: 'fiveacross',
       },
       stdio: 'inherit',
     });
     expect(calls[0][2].env).not.toHaveProperty('AUTH_HANDOFF_PROJECT');
+    expect(calls[0][2].env).not.toHaveProperty('POSTHOG_UPLOAD_API_KEY');
     expect(calls[0][2].env).not.toHaveProperty('AUTH_HANDOFF_REGION');
     expect(calls[0][2].env).not.toHaveProperty('AUTH_HANDOFF_MINT_SERVICE');
     expect(calls[0][2].env).not.toHaveProperty('AUTH_HANDOFF_EXCHANGE_SERVICE');
@@ -452,7 +454,7 @@ describe('deploy target selection', () => {
     expect(invocation.environment).toMatchObject({
       NODE_ENV: 'production',
       BUILD_CMD:
-        'scripts/firebase/op-firebase-deploy fiveacross --verify-fiveacross-hostnames && npm run build:fiveacross',
+        "scripts/firebase/op-firebase-deploy fiveacross --verify-fiveacross-hostnames && scripts/with-posthog-sourcemaps.sh -- npm run build:fiveacross",
       CF_ZONE_ID: '',
       SYNTHETIC_URL: 'https://bodega-bay.fiveacross.app/',
     });
@@ -467,7 +469,7 @@ describe('deploy target selection', () => {
     // reconciliation — it is the one project it's provisioned for (#768).
     expect(invocation.args).toEqual(['--', 'gaycruisebingo', '--only', 'hosting']);
     expect(invocation.environment).toMatchObject({
-      BUILD_CMD: 'npm run build:gaycruisebingo',
+      BUILD_CMD: "scripts/with-posthog-sourcemaps.sh -- npm run build:gaycruisebingo",
       CF_ZONE_ID: '8066dd2b105ad564c45bb8c898859343',
       SYNTHETIC_URL: 'https://gaycruisebingo.com/',
     });
@@ -524,7 +526,7 @@ describe('deploy target selection', () => {
       'hosting',
     ]);
     expect(invocation.environment).toMatchObject({
-      BUILD_CMD: 'npm run build:gaycruisebingo',
+      BUILD_CMD: "scripts/with-posthog-sourcemaps.sh -- npm run build:gaycruisebingo",
       CF_ZONE_ID: '8066dd2b105ad564c45bb8c898859343',
       SYNTHETIC_URL: 'https://gaycruisebingo.com/',
     });

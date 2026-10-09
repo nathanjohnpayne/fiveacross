@@ -94,3 +94,23 @@ export function assertPreviewFirebaseIsolation(
     );
   }
 }
+
+/** Private maps are mandatory for production releases; Firebase validation emits none. */
+export function posthogSourceMapOptions(input: {
+  command: string; mode: string; targetBuild: boolean; vercelEnv?: string;
+  upload?: string; apiKey?: string; version: string; firebaseDryRun?: string;
+}) {
+  if (input.targetBuild && input.vercelEnv !== 'production' && input.firebaseDryRun === 'true') return null;
+  if (input.command !== 'build' || input.mode !== 'production'
+    || !(input.targetBuild || input.vercelEnv === 'production' || input.upload === '1')) return null;
+  if (!input.apiKey?.trim()) throw new Error(
+    'Private source-map upload requires POSTHOG_UPLOAD_API_KEY from 1Password. ' +
+    'Use scripts/with-posthog-sourcemaps.sh for local deploys; provision the same scoped key as a sensitive Production build variable on each Vercel mirror.',
+  );
+  if (!/^[a-f0-9]{40}$/.test(input.version)) throw new Error('Private source maps require the exact 40-character release commit.');
+  return {
+    personalApiKey: input.apiKey.trim(), projectId: '503790', host: 'https://us.posthog.com',
+    sourcemaps: { enabled: true, releaseName: 'fiveacross', releaseVersion: input.version,
+      releaseMode: 'symbol-set' as const, deleteAfterUpload: true },
+  };
+}

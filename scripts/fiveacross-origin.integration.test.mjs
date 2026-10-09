@@ -35,7 +35,8 @@ const requiredViteKeys = Object.keys(fiveAcrossTargetEnv).filter((key) => key.st
 const targetEnvironment = buildEnvironment(
   'fiveacross',
   fiveAcrossTargetEnv,
-  { ...process.env, GITHUB_SHA: '1111111111111111111111111111111111111111' },
+  // This is a validation build, never a production release or PostHog upload.
+  { ...process.env, GITHUB_SHA: '1111111111111111111111111111111111111111', FIREBASE_DRY_RUN: 'true' },
   requiredViteKeys,
 );
 

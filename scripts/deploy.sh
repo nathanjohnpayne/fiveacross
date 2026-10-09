@@ -803,7 +803,9 @@ else
   # — but `npm run lint; npm run build` would mask the lint failure
   # behind the build's exit code, and `npm run build | tee log.txt`
   # would only surface tee's exit code. Strict-bash closes both.
-  bash -euo pipefail -c -- "$BUILD_CMD"
+  # Pass the canonical argv classification, overriding any ambient value. A
+  # Firebase validation build must not publish private PostHog artifacts either.
+  FIREBASE_DRY_RUN="$FIREBASE_DRY_RUN" bash -euo pipefail -c -- "$BUILD_CMD"
 fi
 
 # Step 1.5: Ensure the post-deploy synthetic browser is present BEFORE we

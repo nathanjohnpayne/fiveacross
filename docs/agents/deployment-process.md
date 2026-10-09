@@ -62,3 +62,7 @@ If the source is unexpected, the diagnosis order is usually:
 5. **Deploy succeeds but logs an `ADC quota project` warning** → expected when the underlying credential was originally stamped for another project. `op-firebase-deploy` overrides `quota_project_id` to the target project for actual deploy commands, so the warning is cosmetic.
 
 If the rotation procedure is needed, follow `DEPLOYMENT.md` § [Rotating a Firebase deploy SA key](../../DEPLOYMENT.md#rotating-a-firebase-deploy-sa-key). Rotation is human-only and not automated by any agent or workflow.
+
+## Private PostHog source maps (#1222)
+
+Named Firebase production releases and Vercel Production builds upload hidden source maps privately to PostHog project 503790 and refuse to publish residual maps. Local target deployments read the scoped Personal API key through `POSTHOG_UPLOAD_OP_REF` and `scripts/with-posthog-sourcemaps.sh`; Vercel mirrors require the same 1Password-sourced key as a sensitive Production-only `POSTHOG_UPLOAD_API_KEY` build variable. Generic compilation, emulator builds and Firebase `--dry-run` validation builds emit no maps and require no key. Real uploads clear ambient CLI dry-run controls. Follow [the source-map contract](../../specs/posthog-source-maps.md) for key scopes, release matching and actual deployed exception/host-probe acceptance. Never treat a successful upload as proof of symbolication.

@@ -67,9 +67,12 @@ function deployInvocationForConfig(target, config, deployArgs, inheritedEnv, wra
     ...inheritedEnv,
     BUILD_CMD:
       target === 'fiveacross'
-        ? 'scripts/firebase/op-firebase-deploy fiveacross --verify-fiveacross-hostnames && npm run build:fiveacross'
-        : `npm run build:${target}`,
+        ? 'scripts/firebase/op-firebase-deploy fiveacross --verify-fiveacross-hostnames && scripts/with-posthog-sourcemaps.sh -- npm run build:fiveacross'
+        : `scripts/with-posthog-sourcemaps.sh -- npm run build:${target}`,
   };
+  // Load the upload key only for npm's build, after hostname verification.
+  // Never forward a loose ambient upload key into source/readiness checks.
+  delete environment.POSTHOG_UPLOAD_API_KEY;
   environment.CF_ZONE_ID = config.cloudflareZoneId ?? '';
   environment.SYNTHETIC_URL = config.syntheticUrl;
   // Pins the Cloud Run invoker reconciliation to the SELECTED target (#768).

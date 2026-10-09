@@ -1498,7 +1498,9 @@ GCLOUD_BIN="$STUB_DIR/gcloud" \
 GOOGLE_APPLICATION_CREDENTIALS="$READINESS_CREDENTIAL" \
 AUTH_HANDOFF_DEPLOY_READINESS_PROJECT=fiveacross \
 DEPLOY_TARGET_PROJECT=fiveacross \
-  bash -c "cd '$REPO18' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo --dry-run" \
+FIREBASE_DRY_RUN=false \
+BUILD_CMD='[[ "$FIREBASE_DRY_RUN" == true ]]' \
+  bash -c "cd '$REPO18' && bash '$SCRIPT' --force --skip-cf-purge --skip-synthetic -- gaycruisebingo --dry-run" \
   >"$OUT18" 2>"$ERR18"
 RC18=$?
 set -e
@@ -1572,7 +1574,9 @@ for value_option_case in \
   GOOGLE_APPLICATION_CREDENTIALS="$READINESS_CREDENTIAL" \
   AUTH_HANDOFF_DEPLOY_READINESS_PROJECT=fiveacross \
   DEPLOY_TARGET_PROJECT=fiveacross \
-    bash -c "cd '$REPO_VALUE' && bash '$SCRIPT' --force --skip-build --skip-cf-purge --skip-synthetic -- gaycruisebingo '$value_option' --dry-run $trailing_scope" \
+  FIREBASE_DRY_RUN=true \
+  BUILD_CMD='[[ "$FIREBASE_DRY_RUN" == false ]]' \
+    bash -c "cd '$REPO_VALUE' && bash '$SCRIPT' --force --skip-cf-purge --skip-synthetic -- gaycruisebingo '$value_option' --dry-run $trailing_scope" \
     >"$OUT_VALUE" 2>"$ERR_VALUE"
   RC_VALUE=$?
   set -e

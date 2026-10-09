@@ -2,6 +2,8 @@
 
 Adds PostHog product analytics to the React app **alongside GA4** (both fire; PostHog does not replace GA4). Set up initially via `@posthog/wizard` on branch `posthog-setup`; the wizard's server-side (`posthog-node`) output was reverted in favour of this client integration, because 2 of its 3 instrumented surfaces (the `share` Cloud Function and the Cloud Run OG renderer) are removed by ADR 0005 / #39, and the PRD's analytics goal is client events.
 
+Private production source maps, release matching, credential handling and deployed symbolication acceptance are defined in [posthog-source-maps.md](posthog-source-maps.md) (#1222).
+
 ## Behaviour
 
 - **Single dispatch path.** `track(name, params)` in `src/analytics.ts` is the only analytics call site in the app; it now fires each event to **both** GA4 (`logEvent`) and PostHog (`phCapture`). Each sink is independently guarded and never throws, so one failing or being unconfigured never blocks the other. The event catalog is `GA4_EVENTS`—the 12 PRD events plus the operational `login_failed` added later by #163; every catalogued event dispatches to both sinks. `login_failed` carries only `{ method, code }`, where `code` is an allowlisted Firebase Auth code or `auth/unknown`; raw provider messages never enter analytics, so PostHog's privacy posture below is unchanged.
