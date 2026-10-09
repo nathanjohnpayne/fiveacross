@@ -2,7 +2,7 @@
  * Event Invitation decision layer (#803).
  *
  * This module owns no Firebase runtime objects. Firestore, time, timestamps,
- * entropy, and the unresolved product choices are injected so transaction
+ * entropy, and server-owned policy are injected so transaction
  * behavior can be proven without weakening the production seam. Invitation
  * codes are bearer capabilities: only their SHA-256 digest is stored, and the
  * raw code appears only in the fragment of the returned URL.
@@ -52,6 +52,23 @@ export interface EventInvitationPolicy {
   revokeGrantedMemberships: boolean;
   rate: Readonly<Record<InvitationOperation, InvitationRatePolicy>>;
 }
+
+/** Owner-accepted 2026-10-02 policy; never taken from callable input. */
+export const PRODUCTION_EVENT_INVITATION_POLICY: EventInvitationPolicy = Object.freeze({
+  ttlMs: 24 * 60 * 60 * 1_000,
+  grantRole: 'member',
+  maxUses: 1,
+  revokeGrantedMemberships: true,
+  rate: Object.freeze({
+    mint: Object.freeze({ windowMs: 10 * 60 * 1_000, maxAttempts: 30 }),
+    redeem: Object.freeze({ windowMs: 10 * 60 * 1_000, maxAttempts: 30 }),
+    revoke: Object.freeze({ windowMs: 10 * 60 * 1_000, maxAttempts: 30 }),
+  }),
+});
+
+type InvitationFailure<Reason extends string> =
+  | { ok: false; reason: Exclude<Reason, 'rate-limited'> }
+  | { ok: false; reason: 'rate-limited'; retryAt: number };
 
 export interface InvitationSnapshot {
   readonly exists: boolean;
@@ -119,7 +136,7 @@ export type MintInvitationResult =
       invitationUrl: string;
       expiresAt: number;
     }
-  | { ok: false; reason: MintInvitationReason };
+  | InvitationFailure<MintInvitationReason>;
 
 export type RedeemInvitationReason =
   | 'unauthenticated'
@@ -137,7 +154,7 @@ export type RedeemInvitationReason =
 
 export type RedeemInvitationResult =
   | { ok: true; eventId: string; outcome: 'membership-created' | 'already-member' }
-  | { ok: false; reason: RedeemInvitationReason };
+  | InvitationFailure<RedeemInvitationReason>;
 
 export type RevokeInvitationReason =
   | 'unauthenticated'
@@ -160,7 +177,7 @@ export type RevokeInvitationResult =
       outcome: 'revoked' | 'already-revoked';
       membershipAccess: 'invitation-only' | 'pending-enforcement' | 'revoked';
     }
-  | { ok: false; reason: RevokeInvitationReason };
+  | InvitationFailure<RevokeInvitationReason>;
 
 type InvitationStatus = 'active' | 'consumed' | 'revoked';
 
@@ -382,25 +399,32 @@ function canonicalHost(snapshot: InvitationQuerySnapshot, eventId: string): stri
   return doc.id;
 }
 
+type RateDecision =
+  | { allowed: true; document: Record<string, unknown> }
+  | { allowed: false; retryAt: number };
+
 function nextRateDocument(
   raw: unknown,
   operation: InvitationOperation,
   now: number,
   policy: InvitationRatePolicy,
-): Record<string, unknown> | null {
+): RateDecision {
+  const blocked = (): RateDecision => ({ allowed: false, retryAt: now + policy.windowMs });
   let attempts: number[] = [];
   if (raw !== undefined) {
-    if (!raw || typeof raw !== 'object') return null;
+    if (!raw || typeof raw !== 'object') return blocked();
     const data = raw as Record<string, unknown>;
-    if (!exactKeys(data, ['schemaVersion', 'operation', 'attemptMs'])) return null;
-    if (data.schemaVersion !== 1 || data.operation !== operation || !Array.isArray(data.attemptMs)) return null;
-    if (data.attemptMs.some((ms) => typeof ms !== 'number' || !Number.isFinite(ms) || ms > now)) return null;
+    if (!exactKeys(data, ['schemaVersion', 'operation', 'attemptMs'])) return blocked();
+    if (data.schemaVersion !== 1 || data.operation !== operation || !Array.isArray(data.attemptMs)) return blocked();
+    if (data.attemptMs.some((ms) => typeof ms !== 'number' || !Number.isFinite(ms) || ms > now)) return blocked();
     attempts = [...data.attemptMs] as number[];
   }
   const cutoff = now - policy.windowMs;
-  const recent = attempts.filter((ms) => ms > cutoff);
-  if (recent.length >= policy.maxAttempts) return null;
-  return { schemaVersion: 1, operation, attemptMs: [...recent, now] };
+  const recent = attempts.filter((ms) => ms > cutoff).sort((a, b) => a - b);
+  if (recent.length >= policy.maxAttempts) {
+    return { allowed: false, retryAt: recent[recent.length - policy.maxAttempts] + policy.windowMs };
+  }
+  return { allowed: true, document: { schemaVersion: 1, operation, attemptMs: [...recent, now] } };
 }
 
 async function readRate(
@@ -409,7 +433,7 @@ async function readRate(
   operation: InvitationOperation,
   now: number,
   policy: InvitationRatePolicy,
-): Promise<Record<string, unknown> | null> {
+): Promise<RateDecision> {
   const snapshot = await tx.get(ref);
   return nextRateDocument(snapshot.exists ? snapshot.data() : undefined, operation, now, policy);
 }
@@ -440,8 +464,9 @@ export async function mintEventInvitation(
     const result = await deps.db.runTransaction(async (tx): Promise<MintInvitationResult | { collision: true }> => {
       const now = deps.now();
       const rateRef = deps.db.doc(invitationRatePath('mint', uid));
-      const rateDocument = await readRate(tx, rateRef, 'mint', now, deps.policy.rate.mint);
-      if (!rateDocument) return { ok: false, reason: 'rate-limited' };
+      const rate = await readRate(tx, rateRef, 'mint', now, deps.policy.rate.mint);
+      if (!rate.allowed) return { ok: false, reason: 'rate-limited', retryAt: rate.retryAt };
+      const rateDocument = rate.document;
       const eventRef = deps.db.doc(`events/${eventId}`);
       const issuerRef = deps.db.doc(membershipPath(eventId, uid));
       const invitationRef = deps.db.doc(invitationPath(invitationId));
@@ -523,11 +548,12 @@ export async function redeemEventInvitation(
   return deps.db.runTransaction(async (tx): Promise<RedeemInvitationResult> => {
     const now = deps.now();
     const rateRef = deps.db.doc(invitationRatePath('redeem', uid));
-    const rateDocument = await readRate(tx, rateRef, 'redeem', now, deps.policy.rate.redeem);
-    if (!rateDocument) return { ok: false, reason: 'rate-limited' };
+    const rate = await readRate(tx, rateRef, 'redeem', now, deps.policy.rate.redeem);
+    if (!rate.allowed) return { ok: false, reason: 'rate-limited', retryAt: rate.retryAt };
+    const rateDocument = rate.document;
     const invitationRef = deps.db.doc(invitationPath(invitationId));
     const invitationSnapshot = await tx.get(invitationRef);
-    const refuse = (reason: RedeemInvitationReason): RedeemInvitationResult => {
+    const refuse = (reason: Exclude<RedeemInvitationReason, 'rate-limited'>): RedeemInvitationResult => {
       writeRate(tx, rateRef, rateDocument);
       return { ok: false, reason };
     };
@@ -617,8 +643,9 @@ export async function revokeEventInvitation(
   return deps.db.runTransaction(async (tx): Promise<RevokeInvitationResult> => {
     const now = deps.now();
     const rateRef = deps.db.doc(invitationRatePath('revoke', uid));
-    const rateDocument = await readRate(tx, rateRef, 'revoke', now, deps.policy.rate.revoke);
-    if (!rateDocument) return { ok: false, reason: 'rate-limited' };
+    const rate = await readRate(tx, rateRef, 'revoke', now, deps.policy.rate.revoke);
+    if (!rate.allowed) return { ok: false, reason: 'rate-limited', retryAt: rate.retryAt };
+    const rateDocument = rate.document;
     const eventRef = deps.db.doc(`events/${eventId}`);
     const issuerRef = deps.db.doc(membershipPath(eventId, uid));
     const invitationRef = deps.db.doc(invitationPath(invitationId));

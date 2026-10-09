@@ -1,13 +1,13 @@
 ---
 spec_id: event-invitations
-status: proposed
+status: accepted
 ---
 
 # Event invitations: mint, redeem, revoke, and membership grant (`event-invitations`)
 
 Implements #803 under epic #801. An Invitation is the organizer-issued, high-entropy capability that creates one Event Membership. It is distinct from an Event hostname or Slug: those are public addresses and grant no admission.
 
-This specification is `proposed` only because the product-policy rows in [Owner decisions](#owner-decisions) are not yet answered. The transaction, authorization, secrecy, rules, and client-ordering contracts below can be implemented and reviewed provisionally, but no production callable is exported until the owner accepts a complete package. Some choices (notably transferable versus identity-bound capability and the issuer authority model) change the wire or data model rather than a numeric constant; if the proposal is rejected, the provisional core changes before export rather than pretending those choices were injectable.
+The owner accepted this policy package on 2026-10-02 ([decision](https://github.com/nathanjohnpayne/fiveacross/issues/803#issuecomment-5963595910)). The server binds it in `PRODUCTION_EVENT_INVITATION_POLICY` and exports all three callables. Source acceptance and code merge do not establish production configuration: #805 seeds existing Admin Memberships before enabling minting and owns the supervised rollout.
 
 ## Sources and scope
 
@@ -29,16 +29,18 @@ This ticket owns the three callable Functions, their server-only Firestore state
 
 ## Owner decisions
 
-The coordinating owner must answer these rows before this spec becomes `accepted` and before the callable exports choose a production policy. The decision-neutral core takes them as explicit server-owned policy; none is accepted from callable input.
+Accepted by Nathan on 2026-10-02. The policy is server-owned; callable payloads cannot select any row.
 
-| Decision | Options still open | Safe minimal package proposed for approval |
-|---|---|---|
-| D4 — capability shape | transferable bearer or identity-bound; exact TTL; grant role; single versus capped multi-use | transferable single-use bearer, 24-hour TTL, `member` only |
-| D8 — issuer | current Admins only, or a new Host permission | current live Admin roster **and** active issuer Membership |
-| Redeemed-grant revocation | revoke only future redemption, or also revoke the Membership created by this Invitation | revoke the Invitation and its one provenance-matching Membership atomically |
-| Enforcement-off revocation | refuse until enforcement, or write the revoked Membership now and report that access continues until enforcement | write the durable revocation now and return `pending-enforcement` until the Event is enforced |
-| Public failure detail | distinguish lifecycle failures, or collapse them | unknown, consumed, expired, and revoked share one terminal client message |
-| Per-caller rate windows | operation-specific window and cap for mint, redeem, and revoke | 30 attempts per 10 minutes for each operation |
+| Decision | Accepted policy |
+|---|---|
+| D4 — capability shape | Transferable single-use bearer, 24-hour TTL, `member` only. Whoever redeems first is admitted; forwarding transfers the Invitation. A printed shared QR remains an address. |
+| D8 — issuer | Current live Admin roster **and** active issuer Membership, read in the committing transaction in both enforcement postures. No Host permission or admin-grant Invitation. Seed existing Admin Memberships before enabling minting. |
+| Redeemed-grant revocation | Revoke the Invitation and its one provenance-matching Membership atomically; remove any current Admin-roster entry in that transaction. An unrelated pre-existing Membership is preserved. Operator confirmation must state whether admission is removed. |
+| Enforcement-off revocation | Write durable revocation now and return `pending-enforcement`; access continues until enforcement. |
+| Public failure detail | Unknown, consumed, expired and revoked share one terminal client message. Sign-in, connectivity and rate-limit errors remain separately retryable. Private diagnostics contain no bearer secrets. |
+| Per-caller rate windows | 30 well-formed attempts per 10 minutes for each operation, including failed attempts; switching Events or switching away from and back to an account never resets that UID's stored window. Return the server retry time. |
+| Production operation | The reviewed callable/authority path may be exercised by a documented operator script under #805 with explicit project/Event identifiers, consequence confirmation and no bearer logging. Organizer UI is #1490, a prerequisite for self-service launch. |
+
 
 The following are already fixed by repository authority and are not choices:
 
@@ -48,7 +50,7 @@ The following are already fixed by repository authority and are not choices:
 - Redemption is create-only. A revoked Membership is never overwritten or reactivated.
 - Decision D-A's transitional Admin bypass does not apply to callables.
 - A Host remains social identity rather than permission unless D8 explicitly creates a new authority model.
-- If a future accepted policy permits `admin` grants, redemption is the product's first server-side write path to `EventDoc.admins`; the proposed production policy disables that path by granting `member` only.
+- If a future accepted policy permits `admin` grants, redemption is the product's first server-side write path to `EventDoc.admins`; the accepted production policy disables that path by granting `member` only.
 
 ## Wire contract
 
@@ -101,7 +103,7 @@ The server resolves an active canonical hostname for `eventId` and returns the c
 }
 ```
 
-Revocation uses the non-secret Invitation id, not the bearer code. The stored Invitation must name the requested Event. The policy row above decides whether an already-created, provenance-matching Membership is revoked in the same transaction. `membershipAccess` reports the observable scope truthfully: `invitation-only` means no Membership was changed, `pending-enforcement` means the Membership is durably revoked but the Event's access gate is still off, and `revoked` means that gate is enforced. Absent or malformed `membershipEnforcement` reads as `off`, matching the canonical Membership contract.
+Revocation uses the non-secret Invitation id, not the bearer code. The stored Invitation must name the requested Event. The accepted policy revokes an already-created, provenance-matching Membership in the same transaction. `membershipAccess` reports the observable scope truthfully: `invitation-only` means no Membership was changed, `pending-enforcement` means the Membership is durably revoked but the Event's access gate is still off, and `revoked` means that gate is enforced. Absent or malformed `membershipEnforcement` reads as `off`, matching the canonical Membership contract.
 
 ## Data model
 
@@ -128,7 +130,7 @@ Every sentinel is written explicitly. Missing fields and malformed timestamps fa
 
 ### `eventInvitationRateLimits/{bucketId}`
 
-Server-owned rolling-window state. Bucket ids are domain-separated SHA-256 digests of the authenticated caller identity and operation, not raw UIDs and not guessed invitation codes. Mint, redemption, and revocation have distinct buckets and limits. Every well-formed call consumes one request attempt, including an idempotent redemption; idempotency preserves the Invitation use, not an unlimited request budget. Once a bucket is exhausted, the transaction reads only that bucket and returns before touching Event, Membership, Invitation, or hostname state. A well-formed unknown-code redemption still commits its rate charge.
+Server-owned rolling-window state. Bucket ids are domain-separated SHA-256 digests of the authenticated caller identity and operation, not raw UIDs and not guessed invitation codes. Mint, redemption, and revocation have distinct buckets and limits. Every well-formed call consumes one request attempt, including an idempotent redemption; idempotency preserves the Invitation use, not an unlimited request budget. Once a bucket is exhausted, the transaction reads only that bucket and returns before touching Event, Membership, Invitation, or hostname state. A well-formed unknown-code redemption still commits its rate charge. A limited result carries `retryAt` as Unix milliseconds: the earliest limiting attempt expiry under the current cap, including after a smaller cap or an unsorted stored history. The callable returns only `{ retryAt }` in `resource-exhausted` details; client wrappers validate that timestamp and expose no other details. Malformed rate state remains denied and returns a conservative one-window retry time, without promising that corrupt server state will repair itself.
 
 ## One membership implementation
 
@@ -238,14 +240,14 @@ The projects' Domain Restricted Sharing policy rejects Firebase's `allUsers` Clo
 
 ## Test coverage
 
-- `tests/functions/event-invitations.test.ts` — injected decision layer: transaction-retry harness guard, mint/redeem/revoke branch matrix, authority races, hashing, canonical-host resolution, strict stored shapes, rate-limit boundaries, create-only/idempotent grants, and revoke/redeem convergence.
+- `tests/functions/event-invitations.test.ts` — accepted 24-hour member-only single-use grants, provenance revocation, 30/10-minute production limits and retry-time boundaries; injected decision layer: transaction-retry harness guard, mint/redeem/revoke branch matrix, authority races, hashing, canonical-host resolution, strict stored shapes, rate-limit boundaries, create-only/idempotent grants, and revoke/redeem convergence.
 - `tests/rules/event-invitations.test.ts` — leaf-collection client denial and the neighboring hostname control.
 - `tests/rules/event-invitations-core.test.ts` — real Firestore replay and concurrent-redemption convergence through an Admin-context adapter.
 - `src/pendingEventInvitation.test.ts` and `src/handoffBoot.test.ts` — strict fragment capture, dual-store persistence, compare-delete, removal-before-app, telemetry suppression, a newer cross-tab capture superseding this tab's memory copy on read (two module instances over one jsdom localStorage), the read retiring the captures it out-ordered, and a memory-only record re-persisted once the stores accept writes (or reported still memory-only when they refuse).
 - `src/components/signin-invitation-handoff.test.tsx` — the handoff tap gives a memory-only Invitation a stored copy before leaving, starts the handoff when there is none or once it is durable, and stays on the document with its own message when the stores still refuse (the bearer never reaching the DOM).
 - `src/components/signin-popup-failure.test.tsx` — a direct sign-in that rejects (a blocked popup, a rejected account, a network failure) showing the static did-not-finish message with the button re-armed, never rendering the error itself, and showing nothing when the sign-in settles (#1134).
 
-- `src/data/eventInvitations.test.ts` — exact callable names, payloads, sanitized results, and safe error mapping.
+- `src/data/eventInvitations.test.ts` — exact callable names, payloads, sanitized results, safe error mapping and validated retry timestamps.
 - `scripts/materialize-event-membership-functions.test.mjs` — generated authorization source audit and fail-closed marker/drift handling.
 - `scripts/event-invitations-invoker.test.mjs`, `scripts/event-invitations-deploy.test.mjs`, and `tests/test_deploy.sh` — exact/whole/unknown Functions scopes preflight and reconcile the selected Invitation services, strict per Functions codebase (#1282): a service the classifier proves the resolved codebase exports must exist after publish, while one it does not prove (including an export it cannot classify), or a codebase that cannot be inventoried, is reconciled with absence allowed, and a whole-codebase scope always selects the family (#1335; see `docs/app/deploy-targets.md`).
 - `src/auth/admissionCoordinator.test.ts` — the client admission coordinator: the deal gate over every state, classify answering clear or held without touching the callable and superseding an older attempt, no-record and foreign-origin visits staying clear, pending exposing only the capture id, admit-and-forget on both outcomes, terminal blocking with the shared message, transient reasons and a rejecting seam retained for Retry, a cross-Event success refused, Retry re-reading the origin (newer capture, expired record, no-op states), and the stale-visit guards across Event, account, re-begin, reset and retry.

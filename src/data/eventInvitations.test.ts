@@ -288,3 +288,23 @@ describe('revokeEventInvitation', () => {
     expect(revoke).not.toHaveBeenCalled();
   });
 });
+
+describe('invitation retry timestamps', () => {
+  const calls = [
+    () => mintEventInvitation({ eventId: EVENT_ID }),
+    () => redeemEventInvitation({ code: CODE, expectedEventId: EVENT_ID }),
+    () => revokeEventInvitation({ eventId: EVENT_ID, invitationId: INVITATION_ID }),
+  ];
+  it.each(calls)('returns only the validated retry timestamp from a limited callable', async call => {
+    mocks.httpsCallable.mockReturnValue(vi.fn().mockRejectedValue({
+      code: 'functions/resource-exhausted', details: { retryAt: 1_800_000_000_000, secret: CODE },
+    }));
+    expect(await call()).toEqual({ ok: false, reason: 'rate-limited', retryAt: 1_800_000_000_000 });
+  });
+  it.each([undefined, 'tomorrow', NaN, Infinity, -1, 1.5])('withholds malformed retry time %s', async retryAt => {
+    mocks.httpsCallable.mockReturnValue(vi.fn().mockRejectedValue({
+      code: 'functions/resource-exhausted', details: { retryAt, secret: CODE },
+    }));
+    expect(await calls[1]()).toEqual({ ok: false, reason: 'rate-limited' });
+  });
+});
