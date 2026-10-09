@@ -276,6 +276,10 @@ service firebase.storage {
       // What this arm governs is the browser.
       allow create, update: if isOwner(uid)
         && resource == null
+        // These fields are authoritative server decisions, never upload input.
+        && !request.resource.metadata.keys().hasAny([
+          'faSrc', 'faHold', 'faLease'
+        ])
         && okProofMedia(file)
         && openAndAdmittedProofMedia(
           firestore.get(/databases/(default)/documents/events/$(eventId)).data, eventId);

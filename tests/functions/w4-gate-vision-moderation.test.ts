@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { visionModerationEnabled, shouldScanProof } from '../../functions/src/visionGate';
+import { visionModerationEnabled, proofMediaHoldEnabled, shouldScanProof } from '../../functions/src/visionGate';
 
 // firebase-admin only lives in functions/node_modules (not the repo root).
 // A plain `import ... from 'firebase-admin/app'` in this file resolves node
@@ -131,6 +131,7 @@ describe('moderateProof export gating (#126)', () => {
 
   afterEach(() => {
     delete process.env.ENABLE_VISION_MODERATION;
+    delete process.env.ENABLE_PROOF_MEDIA_HOLD;
   });
 
   it('is undefined (not exported) when the flag is absent — default OFF', async () => {
@@ -157,6 +158,41 @@ describe('moderateProof export gating (#126)', () => {
     // Pinned to us-east1 to match the default Storage bucket (#132): a
     // us-central1 trigger on a us-east1 bucket fails deploy-plan validation.
     expect(mod.moderateProof.__endpoint.region).toContain('us-east1');
+    // Existing Vision deployments retain their historical non-retry behavior.
+    expect(mod.moderateProof.__endpoint.eventTrigger.retry).toBe(false);
+  });
+
+  it('keeps hold endpoints absent until explicit cutover enablement', async () => {
+    for (const flag of [undefined, 'false', 'TRUE']) {
+      if (flag === undefined) delete process.env.ENABLE_PROOF_MEDIA_HOLD;
+      else process.env.ENABLE_PROOF_MEDIA_HOLD = flag;
+      const mod = await importIndex();
+      expect(mod.onProofMediaHoldWritten).toBeUndefined();
+      expect(mod.repairProofMediaHolds).toBeUndefined();
+    }
+    process.env.ENABLE_PROOF_MEDIA_HOLD = 'true';
+    process.env.ENABLE_VISION_MODERATION = 'true';
+    const mod = await importIndex();
+    expect(mod.onProofMediaHoldWritten?.__endpoint.eventTrigger.retry).toBe(true);
+    expect(mod.onProofMediaHoldWritten?.__endpoint.eventTrigger.eventFilterPathPatterns.document)
+      .toBe('events/{eventId}/proofs/{proofId}');
+    expect(mod.repairProofMediaHolds?.__endpoint.scheduleTrigger.schedule).toBe('every 1 minutes');
+    expect(mod.moderateProof?.__endpoint.eventTrigger.retry).toBe(true);
+  });
+
+  it('honors the hold gate in sealed discovery with project-specific precedence', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'proof-hold-gate-'));
+    try {
+      const env = { FUNCTIONS_CONTROL_API: 'true', GCLOUD_PROJECT: 'fiveacross' };
+      expect(proofMediaHoldEnabled(env, dir)).toBe(false);
+      writeFileSync(join(dir, '.env'), 'ENABLE_PROOF_MEDIA_HOLD=true\n');
+      expect(proofMediaHoldEnabled(env, dir)).toBe(true);
+      writeFileSync(join(dir, '.env.fiveacross'), 'ENABLE_PROOF_MEDIA_HOLD=false\n');
+      expect(proofMediaHoldEnabled(env, dir)).toBe(false);
+      writeFileSync(join(dir, '.env.fiveacross'), 'ENABLE_PROOF_MEDIA_HOLD="true" # cutover\n');
+      expect(proofMediaHoldEnabled(env, dir)).toBe(true);
+      expect(proofMediaHoldEnabled({ ...env, ENABLE_PROOF_MEDIA_HOLD: 'false' }, dir)).toBe(false);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
   it('leaves the #101 notifiers exported and unaffected regardless of the flag', async () => {
@@ -336,8 +372,9 @@ describe('shouldScanProof — the RUNTIME admin toggle (#268)', () => {
   });
 });
 
-it('the real thumbnail writer stamps no-store metadata before the disabled scan returns (#1410)', async () => {
+it('the real thumbnail writer starts held and reconciles before a disabled scan, retrying hold failures', async () => {
   process.env.ENABLE_VISION_MODERATION = 'true';
+  process.env.ENABLE_PROOF_MEDIA_HOLD = 'true';
   const mod = await importIndex();
   const { getStorage } = functionsRequire('firebase-admin/storage') as typeof import('firebase-admin/storage');
   const { getFirestore } = functionsRequire('firebase-admin/firestore') as typeof import('firebase-admin/firestore');
@@ -355,7 +392,14 @@ it('the real thumbnail writer stamps no-store metadata before the disabled scan 
   const files = vi.spyOn(bucket, 'file').mockImplementation(name => name.endsWith('_thumb.jpg') ? thumbnail : source);
   const buckets = vi.spyOn(storage, 'bucket').mockReturnValue(bucket);
   const docs = vi.spyOn(getFirestore(), 'doc').mockReturnValue(eventRef);
-  const get = vi.spyOn(eventRef, 'get').mockResolvedValue({ exists: true, get: () => false } as unknown as Awaited<ReturnType<typeof eventRef.get>>);
+  const get = vi.spyOn(eventRef, 'get').mockResolvedValue({ exists: true, get: () => false,
+    data: () => ({ status: 'hidden', storagePath: source.name }),
+    updateTime: { seconds: 100, nanoseconds: 1 }, readTime: { seconds: 100, nanoseconds: 2 },
+  } as unknown as Awaited<ReturnType<typeof eventRef.get>>);
+  const listing = vi.spyOn(bucket, 'getFiles').mockResolvedValue([[thumbnail], null] as never);
+  const metadata = vi.spyOn(thumbnail, 'getMetadata').mockResolvedValue([{ generation: '1', metageneration: '1', metadata: { faHold: 'true' } }] as never);
+  const patch = vi.spyOn(thumbnail, 'setMetadata').mockResolvedValue([] as never);
+  const repair = vi.spyOn(getFirestore(), 'runTransaction').mockResolvedValue(undefined as never);
   const scan = vi.spyOn(ImageAnnotatorClient.prototype, 'safeSearchDetection').mockImplementation(() => { throw new Error('Vision must not be invoked'); });
   try {
     if (!mod.moderateProof) throw new Error('Expected the locally enabled thumbnail handler');
@@ -363,11 +407,52 @@ it('the real thumbnail writer stamps no-store metadata before the disabled scan 
     expect(download).toHaveBeenCalledOnce();
     expect(save).toHaveBeenCalledWith(expect.any(Buffer), {
       contentType: 'image/jpeg',
-      metadata: { cacheControl: 'private, no-store, max-age=0' },
+      preconditionOpts: { ifGenerationMatch: 0 },
+      metadata: { cacheControl: 'private, no-store, max-age=0', metadata: { faHold: 'true' } },
     });
+    expect(patch).toHaveBeenCalledWith(expect.objectContaining({ metadata: expect.objectContaining({
+      faHold: 'true', faSrc: '062135596900.000000001', firebaseStorageDownloadTokens: null,
+    }) }), { ifMetagenerationMatch: '1', ifGenerationMatch: '1' });
+    expect(save.mock.invocationCallOrder[0]).toBeLessThan(patch.mock.invocationCallOrder[0]);
     expect(scan).not.toHaveBeenCalled();
+    patch.mockRejectedValueOnce(new Error('hold unavailable'));
+    await expect(mod.moderateProof.run({ data: { name: source.name, bucket: bucket.name } } as unknown as Parameters<typeof mod.moderateProof.run>[0]))
+      .rejects.toThrow('hold unavailable');
+    const savesBeforeRetiredSource = save.mock.calls.length;
+    download.mockRejectedValueOnce(Object.assign(new Error('source retired'), { code: 404 }));
+    await expect(mod.moderateProof.run({ data: { name: source.name, bucket: bucket.name } } as unknown as Parameters<typeof mod.moderateProof.run>[0]))
+      .resolves.toBeUndefined();
+    expect(save.mock.calls).toHaveLength(savesBeforeRetiredSource);
+    download.mockRejectedValueOnce(Object.assign(new Error('source temporarily unavailable'), { code: 503 }));
+    await expect(mod.moderateProof.run({ data: { name: source.name, bucket: bucket.name } } as unknown as Parameters<typeof mod.moderateProof.run>[0]))
+      .rejects.toThrow('source temporarily unavailable');
+
+    // Redelivery cannot replace a generation carrying an in-flight hide lease.
+    save.mockRejectedValueOnce(Object.assign(new Error('thumbnail exists'), { code: 412 }));
+    get.mockResolvedValue({ exists: true, get: () => false,
+      data: () => ({ status: 'active', storagePath: source.name }),
+      updateTime: { seconds: 100, nanoseconds: 1 }, readTime: { seconds: 100, nanoseconds: 2 },
+    } as unknown as Awaited<ReturnType<typeof eventRef.get>>);
+    metadata.mockResolvedValueOnce([{ generation: '7', metageneration: '3', metadata: {
+      faHold: 'true', faLease: String(Date.now() + 600_000),
+    } }] as never);
+    patch.mockClear();
+    await mod.moderateProof.run({ data: { name: source.name, bucket: bucket.name } } as unknown as Parameters<typeof mod.moderateProof.run>[0]);
+    expect(patch).not.toHaveBeenCalled();
+    expect(repair).toHaveBeenCalledOnce();
+
+    // Optional Vision failures are acknowledged rather than redelivered.
+    get.mockResolvedValue({ exists: true, get: () => true,
+      data: () => ({ status: 'active', storagePath: source.name }),
+      updateTime: { seconds: 100, nanoseconds: 1 }, readTime: { seconds: 100, nanoseconds: 2 },
+    } as unknown as Awaited<ReturnType<typeof eventRef.get>>);
+    scan.mockImplementationOnce(() => { throw new Error('Vision quota unavailable'); });
+    await expect(mod.moderateProof.run({ data: { name: source.name, bucket: bucket.name } } as unknown as Parameters<typeof mod.moderateProof.run>[0]))
+      .resolves.toBeUndefined();
+    expect(scan).toHaveBeenCalledOnce();
   } finally {
-    for (const spy of [download, save, files, buckets, docs, get, scan]) spy.mockRestore();
+    for (const spy of [download, save, files, buckets, docs, get, listing, metadata, patch, repair, scan]) spy.mockRestore();
     delete process.env.ENABLE_VISION_MODERATION;
+    delete process.env.ENABLE_PROOF_MEDIA_HOLD;
   }
 });

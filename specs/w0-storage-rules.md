@@ -63,3 +63,7 @@ The suite empties the bucket between cases through `tests/support/storage-emulat
 - Avatar + Proof-object owner-only paths asserted.
 - Inert `og/**` write-deny asserted.
 - Storage ↔ Firestore Proof pinning cross-checked, including the negative case.
+
+## Server-owned hold metadata (#1524)
+
+Client proof-media uploads must omit `faSrc`, `faHold` and `faLease`; supplying any one is denied before the Event/admission lookup. Unrelated custom metadata is still allowed. These metadata checks consume no Firestore access and do not change the D10 delete exception. Tests: `tests/rules/w0-storage-rules.test.ts`.
