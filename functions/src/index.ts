@@ -44,6 +44,7 @@ import {
   type ProofStorageDeleteInput,
   type SweepLeaseOutcome,
 } from './proofStorageDeletes';
+import { adminProofMediaHoldStore, reconcileProofMediaHold, runProofMediaHoldRepairs } from './proofMediaHold';
 import { createExchangeAdmission, exchangeHandoff, mintHandoff, type HandoffFirestore } from './authHandoff';
 import {
   manualUnlockNow,
@@ -123,6 +124,20 @@ export const revokeEventInvitation = onCall(invitationOptions, invitationHandler
 export const submitBugReport = onCall(
   { maxInstances: 10, timeoutSeconds: 30, serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
   (request) => handleSubmitBugReport(request, BUG_REPORT_APP_CHECK.value()),
+);
+
+// Metadata-only reconciliation. Existing hide paths are not switched here.
+export const onProofMediaHoldWritten = onDocumentWritten(
+  { document: 'events/{eventId}/proofs/{proofId}', retry: true, timeoutSeconds: 120,
+    serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  async event => {
+    await reconcileProofMediaHold(event.params, adminProofMediaHoldStore(getStorage().bucket(), db));
+  },
+);
+export const repairProofMediaHolds = onSchedule(
+  { schedule: 'every 1 minutes', timeoutSeconds: 120, maxInstances: 1,
+    serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT },
+  async () => { await runProofMediaHoldRepairs(adminProofMediaHoldStore(getStorage().bucket(), db)); },
 );
 
 // --- Centralised-auth handoff (#548, ADR 0010, specs/auth-handoff.md) -----------
