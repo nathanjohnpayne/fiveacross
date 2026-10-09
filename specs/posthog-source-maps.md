@@ -1,8 +1,8 @@
 ---
 spec_id: posthog-source-maps
-status: proposed
+status: implemented
 tested: false
-reason: Reviewed production deployment and fresh exception symbolication still require operational acceptance.
+reason: Production deployment and actual PostHog issue symbolication are verified operationally; build behavior is covered by the deployment safety harness.
 ---
 
 # Private source maps
@@ -25,6 +25,8 @@ The same 1Password-sourced key was provisioned and verified as a Secret restrict
 
 ## Operational acceptance
 
-Keep #1222 open until the scoped key is provisioned, both primaries and their three mirrors ship the reviewed commit, and a fresh real deployed exception resolves to authored `src/**` paths and line numbers in PostHog. Record the exception id, release commit, resolved source/line and serving origin; an upload success alone is insufficient. Probe `.map` counterparts for each deployed JS asset on each host and verify they return no source-map JSON. A SPA HTML response is acceptable non-disclosure evidence, though its HTTP 200 alone proves nothing.
+Acceptance requires the scoped key, both primaries and their three mirrors shipping the reviewed commit, and a fresh real deployed exception resolving to authored `src/**` paths and line numbers in PostHog. Record the exception id, release commit, resolved source/line and serving origin; an upload success alone is insufficient. Probe `.map` counterparts for each deployed JS asset on each host and verify they return no source-map JSON. A SPA HTML response is acceptable non-disclosure evidence, though its HTTP 200 alone proves nothing.
 
-The owner provisioned the scoped credential on 2026-10-09. A clean-commit private app/worker/service-worker upload succeeded on `fca64d7b`; its 27 public output files contained neither maps nor the upload key. Integration tests cover all three build stages and fail-closed upload/artifact behavior; the deployment safety harness passed 145 cases. Reviewed deployment, a fresh resolved exception and deployed host probes remain pending. No deployment or live symbolication success is claimed here.
+The owner provisioned the scoped credential on 2026-10-09. A clean-commit private app/worker/service-worker upload succeeded on `fca64d7b`; its 27 public output files contained neither maps nor the upload key. Integration tests cover all three build stages and fail-closed upload/artifact behavior; the deployment safety harness passed 145 cases. Live acceptance passed later that day on release `36277bc0f532566f4001280d60fcf3cc21e0aeb8` (PR #1845). Both named Firebase Hosting deployments passed their two post-deploy smoke tests; all three Vercel Production mirrors completed after their primaries. The seven serving hosts (the three Bodega primary aliases, Gay Cruise Bingo, and the three mirrors) each served the exact release stamp and instrumented chunks. Probes of 15 JS/service-worker map paths per host returned no source-map JSON.
+
+A temporary signed-out browser tab on `https://bodega-bay.fiveacross.app/` deliberately passed null sink options to the deployed `trackToAnalyticsSinks` function. Its actual unhandled TypeError, captured at 2026-10-09 20:42:40 UTC as event `01a12267-562a-7604-bb1a-806242619fab`, appears on [PostHog issue 01a12267-65aa-73b0-a8f0-16c028bdcb52](https://us.posthog.com/project/503790/error_tracking/01a12267-65aa-73b0-a8f0-16c028bdcb52). The application frame resolves from `main-CJMVH7IF.js:940:140125` to `../../src/analytics.ts:279:22`, original function `trackToAnalyticsSinks`, with `resolved: true` and chunk id `ffbb4d83-2b87-4cac-8c1c-632e547c7777`. The automation eval frame remains unresolved. No authored smoke code or fabricated stack was uploaded; the temporary tab was closed. [The ticket acceptance record](https://github.com/nathanjohnpayne/fiveacross/issues/1222#issuecomment-6088960254) records the release and live probes. #1222 is complete.
