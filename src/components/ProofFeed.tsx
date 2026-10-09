@@ -16,7 +16,7 @@ import AsyncButton from './admin/AsyncButton';
 import Avatar from './Avatar';
 import BlockPlayerButton from './BlockPlayerButton';
 import { safeMediaUrl } from './safeMediaUrl';
-import { resolveProofMediaUrl } from '../data/proofMediaUrl';
+import { useProofMediaUrls } from '../hooks/useProofMedia';
 import { tutorialDayIndexSet, ceremonialDayIndexSet, standingsFrozen } from '../game/logic';
 import { isDoubtSatisfied, openDoubts, doubtStatusFor, raiseDoubt } from '../data/doubts';
 import { heartState, setHeart } from '../data/hearts';
@@ -186,8 +186,8 @@ function visiblePodium(podium: PodiumMomentPayload | undefined, bannedUids: read
  * A Proof card — the existing Feed entry (report ⚑, owner-delete 🗑, a "flagged
  * for review" badge, and the captured media by type). The media URL is
  * scheme-guarded (`safeMediaUrl`) before it reaches an <img>/<audio> src (CodeQL
- * js/xss-through-dom #1): mediaURL is resolved from a Firestore doc, so a forged
- * non-media scheme (javascript:, …) is dropped rather than rendered.
+ * js/xss-through-dom #1). Authenticated SDK bytes supply the object URL;
+ * persisted bearer URLs are never used by the renderer.
  */
 /** A post's heart state + toggle, derived from its target-scoped stream —
  * the shape both card kinds render through `HeartButton`. `onToggle` takes
@@ -300,14 +300,8 @@ function ProofCard({
     viewerUidRef.current = viewerUid;
     return () => { viewerUidRef.current = undefined; };
   }, [viewerUid]);
-  // #335: `resolveProofMediaUrl` is composed INSIDE `safeMediaUrl`, never around
-  // it. It is identity in every real build (and a no-op on any value that is not
-  // a production Storage download URL); under the e2e emulator build ONLY it
-  // points a canonicalized `mediaURL` back at the Storage emulator holding the
-  // bytes. Sanitizing LAST keeps `safeMediaUrl` the final barrier on every flow
-  // into the `src` attribute below — the CodeQL js/xss-through-dom guard from
-  // PR #95 — which a rewrite applied AFTER the guard would have re-opened.
-  const media = safeMediaUrl(resolveProofMediaUrl(proof.mediaURL));
+  const { urls } = useProofMediaUrls([proof.storagePath], viewerUid ?? null);
+  const media = safeMediaUrl(proof.storagePath ? urls.get(proof.storagePath) : undefined);
   return (
     <div className="proof">
       <div className="row" style={{ border: 'none', background: 'none', padding: 0 }}>

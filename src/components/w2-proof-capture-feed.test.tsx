@@ -133,7 +133,7 @@ function proof(over: Partial<ProofDoc> & Pick<ProofDoc, 'id' | 'createdAt'>): Pr
     type: 'text',
     cellIndex: 0,
     itemText: 'a prompt',
-    storagePath: null,
+    storagePath: over.type === 'photo' || over.type === 'audio' ? `proofs/test-event/u-${over.id}/${over.id}.${over.type === 'photo' ? 'jpg' : 'webm'}` : null,
     mediaURL: null,
     thumbURL: null,
     text: null,
@@ -305,8 +305,8 @@ describe('ProofFeed — photo fit and the blurred fill layer (#363)', () => {
     const fg = wrap.querySelector('img.proof-media')!;
     // One guarded URL feeds both layers — the blur fill is not a second,
     // separately-resolved src path around the safeMediaUrl barrier.
-    expect(fg.getAttribute('src')).toBe('https://x/p.jpg');
-    expect(blur.getAttribute('src')).toBe('https://x/p.jpg');
+    expect(fg.getAttribute('src')).toBe('blob:proofs%2Ftest-event%2Fu-p%2Fp.jpg');
+    expect(blur.getAttribute('src')).toBe('blob:proofs%2Ftest-event%2Fu-p%2Fp.jpg');
     // The fill is decorative: empty alt, hidden from the a11y tree, and FIRST
     // in the wrap so the sharp photo paints above it.
     expect(blur.getAttribute('alt')).toBe('');
@@ -314,12 +314,13 @@ describe('ProofFeed — photo fit and the blurred fill layer (#363)', () => {
     expect(wrap.firstElementChild).toBe(blur);
   });
 
-  it('a forged non-media scheme renders NEITHER layer (the safeMediaUrl barrier covers the fill too)', () => {
+  it('ignores a forged legacy URL and renders only SDK-derived bytes', () => {
     const sub = captureOnNext();
     render(<ProofFeed />);
     sub.fire(colSnap([proof({ id: 'x', createdAt: 1000, type: 'photo', mediaURL: 'javascript:alert(1)' })]));
-    expect(document.querySelector('.proof-media')).toBeNull();
-    expect(document.querySelector('.proof-media-blur')).toBeNull();
+    expect(document.querySelector('.proof-media')?.getAttribute('src')).toBe('blob:proofs%2Ftest-event%2Fu-x%2Fx.jpg');
+    expect(document.querySelector('.proof-media-blur')?.getAttribute('src')).toBe('blob:proofs%2Ftest-event%2Fu-x%2Fx.jpg');
+    expect(document.querySelector('[src=\"javascript:alert(1)\"]')).toBeNull();
   });
 
   // jsdom never applies index.css, so the non-cropping geometry is pinned the
@@ -343,3 +344,11 @@ describe('ProofFeed — photo fit and the blurred fill layer (#363)', () => {
     expect(ruleBody('.proof-media-wrap')).toMatch(/overflow:\s*hidden/);
   });
 });
+
+// Authenticated media transport is covered at its loader/hook boundary.
+vi.mock('../hooks/useProofMedia', () => ({
+  useProofMediaUrls: (paths: readonly (string | null | undefined)[]) => ({
+    scope: 'test-account',
+    urls: new Map(paths.filter((path): path is string => !!path).map(path => [path, `blob:${encodeURIComponent(path)}`])),
+  }),
+}));

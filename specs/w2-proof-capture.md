@@ -11,6 +11,10 @@ Every claim below maps to a real assertion. Layers and runners: `src/data/w2-pro
 
 ## Proof capture: photo, audio, and text all post to the Feed (ADR 0002)
 
+**Authenticated media reads (#1532).** Feed, farewell podium and farewell Share Card resolve bytes from `ProofDoc.storagePath` through authenticated Storage SDK `getBlob` calls on the captured account session. Persisted bearer URLs are never a rendering fallback, including for legacy documents. Denied, missing or timed-out reads withhold media; Share Cards retain their photo-less fallback. Mounted views own and revoke their object URLs on replacement, unmount and session retirement. The existing sink sanitizer remains last. Avatars retain their public read path. Deployment verification must confirm bucket CORS permits the app origins, as required by SDK browser downloads. This is the read-side change only; new token creation, legacy token retirement and the replacement offline cache are separate rollout work.
+
+Tests: `src/data/proofMedia.test.ts` covers authenticated bounded downloads, authority failures, retirement and timeout; `src/hooks/useProofMedia.test.ts` covers URL ownership and late completions. Feed/podium/share component suites retain the existing presentation and fallback coverage.
+
 **Event-scope amendment (#807).** `attachProof` captures the initiating Event before the first media upload or transaction await and passes it through the Storage path, proof/board/player refs, tally writes, and analytics request. `uploadProofMedia` likewise captures its default Event before image decoding. A photo/audio conversion started in A may finish in A after the app switches to B, but it can never upload or attach under B.
 
 - A photo Proof uploads its media (`uploadProofMedia(uid, proofId, blob, 'photo')`) and writes an `active`, Feed-visible proof doc carrying the Player's `displayName`, the Prompt `itemText`, `type: 'photo'`, a numeric `createdAt` (the field the Feed sorts on), `reportCount: 0`, and the server-only moderation fields left null (`visionFlag`, `thumbURL`); the backing cell is marked-confirmed and references the proof—`src/data/w2-proof-capture.test.ts`.

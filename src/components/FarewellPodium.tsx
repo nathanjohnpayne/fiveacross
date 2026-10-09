@@ -17,7 +17,8 @@ import { shareOrigin } from '../canonicalHost';
 import { EVENT_ID } from '../firebase';
 import { useProofFeed } from '../hooks/useData';
 import { useHiddenUids } from '../hooks/useBlocks';
-import { resolveProofMediaUrl } from '../data/proofMediaUrl';
+import { loadProofMediaBlob } from '../data/proofMedia';
+import { useProofMediaUrls } from '../hooks/useProofMedia';
 import { safeMediaUrl } from './safeMediaUrl';
 import {
   renderFarewellShareCard,
@@ -304,11 +305,6 @@ function mostLovedShareCreditLine(
   return line;
 }
 
-/** How long the hero-photo fetch may take before the share falls back to the
- *  photo-less composition — bounded so a dead ship-wifi fetch can never wedge
- *  the share button's tap behind an unresolvable promise. */
-const HERO_PHOTO_FETCH_TIMEOUT_MS = 8000;
-
 /**
  * The warmed farewell card, with its SETTLED state carried alongside the
  * promise (Codex P1, PR #712 round 3).
@@ -330,35 +326,10 @@ type WarmedCard = {
   blob: Blob | null;
 };
 
-/**
- * Fetch the winning photo's bytes for the share card. A plain `<img>` load of
- * proof media elsewhere is opaque/no-cors (`data/proofMediaCache.ts`), which
- * html-to-image cannot read pixels from — so the hero goes fetch → blob →
- * object URL (Firebase Storage download URLs serve CORS headers), giving the
- * rasterizer same-origin-readable pixels. Resolves `null` on ANY failure
- * (timeout, HTTP error, network throw): the caller renders photo-less, the
- * documented fallback.
- */
-async function fetchHeroPhotoBlob(
-  proof: Pick<ProofDoc, 'mediaURL' | 'thumbURL'>,
-): Promise<Blob | null> {
-  // resolveProofMediaUrl FIRST (the proofMediaUrl.ts ordering note): the fetch
-  // needs the host that actually serves the bytes. No safeMediaUrl here — this
-  // URL feeds fetch(), not a DOM sink; the sink guard runs in ShareCard.tsx on
-  // the object URL.
-  const url = resolveProofMediaUrl(proof.mediaURL ?? proof.thumbURL);
-  if (!url) return null;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), HERO_PHOTO_FETCH_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    if (!res.ok) return null;
-    return await res.blob();
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
+/** Authenticated share-card bytes; any denial/failure renders photo-less. */
+async function fetchHeroPhotoBlob(proof: Pick<ProofDoc, 'storagePath'>): Promise<Blob | null> {
+  if (!proof.storagePath) return null;
+  try { return await loadProofMediaBlob(proof.storagePath); } catch { return null; }
 }
 
 /** The wrapper's own props — one shape for both branches below. */
@@ -514,6 +485,11 @@ function FarewellPodiumInner({
   // drop from DISPLAY only; the award record is never touched.
   const displayable = award ? mostLovedDisplayWinners(award, proofs) : [];
 
+  const mediaProofs = displayable.length > 0
+    ? displayable.map(({ proof }) => proof)
+    : proofs.filter(proof => proof.type === 'photo').slice(0, 3);
+  const { scope: mediaScope, urls: mediaUrls } = useProofMediaUrls(mediaProofs.map(proof => proof.storagePath));
+
   // The in-app section's payload — shaped only once the proofs have LOADED so
   // the award never flashes as the highlights fallback while the join is still
   // empty. Award state: every surviving co-winner. Fallback: the newest three
@@ -525,9 +501,8 @@ function FarewellPodiumInner({
       // moderation/incarnation/media gate, so an edit after the standings
       // freeze cannot rewrite what the award records.
       proofId: winner?.proofId ?? p.id,
-      // resolveProofMediaUrl FIRST, safeMediaUrl LAST before the DOM (the
-      // proofMediaUrl.ts ordering note; PR #95's CodeQL barrier).
-      src: safeMediaUrl(resolveProofMediaUrl(p.mediaURL ?? p.thumbURL)),
+      // Keep the sink sanitizer last, including on SDK-derived object URLs.
+      src: safeMediaUrl(p.storagePath ? mediaUrls.get(p.storagePath) : undefined),
       displayName: winner?.displayName ?? p.displayName,
       promptText: winner?.promptText ?? p.itemText,
       // `null` is frozen attribution too: only a highlights fallback reads
@@ -562,12 +537,12 @@ function FarewellPodiumInner({
   // below) — the ref, not a `useEffect` dep list, is what makes it once.
   const eagerRenderStarted = useRef(false);
   // The hero-photo fetch, cached by proofId so warm and tap share ONE fetch.
-  const heroPhoto = useRef<{ proofId: string; promise: Promise<Blob | null> } | null>(null);
+  const heroPhoto = useRef<{ scope: string; proofId: string; promise: Promise<Blob | null> } | null>(null);
 
   const heroPhotoBlob = (proofId: string, proof: ProofDoc): Promise<Blob | null> => {
-    if (heroPhoto.current?.proofId === proofId) return heroPhoto.current.promise;
+    if (heroPhoto.current?.scope === mediaScope && heroPhoto.current.proofId === proofId) return heroPhoto.current.promise;
     const promise = fetchHeroPhotoBlob(proof);
-    heroPhoto.current = { proofId, promise };
+    heroPhoto.current = { scope: mediaScope, proofId, promise };
     return promise;
   };
 
@@ -592,7 +567,7 @@ function FarewellPodiumInner({
             ),
           }
         : null;
-    const key = JSON.stringify({ ...base, mostLoved: heroMeta });
+    const key = JSON.stringify({ ...base, mostLoved: heroMeta, mediaScope });
     if (warmedCard.current?.key === key) return warmedCard.current.promise;
     // `.catch(() => null)` inside the cached promise (same rationale as the
     // Leaderboard's): a render failure degrades to the text/URL leg and can

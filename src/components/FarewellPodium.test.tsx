@@ -268,7 +268,8 @@ function proofDoc(over: Partial<ProofDoc> & Pick<ProofDoc, 'id' | 'uid' | 'creat
     type: 'photo',
     cellIndex: 3,
     itemText: `Prompt ${over.id}`,
-    mediaURL: `https://firebasestorage.googleapis.com/v0/b/x/o/proofs%2F${over.id}?alt=media`,
+    storagePath: `proofs/test-event/${over.uid}/${over.id}.jpg`,
+    mediaURL: 'https://unused.example.test/legacy?token=ignored',
     reportCount: 0,
     status: 'active',
     dayIndex: 1,
@@ -358,7 +359,7 @@ describe('FarewellPodium wrapper — Most-Loved display gate + analytics (#561)'
     });
     const photos = container.querySelectorAll<HTMLImageElement>('.farewell-most-loved-photo');
     expect(photos).toHaveLength(2);
-    expect(photos[0].src).toContain('proofs%2Fw1'); // award order — earliest-posted first
+    expect(photos[0].src).toContain('%2Fw1.jpg'); // award order — earliest-posted first
     expect(container.querySelector('.farewell-most-loved-hearts')?.textContent).toBe('❤ 5');
     // Winner display data comes from the FROZEN award record, not the mutable
     // live doc (whose fixture display name is "Poster w1").
@@ -411,7 +412,7 @@ describe('FarewellPodium wrapper — Most-Loved display gate + analytics (#561)'
     );
     const photos = container.querySelectorAll<HTMLImageElement>('.farewell-most-loved-photo');
     expect(photos).toHaveLength(1);
-    expect(photos[0].src).toContain('proofs%2Fw2');
+    expect(photos[0].src).toContain('%2Fw2.jpg');
     expect(container.querySelector('.farewell-most-loved-title')?.textContent).toBe(
       'Most-loved photo of the cruise',
     );
@@ -653,3 +654,11 @@ describe('FarewellPodium wrapper — a banned honoree is withheld, not handed do
     ).toBe('Champ Carrow');
   });
 });
+
+// Media lifecycle and authority are tested at the loader/hook boundary.
+vi.mock('../hooks/useProofMedia', () => ({
+  useProofMediaUrls: (paths: readonly (string | null | undefined)[]) => ({
+    scope: 'test-account',
+    urls: new Map(paths.filter((path): path is string => !!path).map(path => [path, `blob:${encodeURIComponent(path)}`])),
+  }),
+}));

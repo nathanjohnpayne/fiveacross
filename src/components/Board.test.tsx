@@ -3087,3 +3087,11 @@ describe('offline Tally privacy state (#1411)', () => {
     } finally { vi.restoreAllMocks(); }
   });
 });
+
+// Authenticated media transport is covered at its loader/hook boundary.
+vi.mock('../hooks/useProofMedia', () => ({
+  useProofMediaUrls: (paths: readonly (string | null | undefined)[]) => ({
+    scope: 'test-account',
+    urls: new Map(paths.filter((path): path is string => !!path).map(path => [path, `blob:${encodeURIComponent(path)}`])),
+  }),
+}));

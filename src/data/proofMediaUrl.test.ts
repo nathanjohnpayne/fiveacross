@@ -159,13 +159,14 @@ describe('proofMediaUrl — source guards', () => {
     );
   });
 
-  it('keeps the render half composed INSIDE safeMediaUrl, never around it', async () => {
+  it('keeps the SDK object URL inside safeMediaUrl with no bearer fallback', async () => {
     // The ordering that keeps safeMediaUrl the last barrier before the DOM
     // (the CodeQL js/xss-through-dom sanitizer from PR #95). A future edit that
     // flipped these — `resolveProofMediaUrl(safeMediaUrl(...))` — would put a
     // rewrite between the barrier and the `src` attribute and re-open the class.
     const feedSource = readFileSync('src/components/ProofFeed.tsx', 'utf8');
-    expect(feedSource).toContain('safeMediaUrl(resolveProofMediaUrl(proof.mediaURL))');
+    expect(feedSource).toMatch(/const media = safeMediaUrl\(/);
+    expect(feedSource).not.toContain('proof.mediaURL');
     expect(feedSource).not.toMatch(/resolveProofMediaUrl\(\s*safeMediaUrl\(/);
   });
 });

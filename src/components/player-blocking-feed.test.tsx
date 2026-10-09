@@ -414,3 +414,11 @@ it('retires pending optimistic intent when the target Heart listener is denied',
   fireEvent.click(button());
   expect(H.setHeart).toHaveBeenCalledTimes(1);
 });
+
+// Authenticated media transport is covered at its loader/hook boundary.
+vi.mock('../hooks/useProofMedia', () => ({
+  useProofMediaUrls: (paths: readonly (string | null | undefined)[]) => ({
+    scope: 'test-account',
+    urls: new Map(paths.filter((path): path is string => !!path).map(path => [path, `blob:${encodeURIComponent(path)}`])),
+  }),
+}));
