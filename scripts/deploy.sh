@@ -775,6 +775,13 @@ EOF
   fi
 fi
 
+# Named primary Hosting releases verify browser SDK download readiness before
+# shipping the client. Function-only scopes and Firebase dry runs do not mutate
+# bucket configuration. The helper preserves unrelated CORS rules under CAS.
+if [[ -n "${PROOF_MEDIA_CORS_TARGET:-}" && "$HOSTING_ATTEMPTED" == "true" && "$FIREBASE_DRY_RUN" != "true" ]]; then
+  bash "$SCRIPT_DIR/apply-proof-media-cors.sh" "$PROOF_MEDIA_CORS_TARGET"
+fi
+
 # Step 1: Build
 if [[ "$BUILD_SKIP" == "true" ]]; then
   echo ">> Skipping build (--skip-build)"

@@ -38,7 +38,9 @@ describe('proof media viewport gate', () => {
     ], {} as IntersectionObserver));
     notify(false); expect(result.current.nearby).toBe(false);
     notify(true); expect(result.current.nearby).toBe(true);
-    expect(disconnect).toHaveBeenCalledOnce();
+    expect(disconnect).not.toHaveBeenCalled();
+    notify(false); expect(result.current.nearby).toBe(false);
+    notify(true); expect(result.current.nearby).toBe(true);
     unmount(); expect(disconnect).toHaveBeenCalledOnce();
   });
 
@@ -54,6 +56,9 @@ describe('proof media viewport gate', () => {
     top = 200;
     act(() => window.dispatchEvent(new Event('scroll')));
     expect(result.current.nearby).toBe(true);
+    top = 10_000;
+    act(() => window.dispatchEvent(new Event('resize')));
+    expect(result.current.nearby).toBe(false);
     unmount();
   });
 });

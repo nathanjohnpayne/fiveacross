@@ -876,6 +876,10 @@ it('defers a Proof card’s authenticated media request until viewport proximity
     expect(card.querySelector('img.proof-media')).toBeNull();
     act(() => callbacks.get(card)!([{ target: card, isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver));
     expect(card.querySelector<HTMLImageElement>('img.proof-media')?.src).toContain('blob:');
+    act(() => callbacks.get(card)!([{ target: card, isIntersecting: false } as IntersectionObserverEntry], {} as IntersectionObserver));
+    expect(card.querySelector('img.proof-media')).toBeNull();
+    act(() => callbacks.get(card)!([{ target: card, isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver));
+    expect(card.querySelector<HTMLImageElement>('img.proof-media')?.src).toContain('blob:');
   } finally { unmount(); vi.unstubAllGlobals(); }
 });
 

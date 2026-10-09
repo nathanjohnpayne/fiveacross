@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 
-/** Start media work once its card comes within one short scroll of the view. */
+/** Retain media only while its card is within one short scroll of the view. */
 export function useNearViewport() {
   const ref = useRef<HTMLDivElement>(null);
   const [nearby, setNearby] = useState(false);
   useEffect(() => {
     const node = ref.current;
-    if (nearby || !node) return;
+    if (!node) return;
     if (typeof IntersectionObserver !== 'undefined') {
       const observer = new IntersectionObserver(entries => {
-        if (entries.some(entry => entry.target === node && entry.isIntersecting)) setNearby(true);
+        for (const entry of entries) {
+          if (entry.target === node) setNearby(entry.isIntersecting);
+        }
       }, { rootMargin: '400px 0px' });
       observer.observe(node);
       return () => observer.disconnect();
@@ -17,7 +19,7 @@ export function useNearViewport() {
     // Older browsers retain lazy loading through scroll and resize checks.
     const check = () => {
       const box = node.getBoundingClientRect();
-      if (box.bottom >= -400 && box.top <= window.innerHeight + 400) setNearby(true);
+      setNearby(box.bottom >= -400 && box.top <= window.innerHeight + 400);
     };
     check();
     window.addEventListener('scroll', check, { passive: true, capture: true });
@@ -26,6 +28,6 @@ export function useNearViewport() {
       window.removeEventListener('scroll', check, true);
       window.removeEventListener('resize', check);
     };
-  }, [nearby]);
+  }, []);
   return { ref, nearby };
 }

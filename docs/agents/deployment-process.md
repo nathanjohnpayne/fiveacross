@@ -2,6 +2,8 @@
 
 See `DEPLOYMENT.md` for all build and deployment steps.
 
+Named primary Hosting releases also run `scripts/apply-proof-media-cors.sh` after the source/config guards and before building. It verifies the target bucket's project identity, preserves existing CORS entries, adds wildcard-origin GET support under metageneration CAS when absent, and verifies the readback. This is browser SDK download readiness, not an authorization grant: Auth, App Check and Storage Rules remain authoritative. The deploy credential needs `storage.buckets.get` and `storage.buckets.update`; missing permission, credential failure, contention or failed readback stops the release. Functions-only scopes and Firebase dry runs skip this mutation. Release each Firebase primary through its named deploy before its mirrors; they share that primary's bucket. Generic build checks do not configure live CORS.
+
 ## This repo deploys to more than one place — read `docs/app/deploy-targets.md` first
 
 `DEPLOYMENT.md` covers the generic Firebase flow. It does **not** describe this repository's actual deploy surface, which is two Firebase projects, three Vercel mirrors, and one Cloudflare Worker:

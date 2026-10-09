@@ -76,7 +76,7 @@ SCRIPT="$ROOT/scripts/deploy.sh"
 # EMAIL_UNSUBSCRIBE_* overrides — both of which change what the code under test
 # does. Every case that cares sets them explicitly.
 unset GOOGLE_APPLICATION_CREDENTIALS GCLOUD_BIN GCLOUD_REAL_BIN DEPLOY_TARGET_PROJECT
-unset AUTH_HANDOFF_DEPLOY_READINESS_PROJECT
+unset AUTH_HANDOFF_DEPLOY_READINESS_PROJECT PROOF_MEDIA_CORS_TARGET
 unset BUG_REPORT_PROJECT BUG_REPORT_REGION BUG_REPORT_SERVICE
 unset EMAIL_UNSUBSCRIBE_PROJECT EMAIL_UNSUBSCRIBE_REGION EMAIL_UNSUBSCRIBE_SERVICE
 
@@ -2706,6 +2706,61 @@ elif [[ -s "$WORKDIR/gcloud-calls-23t.log" || -e "$WORKDIR/build-ran-23t" || -s 
 else
   pass "readiness-after-param-guard: missing Functions params block readiness, BUILD_CMD, and Firebase (rc=$RC23T)."
 fi
+
+# CORS readiness runs inside the real guarded deploy, before build/publish.
+CORS_STUB_DIR="$WORKDIR/cors-node-stub"
+mkdir -p "$CORS_STUB_DIR"
+CORS_REAL_NODE="$(command -v node)"
+cat >"$CORS_STUB_DIR/node" <<'STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */proof-media-cors.mjs ]]; then
+  if [[ "${3:-}" == --project ]]; then printf '%s\n' "$2"; exit 0; fi
+  echo cors >> "$CORS_LOG"
+  exit "${CORS_EXIT:-0}"
+fi
+exec "$CORS_REAL_NODE" "$@"
+STUB
+chmod +x "$CORS_STUB_DIR/node"
+export CORS_REAL_NODE
+for cors_case in success failure dry-run storage source-guard; do
+  cors_repo="$WORKDIR/cors-$cors_case"
+  init_fixture_repo "$cors_repo"
+  cors_log="$WORKDIR/cors-$cors_case.log"
+  : > "$cors_log"
+  cors_flags=(--force --skip-cf-purge --skip-synthetic)
+  cors_scope=(--only hosting)
+  cors_exit=0
+  case "$cors_case" in
+    failure) cors_exit=7 ;;
+    dry-run) cors_flags+=(--skip-build); cors_scope+=(--dry-run) ;;
+    storage) cors_flags+=(--skip-build); cors_scope=(--only storage) ;;
+    source-guard) cors_flags=(--skip-cf-purge --skip-synthetic) ;;
+  esac
+  set +e
+  (cd "$cors_repo" && PATH="$CORS_STUB_DIR:$STUB_DIR:$PATH" \
+    PROOF_MEDIA_CORS_TARGET=gaycruisebingo GOOGLE_APPLICATION_CREDENTIALS="$ESTABLISHED_CREDENTIAL" \
+    CORS_LOG="$cors_log" CORS_EXIT="$cors_exit" OFD_LOG="$cors_log" \
+    BUILD_CMD='echo build >> "$CORS_LOG"' \
+    bash "$SCRIPT" "${cors_flags[@]}" -- gaycruisebingo "${cors_scope[@]}") \
+    >"$WORKDIR/cors-$cors_case.out" 2>"$WORKDIR/cors-$cors_case.err"
+  cors_rc=$?
+  set -e
+  case "$cors_case" in
+    success)
+      if [[ $cors_rc -eq 0 && "$(sed -n '1p' "$cors_log")" == cors && "$(sed -n '2p' "$cors_log")" == build ]] && grep -q '^op-firebase-deploy' "$cors_log"; then
+        pass 'cors: verified before build and publish'
+      else fail "cors: wrong success sequence (rc=$cors_rc)"; cat "$cors_log"; fi ;;
+    failure)
+      if [[ $cors_rc -ne 0 && "$(cat "$cors_log")" == cors ]]; then pass 'cors: readiness failure blocks build and publish'
+      else fail "cors: readiness failure leaked through (rc=$cors_rc)"; cat "$cors_log"; fi ;;
+    dry-run|storage)
+      if [[ $cors_rc -eq 0 ]] && ! grep -q '^cors$' "$cors_log"; then pass "cors: $cors_case skips bucket mutation"
+      else fail "cors: $cors_case reached readiness or failed (rc=$cors_rc)"; cat "$cors_log"; fi ;;
+    source-guard)
+      if [[ $cors_rc -ne 0 && ! -s "$cors_log" ]]; then pass 'cors: branch guard fails before readiness'
+      else fail "cors: source guard allowed a readiness effect (rc=$cors_rc)"; cat "$cors_log"; fi ;;
+  esac
+done
 
 # ---------------------------------------------------------------------------
 # Cases 25a-25c (#803): event-invitation callables share one reconciliation
