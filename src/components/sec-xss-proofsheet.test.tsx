@@ -231,27 +231,27 @@ describe('ProofFeed — text Proof is inert; media schemes are guarded', () => {
     expect(document.querySelector('img')).toBeNull();
   });
 
-  it('ProofFeed: a photo Proof renders an https media URL and drops a javascript: media URL', () => {
+  it('ProofFeed: a photo renders SDK bytes; a legacy URL without object identity is withheld', () => {
     H.proofs = [
-      proof({ id: 'safe', createdAt: 2, type: 'photo', mediaURL: 'https://x/p.jpg' }),
+      proof({ id: 'safe', createdAt: 2, type: 'photo', storagePath: 'proofs/test-event/owner/p.jpg', mediaURL: 'https://ignored.test/?token=old' }),
       proof({ id: 'evil', createdAt: 1, type: 'photo', mediaURL: 'javascript:alert(1)' }),
     ];
     render(<ProofFeed />);
 
     const imgs = document.querySelectorAll('img.proof-media');
     expect(imgs).toHaveLength(1); // only the https photo rendered
-    expect((imgs[0] as HTMLImageElement).getAttribute('src')).toBe('https://x/p.jpg');
+    expect((imgs[0] as HTMLImageElement).getAttribute('src')).toBe('blob:proofs%2Ftest-event%2Fowner%2Fp.jpg');
     // The javascript: URL never became a src.
     expect(document.querySelector('img[src="javascript:alert(1)"]')).toBeNull();
   });
 
-  it('ProofFeed: an audio Proof renders an https media URL', () => {
-    H.proofs = [proof({ id: 'a', createdAt: 1, type: 'audio', mediaURL: 'https://x/a.webm' })];
+  it('ProofFeed: an audio Proof renders SDK bytes', () => {
+    H.proofs = [proof({ id: 'a', createdAt: 1, type: 'audio', storagePath: 'proofs/test-event/owner/a.webm', mediaURL: 'https://ignored.test/?token=old' })];
     render(<ProofFeed />);
 
     const audio = document.querySelector('.proof-audio audio') as HTMLAudioElement;
     expect(audio).toBeInTheDocument();
-    expect(audio.getAttribute('src')).toBe('https://x/a.webm');
+    expect(audio.getAttribute('src')).toBe('blob:proofs%2Ftest-event%2Fowner%2Fa.webm');
   });
 });
 
@@ -280,3 +280,11 @@ describe('Proof report ownership and incarnation', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 });
+
+// Media lifecycle and authority are tested at the loader/hook boundary.
+vi.mock('../hooks/useProofMedia', () => ({
+  useProofMediaUrls: (paths: readonly (string | null | undefined)[]) => ({
+    scope: 'test-account',
+    urls: new Map(paths.filter((path): path is string => !!path).map(path => [path, `blob:${encodeURIComponent(path)}`])),
+  }),
+}));

@@ -81,6 +81,7 @@ function deployInvocationForConfig(target, config, deployArgs, inheritedEnv, wra
   // just-reset gaycruisebingo services keep 403ing. Assigned unconditionally
   // so an inherited value is overwritten, never merged.
   environment.DEPLOY_TARGET_PROJECT = config.firebaseProject;
+  environment.PROOF_MEDIA_CORS_TARGET = target;
   delete environment.AUTH_HANDOFF_DEPLOY_READINESS_PROJECT;
   delete environment.AUTH_HANDOFF_PROJECT;
   delete environment.AUTH_HANDOFF_REGION;

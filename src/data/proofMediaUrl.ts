@@ -21,9 +21,9 @@
 //     turns the emulator download URL into its production-canonical twin. The
 //     value written to Firestore is then the same shape production writes, so
 //     the rules regex is exercised FOR REAL rather than relaxed or bypassed.
-//   * `resolveProofMediaUrl` runs at RENDER (the Feed's media sink) and at
-//     cache-purge, and inverts it, so the browser fetches the bytes back from
-//     the emulator that actually holds them.
+//   * `resolveProofMediaUrl` remains for legacy cache purge and avatar reads.
+//     Proof rendering now uses authenticated SDK bytes from storagePath (#1532),
+//     so the Storage SDK handles emulator routing directly.
 //
 // Only the ORIGIN is rewritten; `/v0/b/<bucket>/o/<encoded path>?alt=media&token=…`
 // is byte-identical between the two hosts, which is what makes the pair lossless.
@@ -47,15 +47,11 @@
 // (`PROOF_MEDIA_URL_PATTERN`, ./proofMediaCache.ts) matches the PRODUCTION host,
 // so under the e2e build the resolved emulator request simply misses the route
 // and uses the emulator network directly. `deleteProof`'s legacy cache purge
-// still resolves its key the same way the render path does, preserving the
+// still resolves its old persisted key, preserving the
 // pre-upgrade own-device purge contract.
 //
-// ORDERING NOTE FOR THE RENDER HALF. `resolveProofMediaUrl` must run BEFORE
-// `safeMediaUrl`, never after: `safeMediaUrl` is the CodeQL-recognised sanitizer
-// barrier for the `js/xss-through-dom` class on the Proof media sinks (PR #95),
-// and any rewrite applied after it would sit between the barrier and the DOM and
-// re-open the class. Composed the documented way round — sanitize last — the
-// barrier still terminates every flow into the `src` attribute.
+// Proof media sinks now sanitize their SDK-derived object URLs last (#1532).
+// This legacy URL bridge supplies no bearer fallback for those sinks.
 
 /**
  * The Storage emulator's host/port, mirroring `firebase.json`'s `emulators.storage`
@@ -111,13 +107,11 @@ export function canonicalizeProofMediaUrl(url: string): string {
 
 /**
  * The inverse of {@link canonicalizeProofMediaUrl}: point a canonicalized
- * `mediaURL` back at the emulator that actually holds the bytes, so the Feed's
- * `<img>`/`<audio>` can load it. Identity outside the e2e emulator build, and
+ * legacy URL back at the emulator that actually holds its object. Identity outside the e2e emulator build, and
  * identity on a value that is not a production download URL (an emulator URL
  * seeded directly by a test fixture passes through untouched).
  *
- * MUST be composed INSIDE `safeMediaUrl(...)`, never around it — see the
- * ordering note in this file's header.
+ * Proof media rendering does not call this helper; it uses authenticated SDK bytes.
  */
 export function resolveProofMediaUrl(url: string | null | undefined): string | null | undefined {
   if (!EMULATOR_STORAGE_WIRED || !url) return url;

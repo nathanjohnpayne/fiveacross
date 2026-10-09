@@ -1,5 +1,6 @@
+import * as proofMediaHooks from '../hooks/useProofMedia';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import type { DayDef, EventDoc, MostLovedPhotoAward, ProofDoc } from '../types';
 import TutorialBanner from './TutorialBanner';
 import FarewellPodium, { FarewellPodiumView, type FarewellMostLoved } from './FarewellPodium';
@@ -26,6 +27,7 @@ vi.mock('../analytics', () => ({ track }));
 const M = vi.hoisted(() => ({
   proofs: [] as unknown[],
   proofsLoading: false,
+  deniedMedia: new Set<string>(),
   proofFeedCalls: [] as Array<{
     max: number | null;
     moderation?: { threshold: number | undefined; bannedUids: readonly string[] };
@@ -268,7 +270,8 @@ function proofDoc(over: Partial<ProofDoc> & Pick<ProofDoc, 'id' | 'uid' | 'creat
     type: 'photo',
     cellIndex: 3,
     itemText: `Prompt ${over.id}`,
-    mediaURL: `https://firebasestorage.googleapis.com/v0/b/x/o/proofs%2F${over.id}?alt=media`,
+    storagePath: `proofs/test-event/${over.uid}/${over.id}.jpg`,
+    mediaURL: 'https://unused.example.test/legacy?token=ignored',
     reportCount: 0,
     status: 'active',
     dayIndex: 1,
@@ -333,6 +336,7 @@ describe('FarewellPodium wrapper — Most-Loved display gate + analytics (#561)'
     track.mockReset();
     M.proofs = [];
     M.proofsLoading = false;
+    M.deniedMedia.clear();
     M.proofFeedCalls = [];
     Object.defineProperty(window, 'localStorage', {
       value: memoryStorage(),
@@ -358,7 +362,7 @@ describe('FarewellPodium wrapper — Most-Loved display gate + analytics (#561)'
     });
     const photos = container.querySelectorAll<HTMLImageElement>('.farewell-most-loved-photo');
     expect(photos).toHaveLength(2);
-    expect(photos[0].src).toContain('proofs%2Fw1'); // award order — earliest-posted first
+    expect(photos[0].src).toContain('%2Fw1.jpg'); // award order — earliest-posted first
     expect(container.querySelector('.farewell-most-loved-hearts')?.textContent).toBe('❤ 5');
     // Winner display data comes from the FROZEN award record, not the mutable
     // live doc (whose fixture display name is "Poster w1").
@@ -411,10 +415,27 @@ describe('FarewellPodium wrapper — Most-Loved display gate + analytics (#561)'
     );
     const photos = container.querySelectorAll<HTMLImageElement>('.farewell-most-loved-photo');
     expect(photos).toHaveLength(1);
-    expect(photos[0].src).toContain('proofs%2Fw2');
+    expect(photos[0].src).toContain('%2Fw2.jpg');
     expect(container.querySelector('.farewell-most-loved-title')?.textContent).toBe(
       'Most-loved photo of the cruise',
     );
+  });
+
+  it('loads the newest three highlights when a surviving winner’s SDK download fails', () => {
+    M.proofs = [
+      proofDoc({ id: 'h1', uid: 'cy', createdAt: 5000 }),
+      proofDoc({ id: 'h2', uid: 'di', createdAt: 4000 }),
+      proofDoc({ id: 'h3', uid: 'ed', createdAt: 3000 }),
+      proofDoc({ id: 'h4', uid: 'fi', createdAt: 2500 }),
+      proofDoc({ id: 'w1', uid: 'ana', createdAt: 1000 }),
+    ];
+    M.deniedMedia.add('proofs/test-event/ana/w1.jpg');
+    const { container } = render(<FarewellPodium players={[]} days={undefined} event={awardedEvent(AWARD)} />);
+    expect(container.querySelector('.farewell-most-loved-title')?.textContent).toBe('Photo highlights');
+    const photos = container.querySelectorAll<HTMLImageElement>('.farewell-most-loved-photo');
+    expect(photos).toHaveLength(3);
+    expect(photos[0].src).toContain('%2Fh1.jpg');
+    expect(photos[2].src).toContain('%2Fh3.jpg');
   });
 
   it('the explicit no-award record (winners: []) renders the highlights fallback', () => {
@@ -652,4 +673,43 @@ describe('FarewellPodium wrapper — a banned honoree is withheld, not handed do
       section.querySelector('.farewell-podium-champion .farewell-podium-name')?.textContent,
     ).toBe('Champ Carrow');
   });
+});
+
+// Media lifecycle and authority are tested at the loader/hook boundary.
+vi.mock('../hooks/useProofMedia', () => ({
+  useFirstAvailableProofMedia: (paths: readonly (string | null | undefined)[]) => ({
+    scope: 'test-account', settled: true,
+    path: paths.find(path => !!path && !M.deniedMedia.has(path)),
+    unavailable: new Set(paths.filter(path => path && !(!!path && !M.deniedMedia.has(path)))),
+  }),
+  useProofMediaUrls: (paths: readonly (string | null | undefined)[]) => ({
+    scope: 'test-account',
+    urls: new Map(paths.filter((path): path is string => !!path && !M.deniedMedia.has(path)).map(path => [path, `blob:${encodeURIComponent(path)}`])),
+  }),
+}));
+
+it('loads only nearby images for a 100-way podium tie and releases them on exit', () => {
+  const observers: { callback: IntersectionObserverCallback; target?: Element }[] = [];
+  vi.stubGlobal('IntersectionObserver', class {
+    row: typeof observers[number];
+    constructor(callback: IntersectionObserverCallback) { this.row = { callback }; observers.push(this.row); }
+    observe(target: Element) { this.row.target = target; }
+    disconnect() { /* fixture */ }
+  });
+  const reads = vi.spyOn(proofMediaHooks, 'useProofMediaUrls');
+  try {
+    const tieProofs = Array.from({ length: 100 }, (_, i) => proofDoc({ id: `tie-${i}`, uid: 'ana', createdAt: 1000 + i }));
+    M.proofs = tieProofs;
+    const award = { ...AWARD, winnerCount: 100, winners: tieProofs.map(p => ({ ...AWARD.winners[0], proofId: p.id, proofCreatedAt: p.createdAt })) };
+    const { container } = render(<FarewellPodium players={[]} days={undefined} event={awardedEvent(award)} />);
+    expect(container.querySelectorAll('.farewell-most-loved-credit')).toHaveLength(100);
+    expect(reads.mock.calls.flatMap(([paths]) => paths).filter(Boolean)).toHaveLength(0);
+    const first = observers[0];
+    const signal = (isIntersecting: boolean) => first.callback([{ target: first.target!, isIntersecting } as IntersectionObserverEntry], {} as IntersectionObserver);
+    act(() => signal(true));
+    expect(new Set(reads.mock.calls.flatMap(([paths]) => paths).filter(Boolean)).size).toBe(1);
+    expect(container.querySelectorAll('.farewell-most-loved-photo')).toHaveLength(1);
+    act(() => signal(false));
+    expect(container.querySelectorAll('.farewell-most-loved-photo')).toHaveLength(0);
+  } finally { reads.mockRestore(); vi.unstubAllGlobals(); }
 });

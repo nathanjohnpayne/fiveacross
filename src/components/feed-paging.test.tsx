@@ -149,11 +149,12 @@ describe('ProofFeed paging — the scroll trigger', () => {
     class StubIO {
       constructor(
         private cb: IntersectionObserverCallback,
-        options?: IntersectionObserverInit,
-      ) {
-        lastOptions = options;
-      }
+        private options?: IntersectionObserverInit,
+      ) {}
       observe(node: Element) {
+        // Media cards have their own proximity observers; this suite owns paging.
+        if (!node.matches('.feed-more')) return;
+        lastOptions = this.options;
         observed.push({
           node,
           fire: (isIntersecting: boolean) =>
@@ -227,3 +228,11 @@ describe('specs/feed-paging.md — the CSS pin', () => {
     expect(indexCss).toContain('.feed-more-btn {');
   });
 });
+
+// Media lifecycle and authority are tested at the loader/hook boundary.
+vi.mock('../hooks/useProofMedia', () => ({
+  useProofMediaUrls: (paths: readonly (string | null | undefined)[]) => ({
+    scope: 'test-account',
+    urls: new Map(paths.filter((path): path is string => !!path).map(path => [path, `blob:${encodeURIComponent(path)}`])),
+  }),
+}));

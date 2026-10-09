@@ -3005,7 +3005,8 @@ describe('FarewellPodium — photo-hero share (#534/#561)', () => {
       type: 'photo',
       cellIndex: 3,
       itemText: `Prompt ${id}`,
-      mediaURL: `https://firebasestorage.googleapis.com/v0/b/x/o/proofs%2F${id}?alt=media`,
+      storagePath: `proofs/test-event/${uid}/${id}.jpg`,
+      mediaURL: 'https://unused.example.test/?token=ignored',
       createdAt,
       reportCount: 0,
       status: 'active',
@@ -3015,18 +3016,14 @@ describe('FarewellPodium — photo-hero share (#534/#561)', () => {
 
   const eventProp = { name: 'Allure of the Seas', mostLovedPhoto: AWARD } as EventDoc;
 
-  const fetchMock = vi.fn();
+  const fetchMock = authenticatedMedia.load;
   const createObjectURL = vi.fn();
   const revokeObjectURL = vi.fn();
 
   beforeEach(() => {
     H.proofs = [liveProof('w1', 'ana', 1000), liveProof('w2', 'bea', 2000)];
     fetchMock.mockReset();
-    fetchMock.mockResolvedValue({
-      ok: true,
-      blob: async () => new Blob(['jpeg-bytes'], { type: 'image/jpeg' }),
-    });
-    vi.stubGlobal('fetch', fetchMock);
+    fetchMock.mockResolvedValue(new Blob(['jpeg-bytes'], { type: 'image/jpeg' }));
     createObjectURL.mockReset();
     createObjectURL.mockReturnValue('blob:hero-1');
     revokeObjectURL.mockReset();
@@ -3057,9 +3054,9 @@ describe('FarewellPodium — photo-hero share (#534/#561)', () => {
     await user.click(screen.getByRole('button', { name: 'Share final standings' }));
     await waitFor(() => expect(shareMock).toHaveBeenCalledTimes(1));
 
-    // One media fetch, of the WINNER's own mediaURL.
+    // One authenticated SDK download, of the WINNER's object identity.
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(String(fetchMock.mock.calls[0][0])).toContain('proofs%2Fw1');
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/w1.jpg');
 
     const node = latestToBlobNode();
     const img = node.querySelector<HTMLImageElement>('.share-card-ml-img')!;
@@ -3093,8 +3090,22 @@ describe('FarewellPodium — photo-hero share (#534/#561)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('reloads and rasterizes a changed hero storagePath within the same Proof and session', async () => {
+    const user = userEvent.setup();
+    const view = render(<FarewellPodium players={[champ, early]} days={undefined} event={eventProp} />);
+    await waitFor(() => expect(toBlobMock).toHaveBeenCalledTimes(1));
+    expect(fetchMock).toHaveBeenCalledWith('proofs/test-event/ana/w1.jpg');
+
+    H.proofs = [{ ...liveProof('w1', 'ana', 1000), storagePath: 'proofs/test-event/ana/w1.webm' }, liveProof('w2', 'bea', 2000)];
+    view.rerender(<FarewellPodium players={[champ, early]} days={undefined} event={eventProp} />);
+    await user.hover(screen.getByRole('button', { name: 'Share final standings' }));
+    await waitFor(() => expect(toBlobMock).toHaveBeenCalledTimes(2));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenLastCalledWith('proofs/test-event/ana/w1.webm');
+  });
+
   it('a failed media fetch falls back to the photo-less composition — the documented fallback, never a broken hero', async () => {
-    fetchMock.mockResolvedValue({ ok: false, blob: async () => new Blob() });
+    fetchMock.mockRejectedValue(Object.assign(new Error('denied'), { code: 'storage/unauthorized' }));
     const shareMock = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(window.navigator, 'canShare', { value: () => true, configurable: true });
     Object.defineProperty(window.navigator, 'share', { value: shareMock, configurable: true });
@@ -3150,7 +3161,7 @@ describe('FarewellPodium — photo-hero share (#534/#561)', () => {
     await user.click(screen.getByRole('button', { name: 'Share final standings' }));
     await waitFor(() => expect(shareMock).toHaveBeenCalledTimes(1));
 
-    expect(String(fetchMock.mock.calls[0][0])).toContain('proofs%2Fw2');
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/w2.jpg');
     expect(latestToBlobNode().querySelector('.share-card-ml-by')?.textContent).toBe(
       'Bea · “Fog bank rolling in” · Day 3 · shared with Ana',
     );
@@ -3298,3 +3309,19 @@ describe('ShareCard — legacy oversized text', () => {
     }
   });
 });
+
+// Media lifecycle and authority are tested at the loader/hook boundary.
+vi.mock('../hooks/useProofMedia', () => ({
+  useFirstAvailableProofMedia: (paths: readonly (string | null | undefined)[]) => ({
+    scope: 'test-account', settled: true,
+    path: paths.find(path => !!path),
+    unavailable: new Set(paths.filter(path => path && !(!!path))),
+  }),
+  useProofMediaUrls: (paths: readonly (string | null | undefined)[]) => ({
+    scope: 'test-account',
+    urls: new Map(paths.filter((path): path is string => !!path).map(path => [path, `blob:${encodeURIComponent(path)}`])),
+  }),
+}));
+
+const authenticatedMedia = vi.hoisted(() => ({ load: vi.fn() }));
+vi.mock('../data/proofMedia', () => ({ loadProofMediaBlob: authenticatedMedia.load }));

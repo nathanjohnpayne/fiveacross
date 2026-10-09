@@ -1352,3 +1352,11 @@ describe('ProofFeed — the merged Feed (specs/w2-feed-moments.md)', () => {
     expect(screen.getByText(/nothing in the feed yet/i)).toBeInTheDocument();
   });
 });
+
+// Media lifecycle and authority are tested at the loader/hook boundary.
+vi.mock('../hooks/useProofMedia', () => ({
+  useProofMediaUrls: (paths: readonly (string | null | undefined)[]) => ({
+    scope: 'test-account',
+    urls: new Map(paths.filter((path): path is string => !!path).map(path => [path, `blob:${encodeURIComponent(path)}`])),
+  }),
+}));

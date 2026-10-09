@@ -17,7 +17,9 @@ import { shareOrigin } from '../canonicalHost';
 import { EVENT_ID } from '../firebase';
 import { useProofFeed } from '../hooks/useData';
 import { useHiddenUids } from '../hooks/useBlocks';
-import { resolveProofMediaUrl } from '../data/proofMediaUrl';
+import { loadProofMediaBlob } from '../data/proofMedia';
+import { useFirstAvailableProofMedia, useProofMediaUrls } from '../hooks/useProofMedia';
+import { useNearViewport } from '../hooks/useNearViewport';
 import { safeMediaUrl } from './safeMediaUrl';
 import {
   renderFarewellShareCard,
@@ -71,11 +73,12 @@ function makeDayLabel(days: readonly DayDef[] | undefined): (dayIndex: number) =
   };
 }
 
-/** One photo of the Most-Loved section, shaped by the wrapper (`src` already
- *  resolved + sanitized) so the view stays payload-driven and testable. */
+/** Frozen attribution plus a live object path; each row owns its nearby SDK URL.
+ *  Fixture-driven views may instead supply an already sanitized src. */
 export interface FarewellMostLovedPhoto {
   proofId: string;
   src: string | undefined;
+  storagePath?: string | null;
   displayName: string;
   promptText: string;
   dayIndex: number | null;
@@ -92,27 +95,24 @@ export type FarewellMostLoved =
  *  `fx-podium-vacay`). Appreciation for a moment, never player rank: no ranks,
  *  no per-player stats, no streaks — the ONLY number anywhere is the frozen
  *  heart chip. */
-function MostLovedBlock({ mostLoved }: { mostLoved: FarewellMostLoved }) {
-  const award = mostLoved.kind === 'award';
+function MostLovedPhoto({ p, award, heartCount }: { p: FarewellMostLovedPhoto; award: boolean; heartCount?: number }) {
+  const { ref, nearby } = useNearViewport();
+  const { urls } = useProofMediaUrls(nearby && p.storagePath ? [p.storagePath] : []);
+  const src = safeMediaUrl(p.storagePath ? urls.get(p.storagePath) : p.src);
   return (
-    <div className="farewell-most-loved">
-      <p className="farewell-most-loved-title">
-        {award ? `Most-loved photo of the ${editionLexicon().occasion}` : 'Photo highlights'}
-      </p>
-      {mostLoved.photos.map((p) => (
-        <figure key={p.proofId} className="farewell-most-loved-item">
-          <div className="farewell-most-loved-frame">
-            <img
+        <figure className="farewell-most-loved-item">
+          <div ref={ref} className="farewell-most-loved-frame">
+            {src && <img
               className="farewell-most-loved-photo"
-              src={p.src}
+              src={src}
               alt={award ? `Most-loved photo by ${p.displayName}` : `Photo by ${p.displayName}`}
               loading="lazy"
-            />
+            />}
             {award && (
               <span className="farewell-most-loved-hearts">
                 {/* The FROZEN eligible count (never live heartState), shared by
                     every co-winner on a tie. EmojiText: captured surface. */}
-                <EmojiText text={`❤ ${mostLoved.heartCount}`} />
+                <EmojiText text={`❤ ${heartCount}`} />
               </span>
             )}
           </div>
@@ -124,7 +124,18 @@ function MostLovedBlock({ mostLoved }: { mostLoved: FarewellMostLoved }) {
             />
           </figcaption>
         </figure>
-      ))}
+  );
+}
+
+function MostLovedBlock({ mostLoved }: { mostLoved: FarewellMostLoved }) {
+  const award = mostLoved.kind === 'award';
+  return (
+    <div className="farewell-most-loved">
+      <p className="farewell-most-loved-title">
+        {award ? `Most-loved photo of the ${editionLexicon().occasion}` : 'Photo highlights'}
+      </p>
+      {mostLoved.photos.map(p => <MostLovedPhoto key={p.proofId} p={p} award={award}
+        heartCount={mostLoved.kind === 'award' ? mostLoved.heartCount : undefined} />)}
       {award && (
         <p className="farewell-most-loved-note">Frozen at {editionLexicon().occasion} end</p>
       )}
@@ -304,11 +315,6 @@ function mostLovedShareCreditLine(
   return line;
 }
 
-/** How long the hero-photo fetch may take before the share falls back to the
- *  photo-less composition — bounded so a dead ship-wifi fetch can never wedge
- *  the share button's tap behind an unresolvable promise. */
-const HERO_PHOTO_FETCH_TIMEOUT_MS = 8000;
-
 /**
  * The warmed farewell card, with its SETTLED state carried alongside the
  * promise (Codex P1, PR #712 round 3).
@@ -330,35 +336,10 @@ type WarmedCard = {
   blob: Blob | null;
 };
 
-/**
- * Fetch the winning photo's bytes for the share card. A plain `<img>` load of
- * proof media elsewhere is opaque/no-cors (`data/proofMediaCache.ts`), which
- * html-to-image cannot read pixels from — so the hero goes fetch → blob →
- * object URL (Firebase Storage download URLs serve CORS headers), giving the
- * rasterizer same-origin-readable pixels. Resolves `null` on ANY failure
- * (timeout, HTTP error, network throw): the caller renders photo-less, the
- * documented fallback.
- */
-async function fetchHeroPhotoBlob(
-  proof: Pick<ProofDoc, 'mediaURL' | 'thumbURL'>,
-): Promise<Blob | null> {
-  // resolveProofMediaUrl FIRST (the proofMediaUrl.ts ordering note): the fetch
-  // needs the host that actually serves the bytes. No safeMediaUrl here — this
-  // URL feeds fetch(), not a DOM sink; the sink guard runs in ShareCard.tsx on
-  // the object URL.
-  const url = resolveProofMediaUrl(proof.mediaURL ?? proof.thumbURL);
-  if (!url) return null;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), HERO_PHOTO_FETCH_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    if (!res.ok) return null;
-    return await res.blob();
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
+/** Authenticated share-card bytes; any denial/failure renders photo-less. */
+async function fetchHeroPhotoBlob(proof: Pick<ProofDoc, 'storagePath'>): Promise<Blob | null> {
+  if (!proof.storagePath) return null;
+  try { return await loadProofMediaBlob(proof.storagePath); } catch { return null; }
 }
 
 /** The wrapper's own props — one shape for both branches below. */
@@ -514,6 +495,14 @@ function FarewellPodiumInner({
   // drop from DISPLAY only; the award record is never touched.
   const displayable = award ? mostLovedDisplayWinners(award, proofs) : [];
 
+  // One ordered availability probe selects award vs fallback without retaining
+  // a 100-way tie's media. Each displayed row owns only its nearby image URL.
+  const winnerMedia = useFirstAvailableProofMedia(displayable.map(({ proof }) => proof.storagePath));
+  const mediaScope = winnerMedia.scope;
+  const fallback = displayable.length === 0 || (winnerMedia.settled && !winnerMedia.path);
+  const highlights = fallback ? proofs.filter(proof => proof.type === 'photo').slice(0, 3) : [];
+  const { urls: mediaUrls } = useProofMediaUrls(highlights.map(proof => proof.storagePath));
+
   // The in-app section's payload — shaped only once the proofs have LOADED so
   // the award never flashes as the highlights fallback while the join is still
   // empty. Award state: every surviving co-winner. Fallback: the newest three
@@ -525,9 +514,9 @@ function FarewellPodiumInner({
       // moderation/incarnation/media gate, so an edit after the standings
       // freeze cannot rewrite what the award records.
       proofId: winner?.proofId ?? p.id,
-      // resolveProofMediaUrl FIRST, safeMediaUrl LAST before the DOM (the
-      // proofMediaUrl.ts ordering note; PR #95's CodeQL barrier).
-      src: safeMediaUrl(resolveProofMediaUrl(p.mediaURL ?? p.thumbURL)),
+      // Keep the sink sanitizer last, including on SDK-derived object URLs.
+      src: safeMediaUrl(p.storagePath ? mediaUrls.get(p.storagePath) : undefined),
+      storagePath: winner ? p.storagePath : undefined,
       displayName: winner?.displayName ?? p.displayName,
       promptText: winner?.promptText ?? p.itemText,
       // `null` is frozen attribution too: only a highlights fallback reads
@@ -535,11 +524,11 @@ function FarewellPodiumInner({
       dayIndex: winner ? winner.dayIndex : p.dayIndex ?? null,
     });
     const winnerPhotos = displayable
-      .map(({ winner, proof }) => shape(proof, winner))
-      .filter((p) => p.src !== undefined);
-    if (winnerPhotos.length > 0) {
+      .filter(({ proof }) => !proof.storagePath || !winnerMedia.unavailable.has(proof.storagePath))
+      .map(({ winner, proof }) => shape(proof, winner));
+    if (winnerMedia.path && winnerPhotos.length > 0) {
       mostLoved = { kind: 'award', heartCount: award.heartCount, photos: winnerPhotos };
-    } else {
+    } else if (fallback) {
       const highlights = proofs
         .filter((p) => p.type === 'photo')
         .map((p) => shape(p))
@@ -556,18 +545,19 @@ function FarewellPodiumInner({
   // the roster array's identity: Board re-filters `players` every snapshot,
   // so an identity key would invalidate on every render even though the
   // frozen podium almost never changes. #561: the key swaps the hero's object
-  // URL for its proofId (object URLs differ per fetch; the photo does not).
+  // URL for its proofId and storagePath (object URLs differ per fetch).
   const warmedCard = useRef<WarmedCard | null>(null);
   // One eager render per mount, once sharing is allowed (see the effect
   // below) — the ref, not a `useEffect` dep list, is what makes it once.
   const eagerRenderStarted = useRef(false);
-  // The hero-photo fetch, cached by proofId so warm and tap share ONE fetch.
-  const heroPhoto = useRef<{ proofId: string; promise: Promise<Blob | null> } | null>(null);
+  // The hero-photo fetch is scoped to the session, Proof and Storage object.
+  const heroPhoto = useRef<{ scope: string; proofId: string; storagePath: ProofDoc['storagePath']; promise: Promise<Blob | null> } | null>(null);
 
   const heroPhotoBlob = (proofId: string, proof: ProofDoc): Promise<Blob | null> => {
-    if (heroPhoto.current?.proofId === proofId) return heroPhoto.current.promise;
+    if (heroPhoto.current?.scope === mediaScope && heroPhoto.current.proofId === proofId
+      && heroPhoto.current.storagePath === proof.storagePath) return heroPhoto.current.promise;
     const promise = fetchHeroPhotoBlob(proof);
-    heroPhoto.current = { proofId, promise };
+    heroPhoto.current = { scope: mediaScope, proofId, storagePath: proof.storagePath, promise };
     return promise;
   };
 
@@ -592,7 +582,7 @@ function FarewellPodiumInner({
             ),
           }
         : null;
-    const key = JSON.stringify({ ...base, mostLoved: heroMeta });
+    const key = JSON.stringify({ ...base, mostLoved: heroMeta, mediaScope, heroStoragePath: hero?.proof.storagePath ?? null });
     if (warmedCard.current?.key === key) return warmedCard.current.promise;
     // `.catch(() => null)` inside the cached promise (same rationale as the
     // Leaderboard's): a render failure degrades to the text/URL leg and can

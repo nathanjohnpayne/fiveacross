@@ -78,8 +78,8 @@ export async function uploadProofMedia(
   // production `firebasestorage.googleapis.com` host on purpose — can never
   // match, so a real photo/audio Proof used to 403 in the emulator stack. The
   // canonicalization writes the production-shaped URL the rule actually expects,
-  // so e2e exercises that regex for real; ProofFeed inverts it at render
-  // (resolveProofMediaUrl) to load the bytes back from the emulator.
+  // so e2e exercises that regex for real; ProofFeed reads storagePath via the SDK
+  // (loadProofMediaBlob) to load authenticated bytes from the emulator.
   const url = canonicalizeProofMediaUrl(await getDownloadURL(r));
   return { path, url };
 }
