@@ -187,10 +187,7 @@ The audit lists every `hidden` row not created by the seed and prints each row's
 
 ## 2. App Check (abuse protection)
 
-1. Google Cloud console → reCAPTCHA Enterprise → create a **Website** key for `gaycruisebingo.com` (+ `localhost` for dev).
-2. Firebase console → App Check → register the web app with that site key.
-3. Set `VITE_RECAPTCHA_SITE_KEY` in each affected target file (`.env.gaycruisebingo` or `.env.fiveacross`), rebuild, and redeploy that target's hosting. Named production builds deliberately ignore `.env.local`.
-4. In App Check, **enforce** on Cloud Firestore and Cloud Storage once traffic looks healthy.
+Follow [`specs/w4-app-check.md`](../../specs/w4-app-check.md) for the per-project registration, target and mirror distribution, monitoring interval, enforcement readback and positive/negative acceptance checks. The existing client wiring is in `src/firebaseCore.ts`; named production builds read `.env.gaycruisebingo` or `.env.fiveacross` and ignore `.env.local`. Development uses the debug-provider procedure. A source merge does not establish enforcement, and callable-level policy remains #1353.
 
 ## 3. Retire the old Cloud Run OG renderer (one-time, only if you deployed it before)
 
