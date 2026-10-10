@@ -68,10 +68,11 @@ PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/fiveacross \
 
 ### 3. Merge (In review → Done)
 
-After review clears per [`REVIEW_POLICY.md`](../../REVIEW_POLICY.md) (reviewer-identity `--approve` under threshold; Phase 4 for `needs-phase-4` / ≥ 300-line / `src/auth/**` PRs), merge as `nathanjohnpayne`. The `Closes #<num>` link closes the issue; if the "issue closed / PR merged → Done" workflow is on, the card moves itself. Verify (or force) it:
+After review clears per [`REVIEW_POLICY.md`](../../REVIEW_POLICY.md) (reviewer-identity `--approve` under threshold; Phase 4 for `needs-phase-4` / ≥ 300-line / `src/auth/**` / `needs-external-review`-labelled PRs), merge as `nathanjohnpayne`. The `Closes #<num>` link closes the issue; if the "issue closed / PR merged → Done" workflow is on, the card moves itself. Verify (or force) it:
 
 ```bash
-scripts/gh-as-author.sh -- gh pr merge <pr> --repo nathanjohnpayne/fiveacross --squash --delete-branch
+scripts/review-feedback-accounting.sh <pr> nathanjohnpayne/fiveacross   # must report every finding dispositioned
+scripts/gh-as-author.sh -- gh pr merge <pr> --repo nathanjohnpayne/fiveacross --squash --delete-branch --match-head-commit <full-current-head-sha>
 PROJECT=7 OWNER=nathanjohnpayne REPO=nathanjohnpayne/fiveacross \
   GH_TOKEN="$OP_PREFLIGHT_AUTHOR_PAT" scripts/gh-projects/move-item.sh <num> "Done"   # only if the workflow didn't
 ```
