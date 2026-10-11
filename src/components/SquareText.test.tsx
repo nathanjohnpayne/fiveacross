@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, render } from '@testing-library/react';
-import SquareText from './SquareText';
+import SquareText, { FreeSquareText } from './SquareText';
 
 // #1345: the Square fit guard verifies the estimate against the real rendered
 // glyphs and keeps shrinking while a word is wider than the box. jsdom has no
@@ -38,7 +38,16 @@ function stubLayout(realCharEm = REAL_CHAR_EM, renderedLines = 2) {
         borderRightWidth: '0px',
         borderTopWidth: '0px',
         borderBottomWidth: '0px',
-      } as CSSStyleDeclaration;
+        // index.css's corner-chip band, read live so a test can mark the
+        // Square or add a chip after mount: 9px on top for the ✓ (15px once a
+        // Doubt chip joins it), 15px at the bottom only under a ＋ or Tally.
+        getPropertyValue: (name: string) => {
+          if (!el.classList.contains('marked')) return '';
+          if (name === '--fit-block-inset-top') return el.querySelector('.doubt-badge') ? '15px' : '9px';
+          if (name === '--fit-block-inset-bottom') return el.querySelector('.proofbtn, .tally-badge') ? '15px' : '0px';
+          return '';
+        },
+      } as unknown as CSSStyleDeclaration;
     }
     return realGetComputedStyle.call(window, el, pseudo ?? undefined);
   });
@@ -163,5 +172,128 @@ describe('SquareText keeps words whole (#1345)', () => {
     stubLayout();
     const target = renderedSpan('Kissed a stranger');
     expect(parseFloat(target.style.fontSize)).toBe(CEILING_PX);
+  });
+});
+
+// A marked Square's corner chips (✓, ＋, Doubt, Tally): the guard fits the
+// prompt to the band between `--fit-block-inset-top` and `-bottom` so it clears
+// them, and falls back to the full tile only when even the floor cannot.
+describe('SquareText clears a marked Square\'s corner chips', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Short words, so width never binds: only the band's height decides.
+  const FOUR_LINES = 'aa bb cc dd';
+  const BAND = USABLE - 9 - 15; // 38px
+
+  // `proof`: the Board renders a ＋ on every marked Square; the cached-card
+  // fallback renders none.
+  function renderCell(text: string, marked: boolean, proof = marked) {
+    const { container } = render(
+      <div className={marked ? 'cell marked' : 'cell'}>
+        <SquareText text={text} />
+        {proof && <button className="proofbtn" />}
+      </div>,
+    );
+    return {
+      cell: container.querySelector('.cell') as HTMLElement,
+      target: container.querySelector('.cell-text') as HTMLElement,
+    };
+  }
+
+  it('fits four lines inside the band on a marked Square, where an unmarked one keeps the ceiling', () => {
+    stubLayout(REAL_CHAR_EM, 4);
+    expect(parseFloat(renderCell(FOUR_LINES, false).target.style.fontSize)).toBe(CEILING_PX);
+    const { target } = renderCell(FOUR_LINES, true);
+    // The largest 0.5px step whose 4 lines at 1.05 fit 38px: 9px (37.8px).
+    expect(parseFloat(target.style.fontSize)).toBe(9);
+    expect(4 * 9 * 1.05).toBeLessThanOrEqual(BAND);
+    // Centring in the band is CSS's margin, so the guard leaves it alone.
+    expect(target.style.marginBottom).toBe('');
+  });
+
+  it('reserves only the top edge when no ＋ or Tally chip renders, as on the cached-card fallback', () => {
+    // 62 - 9 = 53px: four lines fit at the 12px ceiling (50.4px).
+    stubLayout(REAL_CHAR_EM, 4);
+    expect(parseFloat(renderCell(FOUR_LINES, true, false).target.style.fontSize)).toBe(CEILING_PX);
+  });
+
+  it('falls back to the full tile, centred on it, when even the floor cannot hold the prompt in the band', () => {
+    // 7 lines at the 6px floor are 44.1px, over the 38px band; on the full
+    // 62px tile the largest step that fits is 8px (58.8px).
+    stubLayout(REAL_CHAR_EM, 7);
+    const { target } = renderCell(FOUR_LINES, true);
+    expect(parseFloat(target.style.fontSize)).toBe(8);
+    expect(target.style.marginBottom).toBe('0px');
+  });
+
+  it('re-fits when the Square is marked and again when a Doubt chip appears', async () => {
+    stubLayout(REAL_CHAR_EM, 4);
+    const { cell, target } = renderCell(FOUR_LINES, false);
+    expect(parseFloat(target.style.fontSize)).toBe(CEILING_PX);
+
+    await act(async () => {
+      cell.classList.add('marked');
+      const proof = document.createElement('button');
+      proof.className = 'proofbtn';
+      cell.appendChild(proof);
+    });
+    expect(parseFloat(target.style.fontSize)).toBe(9);
+
+    // A Doubt chip raises the top inset to 15px: a 32px band, 7.5px (31.5px).
+    await act(async () => {
+      const chip = document.createElement('button');
+      chip.className = 'doubt-badge';
+      cell.appendChild(chip);
+    });
+    expect(parseFloat(target.style.fontSize)).toBe(7.5);
+  });
+});
+
+// The free centre (FreeSquareText): its caption is fitted by the same guard,
+// hosted by `.free-prompt-box`, which in the real layout shrinks to the height
+// the display FREE label leaves. Stubbed here as a 20px-tall host.
+describe('FreeSquareText fits its caption under the FREE label', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function renderFree(boxHeight: number, lines: number) {
+    const realGetComputedStyle = window.getComputedStyle;
+    vi.spyOn(window, 'getComputedStyle').mockImplementation((el: Element, pseudo?: string | null) => {
+      if (el instanceof HTMLElement && el.classList.contains('cell-text')) {
+        return { fontSize: `${CEILING_PX}px` } as CSSStyleDeclaration;
+      }
+      return realGetComputedStyle.call(window, el, pseudo ?? undefined);
+    });
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains('free-prompt-box')) return rect(USABLE, boxHeight);
+      if (!this.classList.contains('cell-text')) return rect(CELL, CELL);
+      const size = parseFloat(this.style.fontSize);
+      return rect(Math.min(4 * size * REAL_CHAR_EM, USABLE), lines * size * 1.05);
+    });
+    const { container } = render(
+      <div className="cell free marked">
+        <FreeSquareText text="Main character on the coast" />
+      </div>,
+    );
+    return container;
+  }
+
+  it('renders the FREE label and a fitted caption carrying .free-prompt', () => {
+    const container = renderFree(70, 2);
+    expect(container.querySelector('.free-label')).toHaveTextContent('FREE');
+    const caption = container.querySelector('.free-prompt-box > .cell-text.free-prompt') as HTMLElement;
+    expect(caption).toHaveTextContent('Main character on the coast');
+    // Room to spare: the caption keeps its ceiling.
+    expect(parseFloat(caption.style.fontSize)).toBe(CEILING_PX);
+  });
+
+  it('shrinks the caption to the height the label leaves instead of clipping it', () => {
+    // Three lines in a 20px box: the largest 0.5px step is 6px (18.9px).
+    const caption = renderFree(20, 3).querySelector('.free-prompt') as HTMLElement;
+    expect(parseFloat(caption.style.fontSize)).toBe(6);
+    expect(3 * 6 * 1.05).toBeLessThanOrEqual(20);
   });
 });

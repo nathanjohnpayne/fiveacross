@@ -19,7 +19,7 @@ import { STORAGE_PORT } from './env';
 // The GCB Event payload itself is per-Event seed data (#563).
 import { adminRoster, eventWritePayload, seedItemDocId } from '../../../scripts/seed.mjs';
 import { EVENT_SEED, ITEMS } from '../../../scripts/seed-data/med-2026.mjs';
-import { EVENT_ID, FIRESTORE_HOST, FIRESTORE_PORT, PROJECT_ID } from './env';
+import { EVENT_ID, FIRESTORE_HOST, FIRESTORE_PORT, PROJECT_ID, STORAGE_BUCKET } from './env';
 import { cellsFromData } from '../../../src/game/cells';
 // The recursive bucket wipe the rules suites already use (#1153, Codex round 4
 // P2). `RulesTestEnvironment.clearStorage()` lists only the bucket ROOT.
@@ -105,7 +105,13 @@ export async function seedEmulatorEvent(
     // parity fixture's hard-coded ids as denied UPDATES and never recover. The
     // helper walks the prefixes with rules disabled (tests/support/storage-emulator.ts),
     // which is what both rules suites already call in their own `beforeEach`.
-    if (opts.withStorage) await clearStorageDeep(testEnv);
+    // Both buckets: the test env's default, and the app's own, which the
+    // parity fixture seeds Proof media into because the Feed reads by
+    // `storagePath` against it (#1861).
+    if (opts.withStorage) {
+      await clearStorageDeep(testEnv);
+      await clearStorageDeep(testEnv, `gs://${STORAGE_BUCKET}`);
+    }
 
     await testEnv.withSecurityRulesDisabled(async (context) => {
       const db = context.firestore();

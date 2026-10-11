@@ -19,6 +19,16 @@
    background surrounding the cell, not the gradient fill inside it; using
    --on-gradient there would silently reintroduce the summer-white
    vanishing-border defect this ticket fixes (white-on-light-bg). */
+/* The free square's accent share in its wash (index.css). Declared on EVERY
+   theme boundary, not left to inheritance: a nested Board, cached card or
+   ThemeIsland in another theme must not inherit a page theme's lowered value
+   (fog-froth-farewells' 12%). Placed before the theme blocks so a theme's own
+   override, at the same specificity, wins by source order. */
+:root,
+[data-theme] {
+  --free-wash: 18%;
+}
+
 :root,
 [data-theme='neon-playground'] {
   --bg: #07060d;
@@ -333,6 +343,10 @@
   --border: rgba(138, 85, 51, 0.3);
   --shadow: rgba(51, 48, 43, 0.18);
   --on-gradient: #faf7ef;
+  /* The free square's accent share in its wash (index.css, default 18%). This
+     theme's dark accent on its pale cell drops the accent FREE label to 4.23:1
+     over an 18% wash; 12% keeps it at 4.62:1 (w1-themes.test.tsx). */
+  --free-wash: 12%;
 }
 
 /* --------------------------------------------------------------------------

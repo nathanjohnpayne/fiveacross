@@ -27,6 +27,7 @@ import { expect, type Locator, type Page } from '@playwright/test';
 import {
   completeEmulatorSignIn,
   dismissConsentNotice,
+  markDeviceRecovered,
   signedInUid,
   stubAuthWidgetCdn,
 } from '../../support/emulator-signin';
@@ -673,6 +674,9 @@ export async function clickIfPresent(locator: Locator, timeout: number): Promise
  */
 export async function joinHero(page: Page): Promise<void> {
   await stubAuthWidgetCdn(page); // popups inherit the context's routes
+  // A recovered device: the steady state a marketing shot depicts, with no
+  // "Finish device recovery" notice pushing the header out of frame.
+  await markDeviceRecovered(page, HERO_PROJECT_ID);
   await page.goto('/');
 
   // `locator.isVisible()` never waits, so each optional scrim is waited for

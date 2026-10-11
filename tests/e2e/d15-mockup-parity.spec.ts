@@ -32,7 +32,8 @@ import {
 import { readDealtDayGrid, dismissCoach } from './support/daily';
 import { userAttested } from './support/seed';
 import { joinViaSharedLink, signedInUid } from './support/join';
-import { EVENT_ID } from './support/env';
+import { EVENT_ID, PROJECT_ID } from './support/env';
+import { markDeviceRecovered } from '../support/emulator-signin';
 import { dealBoard, type DealItem } from '../../src/game/logic';
 // @ts-expect-error — plain-JS seed script, no type declarations (see support/seed.ts).
 import { seedItemDocId } from '../../scripts/seed.mjs';
@@ -62,6 +63,9 @@ test('structural parity — every screen against the wireframes', async ({ page 
   // Freeze the browser clock mid-cruise on the fixture's schedule so the
   // date-driven header and the unlock-driven chips agree, deterministically.
   await page.clock.install({ time: PARITY_NOW });
+  // The wireframes draw a recovered device: no "Finish device recovery"
+  // notice, and Proof media served through the private session.
+  await markDeviceRecovered(page, PROJECT_ID);
   await joinViaSharedLink(page);
   const uid = await signedInUid(page);
 
@@ -422,6 +426,7 @@ test.describe('visual baselines (393×852, emulator fixture)', () => {
 
   test('card, locked preview, claim sheet, feed, more, admin', async ({ page }) => {
     await page.clock.install({ time: PARITY_NOW });
+    await markDeviceRecovered(page, PROJECT_ID);
     await joinViaSharedLink(page);
     const uid = await signedInUid(page);
     await expect(page.locator('.grid')).toHaveAttribute('data-server-confirmed', 'true', { timeout: 20_000 });

@@ -34,6 +34,8 @@ The seeded schedule puts **today on Day 0, the warm-up card** (tutorial pool, `W
 
 Seven squares are pre-marked and no line is complete: enough colour for the card to look played-in, without the celebration overlay firing.
 
+The browser is a device that has already finished private-cache recovery: `joinHero` seeds the app's own per-project recovery marker before the first load. Without it the signed-in shell shows the "Finish device recovery" notice above every tab, as it does on any fresh installation (`specs/private-cache-isolation.md`), and that notice pushes the header out of the 393×775 frame.
+
 Dates are computed relative to *today* (`isoDay`), so the Event always reads as in progress. An absolute schedule rots into a "👋 Until next year" header the moment its end date passes.
 
 ## Changing the shot

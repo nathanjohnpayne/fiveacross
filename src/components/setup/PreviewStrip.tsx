@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import type { DraftDayDef, EventDraft } from '../../types';
 import ThemeIsland from '../../theme/ThemeIsland';
-import SquareText from '../SquareText';
+import SquareText, { FreeSquareText } from '../SquareText';
 import {
   dealPreviewCard,
   draftFallbackTheme,
@@ -246,12 +246,7 @@ function PreviewSheet({
                 {deal.cells.map((c) => (
                   <div key={c.index} className={'cell' + (c.free ? ' free marked' : '')}>
                     {c.free ? (
-                      <>
-                        <span className="free-label" aria-hidden="true">
-                          FREE
-                        </span>
-                        <span className="free-prompt">{c.text}</span>
-                      </>
+                      <FreeSquareText text={c.text} />
                     ) : (
                       <SquareText text={c.text} />
                     )}

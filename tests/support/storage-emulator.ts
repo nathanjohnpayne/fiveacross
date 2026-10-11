@@ -33,15 +33,17 @@ async function emptyPrefix(folder: StorageReference): Promise<void> {
 }
 
 /**
- * Empty the Storage emulator's default bucket, prefixes included.
+ * Empty a Storage emulator bucket, prefixes included: the test env's default
+ * (`gs://<projectId>`) unless `bucketUrl` names another, such as the app's own
+ * bucket a fixture seeded media into.
  *
  * Drop-in replacement for `testEnv.clearStorage()` in a `beforeEach`. Safe on an
  * already-empty bucket, and safe on a test env with no Storage configured only
  * in the sense that it will throw the same way `clearStorage()` would — call it
  * from suites that wired Storage in.
  */
-export async function clearStorageDeep(testEnv: RulesTestEnvironment): Promise<void> {
+export async function clearStorageDeep(testEnv: RulesTestEnvironment, bucketUrl?: string): Promise<void> {
   await testEnv.withSecurityRulesDisabled(async (context: RulesTestContext) => {
-    await emptyPrefix(ref(context.storage()));
+    await emptyPrefix(ref(context.storage(bucketUrl)));
   });
 }

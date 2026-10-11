@@ -13,7 +13,7 @@ import { describe, expect, it } from 'vitest';
 //     pre-#325 ceiling (1.15 via --text-scale).
 //   - `--text-scale` keeps its original 0.9 / 1 / 1.15 — body copy behavior
 //     is exactly what shipped before #325.
-//   - Only `.cell`, `.free-label` and `.free-prompt` read `--square-scale`; `body` still
+//   - Only `.cell` and `.free-prompt` read `--square-scale`; `body` still
 //     reads `--text-scale`; nothing else reads either in a font-size.
 
 const css = readFileSync('src/index.css', 'utf8');
@@ -46,7 +46,7 @@ describe('square-scale split (#325, specs/d15-text-size.md)', () => {
     expect(css).toMatch(/:root\[data-text-size='large'\]\s*\{[^}]*--text-scale:\s*1\.15;/);
   });
 
-  it.each(['.cell', '.free-label', '.free-prompt'])('tile ceiling %s reads var(--square-scale)', (selector) => {
+  it.each(['.cell', '.free-prompt'])('tile ceiling %s reads var(--square-scale)', (selector) => {
     const sizes = bySelector.get(selector);
     expect(sizes, `selector ${selector} lost its font-size declaration`).toBeDefined();
     expect(sizes!.some((s) => s.includes('var(--square-scale'))).toBe(true);
@@ -57,7 +57,7 @@ describe('square-scale split (#325, specs/d15-text-size.md)', () => {
   });
 
   it('no other font-size reads either multiplier', () => {
-    const allowed = new Set(['.cell', '.free-label', '.free-prompt', 'body']);
+    const allowed = new Set(['.cell', '.free-prompt', 'body']);
     for (const [selector, sizes] of bySelector) {
       if (allowed.has(selector)) continue;
       for (const size of sizes) {

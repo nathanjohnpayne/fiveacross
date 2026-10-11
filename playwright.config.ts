@@ -1,5 +1,5 @@
 import { defineConfig, devices } from '@playwright/test';
-import { BASE_URL, EVENT_ID, PROJECT_ID, WEB_PORT } from './tests/e2e/support/env';
+import { BASE_URL, EVENT_ID, PROJECT_ID, STORAGE_BUCKET, WEB_PORT } from './tests/e2e/support/env';
 
 // Playwright e2e layer. `smoke.spec.ts` (w0-test-harness) needs no emulator or
 // app server — it drives page content directly. x-e2e-happy-path is the full
@@ -85,7 +85,7 @@ export default defineConfig({
         VITE_FIREBASE_API_KEY: 'demo-api-key',
         VITE_FIREBASE_AUTH_DOMAIN: `${PROJECT_ID}.firebaseapp.com`,
         VITE_FIREBASE_PROJECT_ID: PROJECT_ID,
-        VITE_FIREBASE_STORAGE_BUCKET: `${PROJECT_ID}.appspot.com`,
+        VITE_FIREBASE_STORAGE_BUCKET: STORAGE_BUCKET,
         VITE_FIREBASE_MESSAGING_SENDER_ID: '000000000000',
         VITE_FIREBASE_APP_ID: '1:000000000000:web:0000000000000000000000',
         VITE_EVENT_ID: EVENT_ID,

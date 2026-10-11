@@ -13,7 +13,7 @@ import { doc, setDoc, updateDoc } from 'firebase/firestore';
 import { ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage';
 import type { RulesTestEnvironment } from '@firebase/rules-unit-testing';
 import { seedEmulatorEvent } from './seed';
-import { EVENT_ID } from './env';
+import { EVENT_ID, STORAGE_BUCKET } from './env';
 // @ts-expect-error — plain-JS seed script, no type declarations (see support/seed.ts).
 import { seedItemDocId } from '../../../scripts/seed.mjs';
 import { ITEMS, EASY_ITEMS, CLOSING_ITEMS } from '../../../scripts/seed-data/med-2026.mjs';
@@ -79,13 +79,14 @@ export async function seedParityFixture(): Promise<ParityFixture> {
   const sharedItemId = seedItemDocId(SHARED_ITEM_TEXT);
 
   // Storage bytes first (owner-scoped create per storage.rules), so the proof
-  // docs written below carry live download URLs.
-  const ownerStorage = testEnv.authenticatedContext(PLAYER_A.uid).storage();
+  // docs written below carry live download URLs. Into the app's own bucket:
+  // the Feed reads media by `storagePath` against it (#1861).
+  const ownerStorage = testEnv.authenticatedContext(PLAYER_A.uid).storage(`gs://${STORAGE_BUCKET}`);
   const photoPath = `proofs/${EVENT_ID}/${PLAYER_A.uid}/parity-photo-1.jpg`;
   await uploadBytes(storageRef(ownerStorage, photoPath), JPEG_1PX, { contentType: 'image/jpeg' });
   const photoProofURL = await getDownloadURL(storageRef(ownerStorage, photoPath));
 
-  const bStorage = testEnv.authenticatedContext(PLAYER_B.uid).storage();
+  const bStorage = testEnv.authenticatedContext(PLAYER_B.uid).storage(`gs://${STORAGE_BUCKET}`);
   const audioPath = `proofs/${EVENT_ID}/${PLAYER_B.uid}/parity-audio-1.webm`;
   await uploadBytes(storageRef(bStorage, audioPath), WEBM_STUB, { contentType: 'audio/webm' });
   const audioProofURL = await getDownloadURL(storageRef(bStorage, audioPath));

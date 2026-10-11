@@ -13,6 +13,12 @@ export const PROJECT_ID = 'demo-gaycruisebingo-e2e';
 /** A dedicated Event id for this suite — never the real `med-2026`. */
 export const EVENT_ID = 'e2e-happy-path';
 
+/** The Storage bucket the e2e build reads (VITE_FIREBASE_STORAGE_BUCKET).
+ * Not the rules-unit-testing default, `gs://<projectId>`: since Proofs persist
+ * only a `storagePath` (#1861), the app resolves media against THIS bucket, so
+ * a fixture that uploads to the test-env default seeds bytes the Feed 404s on. */
+export const STORAGE_BUCKET = `${PROJECT_ID}.appspot.com`;
+
 export const FIRESTORE_PORT = 8080; // firebase.json emulators.firestore.port
 export const AUTH_PORT = 9099; // firebase.json emulators.auth.port
 export const STORAGE_PORT = 9199; // firebase.json emulators.storage.port

@@ -14,7 +14,7 @@ import {
   DEFAULT_EDITION,
 } from './themes';
 import { ThemeProvider, useTheme } from './ThemeContext';
-import { contrastRatio, hexToRgb, parseThemeBlocks } from './contrast';
+import { contrastRatio, hexToRgb, mixSrgb, parseThemeBlocks } from './contrast';
 
 // Covers specs/w1-themes.md: WCAG AA contrast across all 8 [data-theme]
 // blocks, ThemeContext's persistence + async-default invariants, the <5s PRD
@@ -59,21 +59,34 @@ const themeBlocks = parseThemeBlocks(readFileSync(cssPath, 'utf-8'));
 // is needed to cover them.
 const TEXT_PAIRS: [fg: string, bg: string][] = [
   ['ink', 'bg'], // body text; .signin h1; .celebrate .big (flat-bg floor — see theme-on-color-contrast.test.tsx for the composited-backdrop checks)
-  ['ink', 'panel'], // .row .name, .input text, .cell.free.marked (FREE + free-space text)
+  ['ink', 'panel'], // .row .name, .input text (the free caption's wash is checked separately below)
   ['ink', 'cell'], // .cell text
   ['dim', 'bg'], // .muted, .count, .ack, inactive .tab
   ['dim', 'panel'], // .row .sub
   ['primary', 'panel'], // .row .rank (leaderboard rank numbers, 22px normal weight)
-  ['accent', 'cell'], // accent text on a tile; no longer .cell.free, which moved to ink on panel
+  ['accent', 'cell'], // accent text on a tile; the free square's FREE sits on its accent wash, checked separately below
   ['accent', 'panel'], // .badge ("1st BINGO")
 ];
 const TEXT_MIN = 4.5; // WCAG 1.4.3 Contrast (Minimum), normal text
+const UI_MIN = 3; // WCAG 1.4.11 Non-text Contrast, UI component boundaries
 
 describe('themes.css — WCAG AA contrast (specs/w1-themes.md)', () => {
   it('defines a [data-theme] block for every ThemeId', () => {
     for (const t of THEMES) {
       expect(themeBlocks[t.id], `missing [data-theme='${t.id}'] block in themes.css`).toBeDefined();
     }
+  });
+
+  // --free-wash inherits like any custom property, so a nested theme (a Board,
+  // cached card or ThemeIsland inside a page wearing another theme) would carry
+  // the page theme's lowered value unless every boundary resets it. The reset
+  // must precede every theme block: at equal specificity, a theme's own
+  // override wins only by coming later.
+  it('resets --free-wash to 18% on every theme boundary, before any theme overrides it', () => {
+    const source = readFileSync(cssPath, 'utf-8');
+    const reset = source.search(/:root,\s*\[data-theme\]\s*\{\s*--free-wash:\s*18%;\s*\}/);
+    expect(reset, 'missing the `:root, [data-theme] { --free-wash: 18%; }` reset').toBeGreaterThanOrEqual(0);
+    expect(reset).toBeLessThan(source.indexOf("[data-theme='"));
   });
 
   for (const t of THEMES) {
@@ -84,6 +97,27 @@ describe('themes.css — WCAG AA contrast (specs/w1-themes.md)', () => {
         expect(contrastRatio(hexToRgb(vars[fg]), hexToRgb(vars[bg]))).toBeGreaterThanOrEqual(TEXT_MIN);
       });
     }
+
+    // The free square paints its FREE label (--accent) and caption (--ink) on
+    // `color-mix(in srgb, var(--accent) var(--free-wash, 18%), var(--cell))`,
+    // not on bare --cell. Check the color actually rendered: --accent against
+    // its own tint is the pair a token-only check misses.
+    it(`${t.id}: free-square FREE (--accent) and caption (--ink) meet ${TEXT_MIN}:1 on the rendered wash`, () => {
+      const wash = parseFloat(vars['free-wash'] ?? '18') / 100;
+      const accent = hexToRgb(vars.accent);
+      const surface = mixSrgb(accent, hexToRgb(vars.cell), wash);
+      expect(contrastRatio(accent, surface)).toBeGreaterThanOrEqual(TEXT_MIN);
+      expect(contrastRatio(hexToRgb(vars.ink), surface)).toBeGreaterThanOrEqual(TEXT_MIN);
+    });
+
+    // Its 2px --accent ring is the boundary that sets the free square apart
+    // (WCAG 1.4.11, 3:1 against adjacent colors): the --cell inset ring inside
+    // it and the page --bg outside it.
+    it(`${t.id}: free-square --accent border meets ${UI_MIN}:1 against --cell and --bg`, () => {
+      const accent = hexToRgb(vars.accent);
+      expect(contrastRatio(accent, hexToRgb(vars.cell))).toBeGreaterThanOrEqual(UI_MIN);
+      expect(contrastRatio(accent, hexToRgb(vars.bg))).toBeGreaterThanOrEqual(UI_MIN);
+    });
   }
 });
 

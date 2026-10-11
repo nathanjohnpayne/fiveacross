@@ -15,6 +15,37 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { expect, type Page, type Route } from '@playwright/test';
+import { privateCacheRecoveryKey } from '../../src/auth/privateCacheRecoveryMarker';
+
+/**
+ * Present the page as a device that has already finished private-cache
+ * recovery for `projectId`, by seeding the app's own per-project marker before
+ * the first load.
+ *
+ * A fresh browser context has no marker, and a missing marker holds private
+ * views closed even on a fresh installation (specs/private-cache-isolation.md):
+ * the signed-in shell shows the "Finish device recovery" notice above every tab
+ * and private-session reads such as Proof media stay withheld. A layer that
+ * photographs steady-state screens (the marketing captures, the mockup-parity
+ * baselines) wants the recovered device; a spec exercising recovery itself must
+ * not call this. Key and value are the app's own: the key ends in the marker's
+ * version, which is also the stored value, so a version bump cannot drift past
+ * the harness.
+ */
+export async function markDeviceRecovered(page: Page, projectId: string): Promise<void> {
+  const key = privateCacheRecoveryKey(projectId);
+  const version = key.slice(key.lastIndexOf(':') + 1);
+  await page.addInitScript(
+    ([key, value]) => {
+      try {
+        localStorage.setItem(key, value);
+      } catch {
+        // An unwritable store leaves the notice up, which the screenshot shows.
+      }
+    },
+    [key, version] as const,
+  );
+}
 
 /**
  * Drive the Firebase Auth Emulator's account-chooser popup that
