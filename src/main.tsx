@@ -7,7 +7,9 @@ import { ThemeProvider } from './theme/ThemeContext';
 import { todaysDayTheme, todaysDayIndex } from './theme/autoTheme';
 import { defaultThemeForEdition } from './theme/themes';
 import { useEventDoc, useMyPlayer } from './hooks/useData';
-import { initPostHog, phSetAuthState, isLocalDevHost } from './posthog';
+import { initPostHog, phSetAuthState, isLocalDevHost, onPostHogReady, phCapture } from './posthog';
+import { firebaseConfig } from './firebaseCore';
+import { drainRecoveryTelemetry } from './auth/privateCacheRecoveryTelemetry';
 import { registerAnalyticsDimensions, registerDayIndexDimension, emitInitialPageView } from './analytics';
 import { isSyntheticProbe } from './synthetic-probe';
 import type { ThemeId } from './types';
@@ -53,8 +55,19 @@ import './index.css';
  * production init then waits for Firebase's first resolved auth state; this
  * function stays fire-and-forget, so that safety gate does not block render.
  */
+let recoveryTelemetryArmed = false;
 function startPostHogAfterResolution(): void {
   if (!isSyntheticProbe() && !isLocalDevHost(window.location.hostname)) {
+    // Device recovery outcomes wait in a local outbox because the recovery
+    // document starts no analytics (#1889). Drain them only through this
+    // consent-aware client once it is capture-ready; `durableOutbox` keeps an
+    // unready capture out of PostHog's own queue so the outbox stays the one
+    // retry authority, and `requireAcceptance` keeps a locally refused event.
+    if (!recoveryTelemetryArmed) {
+      recoveryTelemetryArmed = true;
+      onPostHogReady(() => drainRecoveryTelemetry(firebaseConfig.projectId,
+        (name, properties, event) => phCapture(name, properties, { durableOutbox: true, requireAcceptance: true, ...event })));
+    }
     void initPostHog({ waitForAuth: true });
   }
 }

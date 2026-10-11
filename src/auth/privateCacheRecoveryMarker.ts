@@ -1,3 +1,5 @@
+import { recoveryError } from './privateCacheRecoveryTelemetry';
+
 const RECOVERY_VERSION = 'private-cache-recovered-v1';
 export const privateCacheRecoveryKey = (projectId: string) => `fiveacross:${projectId}:${RECOVERY_VERSION}`;
 
@@ -9,6 +11,6 @@ export function privateCacheRecovered(projectId: string): boolean {
 
 export function recordPrivateCacheRecovery(projectId: string): void {
   localStorage.setItem(privateCacheRecoveryKey(projectId), RECOVERY_VERSION);
-  if (!privateCacheRecovered(projectId)) throw new Error('Device recovery could not be recorded.');
+  if (!privateCacheRecovered(projectId)) throw recoveryError('marker-unwritable', 'Device recovery could not be recorded.');
 }
 

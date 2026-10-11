@@ -666,6 +666,15 @@ export type CaptureOptions = {
   /** This event is persisted by a separate durable outbox. Do not also put it
    * in PostHog's pre-init queue, which would create two retry authorities. */
   durableOutbox?: boolean;
+  /** A stable event id lets PostHog deduplicate an outbox replay, eventually
+   * and best effort rather than exactly once. No historical timestamp option:
+   * the SDK feeds it to the live session manager, which would rotate the
+   * session backwards (#1891). */
+  uuid?: string;
+  /** Acknowledge only an event the SDK actually accepted. A local refusal
+   * (client rate limit, `before_send` rejection) leaves it in the caller's
+   * outbox; an opted-out client acknowledges so consent drops the record. */
+  requireAcceptance?: boolean;
 };
 
 /**
@@ -722,9 +731,11 @@ export function phCapture(name: string, params?: Record<string, unknown>, option
   try {
     // Kept arity-exact for the common path: every existing caller passes no
     // options and must keep producing a two-argument `capture` call.
-    const { durableOutbox: _durableOutbox, ...posthogOptions } = options ?? {};
-    if (Object.keys(posthogOptions).length > 0) posthog.capture(name, params, posthogOptions);
-    else posthog.capture(name, params);
+    const { durableOutbox: _durableOutbox, requireAcceptance, ...posthogOptions } = options ?? {};
+    const accepted = Object.keys(posthogOptions).length > 0
+      ? posthog.capture(name, params, posthogOptions)
+      : posthog.capture(name, params);
+    if (requireAcceptance && accepted === undefined) return posthog.has_opted_out_capturing();
     return true;
   } catch {
     return false;

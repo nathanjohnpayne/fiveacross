@@ -9,12 +9,16 @@ import { applicationAfterRecoveryHref } from './privateCacheRecoveryNavigation';
 import { recordPrivateCacheRecovery } from './privateCacheRecoveryMarker';
 import { clearLegacyCacheWithoutVerification, completeLegacyCacheRecovery } from './privateCacheRecovery';
 import { RECOVERY_CSS, RECOVERY_STYLE_ID } from './privateCacheRecoveryStyles';
+import {
+  isRecoveryErrorCode, recordRecoveryOutcome, recoveryError, recoveryFailureCode, type RecoveryPath, type RecoveryStage,
+} from './privateCacheRecoveryTelemetry';
 
 const CLEAR_STILL_PENDING = 'Still waiting for cache clearing. Keep this recovery document open; returning or retrying stays unavailable until clearing settles. If it never settles, close the browser rather than reopening the app while this clear is running.';
 
 // Names the failed stage so the operator can fix it before retrying (#1886).
 export function recoveryFailureReason(error: unknown): string {
   const code = (error as { code?: unknown } | null)?.code;
+  if (isRecoveryErrorCode(code) && error instanceof Error) return error.message;
   if (code === 'failed-precondition') return 'Another tab or window still has the app open, so this device’s cache is in use.';
   if (code === 'unavailable') return 'The server could not be reached.';
   if (code === 'permission-denied') return 'The server refused access for the signed-in account.';
@@ -97,6 +101,18 @@ export function renderPrivateCacheRecovery(): void {
     alert.replaceChildren(el('strong', 'rec-alert-title', title), el('p', '', recoveryFailureReason(error)), el('p', '', tail));
   };
   let recovering = false;
+  // The stage running when an attempt fails is reported with its error code.
+  let stage: RecoveryStage = 'auth';
+  const at = <T>(next: RecoveryStage, operation: () => T): T => { stage = next; return operation(); };
+  const report = (path: RecoveryPath, error?: unknown) => {
+    if (error === undefined) return recordRecoveryOutcome(firebaseConfig.projectId, { outcome: 'completed', path });
+    const reason = recoveryFailureCode(error);
+    // The session check runs between stages; a change there is an auth
+    // failure, not a failure of the operation that had just finished.
+    recordRecoveryOutcome(firebaseConfig.projectId, {
+      outcome: 'failed', path, stage: reason === 'recovery/session-changed' ? 'auth' : stage, reason,
+    });
+  };
   // initializeFirestore may run once per app; the unverified path reuses the
   // instance a failed attended attempt opened (terminate, then clear).
   let legacyDb: Firestore | undefined;
@@ -120,28 +136,31 @@ export function renderPrivateCacheRecovery(): void {
     recovering = true;
     finish.disabled = back.disabled = allAccounts.disabled = tabsClosed.disabled = true;
     busy('Finishing recovery…');
+    stage = 'auth';
     try {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([auth.authStateReady(), new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error('Auth recovery timed out.')), 5000);
+          timer = setTimeout(() => reject(recoveryError('auth-timeout', 'Auth recovery timed out.')), 5000);
         })]);
       } finally { if (timer) clearTimeout(timer); }
-      if (!auth.currentUser || !navigator.onLine) throw new Error('Return to the app and sign in online first.');
-      const db = openLegacyCache();
+      if (!auth.currentUser || !navigator.onLine) throw recoveryError('signed-out-or-offline', 'Return to the app and sign in online first.');
+      const db = at('open', openLegacyCache);
       await completeLegacyCacheRecovery({ allAccountsRecovered: allAccounts.checked, otherTabsClosed: tabsClosed.checked }, {
         online: () => navigator.onLine,
         currentUid: () => auth.currentUser?.uid ?? null,
-        proveServerAccess: async (uid) => { await getDocFromServer(doc(db, 'users', uid)); },
-        drainActiveUser: () => waitForPendingWrites(db),
-        terminate: () => terminate(db),
-        clear: () => clearIndexedDbPersistence(db),
-        recordCompletion: () => recordPrivateCacheRecovery(firebaseConfig.projectId),
+        proveServerAccess: (uid) => at('server', async () => { await getDocFromServer(doc(db, 'users', uid)); }),
+        drainActiveUser: () => at('drain', () => waitForPendingWrites(db)),
+        terminate: () => at('terminate', () => terminate(db)),
+        clear: () => at('clear', () => clearIndexedDbPersistence(db)),
+        recordCompletion: () => at('record', () => recordPrivateCacheRecovery(firebaseConfig.projectId)),
         clearStillPending: () => busy(CLEAR_STILL_PENDING, true),
       });
+      report('verified');
       recovering = false;
       returnToApp();
     } catch (error) {
+      report('verified', error);
       recovering = false;
       fail('Recovery did not complete', error, 'Private views remain closed. Fix this and try again, or continue without verification below.');
       // A terminated SDK instance cannot be reused. A verified retry must start
@@ -181,18 +200,20 @@ export function renderPrivateCacheRecovery(): void {
       hatchBody.append(status, alert);
       busy('Clearing this device’s cache…');
       try {
-        const db = openLegacyCache();
+        const db = at('open', openLegacyCache);
         await clearLegacyCacheWithoutVerification({
           unsyncedMarksLossAccepted: lossAccepted.checked, otherTabsClosed: continueTabsClosed.checked,
         }, {
-          terminate: () => terminate(db),
-          clear: () => clearIndexedDbPersistence(db),
-          recordCompletion: () => recordPrivateCacheRecovery(firebaseConfig.projectId),
+          terminate: () => at('terminate', () => terminate(db)),
+          clear: () => at('clear', () => clearIndexedDbPersistence(db)),
+          recordCompletion: () => at('record', () => recordPrivateCacheRecovery(firebaseConfig.projectId)),
           clearStillPending: () => busy(CLEAR_STILL_PENDING, true),
         });
+        report('unverified');
         recovering = false;
         returnToApp();
       } catch (error) {
+        report('unverified', error);
         recovering = false;
         hatch.open = true;
         fail('Clearing did not complete', error, 'Private views remain closed. Close every other app tab or window, then try again.');

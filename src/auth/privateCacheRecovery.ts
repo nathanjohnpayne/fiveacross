@@ -1,3 +1,5 @@
+import { recoveryError } from './privateCacheRecoveryTelemetry';
+
 export interface LegacyRecoveryConfirmation {
   allAccountsRecovered: boolean;
   otherTabsClosed: boolean;
@@ -26,7 +28,7 @@ export async function completeLegacyCacheRecovery(
   timeoutMs = 10_000,
 ): Promise<void> {
   if (!confirmation.allAccountsRecovered || !confirmation.otherTabsClosed) {
-    throw new Error('Recover every account’s Marks and close the other tabs first.');
+    throw recoveryError('unconfirmed', 'Recover every account’s Marks and close the other tabs first.');
   }
   const uid = operations.currentUid();
   let expired = false;
@@ -34,13 +36,13 @@ export async function completeLegacyCacheRecovery(
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([operation(), new Promise<never>((_, reject) => {
-        timer = setTimeout(() => { expired = true; reject(new Error("Recovery timed out; reload before retrying.")); }, timeoutMs);
+        timer = setTimeout(() => { expired = true; reject(recoveryError('timeout', 'Recovery timed out; reload before retrying.')); }, timeoutMs);
       })]);
     } finally { if (timer) clearTimeout(timer); }
   };
   const assertSession = () => {
     if (expired || !uid || operations.currentUid() !== uid || !operations.online()) {
-      throw new Error('Stay signed in and online while finishing device recovery.');
+      throw recoveryError('session-changed', 'Stay signed in and online while finishing device recovery.');
     }
   };
   assertSession();
@@ -79,12 +81,12 @@ export async function clearLegacyCacheWithoutVerification(
   timeoutMs = 10_000,
 ): Promise<void> {
   if (!confirmation.unsyncedMarksLossAccepted || !confirmation.otherTabsClosed) {
-    throw new Error('Accept the loss of unsynced Marks and close the other tabs first.');
+    throw recoveryError('unconfirmed', 'Accept the loss of unsynced Marks and close the other tabs first.');
   }
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([operations.terminate(), new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error('Recovery timed out; reload before retrying.')), timeoutMs);
+      timer = setTimeout(() => reject(recoveryError('timeout', 'Recovery timed out; reload before retrying.')), timeoutMs);
     })]);
   } finally { if (timer) clearTimeout(timer); }
   await clearWithinQuarantine(operations, timeoutMs, () => {});
@@ -108,6 +110,6 @@ async function clearWithinQuarantine(
       operations.clearStillPending?.();
     }, timeoutMs);
     await operations.clear();
-    if (expired) throw new Error('Recovery timed out; reload before retrying.');
+    if (expired) throw recoveryError('clear-timeout', 'Recovery timed out; reload before retrying.');
   } finally { if (clearTimer) clearTimeout(clearTimer); }
 }
