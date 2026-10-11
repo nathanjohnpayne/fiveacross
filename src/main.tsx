@@ -66,7 +66,7 @@ function startPostHogAfterResolution(): void {
     if (!recoveryTelemetryArmed) {
       recoveryTelemetryArmed = true;
       onPostHogReady(() => drainRecoveryTelemetry(firebaseConfig.projectId,
-        (name, properties) => phCapture(name, properties, { durableOutbox: true })));
+        (name, properties, event) => phCapture(name, properties, { durableOutbox: true, ...event })));
     }
     void initPostHog({ waitForAuth: true });
   }

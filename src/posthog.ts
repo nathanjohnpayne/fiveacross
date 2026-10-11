@@ -666,6 +666,10 @@ export type CaptureOptions = {
   /** This event is persisted by a separate durable outbox. Do not also put it
    * in PostHog's pre-init queue, which would create two retry authorities. */
   durableOutbox?: boolean;
+  /** A stable event id (and its original time) lets an outbox replay
+   * deduplicate in PostHog instead of counting twice. */
+  uuid?: string;
+  timestamp?: Date;
 };
 
 /**

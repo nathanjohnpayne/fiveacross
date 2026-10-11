@@ -12,7 +12,7 @@ afterEach(() => vi.restoreAllMocks());
 describe('device recovery telemetry outbox (#1889)', () => {
   it('records identity-free outcomes with an ISO time', () => {
     recordRecoveryOutcome(project, { outcome: 'failed', path: 'verified', stage: 'clear', reason: 'failed-precondition' }, new Date('2026-10-11T04:00:00Z'));
-    expect(stored()).toEqual([{ outcome: 'failed', path: 'verified', stage: 'clear', reason: 'failed-precondition', at: '2026-10-11T04:00:00.000Z' }]);
+    expect(stored()).toEqual([{ id: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/), outcome: 'failed', path: 'verified', stage: 'clear', reason: 'failed-precondition', at: '2026-10-11T04:00:00.000Z' }]);
   });
   it('keeps only the newest ten records', () => {
     for (let i = 0; i < 12; i++) recordRecoveryOutcome(project, { outcome: 'failed', path: 'verified', reason: `r${i}` });
@@ -30,11 +30,15 @@ describe('device recovery telemetry outbox (#1889)', () => {
   it('emits failed and completed events and removes acknowledged records', () => {
     recordRecoveryOutcome(project, { outcome: 'failed', path: 'verified', stage: 'auth', reason: 'recovery/signed-out-or-offline' }, new Date('2026-10-11T04:00:00Z'));
     recordRecoveryOutcome(project, { outcome: 'completed', path: 'unverified' }, new Date('2026-10-11T04:01:00Z'));
+    const [failedId, completedId] = (stored() as { id: string }[]).map(record => record.id);
+    expect(failedId).not.toBe(completedId);
     const capture = vi.fn(() => true);
     drainRecoveryTelemetry(project, capture);
     expect(capture.mock.calls).toEqual([
-      ['device_recovery_failed', { path: 'verified', stage: 'auth', reason: 'recovery/signed-out-or-offline', observed_at: '2026-10-11T04:00:00.000Z' }],
-      ['device_recovery_completed', { path: 'unverified', observed_at: '2026-10-11T04:01:00.000Z' }],
+      ['device_recovery_failed', { path: 'verified', stage: 'auth', reason: 'recovery/signed-out-or-offline', observed_at: '2026-10-11T04:00:00.000Z' },
+        { uuid: failedId, timestamp: new Date('2026-10-11T04:00:00Z') }],
+      ['device_recovery_completed', { path: 'unverified', observed_at: '2026-10-11T04:01:00.000Z' },
+        { uuid: completedId, timestamp: new Date('2026-10-11T04:01:00Z') }],
     ]);
     expect(localStorage.getItem(key)).toBeNull();
   });
@@ -43,6 +47,25 @@ describe('device recovery telemetry outbox (#1889)', () => {
     recordRecoveryOutcome(project, { outcome: 'failed', path: 'verified', reason: 'b' });
     drainRecoveryTelemetry(project, (_name, properties) => properties.reason === 'a');
     expect((stored() as { reason: string }[]).map(record => record.reason)).toEqual(['b']);
+  });
+  it('replays an unremoved record under the same event uuid', () => {
+    recordRecoveryOutcome(project, { outcome: 'failed', path: 'verified', reason: 'a' });
+    const uuids: string[] = [];
+    const capture = (_name: string, _properties: Record<string, unknown>, event: { uuid: string }) => { uuids.push(event.uuid); return true; };
+    const removeItem = vi.spyOn(Storage.prototype, 'removeItem').mockImplementationOnce(() => { throw new Error('denied'); });
+    drainRecoveryTelemetry(project, capture);
+    removeItem.mockRestore();
+    drainRecoveryTelemetry(project, capture);
+    expect(uuids).toHaveLength(2); expect(uuids[0]).toBe(uuids[1]);
+    expect(localStorage.getItem(key)).toBeNull();
+  });
+  it('falls back to a random v4 id without randomUUID', () => {
+    // Shadow the prototype method; deleting the own property restores it.
+    Object.defineProperty(crypto, 'randomUUID', { value: undefined, configurable: true });
+    try {
+      recordRecoveryOutcome(project, { outcome: 'completed', path: 'verified' });
+      expect((stored() as { id: string }[])[0].id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    } finally { delete (crypto as { randomUUID?: unknown }).randomUUID; }
   });
   it('does nothing without records', () => {
     const capture = vi.fn(() => true);

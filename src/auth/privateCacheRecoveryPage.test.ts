@@ -258,7 +258,7 @@ describe('failed recovery offers a warned way forward (#1886)', () => {
 
 describe('recovery outcomes are left for PostHog (#1889)', () => {
   const outcomes = () => (JSON.parse(localStorage.getItem(privateCacheRecoveryTelemetryKey(project)) ?? '[]') as Record<string, unknown>[])
-    .map(({ at: _at, ...rest }) => rest);
+    .map(({ at: _at, id: _id, ...rest }) => rest);
   beforeEach(() => localStorage.clear());
   it.each([
     ['ready', 'auth'], ['server', 'server'], ['drain', 'drain'], ['terminate', 'terminate'], ['clear', 'clear'],
