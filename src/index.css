@@ -1950,10 +1950,10 @@ textarea.input {
 }
 /* #fff below is a deliberate, documented exemption from issue #72's "no
    hardcoded #fff text fill" rule (specs/theme-on-color-contrast.md): the
-   button's own rgba(0, 0, 0, 0.35) background is a fixed, theme-independent
-   near-black scrim over a Proof photo thumbnail, not a theme-token surface —
-   white-on-near-black-scrim reads regardless of the active Theme. See the
-   spec's Scope note for the full survey. */
+   button's own rgba(0, 0, 0, 0.45) background is a fixed, theme-independent
+   near-black scrim over the marked Square's gradient, not a theme-token
+   surface. Its ＋ is held to the 3:1 UI-component floor over both gradient
+   ends and the midpoint in every Theme (specs/a11y-badge-contrast.md). */
 .proofbtn {
   position: absolute;
   bottom: 2px;

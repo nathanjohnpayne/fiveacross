@@ -41,6 +41,8 @@
     vertical-align:-1px;margin-right:2px}
 
   /* ---------- real theme tokens (copied from src/theme/themes.css) ---------- */
+  /* --free-wash resets at every theme boundary so a fog frame's 12% never leaks into a nested theme */
+  [data-theme]{--free-wash:18%}
   [data-theme='neon-playground']{--bg:#07060d;--panel:#0e0a1a;--ink:#f6ecff;--dim:#b9a9d6;
     --primary:#ff2d95;--secondary:#00e6ff;--accent:#ffd23f;--cell:#120c22;
     --border:rgba(0,230,255,.35);--on-gradient:#000}
@@ -310,10 +312,10 @@
      small bold ink caption beneath. FREE never wraps, so a missing display face
      falls back to a narrower one instead of breaking the word onto two lines. */
   .cell.free{flex-direction:column;gap:2px;background:color-mix(in srgb,var(--accent) var(--free-wash,18%),var(--cell));
-    border:2px solid var(--accent);box-shadow:inset 0 0 0 2px var(--cell),0 0 10px var(--shadow);
+    border:2px solid var(--accent);box-shadow:inset 0 0 0 2px var(--cell),0 0 10px var(--shadow,transparent);
     color:var(--ink);font-weight:700}
   .cell.free .fl{font-family:'Bebas Neue','Arial Narrow','Avenir Next Condensed',sans-serif;font-size:18px;
-    line-height:.9;letter-spacing:.08em;white-space:nowrap;color:var(--accent);text-shadow:0 0 8px var(--shadow)}
+    line-height:.9;letter-spacing:.08em;white-space:nowrap;color:var(--accent);text-shadow:0 0 8px var(--shadow,transparent)}
   .cell.free .fp{max-width:100%;font-size:6.6px;line-height:1.05}
   .cell.blank{background:var(--panel);border-style:dashed}
   .tally{position:absolute;right:2px;bottom:2px;background:#000;color:#fff;border-radius:8px;

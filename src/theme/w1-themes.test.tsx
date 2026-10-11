@@ -77,6 +77,18 @@ describe('themes.css — WCAG AA contrast (specs/w1-themes.md)', () => {
     }
   });
 
+  // --free-wash inherits like any custom property, so a nested theme (a Board,
+  // cached card or ThemeIsland inside a page wearing another theme) would carry
+  // the page theme's lowered value unless every boundary resets it. The reset
+  // must precede every theme block: at equal specificity, a theme's own
+  // override wins only by coming later.
+  it('resets --free-wash to 18% on every theme boundary, before any theme overrides it', () => {
+    const source = readFileSync(cssPath, 'utf-8');
+    const reset = source.search(/:root,\s*\[data-theme\]\s*\{\s*--free-wash:\s*18%;\s*\}/);
+    expect(reset, 'missing the `:root, [data-theme] { --free-wash: 18%; }` reset').toBeGreaterThanOrEqual(0);
+    expect(reset).toBeLessThan(source.indexOf("[data-theme='"));
+  });
+
   for (const t of THEMES) {
     const vars = themeBlocks[t.id] ?? {};
 
