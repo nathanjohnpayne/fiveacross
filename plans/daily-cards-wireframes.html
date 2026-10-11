@@ -369,8 +369,18 @@
   .shc .sq.on{background:linear-gradient(145deg,var(--primary),var(--secondary));border-color:transparent;
     color:var(--on-gradient)}
   .shc .sq.line{box-shadow:0 0 4px var(--primary);border:1.5px solid var(--ink)}
-  .shc .sq.freec{background:color-mix(in srgb,var(--accent) 32%,var(--cell));border-color:var(--accent);
-    color:var(--ink)}
+  /* share-card free centre: the on-page free square at share scale (.cell.free above):
+     the same --free-wash accent wash in a double ring (accent border, --cell inset),
+     a display FREE in accent over the Day's caption. On the winning line it keeps the
+     line's glow. A caption too long for the tile drops FREE, then truncates behind an
+     ellipsis (ShareCard.tsx fitFreeCaption). */
+  .shc .sq.freec{flex-direction:column;gap:.5px;color:var(--ink);
+    background:color-mix(in srgb,var(--accent) var(--free-wash,18%),var(--cell));
+    border:1px solid var(--accent);box-shadow:inset 0 0 0 1px var(--cell)}
+  .shc .sq.freec.line{border-width:1.5px;box-shadow:inset 0 0 0 1px var(--cell),0 0 4px var(--primary)}
+  .shc .sq.freec .fl{font-family:'Bebas Neue','Arial Narrow','Avenir Next Condensed',sans-serif;
+    font-size:8.5px;line-height:.9;letter-spacing:.06em;white-space:nowrap;color:var(--accent)}
+  .shc .sq.freec .fp{max-width:100%;font-size:4px;line-height:1.05}
   .shc .foot{margin-top:auto;font-size:8.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim)}
   .shc .pod{display:flex;align-items:flex-end;gap:8px;margin:12px 0 4px}
   .shc .col{display:flex;flex-direction:column;align-items:center;gap:3px;width:72px}
@@ -3111,17 +3121,17 @@
         <span class="brand-chip brand-gcb">🚢 Gay Cruise Bingo</span>
         <div class="cmpshc">
           <div class="shc" data-theme="sporty-splash">
-            <div class="ev">Atlantis Med—Trieste to Barcelona · Day 4 · Valletta</div>
+            <div class="ev">Atlantis Med—Trieste to Barcelona · Day 1 · Trieste</div>
             <div class="big">BINGO!</div>
             <div class="who">Theo</div>
             <div class="mini5">
-              <div class="sq on line">Poppers spill</div><div class="sq"></div><div class="sq on">Matching Speedos</div><div class="sq"></div><div class="sq"></div>
-              <div class="sq"></div><div class="sq on line">Sunset selfie</div><div class="sq"></div><div class="sq on">Eat carbs</div><div class="sq"></div>
-              <div class="sq on">Late-night pizza</div><div class="sq"></div><div class="sq freec line">Complain about circuit music</div><div class="sq"></div><div class="sq"></div>
-              <div class="sq"></div><div class="sq on">Cruise boyfriend</div><div class="sq"></div><div class="sq on line">Three-way kiss</div><div class="sq"></div>
-              <div class="sq"></div><div class="sq"></div><div class="sq on">Lost bracelet</div><div class="sq"></div><div class="sq on line">Dance-floor k-hole</div>
+              <div class="sq on line">Befriend a bartender</div><div class="sq"></div><div class="sq on">Spot matching Speedos</div><div class="sq"></div><div class="sq"></div>
+              <div class="sq"></div><div class="sq on line">Stateroom mirror selfie</div><div class="sq"></div><div class="sq on">Hear the ship's horn</div><div class="sq"></div>
+              <div class="sq on">Locate the late-night pizza</div><div class="sq"></div><div class="sq freec line"><span class="fl">FREE</span><span class="fp">You made it aboard</span></div><div class="sq"></div><div class="sq"></div>
+              <div class="sq"></div><div class="sq on">Find your muster station</div><div class="sq"></div><div class="sq on line">Balcony or porthole photo</div><div class="sq"></div>
+              <div class="sq"></div><div class="sq"></div><div class="sq on">Wave goodbye to land</div><div class="sq"></div><div class="sq on line">Find the theater</div>
             </div>
-            <div class="stat">Bingo #1 · 9 squares · 💦 Splash T-Dance night</div>
+            <div class="stat">Bingo #1 · 9 squares · ⛵ Sail-Away Party night</div>
             <div class="foot">Gay Cruise Bingo 🚢</div>
           </div>
         </div>
@@ -3137,7 +3147,7 @@
             <div class="mini5">
               <div class="sq on line">Find the best boat name in the harbor</div><div class="sq"></div><div class="sq on">Take a picture of a wildflower</div><div class="sq"></div><div class="sq"></div>
               <div class="sq"></div><div class="sq on line">Take a windblown group selfie</div><div class="sq"></div><div class="sq"></div><div class="sq on">Capture a colorful buoy or crab pot</div>
-              <div class="sq"></div><div class="sq"></div><div class="sq freec line">Main character on the coast</div><div class="sq"></div><div class="sq"></div>
+              <div class="sq"></div><div class="sq"></div><div class="sq freec line"><span class="fl">FREE</span><span class="fp">Main character on the coast</span></div><div class="sq"></div><div class="sq"></div>
               <div class="sq"></div><div class="sq on">Stage an original suspense-movie still</div><div class="sq"></div><div class="sq on line">Photograph the fog</div><div class="sq"></div>
               <div class="sq on">Walk to a Bodega Head viewpoint</div><div class="sq"></div><div class="sq"></div><div class="sq"></div><div class="sq on line">Find a seashell on the beach</div>
             </div>
@@ -3157,7 +3167,7 @@
             <div class="mini5">
               <div class="sq on line">Someone cries during a toast</div><div class="sq"></div><div class="sq on">Dad finds the good whisky</div><div class="sq"></div><div class="sq"></div>
               <div class="sq"></div><div class="sq on line">Unrehearsed speech</div><div class="sq"></div><div class="sq"></div><div class="sq on">Shoes come off</div>
-              <div class="sq"></div><div class="sq"></div><div class="sq freec line">Everyone in one photo</div><div class="sq"></div><div class="sq"></div>
+              <div class="sq"></div><div class="sq"></div><div class="sq freec line"><span class="fl">FREE</span><span class="fp">Everyone in one photo</span></div><div class="sq"></div><div class="sq"></div>
               <div class="sq"></div><div class="sq on">Wrong table place card</div><div class="sq"></div><div class="sq on line">Cousin runs the playlist</div><div class="sq"></div>
               <div class="sq"></div><div class="sq"></div><div class="sq on">First dance rehearsal</div><div class="sq"></div><div class="sq on line">Last one on the floor</div>
             </div>
@@ -3545,27 +3555,27 @@
 <h2 id="sec-share">Share surfaces—one renderer, three identities</h2>
 <p class="sub">The five outbound surfaces, drawn three times each: <b>Gay Cruise Bingo</b> (cruise register, full camp, share mark 🚢, <code>gaycruisebingo.com</code>), <b>Vacay Bingo</b> (trip register, moderate camp, 🧳, <code>vacaybingo.com</code>), and <b>Five Across</b> (general register, minimal camp, ✳️, <code>fiveacross.app</code>). Everything structural is the same shared renderer—<code>ShareCard.tsx</code>'s 600×750 canvas, the same podium and honoree blocks, the same on-device <code>html-to-image</code> raster (ADR 0005)—so what differs frame to frame is exactly what the Edition lexicon (#608) owns: the theme tokens, the occasion nouns, the footer share mark, the celebration text, and the download slug. The GCB frames carry the shipped renderer's copy verbatim—every quoted line is what the live Event draws today; that is the point, since <code>gcb</code> is the fallback Edition and any drift there is a bug. Share cards are drawn at half scale; the OG artboards at 1/4. Footer marks and celebration strings below are quoted verbatim from the signed-off lexicon.</p>
 
-<p class="sub"><b>1 · BINGO card</b>—the word, the name, the line. Marked squares carry their prompt text (issue #444) so the card doubles as receipts on pinch-to-zoom; unmarked squares stay blank so the board reads as shape at iMessage-bubble size. Only the footer mark and celebration text move between Editions; the context line (<code>event name · Day N · place</code>) and the stat line's night suffix (<code>· ⟨tonight[0]⟩ night</code>) carry Event data through an Edition-invariant shape (<code>Board.tsx</code>).</p>
+<p class="sub"><b>1 · BINGO card</b>—the word, the name, the line. Marked squares carry their prompt text (issue #444) so the card doubles as receipts on pinch-to-zoom; unmarked squares stay blank so the board reads as shape at iMessage-bubble size. The free centre matches the on-page free square: the same accent wash in a double ring, with a display FREE over the Day's caption. A caption too long for the tile even at the smallest size takes the whole tile instead: FREE yields first, then the caption's tail goes behind an ellipsis (the accent ring still marks the square). Only the footer mark and celebration text move between Editions; the context line (<code>event name · Day N · place</code>) and the stat line's night suffix (<code>· ⟨tonight[0]⟩ night</code>) carry Event data through an Edition-invariant shape (<code>Board.tsx</code>).</p>
 <div class="frames">
 
   <div class="unit" id="fx-share-bingo-gcb">
     <a class="alias" id="frame-share-bingo"></a>
     <span class="brand-chip brand-gcb">🚢 Gay Cruise Bingo</span>
-    <div class="shc" data-theme="sporty-splash">
-      <div class="ev">Atlantis Med—Trieste to Barcelona · Day 4 · Valletta</div>
+    <div class="shc" data-theme="neon-playground">
+      <div class="ev">Atlantis Med—Trieste to Barcelona · Day 1 · Trieste</div>
       <div class="big">BINGO!</div>
       <div class="who">Theo</div>
       <div class="mini5">
-        <div class="sq on line">Poppers spill</div><div class="sq"></div><div class="sq on">Matching Speedos</div><div class="sq"></div><div class="sq"></div>
-        <div class="sq"></div><div class="sq on line">Sunset selfie</div><div class="sq"></div><div class="sq on">Eat carbs</div><div class="sq"></div>
-        <div class="sq on">Late-night pizza</div><div class="sq"></div><div class="sq freec line">Complain about circuit music</div><div class="sq"></div><div class="sq"></div>
-        <div class="sq"></div><div class="sq on">Cruise boyfriend</div><div class="sq"></div><div class="sq on line">Three-way kiss</div><div class="sq"></div>
-        <div class="sq"></div><div class="sq"></div><div class="sq on">Lost bracelet</div><div class="sq"></div><div class="sq on line">Dance-floor k-hole</div>
+        <div class="sq on line">Befriend a bartender</div><div class="sq"></div><div class="sq on">Spot matching Speedos</div><div class="sq"></div><div class="sq"></div>
+        <div class="sq"></div><div class="sq on line">Stateroom mirror selfie</div><div class="sq"></div><div class="sq on">Hear the ship's horn</div><div class="sq"></div>
+        <div class="sq on">Locate the late-night pizza</div><div class="sq"></div><div class="sq freec line"><span class="fl">FREE</span><span class="fp">You made it aboard</span></div><div class="sq"></div><div class="sq"></div>
+        <div class="sq"></div><div class="sq on">Find your muster station</div><div class="sq"></div><div class="sq on line">Balcony or porthole photo</div><div class="sq"></div>
+        <div class="sq"></div><div class="sq"></div><div class="sq on">Wave goodbye to land</div><div class="sq"></div><div class="sq on line">Find the theater</div>
       </div>
-      <div class="stat">Bingo #1 · 9 squares · 💦 Splash T-Dance night</div>
+      <div class="stat">Bingo #1 · 9 squares · ⛵ Sail-Away Party night</div>
       <div class="foot">Gay Cruise Bingo 🚢</div>
     </div>
-    <p class="cap"><b>Cruise register—port, sailing, full camp</b>Diagonal blazes (lit + outlined + glow); other marked squares glow dimmer; free centre in accent. Context line leads with the Event's name, then the Day and its <i>Port</i>; the stat line carries bingo count + squares (the free centre never counts) + the Day's first tonight entry as the party night. Share text <i>"I got BINGO on the high seas 🚢"</i>; file <code>gay-cruise-bingo-bingo.png</code>. Decorative emoji are in budget here and nowhere else.</p>
+    <p class="cap"><b>Cruise register—port, sailing, full camp</b>Diagonal blazes (lit + outlined + glow); other marked squares glow dimmer; the free centre is the on-page free square at share scale, a display FREE over its caption in an accent ring (an over-long caption takes the whole tile instead, behind an ellipsis if it must). Context line leads with the Event's name, then the Day and its <i>Port</i>; the stat line carries bingo count + squares (the free centre never counts) + the Day's first tonight entry as the party night. Share text <i>"I got BINGO on the high seas 🚢"</i>; file <code>gay-cruise-bingo-bingo.png</code>. Decorative emoji are in budget here and nowhere else.</p>
   </div>
 
   <div class="unit" id="fx-share-bingo-vacay">
@@ -3577,7 +3587,7 @@
       <div class="mini5">
         <div class="sq on line">Walk part of the Bodega Dunes</div><div class="sq"></div><div class="sq on">Find a seashell on the beach</div><div class="sq"></div><div class="sq"></div>
         <div class="sq"></div><div class="sq on line">Find the best boat name in the harbor</div><div class="sq"></div><div class="sq on">Photograph a boat name that is pun-y</div><div class="sq"></div>
-        <div class="sq on">Capture a colorful buoy or crab pot</div><div class="sq"></div><div class="sq freec line">Main character on the coast</div><div class="sq"></div><div class="sq"></div>
+        <div class="sq on">Capture a colorful buoy or crab pot</div><div class="sq"></div><div class="sq freec line"><span class="fl">FREE</span><span class="fp">Main character on the coast</span></div><div class="sq"></div><div class="sq"></div>
         <div class="sq"></div><div class="sq on">Take a picture of a wildflower</div><div class="sq"></div><div class="sq on line">Photograph the fog</div><div class="sq"></div>
         <div class="sq"></div><div class="sq"></div><div class="sq on">Photograph something you had to pull over on Highway 1 for</div><div class="sq"></div><div class="sq on line">Take a windblown group selfie</div>
       </div>
@@ -3596,7 +3606,7 @@
       <div class="mini5">
         <div class="sq on line">Someone cries during a toast</div><div class="sq"></div><div class="sq on">Wrong table number</div><div class="sq"></div><div class="sq"></div>
         <div class="sq"></div><div class="sq on line">Group photo redo</div><div class="sq"></div><div class="sq on">Speech runs long</div><div class="sq"></div>
-        <div class="sq on">Playlist hijacked</div><div class="sq"></div><div class="sq freec line">Say hi to a stranger</div><div class="sq"></div><div class="sq"></div>
+        <div class="sq on">Playlist hijacked</div><div class="sq"></div><div class="sq freec line"><span class="fl">FREE</span><span class="fp">Say hi to a stranger</span></div><div class="sq"></div><div class="sq"></div>
         <div class="sq"></div><div class="sq on">Kid steals the show</div><div class="sq"></div><div class="sq on line">Dance floor opens early</div><div class="sq"></div>
         <div class="sq"></div><div class="sq"></div><div class="sq on">Lost the seating chart</div><div class="sq"></div><div class="sq on line">Last song singalong</div>
       </div>
@@ -3614,21 +3624,21 @@
   <div class="unit" id="fx-share-blackout-gcb">
     <a class="alias" id="frame-share-blackout"></a>
     <span class="brand-chip brand-gcb">🚢 Gay Cruise Bingo</span>
-    <div class="shc" data-theme="neon-pink-playground">
-      <div class="ev">Atlantis Med—Trieste to Barcelona · Day 3 · Sea Day</div>
+    <div class="shc" data-theme="sporty-splash">
+      <div class="ev">Atlantis Med—Trieste to Barcelona · Day 1 · Trieste</div>
       <div class="big">BLACKOUT</div>
       <div class="who">Jess</div>
       <div class="mini5">
-        <div class="sq on">Lost passport</div><div class="sq on">Matching Speedos</div><div class="sq on">Poppers spill</div><div class="sq on">Eat carbs</div><div class="sq on">Cruise boyfriend</div>
-        <div class="sq on">Three-way kiss</div><div class="sq on">Late-night pizza</div><div class="sq on">Dance-floor k-hole</div><div class="sq on">Sunset selfie</div><div class="sq on">30-year age gap</div>
-        <div class="sq on">Suite orgy</div><div class="sq on">Lost bracelet</div><div class="sq freec">Complain about circuit music</div><div class="sq on">Use a condom</div><div class="sq on">Threesome</div>
-        <div class="sq on">Mirror-hall selfie</div><div class="sq on">Breakfast in sunglasses</div><div class="sq on">Become ship-famous</div><div class="sq on">Overpacked toiletries</div><div class="sq on">Selfie with HAYLA</div>
-        <div class="sq on">Cafeteria k-hole</div><div class="sq on">Get lost on the ship</div><div class="sq on">Matching tank tops</div><div class="sq on">Suspiciously perfect tan</div><div class="sq on">Nap through the main event</div>
+        <div class="sq on">Get your favorite dessert</div><div class="sq on">Find your muster station</div><div class="sq on">Get lost finding your cabin</div><div class="sq on">Ride an elevator the wrong way</div><div class="sq on">Locate the late-night pizza</div>
+        <div class="sq on">First soft-serve of the cruise</div><div class="sq on">Toast at the sailaway party</div><div class="sq on">Wave goodbye to land</div><div class="sq on">Hear the ship's horn</div><div class="sq on">Meet someone from another country</div>
+        <div class="sq on">Learn a crew member's name</div><div class="sq on">Befriend a bartender</div><div class="sq freec"><span class="fl">FREE</span><span class="fp">You made it aboard</span></div><div class="sq on">Compliment a stranger's outfit</div><div class="sq on">Exchange Instagrams with a new friend</div>
+        <div class="sq on">Spot matching Speedos</div><div class="sq on">Unpack a truly unhinged outfit</div><div class="sq on">Plan tomorrow's party look</div><div class="sq on">Test the bed (nap counts)</div><div class="sq on">Stateroom mirror selfie</div>
+        <div class="sq on">Balcony or porthole photo</div><div class="sq on">Order a frozen drink with zero shame</div><div class="sq on">Scope out the gym you'll never use</div><div class="sq on">Find the theater</div><div class="sq on">Overhear someone already complaining</div>
       </div>
-      <div class="stat">All 24 squares · 💖 Seriously Pink T-Dance night</div>
+      <div class="stat">All 24 squares · ⛵ Sail-Away Party night</div>
       <div class="foot">Gay Cruise Bingo 🚢</div>
     </div>
-    <p class="cap"><b>The full grid lit is the flex</b>Title swaps to BLACKOUT; the stat line says all 24. Celebration text <i>"BLACKOUT. I win the boat. 🚢"</i>; file <code>gay-cruise-bingo-blackout.png</code>. This Event derives <code>adultContent: true</code> from its pool, which is why the prompts read as they do—the posture follows the content, not the Edition.</p>
+    <p class="cap"><b>The full grid lit is the flex</b>Title swaps to BLACKOUT; the stat line says all 24. Celebration text <i>"BLACKOUT. I win the boat. 🚢"</i>; file <code>gay-cruise-bingo-blackout.png</code>. The example is dealt from the tame warm-up pool (Day 1's boarding-day prompts), so the frame can be shown anywhere. The Event still derives <code>adultContent: true</code> from its main pool, so a main-day card reads differently—the posture follows the content, not the Edition.</p>
   </div>
 
   <div class="unit" id="fx-share-blackout-vacay">
@@ -3640,7 +3650,7 @@
       <div class="mini5">
         <div class="sq on">Take a windblown group selfie</div><div class="sq on">Find the best boat name in the harbor</div><div class="sq on">Get a bird into the background of a photo</div><div class="sq on">Spot bird-themed art, a sign, or a souvenir</div><div class="sq on">Capture a colorful buoy or crab pot</div>
         <div class="sq on">Make a toast about friendship</div><div class="sq on">Photograph the fog rolling in, or refusing to leave</div><div class="sq on">Find the house's weirdest decorative object</div><div class="sq on">Get a group photo where nobody is ready</div><div class="sq on">Photograph something the exact color of the sea today</div>
-        <div class="sq on">Take a picture of a fire</div><div class="sq on">Find a hand-painted sign</div><div class="sq freec">The flock has landed</div><div class="sq on">Spot a gull, pelican, or heron doing something undignified</div><div class="sq on">Photograph someone's hair losing a fight with the wind</div>
+        <div class="sq on">Take a picture of a fire</div><div class="sq on">Find a hand-painted sign</div><div class="sq freec"><span class="fl">FREE</span><span class="fp">The flock has landed</span></div><div class="sq on">Spot a gull, pelican, or heron doing something undignified</div><div class="sq on">Photograph someone's hair losing a fight with the wind</div>
         <div class="sq on">Find something in the house older than everyone here</div><div class="sq on">Capture a sunset, or the sky pretending it's going to be one</div><div class="sq on">Win a game of something</div><div class="sq on">Catch someone asleep in a chair they meant to sit in briefly</div><div class="sq on">Photograph the group's shoes in a pile by the door</div>
         <div class="sq on">Find a flower growing somewhere it shouldn't</div><div class="sq on">Post a candid that makes the group laugh</div><div class="sq on">Suggest something for the group to do tomorrow</div><div class="sq on">Get everyone in one frame using a timer</div><div class="sq on">Take a photo of your favorite view from inside the house</div>
       </div>
@@ -3659,7 +3669,7 @@
       <div class="mini5">
         <div class="sq on">Someone cries during a toast</div><div class="sq on">Wrong table number</div><div class="sq on">Group photo redo</div><div class="sq on">Playlist hijacked</div><div class="sq on">Dance floor opens early</div>
         <div class="sq on">Speech runs long</div><div class="sq on">A phone rings mid-vows</div><div class="sq on">Two people in the same suit</div><div class="sq on">Cake cut twice for the camera</div><div class="sq on">Lost the seating chart</div>
-        <div class="sq on">Kid steals the show</div><div class="sq on">Uncle finds the mic</div><div class="sq freec">Say hi to a stranger</div><div class="sq on">Bar-line photo</div><div class="sq on">Grandparents on the floor</div>
+        <div class="sq on">Kid steals the show</div><div class="sq on">Uncle finds the mic</div><div class="sq freec"><span class="fl">FREE</span><span class="fp">Say hi to a stranger</span></div><div class="sq on">Bar-line photo</div><div class="sq on">Grandparents on the floor</div>
         <div class="sq on">Someone changes shoes</div><div class="sq on">Bouquet lands badly</div><div class="sq on">Group selfie with the couple</div><div class="sq on">Sparkler exit rehearsal</div><div class="sq on">First to the buffet</div>
         <div class="sq on">Cufflink emergency</div><div class="sq on">Table of strangers becomes friends</div><div class="sq on">Someone loses a jacket</div><div class="sq on">Late-night second course</div><div class="sq on">Last song singalong</div>
       </div>

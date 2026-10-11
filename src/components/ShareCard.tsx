@@ -50,6 +50,22 @@ export function shareCardAppName(): string {
   return editionBrand().appName;
 }
 
+/**
+ * The free centre's caption under the same bound, cut on a word boundary with
+ * an ellipsis. Free Space text has no length limit, so it is the one share text
+ * that routinely meets the bound, and a raw slice prints half a word.
+ */
+function boundedFreeCaption(value: unknown): string {
+  const full = typeof value === 'string' ? value : '';
+  const bounded = boundedShareText(full);
+  if (bounded.length === full.length) return bounded;
+  const lastSpace = bounded.lastIndexOf(' ', bounded.length - 1);
+  // No space to cut on: drop the last grapheme cluster, which the UTF-16
+  // slice above may have split.
+  const head = lastSpace > 0 ? bounded.slice(0, lastSpace) : graphemes(bounded).slice(0, -1).join('');
+  return `${head.trimEnd()}…`;
+}
+
 /** Bound before emoji segmentation and DOM construction, including legacy names. */
 function boundedShareText(value: unknown, max = 256): string {
   if (typeof value !== 'string') return '';
@@ -119,12 +135,59 @@ function fitCellText(card: HTMLElement): void {
   for (const cell of card.querySelectorAll<HTMLElement>('.share-card-cell')) {
     if (!cell.textContent) continue;
     let size = parseFloat(getComputedStyle(cell).fontSize);
-    while (cell.scrollHeight > cell.clientHeight && size > 4) {
+    while (overflows(cell) && size > 4) {
       // Clamped, not bare subtraction (CodeRabbit, PR #445): a fractional
       // computed size (4.25px) must step onto the 4px floor, never past it.
       size = Math.max(4, size - 0.5);
       cell.style.fontSize = `${size}px`;
     }
+    if (overflows(cell)) fitFreeCaption(cell);
+  }
+}
+
+function graphemes(text: string): string[] {
+  if (typeof Intl !== 'undefined' && 'Segmenter' in Intl) {
+    return Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text), (s) => s.segment);
+  }
+  return Array.from(text); // code points, where Segmenter is unavailable
+}
+
+function overflows(cell: HTMLElement): boolean {
+  return cell.scrollHeight > cell.clientHeight;
+}
+
+/**
+ * The free centre's truncation contract, for an organizer caption (Free Space
+ * text has no length bound) that the 4px floor still cannot hold under the
+ * display FREE. First the label goes, so the caption has the whole tile; the
+ * accent ring still marks the square as free. Then, only if even that
+ * overflows, whole words drop from the end behind an ellipsis, and a single
+ * token too long for the tile (a URL, an unbroken string) loses characters
+ * from its end the same way. Each step rebuilds through
+ * appendEmojiIsolatedText so emoji keep their raster boxes (#603). The image
+ * never carries a silently clipped line. Prompts are bounded by
+ * firestore.rules (80 chars) and never reach this path.
+ */
+function fitFreeCaption(cell: HTMLElement): void {
+  const caption = cell.querySelector<HTMLElement>('.share-card-free-caption');
+  if (!caption) return;
+  cell.querySelector('.share-card-free-label')?.remove();
+  if (!overflows(cell)) return;
+  const words = (caption.dataset.text ?? caption.textContent ?? '').replace(/…$/, '').split(/\s+/).filter(Boolean);
+  const show = (text: string) => {
+    caption.replaceChildren();
+    appendEmojiIsolatedText(caption, `${text}…`);
+  };
+  while (words.length > 1 && overflows(cell)) {
+    words.pop();
+    show(words.join(' '));
+  }
+  // Grapheme clusters, so a cut never splits a surrogate pair, a ZWJ emoji
+  // sequence or a flag into broken glyphs in the image.
+  const chars = graphemes(words.join(' '));
+  while (chars.length > 1 && overflows(cell)) {
+    chars.pop();
+    show(chars.join('').trimEnd());
   }
 }
 
@@ -233,7 +296,19 @@ function buildBingoCardNode(data: BingoShareCardData): HTMLDivElement {
       (lineCells.has(c.index) ? ' line' : '') +
       (c.status === 'pending' ? ' pending' : '') +
       fit;
-    grid.append(el('div', cls, showText ? c.text : undefined));
+    // The free centre mirrors the on-page free square (FreeSquareText): a
+    // display FREE over the Day's caption. The caption sizes in em, so
+    // fitCellText's shrink of the cell reaches it while the label keeps its
+    // fixed display size.
+    const cellNode = el('div', cls, showText && !c.free ? c.text : undefined);
+    if (c.free) {
+      const captionText = boundedFreeCaption(c.text);
+      const caption = el('span', 'share-card-free-caption', captionText);
+      // The bounded text, for fitFreeCaption's word-level truncation.
+      caption.dataset.text = captionText;
+      cellNode.append(el('span', 'share-card-free-label', 'FREE'), caption);
+    }
+    grid.append(cellNode);
   }
   card.append(grid);
   if (data.statLine) card.append(el('div', 'share-card-stat', data.statLine));
