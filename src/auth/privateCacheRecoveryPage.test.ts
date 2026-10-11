@@ -268,6 +268,11 @@ describe('recovery outcomes are left for PostHog (#1889)', () => {
     expect(outcomes()).toEqual([{ outcome: 'failed', path: 'verified', stage, reason: 'unknown' }]);
     expect(localStorage.getItem(privateCacheRecoveryTelemetryKey(project))).not.toContain('alice');
   });
+  it.each(['server', 'drain', 'terminate', 'clear'] as const)('attributes an account change during %s to auth', async mock => {
+    H[mock].mockImplementationOnce(async () => { H.user = { uid: 'bob' }; });
+    await failAttended();
+    expect(outcomes()).toEqual([{ outcome: 'failed', path: 'verified', stage: 'auth', reason: 'recovery/session-changed' }]);
+  });
   it('reports a signed-out attempt and a held cache by code', async () => {
     H.user = null;
     await failAttended();

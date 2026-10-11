@@ -104,9 +104,15 @@ export function renderPrivateCacheRecovery(): void {
   // The stage running when an attempt fails is reported with its error code.
   let stage: RecoveryStage = 'auth';
   const at = <T>(next: RecoveryStage, operation: () => T): T => { stage = next; return operation(); };
-  const report = (path: RecoveryPath, error?: unknown) => recordRecoveryOutcome(firebaseConfig.projectId, error === undefined
-    ? { outcome: 'completed', path }
-    : { outcome: 'failed', path, stage, reason: recoveryFailureCode(error) });
+  const report = (path: RecoveryPath, error?: unknown) => {
+    if (error === undefined) return recordRecoveryOutcome(firebaseConfig.projectId, { outcome: 'completed', path });
+    const reason = recoveryFailureCode(error);
+    // The session check runs between stages; a change there is an auth
+    // failure, not a failure of the operation that had just finished.
+    recordRecoveryOutcome(firebaseConfig.projectId, {
+      outcome: 'failed', path, stage: reason === 'recovery/session-changed' ? 'auth' : stage, reason,
+    });
+  };
   // initializeFirestore may run once per app; the unverified path reuses the
   // instance a failed attended attempt opened (terminate, then clear).
   let legacyDb: Firestore | undefined;
