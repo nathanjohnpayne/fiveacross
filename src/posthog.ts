@@ -666,9 +666,10 @@ export type CaptureOptions = {
   /** This event is persisted by a separate durable outbox. Do not also put it
    * in PostHog's pre-init queue, which would create two retry authorities. */
   durableOutbox?: boolean;
-  /** A stable event id lets an outbox replay deduplicate in PostHog instead
-   * of counting twice. No historical timestamp option: the SDK feeds it to the
-   * live session manager, which would rotate the session backwards (#1891). */
+  /** A stable event id lets PostHog deduplicate an outbox replay, eventually
+   * and best effort rather than exactly once. No historical timestamp option:
+   * the SDK feeds it to the live session manager, which would rotate the
+   * session backwards (#1891). */
   uuid?: string;
   /** Acknowledge only an event the SDK actually accepted. A local refusal
    * (client rate limit, `before_send` rejection) leaves it in the caller's

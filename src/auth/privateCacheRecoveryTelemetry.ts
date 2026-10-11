@@ -9,7 +9,8 @@ export type RecoveryPath = 'verified' | 'unverified';
 export type RecoveryStage = 'auth' | 'open' | 'server' | 'drain' | 'terminate' | 'clear' | 'record';
 export interface RecoveryOutcome {
   /** Persisted at creation and sent as the PostHog event uuid, so a record
-   * re-sent after an unacknowledged outbox update deduplicates. Its time
+   * re-sent after an unacknowledged outbox update can be deduplicated; PostHog
+   * merges equal uuids eventually and best effort, not exactly once. Its time
    * travels as `observed_at`, never as the event timestamp: a historical
    * timestamp would drive the live session manager backwards (#1891). */
   id: string;
