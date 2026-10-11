@@ -68,6 +68,7 @@ const TEXT_PAIRS: [fg: string, bg: string][] = [
   ['accent', 'panel'], // .badge ("1st BINGO")
 ];
 const TEXT_MIN = 4.5; // WCAG 1.4.3 Contrast (Minimum), normal text
+const UI_MIN = 3; // WCAG 1.4.11 Non-text Contrast, UI component boundaries
 
 describe('themes.css — WCAG AA contrast (specs/w1-themes.md)', () => {
   it('defines a [data-theme] block for every ThemeId', () => {
@@ -95,6 +96,15 @@ describe('themes.css — WCAG AA contrast (specs/w1-themes.md)', () => {
       const surface = mixSrgb(accent, hexToRgb(vars.cell), wash);
       expect(contrastRatio(accent, surface)).toBeGreaterThanOrEqual(TEXT_MIN);
       expect(contrastRatio(hexToRgb(vars.ink), surface)).toBeGreaterThanOrEqual(TEXT_MIN);
+    });
+
+    // Its 2px --accent ring is the boundary that sets the free square apart
+    // (WCAG 1.4.11, 3:1 against adjacent colors): the --cell inset ring inside
+    // it and the page --bg outside it.
+    it(`${t.id}: free-square --accent border meets ${UI_MIN}:1 against --cell and --bg`, () => {
+      const accent = hexToRgb(vars.accent);
+      expect(contrastRatio(accent, hexToRgb(vars.cell))).toBeGreaterThanOrEqual(UI_MIN);
+      expect(contrastRatio(accent, hexToRgb(vars.bg))).toBeGreaterThanOrEqual(UI_MIN);
     });
   }
 });

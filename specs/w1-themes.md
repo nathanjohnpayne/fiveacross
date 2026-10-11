@@ -31,7 +31,7 @@ Every `[data-theme]` block meets WCAG 2.1 AA across the foreground/background to
 - `--ink`/`--dim` against the surfaces they render on: `--ink` on `--bg`, `--panel`, `--cell`; `--dim` on `--bg`, `--panel`.
 - `--primary` on `--panel` (`.row .rank`, leaderboard rank numbers).
 - `--accent` on `--cell` (accent text on a tile) and on `--panel` (`.badge`).
-- The free square's `FREE` (`--accent`) and caption (`--ink`) on the surface they actually render on: `color-mix(in srgb, var(--accent) var(--free-wash, 18%), var(--cell))`. A token-only `--accent`/`--cell` check misses this, because the label sits on its own tint. A theme whose accent would fall under 4.5:1 sets `--free-wash` lower (fog-froth-farewells: 12%, 4.62:1).
+- The free square's `FREE` (`--accent`) and caption (`--ink`) on the surface they actually render on: `color-mix(in srgb, var(--accent) var(--free-wash, 18%), var(--cell))`. A token-only `--accent`/`--cell` check misses this, because the label sits on its own tint. A theme whose accent would fall under 4.5:1 sets `--free-wash` lower (fog-froth-farewells: 12%, 4.62:1). Its 2px `--accent` ring is also held to 3:1 (1.4.11) against both adjacent surfaces, the `--cell` inset ring and the page `--bg` (worst 4.97:1).
 
 Border- and glow-only call sites that reuse these same custom-property values (`.btn.primary` / `.chip.active` / `.seg-btn.on` borders, `.btn` border, `.cell.free` / `.row.leader` borders) are covered for free since they share the checked fg/bg pair—no separate weaker check is needed.
 
