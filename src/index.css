@@ -554,6 +554,11 @@ a {
   font-size: calc(clamp(7px, 1.9vw, 10px) * var(--square-scale, 1));
   font-weight: 700;
   line-height: 1.05;
+  /* Whole words, like every fit-guarded prompt since #1345: `.cell`'s
+     `hyphens: auto` split "Main charac-ter on the coast" mid-word. A fixed
+     day-scoped caption this short fits whole; `word-break: break-word` stays
+     the last resort for a word wider than the tile. */
+  hyphens: manual;
 }
 .cell.marked::after {
   content: '✓';

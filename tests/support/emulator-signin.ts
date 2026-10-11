@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { expect, type Page, type Route } from '@playwright/test';
-import { RECOVERY_VERSION, privateCacheRecoveryKey } from '../../src/auth/privateCacheRecoveryMarker';
+import { privateCacheRecoveryKey } from '../../src/auth/privateCacheRecoveryMarker';
 
 /**
  * Present the page as a device that has already finished private-cache
@@ -28,10 +28,13 @@ import { RECOVERY_VERSION, privateCacheRecoveryKey } from '../../src/auth/privat
  * and private-session reads such as Proof media stay withheld. A layer that
  * photographs steady-state screens (the marketing captures, the mockup-parity
  * baselines) wants the recovered device; a spec exercising recovery itself must
- * not call this. Key and value are the app's own, imported so a marker version
- * bump cannot drift past the harness.
+ * not call this. Key and value are the app's own: the key ends in the marker's
+ * version, which is also the stored value, so a version bump cannot drift past
+ * the harness.
  */
 export async function markDeviceRecovered(page: Page, projectId: string): Promise<void> {
+  const key = privateCacheRecoveryKey(projectId);
+  const version = key.slice(key.lastIndexOf(':') + 1);
   await page.addInitScript(
     ([key, value]) => {
       try {
@@ -40,7 +43,7 @@ export async function markDeviceRecovered(page: Page, projectId: string): Promis
         // An unwritable store leaves the notice up, which the screenshot shows.
       }
     },
-    [privateCacheRecoveryKey(projectId), RECOVERY_VERSION] as const,
+    [key, version] as const,
   );
 }
 
