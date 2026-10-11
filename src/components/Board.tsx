@@ -74,7 +74,7 @@ import { FREE_TEXT } from '../data/seed';
 // The non-free Square prompt text with the S/M/L auto-fit guard (#215) — moved
 // to its own module (#434) so the read-only CachedCardFallback can reuse the
 // SAME fitting guard instead of clipping long prompts. Firebase-free deps only.
-import SquareText from './SquareText';
+import SquareText, { FreeSquareText } from './SquareText';
 
 /**
  * The per-Prompt Tally count badge on a marked Square (ADR 0002). Subscribes to
@@ -652,12 +652,7 @@ function LockedDayPreview({
             className={'cell locked-cell' + (index === 12 ? ' free marked' : '')}
           >
             {index === 12 && (
-              <>
-                <span className="free-label" aria-hidden="true">
-                  FREE
-                </span>
-                <span className="free-prompt">{freeText}</span>
-              </>
+              <FreeSquareText text={freeText} />
             )}
           </div>
         ))}
@@ -2844,12 +2839,7 @@ export default function Board() {
               }}
             >
               {c.free ? (
-                <>
-                  <span className="free-label" aria-hidden="true">
-                    FREE
-                  </span>
-                  <span className="free-prompt">{c.text}</span>
-                </>
+                <FreeSquareText text={c.text} />
               ) : (
                 <SquareText text={c.text} />
               )}

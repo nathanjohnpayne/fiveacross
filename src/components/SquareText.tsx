@@ -119,7 +119,7 @@ function clearWholeWordOverrides(el: HTMLElement) {
  * long prompt at the Large text setting — Firebase-free deps only, so it stays
  * out of the fallback's (and this module's) import graph.
  */
-export default function SquareText({ text }: { text: string }) {
+export default function SquareText({ text, className }: { text: string; className?: string }) {
   // Not read directly below — its only job is to make this effect re-run
   // when the Player's S/M/L pick changes, since the ceiling itself is read
   // from the DOM (getComputedStyle), not from this hook's return value.
@@ -214,8 +214,35 @@ export default function SquareText({ text }: { text: string }) {
   }, [text, textSize]);
 
   return (
-    <span ref={ref} className="cell-text" style={fontSize != null ? { fontSize: `${fontSize}px` } : undefined}>
+    <span
+      ref={ref}
+      className={className ? `cell-text ${className}` : 'cell-text'}
+      style={fontSize != null ? { fontSize: `${fontSize}px` } : undefined}
+    >
       {text}
     </span>
+  );
+}
+
+/**
+ * The free centre's content: the display FREE label over the Day's free-space
+ * caption. The caption goes through the same fit guard as every prompt, hosted
+ * by `.free-prompt-box`, a flex item that shrinks to the height the label
+ * leaves (index.css), so an organizer's long free-space text, or a short one
+ * at the Large text size, shrinks to fit instead of clipping under `.cell`'s
+ * `overflow: hidden`. `.free-prompt`'s font-size is the ceiling it shrinks
+ * from. Shared by the Board, the locked-Day preview, the cached-card fallback
+ * and the setup preview so the four cannot drift.
+ */
+export function FreeSquareText({ text }: { text: string }) {
+  return (
+    <>
+      <span className="free-label" aria-hidden="true">
+        FREE
+      </span>
+      <span className="free-prompt-box">
+        <SquareText text={text} className="free-prompt" />
+      </span>
+    </>
   );
 }

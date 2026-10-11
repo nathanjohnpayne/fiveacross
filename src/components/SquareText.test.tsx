@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, render } from '@testing-library/react';
-import SquareText from './SquareText';
+import SquareText, { FreeSquareText } from './SquareText';
 
 // #1345: the Square fit guard verifies the estimate against the real rendered
 // glyphs and keeps shrinking while a word is wider than the box. jsdom has no
@@ -248,5 +248,52 @@ describe('SquareText clears a marked Square\'s corner chips', () => {
       cell.appendChild(chip);
     });
     expect(parseFloat(target.style.fontSize)).toBe(7.5);
+  });
+});
+
+// The free centre (FreeSquareText): its caption is fitted by the same guard,
+// hosted by `.free-prompt-box`, which in the real layout shrinks to the height
+// the display FREE label leaves. Stubbed here as a 20px-tall host.
+describe('FreeSquareText fits its caption under the FREE label', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function renderFree(boxHeight: number, lines: number) {
+    const realGetComputedStyle = window.getComputedStyle;
+    vi.spyOn(window, 'getComputedStyle').mockImplementation((el: Element, pseudo?: string | null) => {
+      if (el instanceof HTMLElement && el.classList.contains('cell-text')) {
+        return { fontSize: `${CEILING_PX}px` } as CSSStyleDeclaration;
+      }
+      return realGetComputedStyle.call(window, el, pseudo ?? undefined);
+    });
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains('free-prompt-box')) return rect(USABLE, boxHeight);
+      if (!this.classList.contains('cell-text')) return rect(CELL, CELL);
+      const size = parseFloat(this.style.fontSize);
+      return rect(Math.min(4 * size * REAL_CHAR_EM, USABLE), lines * size * 1.05);
+    });
+    const { container } = render(
+      <div className="cell free marked">
+        <FreeSquareText text="Main character on the coast" />
+      </div>,
+    );
+    return container;
+  }
+
+  it('renders the FREE label and a fitted caption carrying .free-prompt', () => {
+    const container = renderFree(70, 2);
+    expect(container.querySelector('.free-label')).toHaveTextContent('FREE');
+    const caption = container.querySelector('.free-prompt-box > .cell-text.free-prompt') as HTMLElement;
+    expect(caption).toHaveTextContent('Main character on the coast');
+    // Room to spare: the caption keeps its ceiling.
+    expect(parseFloat(caption.style.fontSize)).toBe(CEILING_PX);
+  });
+
+  it('shrinks the caption to the height the label leaves instead of clipping it', () => {
+    // Three lines in a 20px box: the largest 0.5px step is 6px (18.9px).
+    const caption = renderFree(20, 3).querySelector('.free-prompt') as HTMLElement;
+    expect(parseFloat(caption.style.fontSize)).toBe(6);
+    expect(3 * 6 * 1.05).toBeLessThanOrEqual(20);
   });
 });

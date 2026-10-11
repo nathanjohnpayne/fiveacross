@@ -1,6 +1,6 @@
 import type { CardSnapshot } from '../data/cardCache';
 import { countMarked } from '../game/logic';
-import SquareText from './SquareText';
+import SquareText, { FreeSquareText } from './SquareText';
 
 /**
  * The durable-cache fallback for the Card tab (#434). When the client-driven
@@ -79,12 +79,7 @@ export default function CachedCardFallback({
             aria-label={c.free ? c.text : undefined}
           >
             {c.free ? (
-              <>
-                <span className="free-label" aria-hidden="true">
-                  FREE
-                </span>
-                <span className="free-prompt">{c.text}</span>
-              </>
+              <FreeSquareText text={c.text} />
             ) : (
               // Reuse Board's auto-fit guard so a long prompt SHRINKS to fit
               // rather than clipping under `.cell { overflow: hidden }` at the

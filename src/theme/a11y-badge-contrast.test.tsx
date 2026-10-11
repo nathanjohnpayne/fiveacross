@@ -35,6 +35,8 @@ const indexCss = readFileSync(join(here, '..', 'index.css'), 'utf-8');
 // specs/w1-themes.md applies to the equally-small leaderboard rank numerals —
 // rather than the looser 3:1 non-text/UI-component floor (1.4.11).
 const TEXT_MIN = 4.5;
+// WCAG 2.1 1.4.11 Non-text Contrast: the floor for the proof chip's ＋ glyph.
+const UI_MIN = 3;
 
 /** Body (declaration list) of the first `selector { ... }` rule in a stylesheet. */
 function ruleBody(css: string, selector: string): string {
@@ -117,6 +119,35 @@ describe('badge overlays — WCAG AA contrast (specs/a11y-badge-contrast.md)', (
             contrastRatio(fg, bg),
             `${t.id}: over --${end}`,
           ).toBeGreaterThanOrEqual(TEXT_MIN);
+        }
+      });
+    }
+  });
+
+  // ----- .proofbtn: a white ＋ on rgba(0,0,0,A) over the same marked gradient.
+  // An action glyph, not information-bearing text, so the bar is 1.4.11's 3:1
+  // UI-component floor (specs/a11y-badge-contrast.md § `.proofbtn`). It sits
+  // bottom-left, nearer the 145° gradient's midpoint than either end; the same
+  // convexity argument as the Tally means both ends bound every point between.
+  // 0.35 measured only over --primary passed, and fell to 2.54:1 over
+  // get-sporty's near-white --secondary.
+  describe('.proofbtn — #fff ＋ on rgba(0,0,0,A) over the marked gradient', () => {
+    const proofBody = ruleBody(indexCss, '.proofbtn');
+    const fg = hexToRgb(textColor(proofBody));
+    const rgba = proofBody.match(/background:\s*rgba\(\s*0\s*,\s*0\s*,\s*0\s*,\s*([\d.]+)\s*\)/);
+
+    it('fills its glyph with #fff over a pure-black rgba scrim (parse premise)', () => {
+      expect(textColor(proofBody)).toBe('#fff');
+      expect(rgba, '.proofbtn background is not the expected rgba(0,0,0,A) form').not.toBeNull();
+    });
+
+    const alpha = Number(rgba?.[1]);
+    for (const t of THEMES) {
+      it(`${t.id}: the ＋ meets ${UI_MIN}:1 over both gradient ends`, () => {
+        const black: Rgb = [0, 0, 0];
+        for (const end of ['primary', 'secondary'] as const) {
+          const bg = alphaCompositeOver(black, alpha, hexToRgb(themeBlocks[t.id][end]));
+          expect(contrastRatio(fg, bg), `${t.id}: over --${end}`).toBeGreaterThanOrEqual(UI_MIN);
         }
       });
     }

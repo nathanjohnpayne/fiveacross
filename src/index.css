@@ -458,11 +458,16 @@ a {
   -webkit-mask-composite: source-in;
   mask-composite: intersect;
 }
+/* The Tally and Doubt chips are content-width pills, so their holes are
+   ellipses sized to the widest realistic pill rather than circles: a
+   three-digit Tally measures 28.4px (right 4px to 32.4px), a two-digit Doubt
+   with its 👀 39.3px (left 4px to 43.3px). Each is clear (transparent) to 80%
+   of its radii and feathered to the edge, 18px tall like the pills. */
 .cell.marked:not(.free):has(.tally-badge) .cell-claim {
-  --m-tally: radial-gradient(circle at calc(100% - 13px) calc(100% - 11px), transparent 9px, #000 12.5px);
+  --m-tally: radial-gradient(ellipse 18px 12.5px at calc(100% - 18px) calc(100% - 11px), transparent 80%, #000 100%);
 }
 .cell.marked:not(.free):has(.doubt-badge) .cell-claim {
-  --m-doubt: radial-gradient(circle at 13px 11px, transparent 9px, #000 12.5px);
+  --m-doubt: radial-gradient(ellipse 24.5px 12.5px at 24px 11px, transparent 82%, #000 100%);
 }
 .cell.free.marked > .cell-claim {
   flex-direction: column;
@@ -548,22 +553,33 @@ a {
   white-space: nowrap;
   text-shadow: 0 0 10px var(--shadow);
 }
+.free-prompt-box {
+  /* FreeSquareText's caption host. Full width, so the whole-word probe in
+     SquareText compares against the tile's width; it may shrink below its
+     content height (min-height: 0) to the space the FREE label leaves, which
+     is the height the guard then fits the caption into. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
 .free-prompt {
   max-width: 100%;
-  /* S/M/L pick (specs/d15-text-size.md, PR #237 Codex finding): the free
-     centre Square's prompt is the one Square that never goes through
-     `SquareText`'s auto-fit guard (its text is a fixed, day-scoped string,
-     not measured against the cell box), but it still needs to honor the
-     Player's text-size pick like every other Square's prompt does — same
-     `--square-scale` multiplier `.cell`'s own font-size ceiling reads
-     (#325). Its short fixed strings fit the cell at the 1.4 L ceiling. */
+  /* The ceiling SquareText's fit guard shrinks the free-space caption from
+     (FreeSquareText): the Player's S/M/L pick through the same
+     `--square-scale` multiplier `.cell`'s own ceiling reads (#325,
+     specs/d15-text-size.md). A long organizer-supplied caption, or a short one
+     at the 1.4 Large ceiling under the display FREE, shrinks from here rather
+     than clipping. */
   font-size: calc(clamp(7px, 1.9vw, 10px) * var(--square-scale, 1));
   font-weight: 700;
   line-height: 1.05;
   /* Whole words, like every fit-guarded prompt since #1345: `.cell`'s
-     `hyphens: auto` split "Main charac-ter on the coast" mid-word. A fixed
-     day-scoped caption this short fits whole; `word-break: break-word` stays
-     the last resort for a word wider than the tile. */
+     `hyphens: auto` split "Main charac-ter on the coast" mid-word. The guard
+     already sets this inline once it measures; this covers the first paint. */
   hyphens: manual;
 }
 .cell.marked::after {
