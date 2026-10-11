@@ -4,7 +4,7 @@ import { fireEvent, screen, waitFor } from '@testing-library/dom';
 const H = vi.hoisted(() => ({
   user: { uid: 'alice' } as { uid: string } | null,
   ready: vi.fn(), initialize: vi.fn(), server: vi.fn(), drain: vi.fn(),
-  terminate: vi.fn(), clear: vi.fn(), replace: vi.fn(), order: [] as string[],
+  terminate: vi.fn(), clear: vi.fn(), replace: vi.fn(), reload: vi.fn(), order: [] as string[],
   db: { name: 'legacy-persistent' },
 }));
 vi.mock('../firebaseCore', () => ({
@@ -31,6 +31,20 @@ function confirmBoth() {
   return screen.getByRole('button', { name: 'Clear recovered cache' });
 }
 function failure() { return screen.getByRole('status'); }
+function attendedBoxes() { return screen.getAllByRole('checkbox').slice(0, 2) as HTMLInputElement[]; }
+function acceptUnverified() {
+  const boxes = screen.getAllByRole('checkbox').slice(2);
+  expect(boxes).toHaveLength(2);
+  const proceed = screen.getByRole('button', { name: 'Clear cache without verification' });
+  expect(proceed).toBeDisabled();
+  fireEvent.click(boxes[0]); expect(proceed).toBeDisabled();
+  fireEvent.click(boxes[1]); expect(proceed).not.toBeDisabled();
+  return proceed;
+}
+async function failAttended() {
+  renderPrivateCacheRecovery(); confirmBoth().click();
+  await waitFor(() => expect(failure()).toHaveTextContent('Recovery did not complete'));
+}
 beforeEach(() => {
   vi.clearAllMocks(); H.user = { uid: 'alice' }; H.order = [];
   document.body.innerHTML = '<div id="root"></div>';
@@ -38,7 +52,7 @@ beforeEach(() => {
   vi.stubGlobal('window', new Proxy(browserWindow, {
     get(target, key) {
       return key === 'location'
-        ? { href: 'https://event.example/more?keep=visible&device-cache-recovery=1#old-panel', replace: H.replace }
+        ? { href: 'https://event.example/more?keep=visible&device-cache-recovery=1#old-panel', replace: H.replace, reload: H.reload }
         : Reflect.get(target, key, target);
     },
   }));
@@ -73,7 +87,8 @@ describe('attended recovery document DOM (#1411)', () => {
     await waitFor(() => expect(failure()).toHaveTextContent('Recovery did not complete'));
     expect(privateCacheRecovered(project)).toBe(false);
     expect(screen.getByRole('button', { name: 'Clear recovered cache' })).toBeDisabled();
-    expect(screen.getAllByRole('checkbox').every(box => (box as HTMLInputElement).disabled)).toBe(true);
+    expect(attendedBoxes().every(box => box.disabled)).toBe(true);
+    expect(failure()).toHaveTextContent('SDK refusal');
     expect(H.replace).not.toHaveBeenCalled();
     screen.getByRole('button', { name: 'Return to the app' }).click();
     expect(H.replace).toHaveBeenCalledWith('https://event.example/more?keep=visible');
@@ -143,5 +158,78 @@ describe('attended recovery document DOM (#1411)', () => {
     expect(H.clear).toHaveBeenCalledOnce(); expect(H.replace).not.toHaveBeenCalled();
     expect(localStorage.getItem(privateCacheRecoveryKey(project))).toBeNull();
     expect(privateCacheRecovered(project)).toBe(false);
+  });
+});
+
+describe('failed recovery offers a warned way forward (#1886)', () => {
+  it('names the failure, keeps the attended path closed and retries in a fresh document', async () => {
+    H.clear.mockRejectedValueOnce(Object.assign(new Error('held'), { code: 'failed-precondition' }));
+    await failAttended();
+    expect(failure()).toHaveTextContent('Another tab or window still has the app open');
+    expect(screen.getByRole('button', { name: 'Clear recovered cache' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Clear cache without verification' })).toBeDisabled();
+    expect(screen.getByText(/will be permanently lost/, { selector: 'p' })).toBeInTheDocument();
+    screen.getByRole('button', { name: 'Try again' }).click();
+    expect(H.reload).toHaveBeenCalledOnce();
+    expect(privateCacheRecovered(project)).toBe(false);
+  });
+  it('does not offer the unverified path before an attended attempt fails', () => {
+    renderPrivateCacheRecovery();
+    expect(screen.queryByRole('button', { name: 'Clear cache without verification' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+  });
+  it.each(['signed-out', 'offline'] as const)('clears and unlocks %s after explicit loss acceptance', async condition => {
+    if (condition === 'signed-out') H.user = null;
+    else vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    await failAttended();
+    expect(failure()).toHaveTextContent('sign in online first');
+    expect(H.initialize).not.toHaveBeenCalled();
+    acceptUnverified().click();
+    await waitFor(() => expect(H.replace).toHaveBeenCalledWith('https://event.example/more?keep=visible'));
+    expect(H.order).toEqual(['initialize', 'terminate', 'clear']);
+    expect(H.server).not.toHaveBeenCalled(); expect(H.drain).not.toHaveBeenCalled();
+    expect(privateCacheRecovered(project)).toBe(true);
+  });
+  it('reuses the instance a failed attended attempt opened', async () => {
+    H.drain.mockRejectedValueOnce(new Error('drain refused'));
+    await failAttended();
+    acceptUnverified().click();
+    await waitFor(() => expect(H.replace).toHaveBeenCalledOnce());
+    expect(H.initialize).toHaveBeenCalledOnce();
+    expect(H.drain).toHaveBeenCalledOnce();
+    expect(H.order).toEqual(['initialize', 'server', 'terminate', 'clear']);
+    expect(H.terminate).toHaveBeenCalledWith(H.db); expect(H.clear).toHaveBeenCalledWith(H.db);
+    expect(privateCacheRecovered(project)).toBe(true);
+  });
+  it('keeps private views closed when the unverified clear fails', async () => {
+    H.user = null;
+    await failAttended();
+    H.clear.mockRejectedValueOnce(Object.assign(new Error('held'), { code: 'failed-precondition' }));
+    acceptUnverified().click();
+    await waitFor(() => expect(failure()).toHaveTextContent('Clearing did not complete: Another tab or window'));
+    expect(privateCacheRecovered(project)).toBe(false);
+    expect(H.replace).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Clear cache without verification' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Try again' })).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Return to the app' })).not.toBeDisabled();
+  });
+  it('quarantines the document until a timed-out unverified clear settles, then refuses completion', async () => {
+    H.user = null;
+    await failAttended();
+    vi.useFakeTimers();
+    let resolveClear = () => {};
+    H.clear.mockReturnValue(new Promise<void>(resolve => { resolveClear = resolve; }));
+    acceptUnverified().click();
+    await vi.advanceTimersByTimeAsync(10001);
+    expect(failure()).toHaveTextContent('Still waiting for cache clearing');
+    const back = screen.getByRole('button', { name: 'Return to the app' });
+    const retry = screen.getByRole('button', { name: 'Try again' });
+    expect(back).toBeDisabled(); expect(retry).toBeDisabled();
+    back.click(); retry.click();
+    expect(H.replace).not.toHaveBeenCalled(); expect(H.reload).not.toHaveBeenCalled();
+    resolveClear(); await vi.advanceTimersByTimeAsync(0);
+    expect(failure()).toHaveTextContent('Clearing did not complete');
+    expect(privateCacheRecovered(project)).toBe(false);
+    expect(back).not.toBeDisabled();
   });
 });

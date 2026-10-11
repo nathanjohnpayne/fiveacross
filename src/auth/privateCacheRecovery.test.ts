@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { completeLegacyCacheRecovery, type LegacyRecoveryOperations } from './privateCacheRecovery';
+import {
+  clearLegacyCacheWithoutVerification, completeLegacyCacheRecovery, type LegacyRecoveryOperations,
+} from './privateCacheRecovery';
 
 function fixture() {
   let uid: string | null = 'alice';
@@ -81,6 +83,66 @@ describe('attended legacy private-cache recovery (#1411)', () => {
     const f = fixture();
     vi.mocked(f.operations.recordCompletion).mockImplementationOnce(() => { throw new Error('storage denied'); });
     await expect(completeLegacyCacheRecovery(attended, f.operations)).rejects.toThrow('storage denied');
+    expect(f.operations.clear).toHaveBeenCalledOnce();
+  });
+});
+
+const unverified = { unsyncedMarksLossAccepted: true, otherTabsClosed: true };
+describe('unverified clear after failed recovery (#1886)', () => {
+  it.each([[false, true], [true, false], [false, false]])('never clears without loss acceptance and closed tabs (%s,%s)', async (loss, tabs) => {
+    const f = fixture();
+    await expect(clearLegacyCacheWithoutVerification({ unsyncedMarksLossAccepted: loss, otherTabsClosed: tabs }, f.operations)).rejects.toThrow();
+    expect(f.order).toEqual([]);
+  });
+  it.each(['signed-out', 'offline'])('clears and records while %s, without server proof or draining', async condition => {
+    const f = fixture();
+    if (condition === 'signed-out') f.setUid(null); else f.setOnline(false);
+    await clearLegacyCacheWithoutVerification(unverified, f.operations);
+    expect(f.order).toEqual(['terminate', 'clear', 'record']);
+    expect(f.operations.proveServerAccess).not.toHaveBeenCalled();
+    expect(f.operations.drainActiveUser).not.toHaveBeenCalled();
+  });
+  it.each(['terminate', 'clear'] as const)('never records when %s fails', async stage => {
+    const f = fixture();
+    vi.mocked(f.operations[stage]).mockRejectedValueOnce(new Error('failure'));
+    await expect(clearLegacyCacheWithoutVerification(unverified, f.operations)).rejects.toThrow('failure');
+    expect(f.operations.recordCompletion).not.toHaveBeenCalled();
+    if (stage === 'terminate') expect(f.operations.clear).not.toHaveBeenCalled();
+  });
+  it('bounds a stalled termination and never clears when it settles late', async () => {
+    const f = fixture();
+    let finish = () => {};
+    vi.mocked(f.operations.terminate).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    await expect(clearLegacyCacheWithoutVerification(unverified, f.operations, 5)).rejects.toThrow('timed out');
+    finish(); await Promise.resolve();
+    expect(f.operations.clear).not.toHaveBeenCalled();
+    expect(f.operations.recordCompletion).not.toHaveBeenCalled();
+  });
+  it.each(['resolve', 'reject'] as const)('does not release a timed-out clear until actual %s settlement, and never records', async outcome => {
+    vi.useFakeTimers();
+    try {
+      const f = fixture();
+      const pending = vi.fn();
+      let resolveClear = () => {};
+      let rejectClear = (_error: Error) => {};
+      vi.mocked(f.operations.clear).mockReturnValue(new Promise<void>((resolve, reject) => {
+        resolveClear = resolve; rejectClear = reject;
+      }));
+      let settled = false;
+      const recovery = clearLegacyCacheWithoutVerification(unverified, { ...f.operations, clearStillPending: pending }, 5)
+        .then(() => { settled = true; return 'completed'; }, () => { settled = true; return 'refused'; });
+      await vi.advanceTimersByTimeAsync(6);
+      expect(pending).toHaveBeenCalledOnce();
+      expect(settled).toBe(false);
+      if (outcome === 'resolve') resolveClear(); else rejectClear(new Error('late refusal'));
+      await expect(recovery).resolves.toBe('refused');
+      expect(f.operations.recordCompletion).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+  it('propagates a marker storage failure after clearing', async () => {
+    const f = fixture();
+    vi.mocked(f.operations.recordCompletion).mockImplementationOnce(() => { throw new Error('storage denied'); });
+    await expect(clearLegacyCacheWithoutVerification(unverified, f.operations)).rejects.toThrow('storage denied');
     expect(f.operations.clear).toHaveBeenCalledOnce();
   });
 });
