@@ -14,7 +14,7 @@ import {
   DEFAULT_EDITION,
 } from './themes';
 import { ThemeProvider, useTheme } from './ThemeContext';
-import { contrastRatio, hexToRgb, parseThemeBlocks } from './contrast';
+import { contrastRatio, hexToRgb, mixSrgb, parseThemeBlocks } from './contrast';
 
 // Covers specs/w1-themes.md: WCAG AA contrast across all 8 [data-theme]
 // blocks, ThemeContext's persistence + async-default invariants, the <5s PRD
@@ -59,12 +59,12 @@ const themeBlocks = parseThemeBlocks(readFileSync(cssPath, 'utf-8'));
 // is needed to cover them.
 const TEXT_PAIRS: [fg: string, bg: string][] = [
   ['ink', 'bg'], // body text; .signin h1; .celebrate .big (flat-bg floor — see theme-on-color-contrast.test.tsx for the composited-backdrop checks)
-  ['ink', 'panel'], // .row .name, .input text
+  ['ink', 'panel'], // .row .name, .input text (the free caption's wash is checked separately below)
   ['ink', 'cell'], // .cell text
   ['dim', 'bg'], // .muted, .count, .ack, inactive .tab
   ['dim', 'panel'], // .row .sub
   ['primary', 'panel'], // .row .rank (leaderboard rank numbers, 22px normal weight)
-  ['accent', 'cell'], // .cell.free text ("FREE")
+  ['accent', 'cell'], // accent text on a tile; the free square's FREE sits on its accent wash, checked separately below
   ['accent', 'panel'], // .badge ("1st BINGO")
 ];
 const TEXT_MIN = 4.5; // WCAG 1.4.3 Contrast (Minimum), normal text
@@ -84,6 +84,18 @@ describe('themes.css — WCAG AA contrast (specs/w1-themes.md)', () => {
         expect(contrastRatio(hexToRgb(vars[fg]), hexToRgb(vars[bg]))).toBeGreaterThanOrEqual(TEXT_MIN);
       });
     }
+
+    // The free square paints its FREE label (--accent) and caption (--ink) on
+    // `color-mix(in srgb, var(--accent) var(--free-wash, 18%), var(--cell))`,
+    // not on bare --cell. Check the color actually rendered: --accent against
+    // its own tint is the pair a token-only check misses.
+    it(`${t.id}: free-square FREE (--accent) and caption (--ink) meet ${TEXT_MIN}:1 on the rendered wash`, () => {
+      const wash = parseFloat(vars['free-wash'] ?? '18') / 100;
+      const accent = hexToRgb(vars.accent);
+      const surface = mixSrgb(accent, hexToRgb(vars.cell), wash);
+      expect(contrastRatio(accent, surface)).toBeGreaterThanOrEqual(TEXT_MIN);
+      expect(contrastRatio(hexToRgb(vars.ink), surface)).toBeGreaterThanOrEqual(TEXT_MIN);
+    });
   }
 });
 

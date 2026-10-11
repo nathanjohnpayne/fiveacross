@@ -182,7 +182,7 @@
      the shipped tokens keep each hue and drop only luminance. */
   [data-theme='fog-froth-farewells']{--bg:#efece4;--panel:#faf7ef;--ink:#33302b;--dim:#66625a;
     --primary:#8a5533;--secondary:#4f6b63;--accent:#a8462f;--cell:#faf7ef;
-    --border:rgba(138,85,51,.3);--shadow:rgba(51,48,43,.18);--on-gradient:#faf7ef}
+    --border:rgba(138,85,51,.3);--shadow:rgba(51,48,43,.18);--on-gradient:#faf7ef;--free-wash:12%}
 
   /* Vacay brand chrome: the "VACAY BINGO by Five Across" lockup (one-identity rule) */
   .vlock{text-align:center;line-height:1.15;padding:6px 0 2px}
@@ -309,7 +309,7 @@
      inset gap), a large accent display FREE, and the Day's free-space text as a
      small bold ink caption beneath. FREE never wraps, so a missing display face
      falls back to a narrower one instead of breaking the word onto two lines. */
-  .cell.free{flex-direction:column;gap:2px;background:color-mix(in srgb,var(--accent) 18%,var(--cell));
+  .cell.free{flex-direction:column;gap:2px;background:color-mix(in srgb,var(--accent) var(--free-wash,18%),var(--cell));
     border:2px solid var(--accent);box-shadow:inset 0 0 0 2px var(--cell),0 0 10px var(--shadow);
     color:var(--ink);font-weight:700}
   .cell.free .fl{font-family:'Bebas Neue','Arial Narrow','Avenir Next Condensed',sans-serif;font-size:18px;

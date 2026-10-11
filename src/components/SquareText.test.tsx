@@ -39,12 +39,12 @@ function stubLayout(realCharEm = REAL_CHAR_EM, renderedLines = 2) {
         borderTopWidth: '0px',
         borderBottomWidth: '0px',
         // index.css's corner-chip band, read live so a test can mark the
-        // Square or add a Doubt chip after mount: 9/15px on a marked Square,
-        // 15px on top once a Doubt chip is present.
+        // Square or add a chip after mount: 9px on top for the ✓ (15px once a
+        // Doubt chip joins it), 15px at the bottom only under a ＋ or Tally.
         getPropertyValue: (name: string) => {
           if (!el.classList.contains('marked')) return '';
           if (name === '--fit-block-inset-top') return el.querySelector('.doubt-badge') ? '15px' : '9px';
-          if (name === '--fit-block-inset-bottom') return '15px';
+          if (name === '--fit-block-inset-bottom') return el.querySelector('.proofbtn, .tally-badge') ? '15px' : '0px';
           return '';
         },
       } as unknown as CSSStyleDeclaration;
@@ -187,10 +187,13 @@ describe('SquareText clears a marked Square\'s corner chips', () => {
   const FOUR_LINES = 'aa bb cc dd';
   const BAND = USABLE - 9 - 15; // 38px
 
-  function renderCell(text: string, marked: boolean) {
+  // `proof`: the Board renders a ＋ on every marked Square; the cached-card
+  // fallback renders none.
+  function renderCell(text: string, marked: boolean, proof = marked) {
     const { container } = render(
       <div className={marked ? 'cell marked' : 'cell'}>
         <SquareText text={text} />
+        {proof && <button className="proofbtn" />}
       </div>,
     );
     return {
@@ -210,6 +213,12 @@ describe('SquareText clears a marked Square\'s corner chips', () => {
     expect(target.style.marginBottom).toBe('');
   });
 
+  it('reserves only the top edge when no ＋ or Tally chip renders, as on the cached-card fallback', () => {
+    // 62 - 9 = 53px: four lines fit at the 12px ceiling (50.4px).
+    stubLayout(REAL_CHAR_EM, 4);
+    expect(parseFloat(renderCell(FOUR_LINES, true, false).target.style.fontSize)).toBe(CEILING_PX);
+  });
+
   it('falls back to the full tile, centred on it, when even the floor cannot hold the prompt in the band', () => {
     // 7 lines at the 6px floor are 44.1px, over the 38px band; on the full
     // 62px tile the largest step that fits is 8px (58.8px).
@@ -226,6 +235,9 @@ describe('SquareText clears a marked Square\'s corner chips', () => {
 
     await act(async () => {
       cell.classList.add('marked');
+      const proof = document.createElement('button');
+      proof.className = 'proofbtn';
+      cell.appendChild(proof);
     });
     expect(parseFloat(target.style.fontSize)).toBe(9);
 

@@ -423,16 +423,20 @@ a {
    SquareText fits the prompt inside the band between these insets, and the
    margin below centres it there, so the text clears the chips. A prompt too
    long for the band even at the guard's floor falls back to the full tile
-   rather than clipping. The bottom edge always has the 18px ＋; the top edge
-   usually has only the small ✓ glyph, so it reserves less unless a Doubt pill
-   is present. Set on the tile and inherited, so it reaches the Board's claim
-   button and the cached-card fallback's bare text alike. */
+   rather than clipping. Each edge reserves only for chips that render: the ✓
+   glyph is always there (9px, 15px once a Doubt pill joins it); the bottom
+   reserves 15px only for a ＋ or Tally chip, which the cached-card fallback
+   never renders. Set on the tile and inherited, so it reaches the Board's
+   claim button and the fallback's bare text alike. */
 .cell.marked:not(.free) {
   --fit-block-inset-top: 9px;
-  --fit-block-inset-bottom: 15px;
+  --fit-block-inset-bottom: 0px;
 }
 .cell.marked:not(.free):has(.doubt-badge) {
   --fit-block-inset-top: 15px;
+}
+.cell.marked:not(.free):has(.proofbtn, .tally-badge) {
+  --fit-block-inset-bottom: 15px;
 }
 .cell.marked:not(.free) .cell-text {
   margin-bottom: calc(var(--fit-block-inset-bottom) - var(--fit-block-inset-top));
@@ -502,7 +506,9 @@ a {
   gap: 3px;
   border: 2px solid var(--accent);
   color: var(--ink);
-  background: color-mix(in srgb, var(--accent) 18%, var(--cell));
+  /* --free-wash is a per-theme override (themes.css) for a theme whose accent
+     label would fall under 4.5:1 on the default 18% wash. */
+  background: color-mix(in srgb, var(--accent) var(--free-wash, 18%), var(--cell));
   box-shadow:
     inset 0 0 0 2px var(--cell),
     0 0 16px var(--shadow);
