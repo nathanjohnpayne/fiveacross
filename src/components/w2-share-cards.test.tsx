@@ -126,7 +126,7 @@ function makeCells(marked: number[] = []): Cell[] {
   return Array.from({ length: 25 }, (_, index) => ({
     index,
     itemId: index === 12 ? null : `item-${index}`,
-    text: index === 12 ? 'FREE' : `Prompt ${index}`,
+    text: index === 12 ? 'You made it aboard' : `Prompt ${index}`,
     free: index === 12,
     marked: index === 12 || on.has(index),
     markedAt: index === 12 || on.has(index) ? 1 : null,
@@ -314,7 +314,9 @@ describe('ShareCard — renderBingoShareCard', () => {
     const cellNodes = Array.from(toBlobNode().querySelectorAll('.share-card-cell'));
     expect(cellNodes).toHaveLength(25);
     expect(cellNodes[0].textContent).toBe(longToken); // marked → its prompt, in full
-    expect(cellNodes[12].textContent).toBe('FREE'); // free centre → its own text
+    // Free centre → the on-page free square: a display FREE over its caption.
+    expect(cellNodes[12].querySelector('.share-card-free-label')?.textContent).toBe('FREE');
+    expect(cellNodes[12].querySelector('.share-card-free-caption')?.textContent).toBe('You made it aboard');
     for (const [i, cell] of cellNodes.entries()) {
       if (i === 0 || i === 12) continue;
       expect(cell.textContent).toBe(''); // unmarked → textless shape
@@ -400,6 +402,118 @@ describe('ShareCard — renderBingoShareCard', () => {
     expect(node.querySelectorAll('.share-card-cell.line')).toHaveLength(0);
     const freeCell = node.querySelectorAll('.share-card-cell')[12];
     expect(freeCell).toHaveClass('share-card-cell', 'marked', 'free');
+  });
+
+  // The free centre's truncation contract (Codex P2 on #1887): Free Space text
+  // has no length bound, so past the 4px floor the FREE label yields the tile,
+  // then whole words drop behind an ellipsis — never a silently clipped
+  // half-line. jsdom has no layout, so the free cell's scroll metrics are
+  // stubbed: a 48px tile whose content is 4px per started 10 characters of
+  // each caption word (a short word is one unit) plus 20px for the label while
+  // it is present.
+  describe('free centre truncation contract', () => {
+    let restore: () => void = () => {};
+    beforeEach(() => {
+      // jsdom defines these on Element.prototype, so HTMLElement.prototype has
+      // no own descriptor to put back: cleanup deletes the overrides instead,
+      // letting the inherited (zero-layout) getters show through again.
+      const proto = HTMLElement.prototype;
+      const isFree = (el: HTMLElement) => el.classList.contains('share-card-cell') && el.classList.contains('free');
+      Object.defineProperty(proto, 'scrollHeight', {
+        configurable: true,
+        get(this: HTMLElement) {
+          if (!isFree(this)) return 0;
+          const words = (this.querySelector('.share-card-free-caption')?.textContent ?? '').split(/\s+/).filter(Boolean);
+          const units = words.reduce((sum, w) => sum + Math.ceil(Array.from(w).length / 10), 0);
+          return units * 4 + (this.querySelector('.share-card-free-label') ? 20 : 0);
+        },
+      });
+      Object.defineProperty(proto, 'clientHeight', {
+        configurable: true,
+        get(this: HTMLElement) {
+          return isFree(this) ? 48 : 0;
+        },
+      });
+      restore = () => {
+        delete (proto as unknown as Record<string, unknown>).scrollHeight;
+        delete (proto as unknown as Record<string, unknown>).clientHeight;
+      };
+    });
+    afterEach(() => restore());
+
+    async function freeCellFor(caption: string): Promise<HTMLElement> {
+      const cells = makeCells([0]);
+      cells[12] = { ...cells[12], text: caption };
+      await renderBingoShareCard({ kind: 'bingo', playerName: 'A', eventName: 'E', cells });
+      return toBlobNode().querySelectorAll<HTMLElement>('.share-card-cell')[12];
+    }
+
+    it('keeps FREE and the whole caption when they fit', async () => {
+      const cell = await freeCellFor('You made it aboard'); // 4 words: 16 + 20 = 36 <= 48
+      expect(cell.querySelector('.share-card-free-label')?.textContent).toBe('FREE');
+      expect(cell.querySelector('.share-card-free-caption')?.textContent).toBe('You made it aboard');
+    });
+
+    it('drops the FREE label before touching the caption', async () => {
+      // 8 words: 32 + 20 = 52 > 48 with the label, 32 without it.
+      const caption = 'One two three four five six seven eight';
+      const cell = await freeCellFor(caption);
+      expect(cell.querySelector('.share-card-free-label')).toBeNull();
+      expect(cell.querySelector('.share-card-free-caption')?.textContent).toBe(caption);
+    });
+
+    it('restores the real metrics on cleanup', () => {
+      restore();
+      expect(Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollHeight')).toBeUndefined();
+      expect(Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight')).toBeUndefined();
+      expect(document.createElement('div').scrollHeight).toBe(0);
+    });
+
+    it('cuts a single over-long token by characters, behind an ellipsis', async () => {
+      // One 200-char token: 20 units (80px) > 48 without the label; the cut
+      // stops at 12 units, so at most 120 code points including the ellipsis.
+      const token = 'x'.repeat(200);
+      const cell = await freeCellFor(token);
+      const shown = cell.querySelector('.share-card-free-caption')?.textContent ?? '';
+      expect(cell.querySelector('.share-card-free-label')).toBeNull();
+      expect(shown.endsWith('…')).toBe(true);
+      expect(Array.from(shown).length).toBeLessThanOrEqual(120);
+      expect(Array.from(shown).length).toBeGreaterThan(110);
+    });
+
+    it('never splits a grapheme cluster when it cuts a single token', async () => {
+      // An unbroken run of ZWJ family emoji, each one grapheme cluster of five
+      // code points (eight UTF-16 units). It passes the 256-unit share-text
+      // bound and still overflows the stubbed tile, so both cuts run: neither
+      // may leave a partial family before the ellipsis.
+      const family = '👨‍👩‍👧';
+      const token = family.repeat(60);
+      const cell = await freeCellFor(token);
+      const shown = cell.querySelector('.share-card-free-caption')?.textContent ?? '';
+      expect(shown.endsWith('…')).toBe(true);
+      // What remains before the ellipsis is whole families only.
+      expect(shown.slice(0, -1).split(family).every((rest) => rest === '')).toBe(true);
+    });
+
+    it('cuts a caption past the 256-char share-text bound on a word boundary, with an ellipsis', async () => {
+      restore(); // real (zero) scroll metrics: only the bound applies here
+      const word = 'router';
+      const caption = Array.from({ length: 60 }, () => word).join(' '); // 419 chars
+      const cell = await freeCellFor(caption);
+      const shown = cell.querySelector('.share-card-free-caption')?.textContent ?? '';
+      expect(shown.endsWith('…')).toBe(true);
+      expect(shown.length).toBeLessThanOrEqual(256);
+      // Every word before the ellipsis is whole.
+      expect(shown.slice(0, -1).split(' ').every((w) => w === word)).toBe(true);
+    });
+
+    it('then drops whole words behind an ellipsis until the caption fits', async () => {
+      // 20 words: 80 > 48 even without the label; 12 words (48px) is the fit.
+      const words = Array.from({ length: 20 }, (_, i) => `w${i + 1}`);
+      const cell = await freeCellFor(words.join(' '));
+      expect(cell.querySelector('.share-card-free-label')).toBeNull();
+      expect(cell.querySelector('.share-card-free-caption')?.textContent).toBe(`${words.slice(0, 12).join(' ')}…`);
+    });
   });
 
   // issue #423 — the caller-composed context + stat lines render when given
@@ -519,6 +633,16 @@ describe('ShareCard CSS — fixed-frame safety', () => {
     const freeRule = indexCss.match(/\.share-card-cell\.free\s*\{([^}]*)\}/);
     expect(freeRule, '.share-card-cell.free rule not found in src/index.css').not.toBeNull();
     expect(freeRule![1]).toMatch(/color:\s*var\(--ink\)/);
+    // The on-page free square at share scale: the theme-scoped wash (the
+    // composite w1-themes.test.tsx checks FREE and the caption against) and
+    // the double ring, accent border with a --cell inset.
+    expect(freeRule![1]).toMatch(/background:\s*color-mix\(in srgb,\s*var\(--accent\) var\(--free-wash, 18%\),\s*var\(--cell\)\)/);
+    expect(freeRule![1]).toMatch(/border:\s*2px solid var\(--accent\)/);
+    expect(freeRule![1]).toMatch(/inset 0 0 0 2px var\(--cell\)/);
+    const labelRule = indexCss.match(/\.share-card-free-label\s*\{([^}]*)\}/);
+    expect(labelRule, '.share-card-free-label rule not found in src/index.css').not.toBeNull();
+    expect(labelRule![1]).toMatch(/color:\s*var\(--accent\)/);
+    expect(labelRule![1]).toMatch(/white-space:\s*nowrap/);
   });
 
   it('keeps the bingo frame budget: title size, grid metrics, and no dead name reserve', () => {
