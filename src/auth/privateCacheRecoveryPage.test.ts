@@ -28,9 +28,12 @@ const project = 'demo-recovery-page';
 function confirmBoth() {
   const boxes = screen.getAllByRole('checkbox');
   boxes.forEach(box => fireEvent.click(box));
-  return screen.getByRole('button', { name: 'Clear recovered cache' });
+  return finishButton();
 }
-function failure() { return screen.getByRole('status'); }
+function failure() { return screen.getByRole('alert'); }
+// A hidden button has no accessible name, so query it by its text.
+function finishButton() { return screen.getByText('Clear recovered cache', { selector: 'button' }); }
+function status() { return screen.getByRole('status'); }
 function attendedBoxes() { return screen.getAllByRole('checkbox').slice(0, 2) as HTMLInputElement[]; }
 function acceptUnverified() {
   const boxes = screen.getAllByRole('checkbox').slice(2);
@@ -67,9 +70,15 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('attended recovery document DOM (#1411)', () => {
+  it('installs its own stylesheet once and themes the document', () => {
+    renderPrivateCacheRecovery(); renderPrivateCacheRecovery();
+    expect(document.querySelectorAll('style#device-cache-recovery-style')).toHaveLength(1);
+    expect(document.body).toHaveClass('rec-page');
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Finish device recovery');
+  });
   it('opens no cache and clears nothing until both attended confirmations', async () => {
     renderPrivateCacheRecovery();
-    const finish = screen.getByRole('button', { name: 'Clear recovered cache' });
+    const finish = finishButton();
     expect(finish).toBeDisabled(); finish.click();
     expect(H.ready).not.toHaveBeenCalled(); expect(H.initialize).not.toHaveBeenCalled();
     fireEvent.click(screen.getAllByRole('checkbox')[0]);
@@ -86,7 +95,7 @@ describe('attended recovery document DOM (#1411)', () => {
     renderPrivateCacheRecovery(); confirmBoth().click();
     await waitFor(() => expect(failure()).toHaveTextContent('Recovery did not complete'));
     expect(privateCacheRecovered(project)).toBe(false);
-    expect(screen.getByRole('button', { name: 'Clear recovered cache' })).toBeDisabled();
+    expect(finishButton()).toBeDisabled();
     expect(attendedBoxes().every(box => box.disabled)).toBe(true);
     expect(failure()).toHaveTextContent('SDK refusal');
     expect(H.replace).not.toHaveBeenCalled();
@@ -95,7 +104,7 @@ describe('attended recovery document DOM (#1411)', () => {
     // A new document starts from unchecked consent, never an in-place clear retry.
     renderPrivateCacheRecovery();
     expect(screen.getAllByRole('checkbox').every(box => !(box as HTMLInputElement).checked)).toBe(true);
-    expect(screen.getByRole('button', { name: 'Clear recovered cache' })).toBeDisabled();
+    expect(finishButton()).toBeDisabled();
   });
   it('refuses an account switch after server proof without draining or recording', async () => {
     H.server.mockImplementation(async () => { H.user = { uid: 'bob' }; });
@@ -131,12 +140,12 @@ describe('attended recovery document DOM (#1411)', () => {
     renderPrivateCacheRecovery(); confirmBoth().click();
     await vi.advanceTimersByTimeAsync(10001);
     expect(H.clear).toHaveBeenCalledOnce();
-    expect(failure()).toHaveTextContent('Still waiting for cache clearing');
+    expect(status()).toHaveTextContent('Still waiting for cache clearing');
     const back = screen.getByRole('button', { name: 'Return to the app' });
     expect(back).toBeDisabled(); back.click();
     expect(H.replace).not.toHaveBeenCalled();
     expect(privateCacheRecovered(project)).toBe(false);
-    expect(screen.getByRole('button', { name: 'Clear recovered cache' })).toBeDisabled();
+    expect(finishButton()).toBeDisabled();
     expect(screen.queryByRole('link')).not.toBeInTheDocument();
     await vi.advanceTimersByTimeAsync(60000);
     expect(back).toBeDisabled(); expect(H.replace).not.toHaveBeenCalled();
@@ -166,9 +175,15 @@ describe('failed recovery offers a warned way forward (#1886)', () => {
     H.clear.mockRejectedValueOnce(Object.assign(new Error('held'), { code: 'failed-precondition' }));
     await failAttended();
     expect(failure()).toHaveTextContent('Another tab or window still has the app open');
-    expect(screen.getByRole('button', { name: 'Clear recovered cache' })).toBeDisabled();
+    expect(finishButton()).toBeDisabled();
     expect(screen.queryByRole('button', { name: 'Clear cache without verification' })).toBeDisabled();
-    expect(screen.getByText(/will be permanently lost/, { selector: 'p' })).toBeInTheDocument();
+    expect(document.querySelector('.rec-warn')).toHaveTextContent('for any account used on this device, will be permanently lost.');
+    // The verified retry replaces the hidden finish; the escape hatch starts collapsed.
+    expect(finishButton().hidden).toBe(true);
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeVisible();
+    const hatch = document.querySelector('details.rec-hatch') as HTMLDetailsElement;
+    expect(hatch.open).toBe(false);
+    expect(hatch.querySelector('summary')).toHaveTextContent('Recovery keeps failing?');
     screen.getByRole('button', { name: 'Try again' }).click();
     expect(H.reload).toHaveBeenCalledOnce();
     expect(privateCacheRecovered(project)).toBe(false);
@@ -206,9 +221,15 @@ describe('failed recovery offers a warned way forward (#1886)', () => {
     await failAttended();
     H.clear.mockRejectedValueOnce(Object.assign(new Error('held'), { code: 'failed-precondition' }));
     acceptUnverified().click();
-    await waitFor(() => expect(failure()).toHaveTextContent('Clearing did not complete: Another tab or window'));
+    await waitFor(() => expect(failure()).toHaveTextContent('Clearing did not complete'));
+    expect(failure()).toHaveTextContent('Another tab or window still has the app open');
     expect(privateCacheRecovered(project)).toBe(false);
     expect(H.replace).not.toHaveBeenCalled();
+    // Feedback moves under the pressed button and the hatch is held open.
+    const hatch = document.querySelector('details.rec-hatch') as HTMLDetailsElement;
+    expect(hatch.open).toBe(true);
+    expect(hatch.contains(failure())).toBe(true);
+    expect(hatch.contains(document.querySelector('[role=status]'))).toBe(true);
     expect(screen.getByRole('button', { name: 'Clear cache without verification' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Try again' })).not.toBeDisabled();
     expect(screen.getByRole('button', { name: 'Return to the app' })).not.toBeDisabled();
@@ -221,7 +242,7 @@ describe('failed recovery offers a warned way forward (#1886)', () => {
     H.clear.mockReturnValue(new Promise<void>(resolve => { resolveClear = resolve; }));
     acceptUnverified().click();
     await vi.advanceTimersByTimeAsync(10001);
-    expect(failure()).toHaveTextContent('Still waiting for cache clearing');
+    expect(status()).toHaveTextContent('Still waiting for cache clearing');
     const back = screen.getByRole('button', { name: 'Return to the app' });
     const retry = screen.getByRole('button', { name: 'Try again' });
     expect(back).toBeDisabled(); expect(retry).toBeDisabled();

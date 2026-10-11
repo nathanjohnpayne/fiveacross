@@ -960,6 +960,341 @@
   .legend b{color:#2a2a2e}
   /* the doc has no <code> or <a> rule yet; keep both inside the page's own voice */
   .cap a{color:#2a2a2e}
+
+  /* ---------- device recovery document (#1886) ----------
+     The recovery document loads instead of the app graph and ships its own
+     stylesheet: src/auth/privateCacheRecoveryStyles.ts. The rec-* rules below
+     are that file verbatim; .recwf only adapts them to a 393px frame and
+     shields them from this page's chrome (h2 rules, full-viewport height). */
+  .rec-page {
+    --bg: #0f1116;
+    --panel: #161a22;
+    --ink: #f2f4f8;
+    --dim: #9aa3b2;
+    --primary: #718ef4;
+    --secondary: #647be2;
+    --accent: #f5b840;
+    --border: rgba(96, 130, 255, 0.32);
+    --shadow: rgba(113, 142, 244, 0.4);
+    --danger: #ff6b7a;
+    --on-fill: #000;
+    --radius: 12px;
+    --radius-card: 16px;
+    --radius-pill: 40px;
+    --ease-glide: cubic-bezier(0.22, 1, 0.36, 1);
+    color-scheme: dark; /* native checkboxes render on dark, not UA-light */
+    container-type: inline-size; /* the two @container breakpoints below key off this */
+    margin: 0;
+    min-height: 100vh;
+    min-height: 100dvh;
+    background:
+      radial-gradient(60% 40% at 10% -10%, color-mix(in srgb, var(--primary) 22%, transparent), transparent 60%),
+      var(--bg);
+    color: var(--ink);
+    font: 15px/1.5 'Oswald', 'Helvetica Neue', Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  .rec-page *,
+  .rec-page *::before,
+  .rec-page *::after { box-sizing: border-box; }
+
+  .rec {
+    max-width: 560px;
+    margin: 0 auto;
+    padding: 28px 16px 56px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  @container (min-width: 600px) {
+    .rec { padding: 56px 24px 72px; gap: 20px; }
+  }
+
+  /* ---- header ---- */
+  .rec-head { display: flex; flex-direction: column; gap: 10px; }
+  .rec-title {
+    margin: 0;
+    font-size: 26px;
+    line-height: 1.15;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  .rec-lede { margin: 0; }
+  .rec-steps-title {
+    margin: 6px 0 0;
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--dim);
+    font-weight: 600;
+  }
+  .rec-steps {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    counter-reset: rec-step;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-size: 14px;
+    line-height: 1.45;
+  }
+  .rec-steps li { position: relative; padding-left: 34px; counter-increment: rec-step; }
+  .rec-steps li::before {
+    content: counter(rec-step);
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: 1.5px solid var(--border);
+    color: var(--dim);
+    font-size: 12px;
+    font-weight: 700;
+    display: grid;
+    place-items: center;
+  }
+  .rec-note { margin: 0; font-size: 13px; color: var(--dim); }
+
+  /* ---- confirmation card ---- */
+  .rec-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-card);
+    padding: 16px;
+  }
+  .rec-card-title {
+    margin: 0 0 10px;
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--dim);
+    font-weight: 600;
+  }
+
+  /* ---- checklist rows (real <label> wraps the input; the row is the target) ---- */
+  .rec-checklist {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .rec-check {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    min-height: 48px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1.4;
+    -webkit-tap-highlight-color: transparent;
+    transition: border-color 0.18s ease, background-color 0.18s ease;
+  }
+  .rec-check:hover { border-color: var(--primary); }
+  .rec-check:has(.rec-check-input:checked) {
+    border-color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 10%, var(--bg));
+  }
+  .rec-check:has(.rec-check-input:focus-visible) {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+  .rec-check:has(.rec-check-input:disabled) {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+  .rec-check-input {
+    flex: none;
+    width: 22px;
+    height: 22px;
+    margin: -1px 0 0;
+    accent-color: var(--primary);
+    cursor: inherit;
+  }
+  .rec-check-input:focus-visible { outline: none; } /* the row draws the ring */
+  .rec-check-text { flex: 1; min-width: 0; }
+  /* danger register for the unverified-path acknowledgements */
+  .rec-check--danger:hover,
+  .rec-check--danger:has(.rec-check-input:checked) { border-color: var(--danger); }
+  .rec-check--danger:has(.rec-check-input:checked) { background: color-mix(in srgb, var(--danger) 10%, var(--bg)); }
+  .rec-check--danger:has(.rec-check-input:focus-visible) { outline-color: var(--danger); }
+  .rec-check--danger .rec-check-input { accent-color: var(--danger); }
+
+  /* ---- actions ---- */
+  .rec-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 16px;
+  }
+  @container (min-width: 600px) {
+    .rec-actions { flex-direction: row; }
+    .rec-actions .rec-btn { flex: 1; }
+  }
+  .rec-btn {
+    appearance: none;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    min-height: 44px;
+    padding: 11px 18px;
+    border-radius: var(--radius-pill);
+    border: 1.5px solid var(--secondary);
+    background: color-mix(in srgb, var(--bg) 80%, transparent);
+    color: var(--ink);
+    cursor: pointer;
+    touch-action: manipulation;
+    transition: transform 0.12s var(--ease-glide), filter 0.15s ease, box-shadow 0.2s ease;
+  }
+  .rec-btn:not(:disabled):hover { filter: brightness(1.08); }
+  .rec-btn:not(:disabled):active { transform: scale(0.96); }
+  .rec-btn:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+  .rec-btn--primary {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: var(--on-fill);
+    box-shadow: 0 0 14px var(--shadow);
+  }
+  .rec-btn--danger {
+    background: var(--danger);
+    border-color: var(--danger);
+    color: var(--on-fill);
+  }
+  .rec-btn--danger:focus-visible { outline-color: var(--danger); }
+  .rec-btn--block { width: 100%; }
+  .rec-btn:disabled {
+    background: color-mix(in srgb, var(--panel) 60%, var(--bg));
+    border-color: var(--border);
+    color: var(--dim);
+    box-shadow: none;
+    cursor: not-allowed;
+  }
+  .rec-btn[hidden] { display: none; }
+
+  /* ---- status (role="status") ---- */
+  .rec-status {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin: 0;
+    padding: 12px 14px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--panel);
+    font-size: 14px;
+    line-height: 1.45;
+  }
+  .rec-status:empty { display: none; }
+  .rec-status--wait {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, var(--panel));
+  }
+  .rec-dots { display: inline-flex; gap: 6px; align-items: center; height: 20px; flex: none; }
+  .rec-dots i {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--primary);
+    box-shadow: 0 0 8px var(--shadow);
+    animation: rec-pulse 1s ease-in-out infinite;
+  }
+  .rec-dots i:nth-child(2) { animation-delay: 0.15s; }
+  .rec-dots i:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes rec-pulse {
+    0%, 100% { opacity: 0.35; transform: scale(0.75); }
+    50% { opacity: 1; transform: scale(1.15); }
+  }
+
+  /* ---- failure callout (role="alert") ---- */
+  .rec-alert {
+    margin: 0;
+    padding: 14px 16px;
+    border-radius: var(--radius);
+    border: 1.5px solid var(--danger);
+    background: color-mix(in srgb, var(--danger) 10%, var(--panel));
+    font-size: 14px;
+    line-height: 1.45;
+  }
+  .rec-alert:empty { display: none; }
+  .rec-alert-title {
+    display: block;
+    font-weight: 700;
+    color: var(--danger);
+    margin: 0 0 4px;
+  }
+  .rec-alert p { margin: 0; }
+  .rec-alert p + p { margin-top: 6px; }
+
+  /* ---- escape hatch (<details>) ---- */
+  .rec-hatch {
+    border: 1px dashed var(--danger);
+    border-radius: var(--radius-card);
+    background: var(--panel);
+  }
+  .rec-hatch > summary {
+    list-style: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 48px;
+    padding: 13px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ink);
+    border-radius: var(--radius-card);
+    -webkit-tap-highlight-color: transparent;
+  }
+  .rec-hatch > summary::-webkit-details-marker { display: none; }
+  .rec-hatch > summary::after {
+    content: '';
+    flex: none;
+    width: 9px;
+    height: 9px;
+    margin: -4px 6px 0 0;
+    border-right: 2px solid var(--dim);
+    border-bottom: 2px solid var(--dim);
+    transform: rotate(45deg);
+    transition: transform 0.18s ease;
+  }
+  .rec-hatch[open] > summary::after { transform: rotate(-135deg); margin-top: 4px; }
+  .rec-hatch > summary:focus-visible { outline: 2px solid var(--danger); outline-offset: -2px; }
+  .rec-hatch-body {
+    padding: 2px 16px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .rec-hatch-title { margin: 0; font-size: 18px; line-height: 1.2; font-weight: 700; }
+  .rec-warn {
+    margin: 0;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 1px dashed var(--danger);
+    background: var(--bg);
+    font-size: 14px;
+    line-height: 1.45;
+  }
+  .rec-warn b { color: var(--danger); }
+  .rec-hatch .rec-actions { margin-top: 2px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .rec-dots i { animation: none; opacity: 0.8; }
+    .rec-btn, .rec-check, .rec-hatch > summary::after { transition: none; }
+  }
+  .recwf.rec-page{min-height:0;padding:0}
+  .recwf h2{border-top:0;padding-top:0}
 </style>
 </head>
 <body>
@@ -1021,6 +1356,8 @@
 <span class="vars"><a href="#fx-install-gcb">🚢 fx-install-gcb</a><a href="#fx-install-vacay">🧳 fx-install-vacay</a><a href="#fx-install-fa">✳ fx-install-fa</a></span></li>
 <li><a href="#sec-system-update">Update banner—three lead-ins, one mechanism</a>
 <span class="vars"><a href="#fx-update-gcb">🚢 fx-update-gcb</a><a href="#fx-update-vacay">🧳 fx-update-vacay</a><a href="#fx-update-fa">✳ fx-update-fa</a></span></li>
+<li><a href="#sec-system-recovery">Device recovery—the attended clear and its warned way forward</a>
+<span class="vars"><a href="#fx-recovery-initial-fa">✳ fx-recovery-initial-fa</a><a href="#fx-recovery-busy-fa">✳ fx-recovery-busy-fa</a><a href="#fx-recovery-failed-fa">✳ fx-recovery-failed-fa</a><a href="#fx-recovery-failed-open-fa">✳ fx-recovery-failed-open-fa</a><a href="#fx-recovery-waiting-fa">✳ fx-recovery-waiting-fa</a><a href="#fx-recovery-hatch-failed-fa">✳ fx-recovery-hatch-failed-fa</a></span></li>
 </ol>
 </li>
 <li><a href="#sec-gcb-gallery">Gay Cruise Bingo · Day-by-day gallery—one card per Day, Trieste → Barcelona</a>
@@ -2495,6 +2832,48 @@
       </div>
     </div>
     <p class="cap"><b>Update · Five Across</b>Minimal camp, and the restraint is the point: ⬆️ is functional rather than decorative, and <i>A new version is ready</i> says the thing instead of performing it. Note what did NOT get neutralised—<i>Your marks are safe</i> is warm, brief and competent, which is the platform voice; “general register” is not “no voice.” One invisible fourth state belongs to every Edition and has no banner at all: when the running build is below the remote <code>/build-floor.json</code> (#342) the client skips the offer entirely and activates + reloads as soon as a waiting worker exists.</p>
+  </div>
+
+</div>
+
+<h3 id="sec-system-recovery">Device recovery—the attended clear and its warned way forward</h3>
+<p class="sub">The <code>?device-cache-recovery=1</code> document (<a href="https://github.com/nathanjohnpayne/fiveacross/issues/1411">#1411</a>, <a href="https://github.com/nathanjohnpayne/fiveacross/issues/1886">#1886</a>; contract in <code>specs/private-cache-isolation.md</code>). It loads instead of the app graph, so it is the one platform surface with no Theme engine: it carries the <code>fiveacross-slate</code> tokens and the app’s <code>--danger</code> in its own stylesheet, dark only, identical on every Edition. A failed attempt must never be a dead end: it names the reason, offers a fresh-document retry and, behind a collapsed disclosure, a clearly warned clear that waives the Mark-preservation checks under explicit consent.</p>
+<div class="frames">
+
+  <div class="unit" id="fx-recovery-initial-fa">
+    <span class="brand-chip brand-fa">✳ Five Across</span>
+    <div class="minisys tall recwf rec-page"><main class="rec"><header class="rec-head"><h1 class="rec-title">Finish device recovery</h1><p class="rec-lede">Private and admin views are held closed until this device’s old cache is cleared.</p><p class="rec-steps-title">Before you clear</p><ol class="rec-steps"><li>Return to the app and sign in to every account used on this device.</li><li>Reconnect, and verify that each account’s queued Marks reached the server.</li><li>Stay online, and close the app in every other tab or window.</li></ol><p class="rec-note">Clearing early can lose another account’s unsynced Marks.</p></header><section class="rec-card" aria-labelledby="rec-confirm-initial"><h2 class="rec-card-title" id="rec-confirm-initial">Confirm to continue</h2><ul class="rec-checklist"><li><label class="rec-check"><input type="checkbox" class="rec-check-input"><span class="rec-check-text">I recovered and verified queued Marks for every account used on this device.</span></label></li><li><label class="rec-check"><input type="checkbox" class="rec-check-input"><span class="rec-check-text">I closed every other app tab or window on this device.</span></label></li></ul></section><div class="rec-actions"><button type="button" class="rec-btn rec-btn--primary" disabled="">Clear recovered cache</button><button type="button" class="rec-btn rec-btn--primary" hidden="">Try again</button><button type="button" class="rec-btn">Return to the app</button></div><p class="rec-status" role="status"></p></main></div>
+    <p class="cap"><b>Device recovery · Initial—nothing confirmed</b>The page’s one job reads as a procedure: three numbered steps the operator performs back in the app, then two confirmations as full-width checklist rows (the row is the hit target). The filled primary stays disabled until both are ticked; <i>Return to the app</i> is always live.</p>
+  </div>
+
+  <div class="unit" id="fx-recovery-busy-fa">
+    <span class="brand-chip brand-fa">✳ Five Across</span>
+    <div class="minisys tall recwf rec-page"><main class="rec"><header class="rec-head"><h1 class="rec-title">Finish device recovery</h1><p class="rec-lede">Private and admin views are held closed until this device’s old cache is cleared.</p><p class="rec-steps-title">Before you clear</p><ol class="rec-steps"><li>Return to the app and sign in to every account used on this device.</li><li>Reconnect, and verify that each account’s queued Marks reached the server.</li><li>Stay online, and close the app in every other tab or window.</li></ol><p class="rec-note">Clearing early can lose another account’s unsynced Marks.</p></header><section class="rec-card" aria-labelledby="rec-confirm-busy"><h2 class="rec-card-title" id="rec-confirm-busy">Confirm to continue</h2><ul class="rec-checklist"><li><label class="rec-check"><input type="checkbox" class="rec-check-input" disabled="" checked=""><span class="rec-check-text">I recovered and verified queued Marks for every account used on this device.</span></label></li><li><label class="rec-check"><input type="checkbox" class="rec-check-input" disabled="" checked=""><span class="rec-check-text">I closed every other app tab or window on this device.</span></label></li></ul></section><div class="rec-actions"><button type="button" class="rec-btn rec-btn--primary" disabled="">Clear recovered cache</button><button type="button" class="rec-btn rec-btn--primary" disabled="" hidden="">Try again</button><button type="button" class="rec-btn" disabled="">Return to the app</button></div><p class="rec-status" role="status"><span class="rec-dots" aria-hidden="true"><i></i><i></i><i></i></span>Finishing recovery…</p></main></div>
+    <p class="cap"><b>Device recovery · In progress</b><i>Finishing recovery…</i> in the <code>role="status"</code> slot with the app’s pulse dots. Every control is disabled but stays legible: disabled is a fill change, not a fade.</p>
+  </div>
+
+  <div class="unit" id="fx-recovery-failed-fa">
+    <span class="brand-chip brand-fa">✳ Five Across</span>
+    <div class="minisys tall recwf rec-page"><main class="rec"><header class="rec-head"><h1 class="rec-title">Finish device recovery</h1><p class="rec-lede">Private and admin views are held closed until this device’s old cache is cleared.</p><p class="rec-steps-title">Before you clear</p><ol class="rec-steps"><li>Return to the app and sign in to every account used on this device.</li><li>Reconnect, and verify that each account’s queued Marks reached the server.</li><li>Stay online, and close the app in every other tab or window.</li></ol><p class="rec-note">Clearing early can lose another account’s unsynced Marks.</p></header><section class="rec-card" aria-labelledby="rec-confirm-failed"><h2 class="rec-card-title" id="rec-confirm-failed">Confirm to continue</h2><ul class="rec-checklist"><li><label class="rec-check"><input type="checkbox" class="rec-check-input" disabled="" checked=""><span class="rec-check-text">I recovered and verified queued Marks for every account used on this device.</span></label></li><li><label class="rec-check"><input type="checkbox" class="rec-check-input" disabled="" checked=""><span class="rec-check-text">I closed every other app tab or window on this device.</span></label></li></ul></section><div class="rec-actions"><button type="button" class="rec-btn rec-btn--primary" disabled="" hidden="">Clear recovered cache</button><button type="button" class="rec-btn rec-btn--primary">Try again</button><button type="button" class="rec-btn">Return to the app</button></div><p class="rec-status" role="status"></p><div class="rec-alert" role="alert"><strong class="rec-alert-title">Recovery did not complete</strong><p>Return to the app and sign in online first.</p><p>Private views remain closed. Fix this and try again, or continue without verification below.</p></div><details class="rec-hatch"><summary>Recovery keeps failing?</summary><div class="rec-hatch-body"><h2 class="rec-hatch-title">Continue without verification</h2><p class="rec-warn">If recovery keeps failing, you can clear this device’s old cache without checking that queued Marks reached the server. Any Mark not yet synced, for any account used on this device, will be <b>permanently lost</b>. Marks already on the server are kept. Boards need a connection to load again afterwards. Private and admin views open once clearing finishes.</p><ul class="rec-checklist"><li><label class="rec-check rec-check--danger"><input type="checkbox" class="rec-check-input"><span class="rec-check-text">I understand unsynced Marks for every account on this device will be permanently lost.</span></label></li><li><label class="rec-check rec-check--danger"><input type="checkbox" class="rec-check-input"><span class="rec-check-text">I closed every other app tab or window on this device.</span></label></li></ul><div class="rec-actions"><button type="button" class="rec-btn rec-btn--danger rec-btn--block" disabled="">Clear cache without verification</button></div></div></details></main></div>
+    <p class="cap"><b>Device recovery · Failed—the reason, then the way forward</b>A <code>role="alert"</code> callout names the failed stage (here: signed out). <i>Clear recovered cache</i> is hidden and <i>Try again</i> takes its place, reloading a fresh recovery document. The escape hatch is a collapsed <code>&lt;details&gt;</code>, so retrying stays the obvious path.</p>
+  </div>
+
+  <div class="unit" id="fx-recovery-failed-open-fa">
+    <span class="brand-chip brand-fa">✳ Five Across</span>
+    <div class="minisys tall recwf rec-page"><main class="rec"><header class="rec-head"><h1 class="rec-title">Finish device recovery</h1><p class="rec-lede">Private and admin views are held closed until this device’s old cache is cleared.</p><p class="rec-steps-title">Before you clear</p><ol class="rec-steps"><li>Return to the app and sign in to every account used on this device.</li><li>Reconnect, and verify that each account’s queued Marks reached the server.</li><li>Stay online, and close the app in every other tab or window.</li></ol><p class="rec-note">Clearing early can lose another account’s unsynced Marks.</p></header><section class="rec-card" aria-labelledby="rec-confirm-failed-open"><h2 class="rec-card-title" id="rec-confirm-failed-open">Confirm to continue</h2><ul class="rec-checklist"><li><label class="rec-check"><input type="checkbox" class="rec-check-input" disabled="" checked=""><span class="rec-check-text">I recovered and verified queued Marks for every account used on this device.</span></label></li><li><label class="rec-check"><input type="checkbox" class="rec-check-input" disabled="" checked=""><span class="rec-check-text">I closed every other app tab or window on this device.</span></label></li></ul></section><div class="rec-actions"><button type="button" class="rec-btn rec-btn--primary" disabled="" hidden="">Clear recovered cache</button><button type="button" class="rec-btn rec-btn--primary">Try again</button><button type="button" class="rec-btn">Return to the app</button></div><p class="rec-status" role="status"></p><div class="rec-alert" role="alert"><strong class="rec-alert-title">Recovery did not complete</strong><p>Return to the app and sign in online first.</p><p>Private views remain closed. Fix this and try again, or continue without verification below.</p></div><details class="rec-hatch" open=""><summary>Recovery keeps failing?</summary><div class="rec-hatch-body"><h2 class="rec-hatch-title">Continue without verification</h2><p class="rec-warn">If recovery keeps failing, you can clear this device’s old cache without checking that queued Marks reached the server. Any Mark not yet synced, for any account used on this device, will be <b>permanently lost</b>. Marks already on the server are kept. Boards need a connection to load again afterwards. Private and admin views open once clearing finishes.</p><ul class="rec-checklist"><li><label class="rec-check rec-check--danger"><input type="checkbox" class="rec-check-input" checked=""><span class="rec-check-text">I understand unsynced Marks for every account on this device will be permanently lost.</span></label></li><li><label class="rec-check rec-check--danger"><input type="checkbox" class="rec-check-input" checked=""><span class="rec-check-text">I closed every other app tab or window on this device.</span></label></li></ul><div class="rec-actions"><button type="button" class="rec-btn rec-btn--danger rec-btn--block">Clear cache without verification</button></div></div></details></main></div>
+    <p class="cap"><b>Device recovery · Failed—escape hatch open</b>Expanded: a dashed danger warning spells out the consequence before the button can be pressed, then two danger-register acknowledgements and the filled destructive <i>Clear cache without verification</i> (disabled until both are ticked). It clears without the sign-in, online, server-proof and drain prerequisites.</p>
+  </div>
+
+  <div class="unit" id="fx-recovery-waiting-fa">
+    <span class="brand-chip brand-fa">✳ Five Across</span>
+    <div class="minisys tall recwf rec-page"><main class="rec"><header class="rec-head"><h1 class="rec-title">Finish device recovery</h1><p class="rec-lede">Private and admin views are held closed until this device’s old cache is cleared.</p><p class="rec-steps-title">Before you clear</p><ol class="rec-steps"><li>Return to the app and sign in to every account used on this device.</li><li>Reconnect, and verify that each account’s queued Marks reached the server.</li><li>Stay online, and close the app in every other tab or window.</li></ol><p class="rec-note">Clearing early can lose another account’s unsynced Marks.</p></header><section class="rec-card" aria-labelledby="rec-confirm-waiting"><h2 class="rec-card-title" id="rec-confirm-waiting">Confirm to continue</h2><ul class="rec-checklist"><li><label class="rec-check"><input type="checkbox" class="rec-check-input" disabled="" checked=""><span class="rec-check-text">I recovered and verified queued Marks for every account used on this device.</span></label></li><li><label class="rec-check"><input type="checkbox" class="rec-check-input" disabled="" checked=""><span class="rec-check-text">I closed every other app tab or window on this device.</span></label></li></ul></section><div class="rec-actions"><button type="button" class="rec-btn rec-btn--primary" disabled="">Clear recovered cache</button><button type="button" class="rec-btn rec-btn--primary" disabled="" hidden="">Try again</button><button type="button" class="rec-btn" disabled="">Return to the app</button></div><p class="rec-status rec-status--wait" role="status"><span class="rec-dots" aria-hidden="true"><i></i><i></i><i></i></span>Still waiting for cache clearing. Keep this recovery document open; returning or retrying stays unavailable until clearing settles. If it never settles, close the browser rather than reopening the app while this clear is running.</p></main></div>
+    <p class="cap"><b>Device recovery · Clearing still pending</b>A clear that outlives its bound reports waiting in an accent-toned status (a wait, not an error) and keeps every control disabled until the SDK actually settles; a late success still refuses completion.</p>
+  </div>
+
+  <div class="unit" id="fx-recovery-hatch-failed-fa">
+    <span class="brand-chip brand-fa">✳ Five Across</span>
+    <div class="minisys tall recwf rec-page"><main class="rec"><header class="rec-head"><h1 class="rec-title">Finish device recovery</h1><p class="rec-lede">Private and admin views are held closed until this device’s old cache is cleared.</p><p class="rec-steps-title">Before you clear</p><ol class="rec-steps"><li>Return to the app and sign in to every account used on this device.</li><li>Reconnect, and verify that each account’s queued Marks reached the server.</li><li>Stay online, and close the app in every other tab or window.</li></ol><p class="rec-note">Clearing early can lose another account’s unsynced Marks.</p></header><section class="rec-card" aria-labelledby="rec-confirm-hatch-failed"><h2 class="rec-card-title" id="rec-confirm-hatch-failed">Confirm to continue</h2><ul class="rec-checklist"><li><label class="rec-check"><input type="checkbox" class="rec-check-input" disabled="" checked=""><span class="rec-check-text">I recovered and verified queued Marks for every account used on this device.</span></label></li><li><label class="rec-check"><input type="checkbox" class="rec-check-input" disabled="" checked=""><span class="rec-check-text">I closed every other app tab or window on this device.</span></label></li></ul></section><div class="rec-actions"><button type="button" class="rec-btn rec-btn--primary" disabled="" hidden="">Clear recovered cache</button><button type="button" class="rec-btn rec-btn--primary">Try again</button><button type="button" class="rec-btn">Return to the app</button></div><details class="rec-hatch" open=""><summary>Recovery keeps failing?</summary><div class="rec-hatch-body"><h2 class="rec-hatch-title">Continue without verification</h2><p class="rec-warn">If recovery keeps failing, you can clear this device’s old cache without checking that queued Marks reached the server. Any Mark not yet synced, for any account used on this device, will be <b>permanently lost</b>. Marks already on the server are kept. Boards need a connection to load again afterwards. Private and admin views open once clearing finishes.</p><ul class="rec-checklist"><li><label class="rec-check rec-check--danger"><input type="checkbox" class="rec-check-input" disabled="" checked=""><span class="rec-check-text">I understand unsynced Marks for every account on this device will be permanently lost.</span></label></li><li><label class="rec-check rec-check--danger"><input type="checkbox" class="rec-check-input" disabled="" checked=""><span class="rec-check-text">I closed every other app tab or window on this device.</span></label></li></ul><div class="rec-actions"><button type="button" class="rec-btn rec-btn--danger rec-btn--block" disabled="">Clear cache without verification</button></div><p class="rec-status" role="status"></p><div class="rec-alert" role="alert"><strong class="rec-alert-title">Clearing did not complete</strong><p>Another tab or window still has the app open, so this device’s cache is in use.</p><p>Private views remain closed. Close every other app tab or window, then try again.</p></div></div></details></main></div>
+    <p class="cap"><b>Device recovery · Escape hatch failed</b>The status and alert nodes move under the button that was pressed and the hatch is held open. The hatch controls stay disabled (a further attempt reloads the document); <i>Try again</i> and <i>Return to the app</i> re-enable.</p>
   </div>
 
 </div>
