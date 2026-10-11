@@ -62,11 +62,11 @@ function startPostHogAfterResolution(): void {
     // document starts no analytics (#1889). Drain them only through this
     // consent-aware client once it is capture-ready; `durableOutbox` keeps an
     // unready capture out of PostHog's own queue so the outbox stays the one
-    // retry authority.
+    // retry authority, and `requireAcceptance` keeps a locally refused event.
     if (!recoveryTelemetryArmed) {
       recoveryTelemetryArmed = true;
       onPostHogReady(() => drainRecoveryTelemetry(firebaseConfig.projectId,
-        (name, properties, event) => phCapture(name, properties, { durableOutbox: true, ...event })));
+        (name, properties, event) => phCapture(name, properties, { durableOutbox: true, requireAcceptance: true, ...event })));
     }
     void initPostHog({ waitForAuth: true });
   }

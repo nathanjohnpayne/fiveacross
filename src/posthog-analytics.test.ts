@@ -10,6 +10,7 @@ vi.mock('posthog-js', () => ({
     reset: vi.fn(),
     register: vi.fn(),
     get_property: vi.fn(),
+    has_opted_out_capturing: vi.fn(() => false),
   },
 }));
 
@@ -648,6 +649,32 @@ describe('PostHog init with a key', () => {
     expect(ph.capture).not.toHaveBeenCalledWith('mark_square', expect.anything(), expect.anything());
     expect(mod.phCapture('mark_square', { transitionId: 'durable-1' }, { durableOutbox: true })).toBe(true);
     expect(ph.capture).toHaveBeenLastCalledWith('mark_square', { transitionId: 'durable-1' });
+  });
+
+  it('acknowledges a requireAcceptance capture only when the SDK accepts it or consent opted out (#1889)', async () => {
+    vi.resetModules();
+    vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
+    vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
+    const ph = (await import('posthog-js')).default;
+    const mod = await import('./posthog');
+    await mod.initPostHog();
+    const event = { uuid: '0192a1b2-c3d4-4e5f-8a6b-7c8d9e0f1a2b', timestamp: new Date('2026-10-11T04:00:00Z') };
+    const options = { durableOutbox: true, requireAcceptance: true, ...event };
+
+    vi.mocked(ph.capture).mockReturnValueOnce(undefined);
+    expect(mod.phCapture('device_recovery_failed', { path: 'verified' }, options)).toBe(false);
+    expect(ph.capture).toHaveBeenLastCalledWith('device_recovery_failed', { path: 'verified' }, event);
+
+    vi.mocked(ph.capture).mockReturnValueOnce({ uuid: event.uuid } as CaptureResult);
+    expect(mod.phCapture('device_recovery_failed', { path: 'verified' }, options)).toBe(true);
+
+    vi.mocked(ph.capture).mockReturnValueOnce(undefined);
+    vi.mocked(ph.has_opted_out_capturing).mockReturnValueOnce(true);
+    expect(mod.phCapture('device_recovery_failed', { path: 'verified' }, options)).toBe(true);
+
+    // Existing callers keep acknowledging whatever the SDK returns.
+    vi.mocked(ph.capture).mockReturnValueOnce(undefined);
+    expect(mod.phCapture('mark_square', { transitionId: 'unchanged' }, { durableOutbox: true })).toBe(true);
   });
 
   it('keeps a durable transition pending through a failed identity change, then wakes its outbox after recovery (#727)', async () => {
