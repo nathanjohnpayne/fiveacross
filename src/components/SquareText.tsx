@@ -44,11 +44,20 @@ type InsetKey =
  */
 function keepWordsWhole(el: HTMLElement, host: HTMLElement, estimated: number, baseSize: number): number {
   clearWholeWordOverrides(el);
+  el.style.marginBottom = '';
   const hostStyle = window.getComputedStyle(host);
   const inset = (keys: readonly InsetKey[]) => keys.reduce((sum, key) => sum + (parseFloat(hostStyle[key]) || 0), 0);
   const hostRect = host.getBoundingClientRect();
   const usableWidth = hostRect.width - inset(['paddingLeft', 'paddingRight', 'borderLeftWidth', 'borderRightWidth']);
-  const usableHeight = hostRect.height - inset(['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth']);
+  const fullHeight = hostRect.height - inset(['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth']);
+  // A marked Square's corner chips (index.css `--fit-block-inset-top` /
+  // `-bottom`): fit inside the band between them first, so the text, centred
+  // in that band by its own margin, clears the ✓, ＋, Doubt and Tally chips.
+  // Width is untouched; only the block edges are reserved.
+  const blockInset = (edge: 'top' | 'bottom') =>
+    Math.max(0, parseFloat(hostStyle.getPropertyValue(`--fit-block-inset-${edge}`)) || 0);
+  const reserved = blockInset('top') + blockInset('bottom');
+  let usableHeight = fullHeight - reserved;
   if (!(usableWidth > 0)) return estimated;
   el.style.wordBreak = 'normal';
   el.style.overflowWrap = 'normal';
@@ -62,10 +71,21 @@ function keepWordsWhole(el: HTMLElement, host: HTMLElement, estimated: number, b
   };
   const tooWide = (rect: DOMRect) => rect.width > usableWidth + EPSILON;
   const tooTall = (rect: DOMRect) => usableHeight > 0 && rect.height > usableHeight + EPSILON;
-  const fitted = shrinkToWholeWords(baseSize, (size) => {
+  const overflows = (size: number) => {
     const rect = rectAt(size);
     return tooWide(rect) || tooTall(rect);
-  });
+  };
+  let fitted = shrinkToWholeWords(baseSize, overflows);
+  // Even the floor cannot hold this prompt inside the band: running under a
+  // corner chip beats `.cell`'s `overflow: hidden` clipping whole lines, so
+  // refit against the full tile instead.
+  if (reserved > 0 && tooTall(rectAt(fitted))) {
+    usableHeight = fullHeight;
+    // Centre on the whole tile again: the band's offset would push a
+    // full-height block past an edge.
+    el.style.marginBottom = '0px';
+    fitted = shrinkToWholeWords(baseSize, overflows);
+  }
   if (tooWide(rectAt(fitted))) clearWholeWordOverrides(el);
   return fitted;
 }
@@ -160,7 +180,17 @@ export default function SquareText({ text }: { text: string }) {
     };
     animated.addEventListener('animationend', onAnimationDone);
     animated.addEventListener('animationcancel', onAnimationDone);
+    // Marking a Square, or a Doubt or Tally chip appearing on it, changes the
+    // band the text must fit (index.css `--fit-block-inset-*`) without
+    // changing any box a ResizeObserver reports. Watch the tile's own class
+    // and its direct children (the chips are siblings of the claim button);
+    // the fit writes only this span's style, which neither reaches, so a
+    // re-fit cannot retrigger itself.
+    const tileObserver =
+      typeof MutationObserver === 'undefined' ? null : new MutationObserver(() => measure());
+    tileObserver?.observe(animated, { attributes: true, attributeFilter: ['class'], childList: true });
     const removeAnimationListeners = () => {
+      tileObserver?.disconnect();
       animated.removeEventListener('animationend', onAnimationDone);
       animated.removeEventListener('animationcancel', onAnimationDone);
     };

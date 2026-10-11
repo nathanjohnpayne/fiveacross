@@ -59,12 +59,12 @@ const themeBlocks = parseThemeBlocks(readFileSync(cssPath, 'utf-8'));
 // is needed to cover them.
 const TEXT_PAIRS: [fg: string, bg: string][] = [
   ['ink', 'bg'], // body text; .signin h1; .celebrate .big (flat-bg floor — see theme-on-color-contrast.test.tsx for the composited-backdrop checks)
-  ['ink', 'panel'], // .row .name, .input text, .cell.free.marked (FREE + free-space text)
+  ['ink', 'panel'], // .row .name, .input text
   ['ink', 'cell'], // .cell text
   ['dim', 'bg'], // .muted, .count, .ack, inactive .tab
   ['dim', 'panel'], // .row .sub
   ['primary', 'panel'], // .row .rank (leaderboard rank numbers, 22px normal weight)
-  ['accent', 'cell'], // accent text on a tile; no longer .cell.free, which moved to ink on panel
+  ['accent', 'cell'], // .cell.free text ("FREE")
   ['accent', 'panel'], // .badge ("1st BINGO")
 ];
 const TEXT_MIN = 4.5; // WCAG 1.4.3 Contrast (Minimum), normal text

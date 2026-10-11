@@ -38,7 +38,16 @@ function stubLayout(realCharEm = REAL_CHAR_EM, renderedLines = 2) {
         borderRightWidth: '0px',
         borderTopWidth: '0px',
         borderBottomWidth: '0px',
-      } as CSSStyleDeclaration;
+        // index.css's corner-chip band, read live so a test can mark the
+        // Square or add a Doubt chip after mount: 9/15px on a marked Square,
+        // 15px on top once a Doubt chip is present.
+        getPropertyValue: (name: string) => {
+          if (!el.classList.contains('marked')) return '';
+          if (name === '--fit-block-inset-top') return el.querySelector('.doubt-badge') ? '15px' : '9px';
+          if (name === '--fit-block-inset-bottom') return '15px';
+          return '';
+        },
+      } as unknown as CSSStyleDeclaration;
     }
     return realGetComputedStyle.call(window, el, pseudo ?? undefined);
   });
@@ -163,5 +172,69 @@ describe('SquareText keeps words whole (#1345)', () => {
     stubLayout();
     const target = renderedSpan('Kissed a stranger');
     expect(parseFloat(target.style.fontSize)).toBe(CEILING_PX);
+  });
+});
+
+// A marked Square's corner chips (✓, ＋, Doubt, Tally): the guard fits the
+// prompt to the band between `--fit-block-inset-top` and `-bottom` so it clears
+// them, and falls back to the full tile only when even the floor cannot.
+describe('SquareText clears a marked Square\'s corner chips', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Short words, so width never binds: only the band's height decides.
+  const FOUR_LINES = 'aa bb cc dd';
+  const BAND = USABLE - 9 - 15; // 38px
+
+  function renderCell(text: string, marked: boolean) {
+    const { container } = render(
+      <div className={marked ? 'cell marked' : 'cell'}>
+        <SquareText text={text} />
+      </div>,
+    );
+    return {
+      cell: container.querySelector('.cell') as HTMLElement,
+      target: container.querySelector('.cell-text') as HTMLElement,
+    };
+  }
+
+  it('fits four lines inside the band on a marked Square, where an unmarked one keeps the ceiling', () => {
+    stubLayout(REAL_CHAR_EM, 4);
+    expect(parseFloat(renderCell(FOUR_LINES, false).target.style.fontSize)).toBe(CEILING_PX);
+    const { target } = renderCell(FOUR_LINES, true);
+    // The largest 0.5px step whose 4 lines at 1.05 fit 38px: 9px (37.8px).
+    expect(parseFloat(target.style.fontSize)).toBe(9);
+    expect(4 * 9 * 1.05).toBeLessThanOrEqual(BAND);
+    // Centring in the band is CSS's margin, so the guard leaves it alone.
+    expect(target.style.marginBottom).toBe('');
+  });
+
+  it('falls back to the full tile, centred on it, when even the floor cannot hold the prompt in the band', () => {
+    // 7 lines at the 6px floor are 44.1px, over the 38px band; on the full
+    // 62px tile the largest step that fits is 8px (58.8px).
+    stubLayout(REAL_CHAR_EM, 7);
+    const { target } = renderCell(FOUR_LINES, true);
+    expect(parseFloat(target.style.fontSize)).toBe(8);
+    expect(target.style.marginBottom).toBe('0px');
+  });
+
+  it('re-fits when the Square is marked and again when a Doubt chip appears', async () => {
+    stubLayout(REAL_CHAR_EM, 4);
+    const { cell, target } = renderCell(FOUR_LINES, false);
+    expect(parseFloat(target.style.fontSize)).toBe(CEILING_PX);
+
+    await act(async () => {
+      cell.classList.add('marked');
+    });
+    expect(parseFloat(target.style.fontSize)).toBe(9);
+
+    // A Doubt chip raises the top inset to 15px: a 32px band, 7.5px (31.5px).
+    await act(async () => {
+      const chip = document.createElement('button');
+      chip.className = 'doubt-badge';
+      cell.appendChild(chip);
+    });
+    expect(parseFloat(target.style.fontSize)).toBe(7.5);
   });
 });

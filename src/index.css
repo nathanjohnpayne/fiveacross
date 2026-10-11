@@ -418,9 +418,51 @@ a {
 /* The free centre stacks its FREE eyebrow over the prompt. .cell.free.marked
    carries the same pair for the preview/fallback surfaces, where the spans are
    direct children of the tile; here they are children of the button. */
+/* A marked Square carries corner chips: the ✓ top-right, the proof ＋
+   bottom-left, and sometimes a Doubt (top-left) or Tally (bottom-right).
+   SquareText fits the prompt inside the band between these insets, and the
+   margin below centres it there, so the text clears the chips. A prompt too
+   long for the band even at the guard's floor falls back to the full tile
+   rather than clipping. The bottom edge always has the 18px ＋; the top edge
+   usually has only the small ✓ glyph, so it reserves less unless a Doubt pill
+   is present. Set on the tile and inherited, so it reaches the Board's claim
+   button and the cached-card fallback's bare text alike. */
+.cell.marked:not(.free) {
+  --fit-block-inset-top: 9px;
+  --fit-block-inset-bottom: 15px;
+}
+.cell.marked:not(.free):has(.doubt-badge) {
+  --fit-block-inset-top: 15px;
+}
+.cell.marked:not(.free) .cell-text {
+  margin-bottom: calc(var(--fit-block-inset-bottom) - var(--fit-block-inset-top));
+}
+/* Where a corner graze remains (a long prompt on the full-tile fallback, or a
+   line just reaching a corner), the text fades out under each chip that is
+   present instead of colliding with it: a feathered hole in the claim
+   button's mask per chip. The chips themselves keep their scrims, so their
+   contrast (specs/a11y-badge-contrast.md) is measured over the bare gradient
+   exactly as before. */
+.cell.marked:not(.free) .cell-claim {
+  --m-solid: linear-gradient(#000, #000);
+  --m-plus: radial-gradient(circle at 13px calc(100% - 11px), transparent 9px, #000 12.5px);
+  --m-check: radial-gradient(circle at calc(100% - 10px) 9px, transparent 6.5px, #000 9.5px);
+  --m-tally: var(--m-solid);
+  --m-doubt: var(--m-solid);
+  -webkit-mask-image: var(--m-plus), var(--m-check), var(--m-tally), var(--m-doubt);
+  mask-image: var(--m-plus), var(--m-check), var(--m-tally), var(--m-doubt);
+  -webkit-mask-composite: source-in;
+  mask-composite: intersect;
+}
+.cell.marked:not(.free):has(.tally-badge) .cell-claim {
+  --m-tally: radial-gradient(circle at calc(100% - 13px) calc(100% - 11px), transparent 9px, #000 12.5px);
+}
+.cell.marked:not(.free):has(.doubt-badge) .cell-claim {
+  --m-doubt: radial-gradient(circle at 13px 11px, transparent 9px, #000 12.5px);
+}
 .cell.free.marked > .cell-claim {
   flex-direction: column;
-  gap: 1px;
+  gap: 3px;
 }
 /* A focusable control needs a visible focus indicator (WCAG 2.4.7); .cell had
    no focus style at all before Squares became reachable. The ring is drawn on
@@ -453,17 +495,17 @@ a {
 }
 .cell.free.marked {
   /* The wireframe's free centre (plans/daily-cards-wireframes.html, `.cell.free`):
-     a plain panel tile set apart only by a thin accent border, with FREE and the
-     Day's free-space text as one bold ink block. It replaced an accent-tinted
-     wash with an inset ring and a large accent display FREE, which diverged from
-     the parity reference and, where the display face is missing, wrapped FREE
-     onto two lines. */
+     an accent-tinted wash inside a double ring (accent border, --cell inset gap),
+     a large accent display FREE, and the Day's free-space text as a small bold
+     ink caption beneath. */
   flex-direction: column;
-  gap: 1px;
-  border: 1.5px solid var(--accent);
+  gap: 3px;
+  border: 2px solid var(--accent);
   color: var(--ink);
-  background: var(--panel);
-  box-shadow: none;
+  background: color-mix(in srgb, var(--accent) 18%, var(--cell));
+  box-shadow:
+    inset 0 0 0 2px var(--cell),
+    0 0 16px var(--shadow);
 }
 .cell.free.marked::after {
   content: none;
@@ -487,11 +529,18 @@ a {
   }
 }
 .free-label {
-  /* Same face, size and weight as the free-space text beneath it: the
-     wireframe reads the pair as one line break, not an eyebrow over a caption. */
-  font-size: calc(clamp(7px, 1.9vw, 10px) * var(--square-scale, 1));
-  font-weight: 700;
-  line-height: 1.05;
+  /* A fixed display badge, so it does not read --square-scale: at Large it would
+     outgrow the tile. It never wraps, and the stack carries a condensed face iOS
+     ships (Avenir Next Condensed) ahead of the generic fallback, since neither
+     Bebas Neue nor Arial Narrow is on a phone and a wide system face is what
+     used to break FREE onto two lines. */
+  color: var(--accent);
+  font-family: 'Bebas Neue', 'Arial Narrow', 'Avenir Next Condensed', sans-serif;
+  font-size: clamp(15px, 4.5vw, 22px);
+  line-height: 0.9;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  text-shadow: 0 0 10px var(--shadow);
 }
 .free-prompt {
   max-width: 100%;
@@ -1900,7 +1949,14 @@ textarea.input {
   left: 4px;
   z-index: 3;
   border: none;
-  background: rgba(0, 0, 0, 0.35);
+  /* 0.45, not 0.35: the chip sits near the 145° gradient's midpoint, not its
+     --primary end, and 0.35 left the ＋ at 2.54:1 against get-sporty's
+     near-white --secondary, under the 3:1 UI-component floor
+     (specs/a11y-badge-contrast.md). The frost softens any prompt edge the
+     text mask leaves behind it. */
+  background: rgba(0, 0, 0, 0.45);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
   color: #fff;
   border-radius: 50%;
   width: 18px;
@@ -1926,6 +1982,10 @@ textarea.input {
   z-index: 3;
   border: none;
   background: rgba(0, 0, 0, 0.55);
+  /* Frost only: it does not change the declared scrim the contrast contract
+     composites, and the text mask keeps prompt glyphs out from under it. */
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
   color: #fff;
   border-radius: 20px;
   min-width: 18px;
@@ -3463,9 +3523,8 @@ body:has(.sheet-backdrop) .guidelines-trigger {
 .share-card-cell.free {
   /* Free centre — accent. After .marked so it wins over the gradient (the
      centre is always "marked"). Text on --ink: the accent-tinted wash is a
-     --cell mix, not the gradient, so --on-gradient is the wrong token here.
-     The share card keeps this wash (the wireframe's .shc .sq.freec); the
-     on-page .cell.free.marked is the plain wireframe tile instead. */
+     --cell mix, not the gradient, so --on-gradient is the wrong token here
+     — mirrors the on-page .cell.free.marked. */
   color: var(--ink);
   background: color-mix(in srgb, var(--accent) 32%, var(--cell));
   border-color: var(--accent);
