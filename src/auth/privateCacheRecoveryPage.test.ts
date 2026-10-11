@@ -23,6 +23,7 @@ vi.mock('firebase/firestore', () => ({
 }));
 import { renderPrivateCacheRecovery } from './privateCacheRecoveryPage';
 import { privateCacheRecovered, privateCacheRecoveryKey } from './privateCacheRecoveryMarker';
+import { privateCacheRecoveryTelemetryKey } from './privateCacheRecoveryTelemetry';
 
 const project = 'demo-recovery-page';
 function confirmBoth() {
@@ -252,5 +253,51 @@ describe('failed recovery offers a warned way forward (#1886)', () => {
     expect(failure()).toHaveTextContent('Clearing did not complete');
     expect(privateCacheRecovered(project)).toBe(false);
     expect(back).not.toBeDisabled();
+  });
+});
+
+describe('recovery outcomes are left for PostHog (#1889)', () => {
+  const outcomes = () => (JSON.parse(localStorage.getItem(privateCacheRecoveryTelemetryKey(project)) ?? '[]') as Record<string, unknown>[])
+    .map(({ at: _at, ...rest }) => rest);
+  beforeEach(() => localStorage.clear());
+  it.each([
+    ['ready', 'auth'], ['server', 'server'], ['drain', 'drain'], ['terminate', 'terminate'], ['clear', 'clear'],
+  ] as const)('attributes a %s failure to its stage with a code, never the message', async (mock, stage) => {
+    H[mock].mockRejectedValueOnce(new Error('SDK refusal for alice'));
+    await failAttended();
+    expect(outcomes()).toEqual([{ outcome: 'failed', path: 'verified', stage, reason: 'unknown' }]);
+    expect(localStorage.getItem(privateCacheRecoveryTelemetryKey(project))).not.toContain('alice');
+  });
+  it('reports a signed-out attempt and a held cache by code', async () => {
+    H.user = null;
+    await failAttended();
+    H.clear.mockRejectedValueOnce(Object.assign(new Error('held'), { code: 'failed-precondition' }));
+    acceptUnverified().click();
+    await waitFor(() => expect(failure()).toHaveTextContent('Clearing did not complete'));
+    expect(outcomes()).toEqual([
+      { outcome: 'failed', path: 'verified', stage: 'auth', reason: 'recovery/signed-out-or-offline' },
+      { outcome: 'failed', path: 'unverified', stage: 'clear', reason: 'failed-precondition' },
+    ]);
+  });
+  it('reports completion on either path', async () => {
+    renderPrivateCacheRecovery(); confirmBoth().click();
+    await waitFor(() => expect(H.replace).toHaveBeenCalledOnce());
+    expect(outcomes()).toEqual([{ outcome: 'completed', path: 'verified' }]);
+    localStorage.clear(); H.user = null;
+    await failAttended();
+    acceptUnverified().click();
+    await waitFor(() => expect(H.replace).toHaveBeenCalledTimes(2));
+    expect(outcomes()).toEqual([
+      { outcome: 'failed', path: 'verified', stage: 'auth', reason: 'recovery/signed-out-or-offline' },
+      { outcome: 'completed', path: 'unverified' },
+    ]);
+  });
+  it('reports a marker that cannot be stored as the record stage', async () => {
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(function (this: Storage, name: string, value: string) {
+      if (name === privateCacheRecoveryKey(project)) return;
+      Object.defineProperty(this, name, { value, configurable: true, enumerable: true, writable: true });
+    });
+    await failAttended();
+    expect(outcomes()).toEqual([{ outcome: 'failed', path: 'verified', stage: 'record', reason: 'recovery/marker-unwritable' }]);
   });
 });
