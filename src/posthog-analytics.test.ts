@@ -658,7 +658,7 @@ describe('PostHog init with a key', () => {
     const ph = (await import('posthog-js')).default;
     const mod = await import('./posthog');
     await mod.initPostHog();
-    const event = { uuid: '0192a1b2-c3d4-4e5f-8a6b-7c8d9e0f1a2b', timestamp: new Date('2026-10-11T04:00:00Z') };
+    const event = { uuid: '0192a1b2-c3d4-4e5f-8a6b-7c8d9e0f1a2b' };
     const options = { durableOutbox: true, requireAcceptance: true, ...event };
 
     vi.mocked(ph.capture).mockReturnValueOnce(undefined);

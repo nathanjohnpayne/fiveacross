@@ -36,9 +36,9 @@ describe('device recovery telemetry outbox (#1889)', () => {
     drainRecoveryTelemetry(project, capture);
     expect(capture.mock.calls).toEqual([
       ['device_recovery_failed', { path: 'verified', stage: 'auth', reason: 'recovery/signed-out-or-offline', observed_at: '2026-10-11T04:00:00.000Z' },
-        { uuid: failedId, timestamp: new Date('2026-10-11T04:00:00Z') }],
+        { uuid: failedId }],
       ['device_recovery_completed', { path: 'unverified', observed_at: '2026-10-11T04:01:00.000Z' },
-        { uuid: completedId, timestamp: new Date('2026-10-11T04:01:00Z') }],
+        { uuid: completedId }],
     ]);
     expect(localStorage.getItem(key)).toBeNull();
   });

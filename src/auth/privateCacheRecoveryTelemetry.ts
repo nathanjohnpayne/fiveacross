@@ -9,7 +9,9 @@ export type RecoveryPath = 'verified' | 'unverified';
 export type RecoveryStage = 'auth' | 'open' | 'server' | 'drain' | 'terminate' | 'clear' | 'record';
 export interface RecoveryOutcome {
   /** Persisted at creation and sent as the PostHog event uuid, so a record
-   * re-sent after an unacknowledged outbox update deduplicates. */
+   * re-sent after an unacknowledged outbox update deduplicates. Its time
+   * travels as `observed_at`, never as the event timestamp: a historical
+   * timestamp would drive the live session manager backwards (#1891). */
   id: string;
   outcome: 'failed' | 'completed';
   path: RecoveryPath;
@@ -80,7 +82,7 @@ export function recordRecoveryOutcome(projectId: string, outcome: Omit<RecoveryO
  */
 export function drainRecoveryTelemetry(
   projectId: string,
-  capture: (name: string, properties: Record<string, unknown>, event: { uuid: string; timestamp: Date }) => boolean,
+  capture: (name: string, properties: Record<string, unknown>, event: { uuid: string }) => boolean,
 ): void {
   try {
     const key = privateCacheRecoveryTelemetryKey(projectId);
@@ -94,7 +96,7 @@ export function drainRecoveryTelemetry(
         ...(record.reason ? { reason: record.reason } : {}),
         observed_at: record.at,
       },
-      { uuid: record.id, timestamp: new Date(record.at) },
+      { uuid: record.id },
     ));
     if (unsent.length === 0) localStorage.removeItem(key);
     else localStorage.setItem(key, JSON.stringify(unsent));
