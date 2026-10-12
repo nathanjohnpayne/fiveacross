@@ -12,7 +12,7 @@ generated_by: scripts/project-doc-sync.sh
 do_not_edit: true
 source_repo: nathanjohnpayne/docs
 source_path: projects/gaycruisebingo/prds/native-app-expansion.md
-source_ref: 5a91a80
+source_ref: f051c54
 project: gaycruisebingo
 document_class: prd
 document_slug: native-app-expansion
@@ -237,7 +237,7 @@ Android adds **1.5–2 weeks** for back-button handling, device coverage, and Pl
 |---|---|---|
 | Native offline persistence is unresolved when the shell is otherwise ready | High | Do not retire native-path offline machinery or ship a native build that depends on it until a named persistence approach is tested (fiveacross#1767). The browser path is unaffected. |
 | Store review rejects the build as insufficiently native | High | Ship bundled rather than remote-first; the platform shape—multi-Event, accounts, camera, push, deep links—is the argument, and a single-Event wrapper is what gets rejected. |
-| The adult-content posture gate is bypassed and a reviewer reaches an adult pool | High | Enforce in the native bootstrap, never in a view a deep link could route around, and keep enforcing on live posture changes after launch. Regression-test on `adultContent`, not Edition: a server-confirmed adult Event is not-found natively; an unproven posture shows the retryable state without content; a general-audience Event of any Edition, GCB included, resolves; a mid-session rise to adult blocks the Event before the new content renders; web behavior is unchanged. |
+| The adult-content posture gate is bypassed and a reviewer reaches an adult pool | High | Enforce in the native bootstrap, never in a view a deep link could route around, and keep enforcing on live posture changes after launch. Regression-test on `adultContent`, not Edition: a server-confirmed adult Event is not-found natively; an unproven posture blocks access to the Event's content (the retryable state is the recommended presentation, not a tested contract); a general-audience Event of any Edition, GCB included, resolves; a mid-session rise to adult blocks the Event before the new content renders; web behavior is unchanged. |
 | Shipped player blocking behaves differently in the native shell, or a reviewer expects rules-enforced reads | Medium | Blocking shipped (ADR 0016). Verify reciprocal hiding and the Hearts denial in the native build before submission, and cite the spec's enforcement table in review notes. |
 | Post-install link context is lost and players strand on the join screen | Medium | Treat the code as the primary path and print it on every invite surface beside the store button. |
 | Play's fourteen-day closed test collides with an Event date | Medium | Use an organization account, or start the clock well before any Event depends on it. |
