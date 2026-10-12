@@ -11,7 +11,7 @@ generated_by: scripts/project-doc-sync.sh
 do_not_edit: true
 source_repo: nathanjohnpayne/docs
 source_path: projects/gaycruisebingo/prds/fiveacrossbingo.md
-source_ref: 5a91a80
+source_ref: 4c85054
 project: gaycruisebingo
 document_class: prd
 document_slug: fiveacrossbingo
@@ -60,7 +60,7 @@ The migration should establish wildcard event routing for both Five Across and V
 |---|---|---|
 | **Five Across** / `fiveacross.app` | Master brand, organizer home, and central account surface | Hosts brand, event-management, and centralized sign-in entry points; individual games live on event subdomains. |
 | **Five Across event namespace** / `*.fiveacross.app` | Durable platform address for every event | A wildcard Cloudflare DNS record and Worker route resolve the first hostname label to an Event. For edition-branded Events, this address is a stable alias of the Event's canonical hostname—serving in place rather than redirecting (#599). |
-| **Vacay Bingo** / `vacaybingo.com` and `*.vacaybingo.com` | Travel edition endorsed by Five Across and canonical namespace for travel Events | The apex is the travel-focused landing experience; the wildcard uses the same Event router and serves `<event-slug>.vacaybingo.com` in place as the Edition-branded player address for Vacay Events, while the `fiveacross.app` address is canonical (#599, #960). Bodega Bay is the first production slug. |
+| **Vacay Bingo** / `vacaybingo.com` and `*.vacaybingo.com` | Travel edition endorsed by Five Across and Edition-branded namespace for travel Events (the `fiveacross.app` address is canonical, #599) | The apex is the travel-focused landing experience; the wildcard uses the same Event router and serves `<event-slug>.vacaybingo.com` in place as the Edition-branded player address for Vacay Events, while the `fiveacross.app` address is canonical (#599, #960). Bodega Bay is the first production slug. |
 | **Gay Cruise Bingo** / `gaycruisebingo.com` | Original edition and legacy production environment | Remains live on its existing Firebase project, preserving installed PWAs, saved links, authentication callbacks, cruise-specific entry points, and adult event history. |
 | **For the Story** / `forthestorybingo.com` | Brand promise, campaign, or shareable acquisition URL | Redirects to an appropriate Five Across campaign or landing page; it is not a fourth product to maintain. |
 
@@ -164,7 +164,7 @@ The following are initial targets to validate. They should be recalibrated after
 - **Goal: Support repeated engagement.** **Metric:** for events lasting three or more days, at least 50% of active players return on three separate days; Daily Card events should show a participation lift after each unlock.
 - **Goal: Be reliably phone-native.** **Metric:** installable PWA on iOS and Android, primary actions reachable one-handed, Lighthouse PWA and performance scores of at least 90 on a mid-tier phone, and useful read/write behavior during temporary connectivity loss.
 - **Goal: Become operationally reusable.** **Metric:** after the multi-event milestone, a new event can launch without a source-code edit or event-specific application deployment.
-- **Goal: Make event addresses automatic.** **Metric:** creating an Event with an available slug makes `<slug>.fiveacrossbingo.com` and, when it is a Vacay Event, `<slug>.vacaybingo.com` resolvable without a new DNS record, Hosting custom domain, TLS certificate request, OAuth callback, or Worker route.
+- **Goal: Make event addresses automatic.** **Metric:** creating an Event with an available slug makes `<slug>.fiveacross.app` and, when it is a Vacay Event, `<slug>.vacaybingo.com` resolvable without a new DNS record, Hosting custom domain, TLS certificate request, OAuth callback, or Worker route.
 - **Goal: Enforce group privacy.** **Metric:** automated rules tests demonstrate that a signed-in player cannot read or write another event's private membership, boards, proofs, media, feed, or standings.
 
 ## Non-Goals
@@ -419,7 +419,7 @@ Never place an ID token, refresh token, or Firebase custom token in the URL. Rej
 
 Keep `gaycruisebingo.com` live during the transition. Once the new origin is proven, it can either retain a thin event-specific landing experience or redirect into the Gay Cruise Bingo event on Five Across. Do not break existing deep links or installed app behavior merely to make the domain change appear instantaneous.
 
-Start the `vacaybingo.com` apex as a travel landing page or entry into the Five Across organizer flow, while its wildcard subdomains serve as canonical addresses for travel Events. Point `forthestorybingo.com` to a campaign or landing page. No edition domain creates a second game runtime.
+Start the `vacaybingo.com` apex as a travel landing page or entry into the Five Across organizer flow, while its wildcard subdomains serve travel Events in place as Edition-branded addresses; the `fiveacross.app` address is canonical (#599). Point `forthestorybingo.com` to a campaign or landing page. No edition domain creates a second game runtime.
 
 The wildcard architecture is supported by Cloudflare wildcard DNS and Worker routes. Firebase Hosting custom domains remain suitable for the small set of exact infrastructure hosts, but not as the event-provisioning mechanism: Firebase provisions certificates per custom domain and limits custom-domain subdomains per apex, while Google OAuth redirect validation disallows arbitrary wildcard callbacks.
 
@@ -562,12 +562,12 @@ Do not let players install the PWA before Gate 3 passes: an installed service wo
 - [x] **Gay Cruise Bingo remains on its existing Firebase project; Five Across begins on a new production Firebase project using the same repository.**
 - [x] **Every Five Across Event receives a stable `<event-slug>.fiveacross.app` address** (originally `fiveacrossbingo.com`; amended 2026-08-08).
 - [x] **Vacay Events may also be served at `<event-slug>.vacaybingo.com`. Every registered host serves in place, and the Five Across address is canonical** (#599, as amended). This was originally decided the other way round: the Vacay address was canonical and the Five Across address a redirecting platform alias.
-- [x] **Wildcard DNS and routing ship before the first Five Across Event; event domains are never provisioned one at a time.** Bodega's exact record is retained as a revert lever rather than as a provisioning pattern (see Hosting and domains); grey-clouding it does not waive the platform requirement.
+- [x] **Wildcard DNS and routing ship before the first Five Across Event; event domains are never provisioned one at a time.** Bodega's exact record is retained as a revert lever rather than as a provisioning pattern (see Hosting and domains); grey-clouding it does not waive the platform requirement. *As run:* Bodega did not exercise wildcard routing. Firebase Hosting served it directly and no Worker existed at the time (#569). The Worker router shipped afterward (#545), and wildcard cutover verification is still outstanding (#539, #550), so the POC does not count as coverage for it.
 - [x] **Brand identity is a codified family system:** Five Across is the host, Vacay Bingo is the detour-suggesting friend, the travel lockup is "VACAY BINGO by Five Across — Take the detour. / For the story.", and the one-identity rule governs every player-facing surface after entry.
 - [x] **If the three-day window forces a cut, player suggestions ship and the Most-Loved Photo finale degrades** to the existing photo-highlights treatment; the finale then ships as a fast-follow for the next Vacay Event.
 - [x] **Authentication uses one exact central origin rather than per-event OAuth callbacks.**
 - [x] **Bodega Bay is the first non-Gay-Cruise proof of concept.**
-- [x] **Bodega Bay tests both wildcard domains.** As run on August 7–9, the trip played on `bodega-bay.vacaybingo.com`, then canonical, with the planned Five Across alias redirecting to it (#570). Since #599 and the 2026-09-10 migration (#960), `bodega-bay.fiveacross.app` is canonical and `bodega-bay.vacaybingo.com` serves in place as an alias.
+- [x] **Bodega Bay tests both wildcard domains** (the approved plan). As run on August 7–9, the trip played on `bodega-bay.vacaybingo.com`, then canonical, served directly by Firebase Hosting rather than through a wildcard route. The planned Five Across alias redirected to it through a Cloudflare Single Redirect (#570). The POC therefore validated neither namespace's wildcard routing. Since #599 and the 2026-09-10 migration (#960), `bodega-bay.fiveacross.app` is canonical and `bodega-bay.vacaybingo.com` serves in place as an alias.
 - [x] **The existing Daily Cards wireframes remain the visual and interaction authority for the Bodega Bay pilot.**
 - [x] **Players can put their own ideas on tomorrow's card; approved suggestions become player-sourced Prompts mixed into the next eligible Daily Card.**
 - [x] **Feed hearts are an explicit connection mechanic, and final standings include the frozen Most-Loved Photo when an eligible photo received hearts.**
