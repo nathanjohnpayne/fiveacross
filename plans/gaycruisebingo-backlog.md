@@ -66,7 +66,7 @@ Issue numbers are filled in after creation (see the slug → issue map at the bo
 | w3-claim-modes | Claim Modes (honor / proof_required / **admin_confirmed**) + Claims + admin confirm/reject | social | claims | 0 | 3 | L | 0001 | w2-admin-console, w2-proof-capture, w0-type-contract | Backlog |
 | w3-security-hardening | Security & rules hardening: noindex, acceptable-use page, self-writable-by-design docs, protected-path policy | moderation | security | hardening | 3 | M | 0001,0002,0004 | w0-firestore-rules | Backlog |
 | w4-phase1-functions | Phase 1 functions: server-authoritative hide (flip `status` at threshold) + keep Vision extreme-only + sharp thumbs | backend | backend | 1 | 4 | L | 0004 | w2-admin-console, w0-firestore-rules | Backlog |
-| w4-app-check | App Check enforcement (reCAPTCHA Enterprise): provision key + enforce | phase2-hardening | backend | 2 | 4 | M | 0004 | w1-auth-google | Backlog |
+| w4-app-check | App Check (reCAPTCHA Enterprise): provision both projects, keep ready as break-glass | phase2-hardening | backend | 2 | 4 | M | 0004 | w1-auth-google | Done |
 | w4-infra-domain | Infra: Cloudflare → Firebase Hosting custom domain + SSL (DNS-only) + headers | backend | infra | hardening | 4 | M | — | — | Backlog |
 | w4-infra-blaze-budget | Infra: Blaze upgrade + budget alert before enabling Phase 1 | backend | infra | 1 | 4 | S | — | — | Backlog |
 | p2-vision-proof | Cloud Vision (proof): re-enable the gated `moderateProof` SafeSearch scanner + thumbnails | phase2-hardening | proof | 2 | 4 | M | 0004 | w2-proof-capture, w4-infra-blaze-budget | Backlog |
@@ -147,7 +147,7 @@ Each expands into a full templated issue body (`scripts/gh-projects/examples/gay
 
 **w4-phase1-functions** *(needs-phase-4, phase-1, Blaze)*—`moderateProof` (sharp thumbnail + Cloud Vision extreme/illegal-only; **not** raciness) already satisfies ADR-0004 Phase 1—keep it. Add server-authoritative hide: a Function that flips `proof`/`item` `status:'hidden'` when `reportCount ≥ threshold` (Phase 1 makes the Phase-0 client hide authoritative), plus the Phase-1 rules update making `status` server-set. Do **not** re-add `recomputeStats` as anti-cheat. Files: `functions/src/index.ts`, `firestore.rules`.
 
-**w4-app-check** *(needs-phase-4, phase-1, decision-needed)*—`firebase.ts` already scaffolds `initializeAppCheck` with `ReCaptchaEnterpriseProvider` gated on `VITE_RECAPTCHA_SITE_KEY`. Provision the reCAPTCHA Enterprise key (GCP), set the env, enable enforcement for Firestore + Storage. Decision: key + enforcement timing. Files: `firebase.ts` (already wired), env/config, Firebase console.
+**w4-app-check** *(needs-phase-4, phase-1)*—`firebase.ts` already scaffolds `initializeAppCheck` with `ReCaptchaEnterpriseProvider` gated on `VITE_RECAPTCHA_SITE_KEY`. Provision the reCAPTCHA Enterprise key (GCP), set the env, enable enforcement for Firestore + Storage. Decision: key + enforcement timing. **Superseded 2026-10-12 (#44):** both projects are provisioned, but App Check stays break-glass only, with no key in routine bundles and no enforcement; see `specs/w4-app-check.md`. Files: `firebase.ts` (already wired), env/config, Firebase console.
 
 **w4-infra-domain** *(needs-phase-4)*—Connect `gaycruisebingo.com` (Cloudflare → Firebase Hosting), DNS-only / unproxied so Firebase issues the cert (PRD risk: up to ~24 h); verify hosting headers. Deploy via `op-firebase-deploy`. Phase 0 hosting runs on Spark.
 
@@ -171,7 +171,7 @@ Epic [#131](https://github.com/nathanjohnpayne/fiveacross/issues/131). The post-
 
 **x-multi-event-schema** *(design-only)*—Document that the schema is already event-scoped (`events/{eventId}`), a second Event = a new Event doc, and there is **no** room-browsing / join-code UI (PRD non-goal, ADR 0003). Spec only (`tested: false` + `reason:`), no code.
 
-**x-decisions-needed** *(decision-needed)*—One issue collecting the genuine open operational/config decisions, each tagged with the ticket(s) it blocks: admin roster (2–4 uids incl. Nathan's seed uid) → `w1-event-seed`; confirm `reportHideThreshold` = 4 → `w2-admin-console`; Blaze budget $ → `w4-infra-blaze-budget`; reCAPTCHA Enterprise key + enforcement timing → `w4-app-check`; domain cutover timing → `w4-infra-domain`; GA4 consent copy/region → `w2-ga4-events`; keep `recomputeStats` as labeled repair? (default: remove) → `recon-recompute-stats`. Blocks **only** those tickets, not the whole backlog.
+**x-decisions-needed** *(decision-needed)*—One issue collecting the genuine open operational/config decisions, each tagged with the ticket(s) it blocks: admin roster (2–4 uids incl. Nathan's seed uid) → `w1-event-seed`; confirm `reportHideThreshold` = 4 → `w2-admin-console`; Blaze budget $ → `w4-infra-blaze-budget`; ~~reCAPTCHA Enterprise key + enforcement timing → `w4-app-check`~~ (resolved 2026-10-12: provisioned, break-glass only); domain cutover timing → `w4-infra-domain`; GA4 consent copy/region → `w2-ga4-events`; keep `recomputeStats` as labeled repair? (default: remove) → `recon-recompute-stats`. Blocks **only** those tickets, not the whole backlog.
 
 ## Coverage matrix
 

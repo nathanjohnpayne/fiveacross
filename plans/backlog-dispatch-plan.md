@@ -47,7 +47,6 @@ Every open issue. P0 = production health, dispatch alone and immediately. P1 = u
 | #632 | GA4 coverage pass | **P2 (split)** | Email-UTM leg is actionable; the fiveacross-stream decision is Nathan's (Decisions). |
 | #134 | Post-Event archive | **P2** | Newly timely — both Events have now ended and nothing sets `status:'archived'`. |
 | #132 → #133 | Cloud Vision proof scan → auto-hide | **P2 (sequenced)** | Hardening pair; #132's region blocker resolved, needs API enablement + env flip + deploy; #133 consumes #132's flags. |
-| #44 | App Check enforcement | **P2 (human-gated)** | Client scaffold shipped; remaining work is key provisioning + enforcement — console-side, plus a deploy env change. |
 | #743, #769 | [error-tracking] NS_ERROR_FAILURE | **P2 (triage)** | Empty bodies, zero comments — genuinely untriaged (checked, per the pre-triage rule). One investigation pass via PostHog before any code. |
 | #766 + #626 | Root create page + path addressing | **P1 (spec first)** | Decided 2026-08-17: proceed, designed together — filed as #799 (the combined design spec incl. the PRD non-goal amendment; Opus 4.8 · high, dispatchable in any free lane). #766/#626 carry native blocked-by links to #799; implementation follows the spec. |
 | #604 | Leaderboard proof chips union | **P2** | Decided 2026-08-17: union of proof types. XS–S, Sonnet 5 · low, any free lane. |
@@ -229,7 +228,7 @@ Shared-module rule for this wave: #790 and #545 both need the slug-normalization
 5. **#600** steps 1–4 (DNS CNAME, Hosting custom domain, OAuth redirect URI, authorized domain); step 5 (hostnames doc) is agent-scriptable afterward.
 6. **#578** PostHog managed reverse proxy at `d.fiveacross.app` + CNAME.
 7. **#630** stays blocked until #600 completes.
-8. **#44** reCAPTCHA Enterprise key provisioning when hardening gets scheduled.
+8. ~~**#44** reCAPTCHA Enterprise key provisioning when hardening gets scheduled.~~ Done 2026-10-12: provisioned in both projects, break-glass only (`specs/w4-app-check.md`).
 9. **#632** create the fiveacross GA4 stream (decided 2026-08-17, § 5.4); hand the measurement id to the env-plumbing leg.
 
 ## 5 · Decisions — asked and answered by Nathan, 2026-08-17
