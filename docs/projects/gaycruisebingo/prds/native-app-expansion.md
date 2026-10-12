@@ -12,7 +12,7 @@ generated_by: scripts/project-doc-sync.sh
 do_not_edit: true
 source_repo: nathanjohnpayne/docs
 source_path: projects/gaycruisebingo/prds/native-app-expansion.md
-source_ref: f757aec
+source_ref: 5a91a80
 project: gaycruisebingo
 document_class: prd
 document_slug: native-app-expansion
@@ -110,7 +110,9 @@ Implementation is a check in the **native bootstrap**, after the shared resolver
 - **Adult posture confirmed by a server read** (`adultContent: true`, `adultContentProven: true`): the Event is not available in the app. Render the existing not-found screen, with copy directing the player to the web.
 - **Posture unproven** (`adultContentProven: false`): the resolver could not confirm the posture. For example, revalidating a cached general-audience posture failed, so the resolver keeps the cached Event mapping but reports `adultContent: true` (`src/eventResolution.ts`, `src/adult-content.test.ts`). Keep access blocked, but do not claim the Event does not exist. **Recommendation:** show a retryable "Couldn't verify this Event" state whose retry re-runs resolution. The cached Event identity may label that state and drive the retry, but it never permits showing the Event's content. The retry experience is a recommendation for the implementing spec, not a settled contract.
 
-Three constraints matter. It is native-only and must not apply on the web, where the 18+ acknowledgement remains the correct control. It must live in the bootstrap rather than in a view, so a deep link cannot route around it. And because the field fails closed, an Event that cannot be proven general-audience is never admitted—the safe direction for a store binary.
+Four constraints matter. It is native-only and must not apply on the web, where the 18+ acknowledgement remains the correct control. It must live in the bootstrap rather than in a view, so a deep link cannot route around it. Because the field fails closed, an Event that cannot be proven general-audience is never admitted—the safe direction for a store binary.
+
+The fourth constraint: **the gate must keep watching after bootstrap.** The posture can rise during a session, for example when an Admin approves an Event's first explicit Prompt or enables the adult override and the server re-derives the routing document. A launch-time check alone would leave a session that resolved general-audience showing the newly adult content. The app already watches posture live (`src/components/AdultContentWatcher.tsx`, ADR 0012). On the web, a rise re-shows the 18+ acknowledgement, and an attested Player continues. In the native shell an acknowledgement is not enough: a rise to adult, or a lost live read that returns the posture to unproven, must block or leave the Event before the newly adult content renders. Treat it as a bootstrap rejection: show the not-found or retryable state and remount without the Event.
 
 This preserves the parent PRD's commitment that Gay Cruise Bingo "remains live on its existing Firebase project, preserving installed PWAs, saved links, authentication callbacks, cruise-specific entry points, and adult event history." Nothing about GCB on the web changes.
 
@@ -235,7 +237,7 @@ Android adds **1.5–2 weeks** for back-button handling, device coverage, and Pl
 |---|---|---|
 | Native offline persistence is unresolved when the shell is otherwise ready | High | Do not retire native-path offline machinery or ship a native build that depends on it until a named persistence approach is tested (fiveacross#1767). The browser path is unaffected. |
 | Store review rejects the build as insufficiently native | High | Ship bundled rather than remote-first; the platform shape—multi-Event, accounts, camera, push, deep links—is the argument, and a single-Event wrapper is what gets rejected. |
-| The adult-content posture gate is bypassed and a reviewer reaches an adult pool | High | Enforce in the native bootstrap, never in a view a deep link could route around. Regression-test on `adultContent`, not Edition: a server-confirmed adult Event is not-found natively; an unproven posture shows the retryable state without content; a general-audience Event of any Edition, GCB included, resolves; web behavior is unchanged. |
+| The adult-content posture gate is bypassed and a reviewer reaches an adult pool | High | Enforce in the native bootstrap, never in a view a deep link could route around, and keep enforcing on live posture changes after launch. Regression-test on `adultContent`, not Edition: a server-confirmed adult Event is not-found natively; an unproven posture shows the retryable state without content; a general-audience Event of any Edition, GCB included, resolves; a mid-session rise to adult blocks the Event before the new content renders; web behavior is unchanged. |
 | Shipped player blocking behaves differently in the native shell, or a reviewer expects rules-enforced reads | Medium | Blocking shipped (ADR 0016). Verify reciprocal hiding and the Hearts denial in the native build before submission, and cite the spec's enforcement table in review notes. |
 | Post-install link context is lost and players strand on the join screen | Medium | Treat the code as the primary path and print it on every invite surface beside the store button. |
 | Play's fourteen-day closed test collides with an Event date | Medium | Use an organization account, or start the clock well before any Event depends on it. |
