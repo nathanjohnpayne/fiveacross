@@ -12,7 +12,7 @@ generated_by: scripts/project-doc-sync.sh
 do_not_edit: true
 source_repo: nathanjohnpayne/docs
 source_path: projects/gaycruisebingo/prds/native-app-expansion.md
-source_ref: ae89224
+source_ref: 97b0479
 project: gaycruisebingo
 document_class: prd
 document_slug: native-app-expansion
@@ -30,7 +30,7 @@ sync_direction: central-to-repo
 **Parent PRD:** [Five Across Bingo](fiveacrossbingo.md)
 **Source brief:** [Gay Cruise Bingo](gaycruisebingo.md)
 
-> **This phase supersedes a parent Non-Goal, as the parent anticipated.** The parent lists "Native App Store or Play Store applications. The PWA remains the *initial* delivery model." That wording reserved the option rather than closing it, and this document exercises it. The Non-Goal remains in force for **Gay Cruise Bingo** in two respects: it gets no store listing of its own, and its explicit pool never ships in a store binary. A general-audience GCB Event may still resolve in the Five Across app—see § Decision 1.
+> **This phase supersedes a parent Non-Goal, as the parent anticipated.** The parent lists "Native App Store or Play Store applications. The PWA remains the *initial* delivery model." That wording reserved the option rather than closing it, and this document exercises it. The Non-Goal remains in force for **Gay Cruise Bingo** in one respect: it gets no store listing of its own. Whether its explicit pool may ship in a store binary is still open (§ Open Decisions, the 2027 sailing); the current recommendation is that it does not. A general-audience GCB Event in the Five Across Firebase project may resolve in the Five Across app—see § Decision 1.
 
 ### Where each kind of decision lives
 
@@ -45,7 +45,7 @@ This document follows the parent's split. It is authoritative for the **product 
 
 ## Recommendation
 
-Ship a **Capacitor shell** around the existing web application as a single **Five Across** listing on the App Store, with Google Play as a fast follow. Do not rewrite the client in SwiftUI or React Native. Do not create per-Edition listings. Do not give Gay Cruise Bingo a listing, and do not put its explicit pool in a store binary.
+Ship a **Capacitor shell** around the existing web application as a single **Five Across** listing on the App Store, with Google Play as a fast follow. Do not rewrite the client in SwiftUI or React Native. Do not create per-Edition listings. Do not give Gay Cruise Bingo a listing. Pending the open 2027 decision, do not put its explicit pool in a store binary.
 
 The client is roughly 32.5k lines of production TypeScript against 46k lines of tests. A SwiftUI rewrite reuses none of it and costs five to seven months; React Native reuses about a third—the data layer and game logic—and costs two and a half to four months. A Capacitor shell keeps essentially all of it and costs roughly seven to nine weeks including compliance, before two pieces of work this document leaves open and does not estimate: native offline persistence (§ Over-the-air updates) and the join-code record shape (§ Decision 2), which is the only option whose cost is proportionate to what native actually buys this product.
 
@@ -71,7 +71,7 @@ The product also has a recurring re-engagement beat it cannot currently deliver 
 
 - **A SwiftUI or React Native rewrite.** Wrong cost for a 5×5 grid; see § Recommendation.
 - **Per-Edition store listings.** Two listings double review, compliance, and update channels to buy marketing surface that store copy already provides.
-- **A Gay Cruise Bingo store listing, or its explicit pool in a store binary.** General-audience GCB Events may still resolve in the Five Across app; see § Decision 1.
+- **A Gay Cruise Bingo store listing.** Keeping its explicit pool out of the store binary is the current recommendation, not a settled non-goal: the 2027 sailing decision in § Open Decisions can change it. General-audience GCB Events in the Five Across Firebase project may still resolve in the app; see § Decision 1.
 - **In-session Event switching.** Joining a second Event tears down and remounts the application root. True switching requires folding the Event id into every subscription key first, which is separate work.
 - **A dynamic home-screen icon per Edition.** iOS cannot rename an installed app at runtime and shows a system alert on every icon change; Android's equivalent drops the app from the launcher mid-swap. The icon and name stay Five Across.
 - **Deferred-deep-link attribution services.** The join code closes the post-install gap without a third-party dependency or its privacy-label consequences.
@@ -95,7 +95,7 @@ One Capacitor binary wrapping the existing web application, published as a singl
 
 ### Decision 1—the native resolver gates on adult-content posture, not on Edition
 
-**The native application refuses to resolve any Event whose server-derived `adultContent` posture is true, of any Edition. It resolves every general-audience Event, of any Edition—Gay Cruise Bingo included.**
+**The native application refuses to resolve any Event whose server-derived `adultContent` posture is true, of any Edition. It resolves every general-audience Event in the Five Across Firebase project, of any Edition—Gay Cruise Bingo included.**
 
 An earlier draft of this decision whitelisted Editions and excluded Gay Cruise Bingo outright. That was wrong on its own terms: ADR 0012 makes the adult posture a property of the **Event's Prompt pool**, explicitly independent of Edition—"a `fiveacross` Event with spicy Prompts is 18+ with general vocabulary; a `gcb` Event with a tame pool is not 18+ at all." An Edition whitelist gates the wrong axis, and it would have excluded a tame GCB Event that poses no store problem while admitting a spicy Vacay Event that does.
 
@@ -116,7 +116,7 @@ The fourth constraint: **the gate must keep watching after bootstrap.** The post
 
 This preserves the parent PRD's commitment that Gay Cruise Bingo "remains live on its existing Firebase project, preserving installed PWAs, saved links, authentication callbacks, cruise-specific entry points, and adult event history." Nothing about GCB on the web changes.
 
-**If the 2027 cruise should run natively with its explicit pool**, that is a different decision with a different price: ship the single listing at 17+ and keep the adult acknowledgement in the app. See § Open Decisions—it is a live option, not a foreclosed one, and it is the only path that puts an explicit pool in a store binary.
+**If the 2027 cruise should run natively with its explicit pool**, that is a different decision with a different price: ship the single listing at 17+ and keep the adult acknowledgement in the app. The Event would also have to live in the Five Across Firebase project, or cross-project reach would have to be built first (see above). See § Open Decisions—it is a live option, not a foreclosed one, and it is the only path that puts an explicit pool in a store binary.
 
 ### Decision 2—the join code is the Event Slug, resolved through the public hostname projection
 
@@ -160,7 +160,7 @@ The parent PRD's domain table was amended in place on 2026-08-08 to match. Two m
 
 Association files at `/.well-known/apple-app-site-association` and `/.well-known/assetlinks.json`, served over the existing Hosting configuration with a header rule forcing the JSON content type on the extension-less Apple file.
 
-Both namespaces must carry them, because either can be the address a player taps: `fiveacross.app` and its wildcard for platform addresses, and `vacaybingo.com` and its wildcard for Edition-branded travel-Event addresses. `gaycruisebingo.com` deliberately carries neither, so every GCB-domain link keeps opening the web application. The reason is not that the app refuses GCB Events: under Decision 1 it resolves any general-audience Event, GCB included. The reason is the domain itself. It is the legacy edition's doorway on its own Firebase project, and the parent PRD commits to leaving its installed PWAs, saved links, and authentication callbacks unchanged. Claiming its links for the app would reroute that cohort's existing links. Decision 1 still governs any GCB Event the app reaches by join code or a platform address.
+Both namespaces must carry them, because either can be the address a player taps: `fiveacross.app` and its wildcard for platform addresses, and `vacaybingo.com` and its wildcard for Edition-branded travel-Event addresses. `gaycruisebingo.com` deliberately carries neither, so every GCB-domain link keeps opening the web application. The reason is not that the app refuses GCB Events: under Decision 1 it resolves any general-audience Event in the Five Across Firebase project, GCB included. The reason is the domain itself. It is the legacy edition's doorway on its own Firebase project, and the parent PRD commits to leaving its installed PWAs, saved links, and authentication callbacks unchanged. Claiming its links for the app would reroute that cohort's existing links. Decision 1 still governs any GCB Event the app reaches by join code or a platform address. An address alone does not give the app cross-project reach: a GCB Event in the legacy `gaycruisebingo` project stays unreachable however it is addressed.
 
 Per-Event subdomains are close to free, because the wildcard namespaces the parent PRD establishes in Phase 0 resolve to one Hosting site per namespace—one association file serves every Event host under it, and Apple's subdomain wildcard covers the rest. The application-not-installed path degrades to the web application by design, which is the correct fallback and needs no attribution service.
 
@@ -237,7 +237,7 @@ Android adds **1.5–2 weeks** for back-button handling, device coverage, and Pl
 |---|---|---|
 | Native offline persistence is unresolved when the shell is otherwise ready | High | Do not retire native-path offline machinery or ship a native build that depends on it until a named persistence approach is tested (fiveacross#1767). The browser path is unaffected. |
 | Store review rejects the build as insufficiently native | High | Ship bundled rather than remote-first; the platform shape—multi-Event, accounts, camera, push, deep links—is the argument, and a single-Event wrapper is what gets rejected. |
-| The adult-content posture gate is bypassed and a reviewer reaches an adult pool | High | Enforce in the native bootstrap, never in a view a deep link could route around, and keep enforcing on live posture changes after launch. Regression-test on `adultContent`, not Edition: a server-confirmed adult Event is not-found natively; an unproven posture blocks access to the Event's content (the retryable state is the recommended presentation, not a tested contract); a general-audience Event of any Edition, GCB included, resolves; a mid-session rise to adult blocks the Event before the new content renders; web behavior is unchanged. |
+| The adult-content posture gate is bypassed and a reviewer reaches an adult pool | High | Enforce in the native bootstrap, never in a view a deep link could route around, and keep enforcing on live posture changes after launch. Regression-test on `adultContent`, not Edition: a server-confirmed adult Event is not-found natively; an unproven posture blocks access to the Event's content (the retryable state is the recommended presentation, not a tested contract); a general-audience Event of any Edition in the Five Across project, GCB included, resolves; an Event in another Firebase project does not; a mid-session rise to adult blocks the Event before the new content renders; web behavior is unchanged. |
 | Shipped player blocking behaves differently in the native shell, or a reviewer expects rules-enforced reads | Medium | Blocking shipped (ADR 0016). Verify reciprocal hiding and the Hearts denial in the native build before submission, and cite the spec's enforcement table in review notes. |
 | Post-install link context is lost and players strand on the join screen | Medium | Treat the code as the primary path and print it on every invite surface beside the store button. |
 | Play's fourteen-day closed test collides with an Event date | Medium | Use an organization account, or start the clock well before any Event depends on it. |
@@ -255,7 +255,7 @@ Android adds **1.5–2 weeks** for back-button handling, device coverage, and Pl
 - [ ] **Join-code record shape (prerequisite).** How does a Slug-keyed join code fit the paired canonical/public projection contract and the lifecycle writer? (§ Decision 2)
 - [ ] Should the join screen accept a pasted invite URL as well as a bare Slug? Cheap, and covers the player who copies the link rather than the code.
 - [ ] Does the bundle updater apply quietly on next launch, or prompt as the web update flow does today? The current prompt copy is Edition-branded and would otherwise be deleted.
-- [ ] **Does the summer-2027 Atlantis sailing run natively with its explicit pool?** This is the one decision that changes the store rating. Rated for general audiences, the binary reaches only tame pools and that cruise plays on the web, as every prior sailing has. Rated 17+, it can carry the explicit pool—at the cost of every wedding, conference, and family trip inheriting a 17+ listing, and of a materially higher moderation bar on the proof feed (see § Trust, safety, and compliance). **Recommendation: stay general-audience and let the 2027 cruise play on the web.** The PWA is the surface that sailing has always used, GCB players are the cohort least likely to need a store install, and the rating cost falls on every other Event. Revisit only if native-only capabilities—push, offline capture—become load-bearing for a cruise.
+- [ ] **Does the summer-2027 Atlantis sailing run natively with its explicit pool?** This is the one decision that changes the store rating. Running it natively at all also requires the Event to live in the Five Across Firebase project, or cross-project reach to be built first (§ Decision 1). Rated for general audiences, the binary reaches only tame pools and that cruise plays on the web, as every prior sailing has. Rated 17+, it can carry the explicit pool—at the cost of every wedding, conference, and family trip inheriting a 17+ listing, and of a materially higher moderation bar on the proof feed (see § Trust, safety, and compliance). **Recommendation: stay general-audience and let the 2027 cruise play on the web.** The PWA is the surface that sailing has always used, GCB players are the cohort least likely to need a store install, and the rating cost falls on every other Event. Revisit only if native-only capabilities—push, offline capture—become load-bearing for a cruise.
 - [ ] Does native delivery change the Phase 5 self-service story—can an organizer's Event be reached from the app without a developer registering anything? Under Decision 2 the answer should be yes automatically, but it needs confirming against the organizer flow.
 
 ## Appendix
@@ -263,5 +263,5 @@ Android adds **1.5–2 weeks** for back-button handling, device coverage, and Pl
 - **Parent:** [Five Across Bingo](fiveacrossbingo.md) § Migration Plan (Phases 0–6), § Non-Goals, § Editions.
 - **Source brief:** [Gay Cruise Bingo](gaycruisebingo.md).
 - **Application repository surfaces:** `CONTEXT.md` (ubiquitous language) · `docs/adr/0005`, `0006`, `0009`, `0012`, `0016` · `docs/app/README.md` and `docs/app/phase-1-deploy.md` (prior delivery phases) · `specs/hostnames-lookup.md` · `specs/player-blocking.md`.
-- **Editions and store eligibility:** Five Across (platform register—ships) · Vacay Bingo, by Five Across (travel edition—ships) · Gay Cruise Bingo (legacy edition—no listing; its explicit pool and `gaycruisebingo.com` links stay on the web, while general-audience GCB Events may resolve natively; see Decision 1).
+- **Editions and store eligibility:** Five Across (platform register—ships) · Vacay Bingo, by Five Across (travel edition—ships) · Gay Cruise Bingo (legacy edition—no listing; its explicit pool and `gaycruisebingo.com` links stay on the web, while general-audience GCB Events in the Five Across Firebase project may resolve natively; the explicit pool's store eligibility is the open 2027 decision; see Decision 1).
 - **Store facts:** Apple Developer Program is 99 USD per year; Google Play is a one-time 25 USD registration. Over-the-air limits are in § Over-the-air updates: Apple Guideline 2.5.2 bars downloaded code that introduces or changes features, and Play permits interpreted code subject to its broader policies.
