@@ -11,7 +11,7 @@ generated_by: scripts/project-doc-sync.sh
 do_not_edit: true
 source_repo: nathanjohnpayne/docs
 source_path: projects/gaycruisebingo/prds/fiveacrossbingo.md
-source_ref: 4c85054
+source_ref: ae89224
 project: gaycruisebingo
 document_class: prd
 document_slug: fiveacrossbingo
@@ -757,7 +757,13 @@ The gate required all of the following before the player link was shared:
 | Every expected participant is confirmed to have a Google account, since Google is the only sign-in method | Not recorded | Unchecked on #571. |
 | An administrator has a tested manual unlock, Notice, moderation, and event-stop procedure | Not recorded | Treated as in-flight operational calls (#571). |
 
-**Still open from this gate:** the four-surface sign-in evidence matrix (#550).
+**Still open from this gate:**
+
+- **Cohort isolation.** Membership enforcement is not deployed, so the project split alone does not keep Bodega players out of Gay Cruise Bingo data, or vice versa (ADR 0008).
+- **Wildcard routing.** Neither namespace's wildcard routing was exercised, and cutover verification is outstanding (#539).
+- **Sign-in evidence.** The four-surface sign-in matrix is incomplete (#550).
+
+Every other check above that reads "Not recorded" was never verified, and should not be treated as passed.
 
 ### POC success measures
 
