@@ -47,7 +47,7 @@ Every open issue. P0 = production health, dispatch alone and immediately. P1 = u
 | #632 | GA4 coverage pass | **P2 (split)** | Email-UTM leg is actionable; the fiveacross-stream decision is Nathan's (Decisions). |
 | #134 | Post-Event archive | **P2** | Newly timely — both Events have now ended and nothing sets `status:'archived'`. |
 | #132 → #133 | Cloud Vision proof scan → auto-hide | **P2 (sequenced)** | Hardening pair; #132's region blocker resolved, needs API enablement + env flip + deploy; #133 consumes #132's flags. |
-| #44 | App Check enforcement | **P2 (human-gated)** | Client scaffold shipped; remaining work is key provisioning + enforcement — console-side, plus a deploy env change. |
+| #44 | App Check enforcement | **Closed 2026-10-12** | Provisioned in both projects and kept break-glass only (no key in routine bundles, no enforcement); see `specs/w4-app-check.md`. |
 | #743, #769 | [error-tracking] NS_ERROR_FAILURE | **P2 (triage)** | Empty bodies, zero comments — genuinely untriaged (checked, per the pre-triage rule). One investigation pass via PostHog before any code. |
 | #766 + #626 | Root create page + path addressing | **P1 (spec first)** | Decided 2026-08-17: proceed, designed together — filed as #799 (the combined design spec incl. the PRD non-goal amendment; Opus 4.8 · high, dispatchable in any free lane). #766/#626 carry native blocked-by links to #799; implementation follows the spec. |
 | #604 | Leaderboard proof chips union | **P2** | Decided 2026-08-17: union of proof types. XS–S, Sonnet 5 · low, any free lane. |
