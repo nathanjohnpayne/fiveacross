@@ -1,3 +1,8 @@
+---
+tags:
+  - gaycruisebingo
+  - prd
+---
 <!--
 generated_by: scripts/project-doc-sync.sh
 do_not_edit: true
@@ -10,11 +15,6 @@ document_slug: gaycruisebingo
 sync_direction: central-to-repo
 -->
 
----
-tags:
-  - gaycruisebingo
-  - prd
----
 # Gay Cruise Bingo
 
 **Author:** Nathan Payne
