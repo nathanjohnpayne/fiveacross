@@ -53,8 +53,8 @@ When the incident ends:
 
 1. Unenforce Firestore and Storage in the App Check console and read the state back.
 2. Clear `VITE_RECAPTCHA_SITE_KEY` in the target env file and remove it from each mirror's Vercel Production env.
-3. Redeploy hosting from `main`, or roll Firebase Hosting back to the last key-free release when `main` has not moved since. Raise `public/build-floor.json`'s `floor` again so installed shells leave the key-bearing bundle and its first-load delay.
-4. Rebuild each mirror from `main`. Do not use `vercel rollback` for mirrors: it turns off production-domain auto-assignment, so a later `vercel deploy --prod` silently stops updating the mirror.
+3. Merge a one-line change to `main` that raises `public/build-floor.json`'s `floor` to the current time, so installed shells leave the key-bearing bundle and its first-load delay. Then deploy a newly built key-free hosting release from that `main`. A Hosting rollback cannot carry the new floor, because it re-serves an older immutable release.
+4. Rebuild each mirror from that same revision. Do not use `vercel rollback` for mirrors: it turns off production-domain auto-assignment, so a later `vercel deploy --prod` silently stops updating the mirror.
 5. Confirm in a browser that no host loads reCAPTCHA and that Firestore starts promptly.
 
 Keep the keys and registrations in place for the next incident.
