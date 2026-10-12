@@ -187,7 +187,7 @@ The audit lists every `hidden` row not created by the seed and prints each row's
 
 ## 2. App Check (abuse protection)
 
-App Check is provisioned in both projects but is **break-glass only**: routine builds ship no `VITE_RECAPTCHA_SITE_KEY`, and Firestore and Storage stay unenforced. With the key in the bundle, Firestore waits for a reCAPTCHA-backed App Check token before its first request, which added 3–10s to cold loads in production on 2026-10-12. Leave `VITE_RECAPTCHA_SITE_KEY` empty in `.env.gaycruisebingo` and `.env.fiveacross` and absent from the Vercel mirrors. [`specs/w4-app-check.md`](../../specs/w4-app-check.md) records the provisioned keys and registrations and the procedures for switching App Check on during an abuse incident and standing it down afterwards. Callable-level policy remains #1353.
+App Check is provisioned in both projects but is **break-glass only**: routine builds ship no `VITE_RECAPTCHA_SITE_KEY`, and Firestore and Storage stay unenforced. With the key in the bundle, Firestore waits for a reCAPTCHA-backed App Check token before its first request, which added 3–10s to cold loads in production on 2026-10-12. Leave `VITE_RECAPTCHA_SITE_KEY` empty in `.env.gaycruisebingo` and `.env.fiveacross` and absent from the Vercel mirrors. [`specs/w4-app-check.md`](../../specs/w4-app-check.md) records the provisioned keys and registrations and the procedures for switching App Check on during an abuse incident and standing it down afterwards. Callable-level App Check policy is [#1892](https://github.com/nathanjohnpayne/fiveacross/issues/1892).
 
 ## 3. Retire the old Cloud Run OG renderer (one-time, only if you deployed it before)
 
