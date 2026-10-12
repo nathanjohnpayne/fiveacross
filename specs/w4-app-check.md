@@ -9,7 +9,7 @@ reason: App Check is a provisioned, break-glass operational control; console reg
 
 Ticket #44 adds abuse protection for Cloud Firestore and Cloud Storage. It does not change Membership authority, honor-system Marks or reactive moderation. App Check attests the calling app; it does not authorize a Player's Mark.
 
-**Owner decision (2026-10-12):** App Check is a **break-glass control**. Both Firebase projects keep it provisioned and registered, but shipped bundles carry no site key and neither service is enforced in routine operation. It is switched on only for an active abuse incident and switched off when the incident ends. This supersedes the routine monitor-then-enforce rollout this spec originally described, and the deferral in [#44's timing decision](https://github.com/nathanjohnpayne/fiveacross/issues/44#issuecomment-4919347400).
+**Owner decision (2026-10-12, [recorded on #44](https://github.com/nathanjohnpayne/fiveacross/issues/44#issuecomment-6116613038)):** App Check is a **break-glass control**. Both Firebase projects keep it provisioned and registered, but shipped bundles carry no site key and neither service is enforced in routine operation. It is switched on only for an active abuse incident and switched off when the incident ends. This supersedes the routine monitor-then-enforce rollout this spec originally described, and the deferral in [#44's timing decision](https://github.com/nathanjohnpayne/fiveacross/issues/44#issuecomment-4919347400).
 
 ## Why it is not on routinely
 
@@ -33,7 +33,7 @@ A slow or blocked `google.com/recaptcha`, as on ship networks or behind ad block
 | App Check registration | Web app `1:5297095641:web:aff3537cf7c95dec220fc8`, reCAPTCHA Enterprise provider, token TTL 1h, `minValidScore` 0.5 | Web app `1:849798007162:web:70dffafa77cc65a8306ec3`, same settings |
 | Routine state | No site key in `.env.fiveacross` or either mirror's Vercel Production env; Firestore and Storage unenforced | No site key in `.env.gaycruisebingo` or the mirror's Vercel Production env; Firestore and Storage unenforced |
 
-Allowed domains cover subdomains implicitly, so a new Event on `*.fiveacross.app` or `*.vacaybingo.com` needs no key change; a new apex does. Keep domain validation on and do not add `localhost`; development uses Firebase's debug-provider procedure. The "Five Across" key also has a legacy secret key (1Password item `7slecmeueq2t5nvm2gslcr4whi`); the Enterprise provider never uses it, and it must never enter a bundle or a Vercel env.
+Allowed domains cover subdomains implicitly, so a new Event on `*.fiveacross.app` or `*.vacaybingo.com` needs no key change; a new apex does. Changing a key needs an owner credential with reCAPTCHA Enterprise admin rights. The per-project `firebase-deployer` service accounts can read and update App Check configuration and enforcement, but cannot list, create or edit reCAPTCHA keys or enable APIs. Keep domain validation on and do not add `localhost`. Local development leaves the site key empty, so App Check never initializes there. The client has no debug-provider wiring, so exercising enforcement from `localhost` would first need a dev-only `FIREBASE_APPCHECK_DEBUG_TOKEN` path, which is out of scope here. The "Five Across" key also has a legacy secret key (1Password item `7slecmeueq2t5nvm2gslcr4whi`); the Enterprise provider never uses it, and it must never enter a bundle or a Vercel env.
 
 On 2026-10-12, before the rollback, a deployed browser on each project loaded reCAPTCHA, `exchangeRecaptchaEnterpriseToken` returned 200 and Firestore succeeded. That is the end-to-end proof that the provisioned state works. Re-read the table above against the live consoles before relying on it in an incident.
 
@@ -45,7 +45,7 @@ Use this only for an active abuse incident on Firestore or Storage. Act per proj
 2. **Mirrors.** Add `VITE_RECAPTCHA_SITE_KEY` to each of that project's Vercel mirrors' Production env as type **Config** (the site key is public by design), then redeploy each mirror with the guarded block in [`deploy-targets.md` § Deploying a mirror](../docs/app/deploy-targets.md#deploying-a-mirror). Every serving host must carry the key before step 4, or enforcement locks that host out.
 3. **Attest.** Load every serving host in a browser and confirm `exchangeRecaptchaEnterpriseToken` returns 200 and that sign-in, a Firestore read/write and a Storage upload/download still work. Do not record App Check or Auth tokens. Firebase console → App Check request metrics should show verified traffic for that project.
 4. **Enforce.** Firebase console → App Check → enforce Cloud Firestore and/or Cloud Storage. Read back the enforced state, then repeat the step 3 checks. Expect a 3–10s first-load delay and some lockouts for players whose network blocks reCAPTCHA.
-5. **Confirm the block.** An otherwise-authorized request without an App Check token should now be rejected by App Check, not by Security Rules.
+5. **Confirm the block.** For each enforced service separately, send an otherwise-authorized request without an App Check token: a Firestore read for Cloud Firestore and a Storage download for Cloud Storage. Each should be rejected by App Check, not by Security Rules. A rejection from one service proves nothing about the other.
 
 ## Standing down
 
