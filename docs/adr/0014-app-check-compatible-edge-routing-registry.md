@@ -5,6 +5,8 @@ implemented: false
 
 # The Event router reads a server-published edge replica, never Firestore
 
+> **Amended 2026-10-12 (#44):** App Check is now a break-glass control ([`w4-app-check`](../../specs/w4-app-check.md)). It is provisioned in both projects but neither shipped in routine bundles nor enforced, because a reCAPTCHA-gated first Firestore RPC added 3–10s to cold loads in production. The decision below is unchanged. An incident can switch enforcement on at any time, so the router must never depend on reaching Firestore without App Check. The invariant is therefore compatibility rather than permanence: no router rollout or rollback step may require enforcement to be off, and R3 proves compatibility in a temporary enforcement rehearsal instead of waiting for permanent enforcement.
+
 ## Context
 
 Before the signed-registry decision, the Event router point-got the public `hostnames/{host}` document through the Firestore REST API with the Firebase web API key. That is least-privilege only while Firestore App Check is not enforced: enforcement rejects a request without a valid App Check token even when Security Rules would allow the read. A Cloudflare Worker is not an attested browser or app instance, so manufacturing an App Check token for it would erase the caller property App Check exists to prove.
@@ -33,14 +35,14 @@ The Durable Object is also the lookup source. Keeping mutation and lookup in one
 
 ## Consequences
 
-- App Check enforcement stays enabled. No rollout or rollback step may weaken it to recover the router.
+- The router stays compatible with App Check enforcement whenever it is on, which since the 2026-10-12 amendment is break-glass only. No rollout or rollback step may require enforcement to be off, or weaken it, to recover the router.
 - Hostname writes become a cross-cloud workflow. Firestore is the source of truth; the private desired-state document and an audit tool make lag and drift observable, while the Durable Object replica is the router's only runtime lookup.
 - Activation, repoint, disable, and delete are not complete when the Firestore transaction commits. The operator/provisioner waits for the intended edge revision and the rollout probes required by the spec.
 - An acknowledged Durable Object revision is immediately authoritative for later lookups, but an undelivered Firestore event can leave the prior revision serving. It cannot grant Event-data access, and the client re-resolves against Firestore. Emergency takedown therefore uses an exact-host Cloudflare block; Namespace route removal is reserved for a demonstrated fail-closed rollback.
 - A compromised publisher runtime can use its intended KMS authority to sign bad contiguous revisions. Drift alerts and a separately authenticated human recovery path bound to a different identity/key are therefore part of the control plane, not optional operations polish. Recovery also requires a second, human-only source-attestor identity/key to derive the canonical projection from a transactionally read hostname document, refuse any unequal replica ledger, and sign that exact fresh equality plus bounded nonsampled Function/IAM/KMS readback. Recovery authority alone therefore cannot invent canonical state, bless a stale/poisoned ledger, or claim an inaccessible replacement publisher. Integrity recovery raises the per-host publisher epoch only after that evidence proves a replacement subject/key unavailable to the quarantined runtime, so its pre-signed higher revisions cannot replay after repair.
 - Random valid hostnames can still create/read empty Durable Objects after the Namespace guard, so provider-side wildcard/WAF rate limiting is a cutover control rather than optional cost polish. R0 records its counting key, scope/match, thresholds/window, mitigation action, exemptions, and provider evidence. #973 delivers and validates the reusable provider-readback plus synthetic-evidence verifier; #529 runs it immediately before attaching each wildcard route and blocks on missing, disabled, stale, or indeterminate evidence.
 - Remote rehearsal uses guarded, temporary exact routes and DNS records for a permanently reserved synthetic manifest, including a globally reserved `r2-root-*` test class so root behavior is exercised without routing an apex. It never treats `workers.dev` as Namespace evidence or attaches a wildcard/real Event host. Recovery proof additionally pays for provider request/firewall log ingestion so three runner observations can be matched to distinct provider-recorded Rays/colos and the exact blocking rule. Synthetic state is tombstoned before provider-verified route/DNS removal; cleanup is a recorded gate, not an informal afterthought.
-- Once Firestore App Check enforcement is a cutover invariant, rolling back means selecting an earlier replica-capable Worker or removing the Worker route. Rolling back to the Firestore REST reader is prohibited.
+- Because Firestore App Check enforcement can be switched on at any time, rolling back means selecting an earlier replica-capable Worker or removing the Worker route. Rolling back to the Firestore REST reader is prohibited.
 
 ## Considered alternatives
 

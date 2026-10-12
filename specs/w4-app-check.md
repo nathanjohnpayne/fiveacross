@@ -1,56 +1,67 @@
 ---
 spec_id: w4-app-check
-status: proposed
+status: accepted
 tested: false
-reason: Console provisioning, request metrics and deployed-browser acceptance establish enforcement; source tests cannot prove live App Check configuration.
+reason: App Check is a provisioned, break-glass operational control; console registration, deployed-browser exchange and enforcement readback establish it, and source tests cannot prove live App Check configuration.
 ---
 
-# App Check provisioning and enforcement
+# App Check: provisioned, break-glass only
 
-Ticket #44 adds abuse protection for Cloud Firestore and Cloud Storage. It does not change Membership authority, honor-system Marks or reactive moderation. The owner deferred provisioning until 2026-08-01 in [#44's timing decision](https://github.com/nathanjohnpayne/fiveacross/issues/44#issuecomment-4919347400); that date has passed.
+Ticket #44 adds abuse protection for Cloud Firestore and Cloud Storage. It does not change Membership authority, honor-system Marks or reactive moderation. App Check attests the calling app; it does not authorize a Player's Mark.
 
-The owner-confirmed scope is both existing Firebase projects, `gaycruisebingo` and `fiveacross`. Inventory each target before changing live configuration. The current source already initializes `ReCaptchaEnterpriseProvider` in `src/firebaseCore.ts` when `VITE_RECAPTCHA_SITE_KEY` is nonempty, with token auto-refresh enabled. The private memory app receives the primary App Check token through its custom provider. No client rewrite is required.
+**Owner decision (2026-10-12):** App Check is a **break-glass control**. Both Firebase projects keep it provisioned and registered, but shipped bundles carry no site key and neither service is enforced in routine operation. It is switched on only for an active abuse incident and switched off when the incident ends. This supersedes the routine monitor-then-enforce rollout this spec originally described, and the deferral in [#44's timing decision](https://github.com/nathanjohnpayne/fiveacross/issues/44#issuecomment-4919347400).
 
-## Provision and distribute, with enforcement off
+## Why it is not on routinely
 
-For each project independently:
+`src/firebaseCore.ts` initializes `ReCaptchaEnterpriseProvider` only when `VITE_RECAPTCHA_SITE_KEY` is nonempty. Once it does, Firestore waits for an App Check token before its first RPC, and minting that token first runs reCAPTCHA in the page. The measurements below were taken on 2026-10-12 with both keys deployed to production, on cold loads with no cached token:
 
-1. Inventory its Firebase web-app id, registered App Check provider, existing reCAPTCHA Enterprise website keys, Firestore/Storage enforcement state and deployed client key. Reuse a correctly configured key rather than creating a duplicate. Record identifiers and state, never credentials or App Check tokens.
-2. Create or configure the Enterprise website key in that project and register the exact Firebase web app in App Check. Review its allowed domains against [the target inventory](../docs/app/deploy-targets.md), including that project's primary hosts, Firebase aliases, Vercel mirrors and the Five Across handoff origin where applicable. Keep domain validation enabled. Development uses Firebase's debug-provider procedure rather than weakening production domain validation.
-3. Set the public site key in the matching `.env.gaycruisebingo` or `.env.fiveacross` file. Named production builds ignore `.env.local`. Set the corresponding Vercel project's Production build environment as well; one project's registration does not attest another project's web app.
-4. From a clean, current `main`, use the matching guarded target deploy, then publish and verify its affected mirrors under [the deployment process](../docs/agents/deployment-process.md). Record the Firebase release, mirror deployments and commit. Keep Firestore and Storage enforcement off during this distribution and monitoring stage.
-5. Verify the deployed browser successfully exchanges an App Check token without logging it. Exercise sign-in, a legitimate Firestore read/write and a photo/audio Storage upload and authenticated download. Include the primary gameplay app and the named memory transport; source-level provider wiring is insufficient evidence. Check every affected serving origin. Existing mirror sign-in limitations remain explicit and must not be described as a successful smoke check.
+| Host | First Firestore RPC |
+|---|---|
+| `bodega-bay.fiveacross.app` | 3.6s, behind a 3.4s App Check exchange |
+| `gaycruisebingo.com` | 7.6s and 10s; on two loads Firestore never connected until reCAPTCHA was triggered by hand |
+| Either host, no site key | about 0.2s |
 
-The operational sequence follows Firebase's [Enterprise web setup](https://firebase.google.com/docs/app-check/web/recaptcha-enterprise-provider) and [request-metrics guidance](https://firebase.google.com/docs/app-check/monitor-metrics). Provisioning and deployment credentials use the repository's 1Password-backed path. An authentication failure pauses credential-dependent work until attended preflight is restored.
+A slow or blocked `google.com/recaptcha`, as on ship networks or behind ad blockers, therefore gates the whole data layer. That cost is not justified by monitoring metrics alone, and enforcement adds false rejections for players who cannot attest or score below `minValidScore`. A score-based key never shows a visible challenge, so the cost is latency and false rejection, not friction. Both projects were rolled back to key-free builds the same day.
 
-## Monitor, then enforce each service
+## Provisioned state
 
-Record a representative monitoring interval after distribution, with start/end times and the verified, outdated, unknown and invalid request categories for each service and project. Investigate legitimate traffic outside the verified category, including installed clients and origin-specific failures. An elapsed timer, an empty traffic window or one successful token exchange does not establish readiness.
-
-Once observed legitimate usage is healthy, enable enforcement separately for Cloud Firestore and Cloud Storage in the intended project. Read back each service's enforced state, then repeat the legitimate browser read/write/upload/download checks. A named memory client must still work after token refresh and an account transition.
-
-Run a negative probe without an App Check token using an otherwise valid authenticated session and an operation that Security Rules would permit. Compare with the equivalent attested request. Record the App Check rejection without recording Auth tokens, App Check tokens or private payloads; a Rules denial alone does not prove App Check enforcement.
-
-If legitimate requests fail after the flip, return the affected service to unenforced monitoring, verify that readback and repeat the smoke check. Keep the client attestation wiring and investigate the failed cohort before another flip.
-
-Callable-level App Check policy remains #1353. This ticket does not silently change `AUTH_HANDOFF_APP_CHECK`, `BUG_REPORT_APP_CHECK`, `APPROVE_PROMPTS_APP_CHECK` or `SUBMIT_PROMPT_APP_CHECK`, nor does its smoke check satisfy #1411's attended two-account device acceptance.
-
-## Live inventory — 2026-10-09
-
-The project-specific deploy service accounts reached Google APIs using their own 1Password-backed keys. Both projects returned `SERVICE_DISABLED` for Firebase App Check and reCAPTCHA Enterprise. The Gay Cruise Bingo deploy account has App Check config read/update permissions but lacks `serviceusage.services.enable`, `recaptchaenterprise.keys.create` and `recaptchaenterprise.keys.list`. No API was enabled, key created or enforcement changed. Owner console provisioning of both APIs and the two Enterprise website keys is pending; provider registration and monitoring resume afterward.
-
-## Acceptance evidence
-
-Code merge does not establish live enforcement. Keep #44 open until each in-scope project has a completed record:
-
-| Evidence | `gaycruisebingo` | `fiveacross` |
+| | `fiveacross` | `gaycruisebingo` |
 |---|---|---|
-| Web-app registration and Enterprise key id | Pending | Pending |
-| Allowed serving domains reviewed | Pending | Pending |
-| Target and mirror releases with site key | Pending | Pending |
-| Monitoring interval and request-category counts | Pending | Pending |
-| Firestore and Storage enforced readback | Pending | Pending |
-| Attested browser read/write/upload/download, including memory transport | Pending | Pending |
-| Otherwise-authorized unattested request rejected by App Check | Pending | Pending |
+| Serves | `fiveacross.app` and `vacaybingo.com` hosts, `fiveacross.vercel.app`, `vacaybingo.vercel.app` | `gaycruisebingo.com`, `gaycruisebingo.vercel.app` |
+| reCAPTCHA Enterprise key | Score-based Website key "Five Across"; site key in 1Password item `oslqrargfw57urqiy4tsz3bir4` | Score-based Website key "Gay Cruise Bingo"; site key in 1Password item `uooosjdc6mqd27k46likrlaktm` |
+| Allowed domains | `fiveacross.app`, `vacaybingo.com`, `fiveacross.web.app`, `fiveacross.firebaseapp.com`, `fiveacross.vercel.app`, `vacaybingo.vercel.app` | `gaycruisebingo.com`, `gaycruisebingo.web.app`, `gaycruisebingo.firebaseapp.com`, `gaycruisebingo.vercel.app` |
+| App Check registration | Web app `1:5297095641:web:aff3537cf7c95dec220fc8`, reCAPTCHA Enterprise provider, token TTL 1h, `minValidScore` 0.5 | Web app `1:849798007162:web:70dffafa77cc65a8306ec3`, same settings |
+| Routine state | No site key in `.env.fiveacross` or either mirror's Vercel Production env; Firestore and Storage unenforced | No site key in `.env.gaycruisebingo` or the mirror's Vercel Production env; Firestore and Storage unenforced |
 
-The runbook is provisioning-only (`tested: false`). Spec alignment and repository checks validate its source integration; the table above carries the separate deployed acceptance proof.
+Allowed domains cover subdomains implicitly, so a new Event on `*.fiveacross.app` or `*.vacaybingo.com` needs no key change; a new apex does. Keep domain validation on and do not add `localhost`; development uses Firebase's debug-provider procedure. The "Five Across" key also has a legacy secret key (1Password item `7slecmeueq2t5nvm2gslcr4whi`); the Enterprise provider never uses it, and it must never enter a bundle or a Vercel env.
+
+On 2026-10-12, before the rollback, a deployed browser on each project loaded reCAPTCHA, `exchangeRecaptchaEnterpriseToken` returned 200 and Firestore succeeded. That is the end-to-end proof that the provisioned state works. Re-read the table above against the live consoles before relying on it in an incident.
+
+## Switching it on
+
+Use this only for an active abuse incident on Firestore or Storage. Act per project: a project's App Check registration does not attest the other project's web app.
+
+1. **Bundle.** Copy the project's site key from 1Password into `VITE_RECAPTCHA_SITE_KEY` in `.env.fiveacross` or `.env.gaycruisebingo`. Named production builds ignore `.env.local`. From a clean, current `main`, run the guarded hosting deploy for that target (`npm run deploy:<target>:hosting`; see [the deployment process](../docs/agents/deployment-process.md)).
+2. **Mirrors.** Add `VITE_RECAPTCHA_SITE_KEY` to each of that project's Vercel mirrors' Production env as type **Config** (the site key is public by design), then redeploy each mirror with the guarded block in [`deploy-targets.md` § Deploying a mirror](../docs/app/deploy-targets.md#deploying-a-mirror). Every serving host must carry the key before step 4, or enforcement locks that host out.
+3. **Attest.** Load every serving host in a browser and confirm `exchangeRecaptchaEnterpriseToken` returns 200 and that sign-in, a Firestore read/write and a Storage upload/download still work. Do not record App Check or Auth tokens. Firebase console → App Check request metrics should show verified traffic for that project.
+4. **Enforce.** Firebase console → App Check → enforce Cloud Firestore and/or Cloud Storage. Read back the enforced state, then repeat the step 3 checks. Expect a 3–10s first-load delay and some lockouts for players whose network blocks reCAPTCHA.
+5. **Confirm the block.** An otherwise-authorized request without an App Check token should now be rejected by App Check, not by Security Rules.
+
+## Standing down
+
+When the incident ends:
+
+1. Unenforce Firestore and Storage in the App Check console and read the state back.
+2. Clear `VITE_RECAPTCHA_SITE_KEY` in the target env file and remove it from each mirror's Vercel Production env.
+3. Redeploy hosting from `main`, or roll Firebase Hosting back to the last key-free release when `main` has not moved since.
+4. Rebuild each mirror from `main`. Do not use `vercel rollback` for mirrors: it turns off production-domain auto-assignment, so a later `vercel deploy --prod` silently stops updating the mirror.
+5. Confirm in a browser that no host loads reCAPTCHA and that Firestore starts promptly.
+
+Keep the keys and registrations in place for the next incident.
+
+## Boundaries
+
+- The edge Event router must keep working whenever enforcement is on and must never require it to be off ([ADR 0014](../docs/adr/0014-app-check-compatible-edge-routing-registry.md)). Its R3 gate rehearses that compatibility with a temporary switch-on rather than waiting for permanent enforcement ([`event-router-registry`](event-router-registry.md)).
+- Callable-level App Check policy remains #1353. This spec does not change `AUTH_HANDOFF_APP_CHECK`, `BUG_REPORT_APP_CHECK`, `APPROVE_PROMPTS_APP_CHECK` or `SUBMIT_PROMPT_APP_CHECK`, and it does not satisfy #1411's attended two-account device acceptance.
+- The private memory app receives the primary App Check token through its custom provider (`src/privateFirestore.ts`), so it attests automatically whenever the primary app does.
+- Initializing App Check without making Firestore's first RPC wait on reCAPTCHA would make routine monitoring affordable. That would be a client change, outside this spec.
