@@ -123,7 +123,7 @@ GH_TOKEN="$(op read 'op://Private/pvbq24vl2h6gl7yjclxy2hbote/token')" \
 
 - Use the item ID from the lookup table above for your agent identity. Do not use the 1Password item title.
 - To verify a cached PAT, use `GH_TOKEN="$OP_PREFLIGHT_REVIEWER_PAT" gh api user --jq .login` or let the wrapper perform the same check before the write. Do not use `gh auth status` as an attribution proof; it is affected by env tokens and does not replace the wrapper's effective-login check.
-- If `op whoami` says you are not signed in, still run the `op read ...` command in an interactive TTY. That is what triggers the 1Password biometric prompt on local machines.
+- If 1Password reports a sign-in or biometric failure, stop and follow the pause-and-prompt procedure; wait for human readiness confirmation before one canonical preflight refresh.
 - If GitHub returns `Review Can not approve your own pull request`, you either the PR author is not `nathanjohnpayne`, the reviewer token resolved to the author identity, or the no-self-approve scoping rule below applies. Confirm with `gh pr view <PR#> --json author` and `GH_AS_REVIEWER_IDENTITY=nathanpayne-<agent> scripts/gh-as-reviewer.sh -- gh api user --jq .login` before retrying. If you intentionally skipped `--approve` under the no-self-approve scoping rule below (Phase 4 / above-threshold PRs), post `--comment` instead and let Phase 4 carry the gate.
 
 ### SSH Signing Keys
@@ -244,7 +244,7 @@ Session-cache maintenance:
 
 The session file contains plaintext PATs guarded only by filesystem permissions (0600) and is readable by any process running as your user — equivalent to the protection `op` itself provides for its unlocked session. Rotate the PATs in 1Password and purge the cache if you suspect the machine was compromised.
 
-If any `op` command fails mid-session (rare — only if 1Password locks or the 12-hour hard limit is reached), re-run the preflight command with `--refresh` to force a fresh fetch.
+If a 1Password authentication or signing prompt fails mid-session, stop and follow the pause-and-prompt procedure in `docs/agents/operating-rules.md`. Wait for the human to confirm they are present and ready before one canonical preflight refresh; do not retry individual credential reads or refresh automatically.
 
 ### Phase 1: Authoring
 
@@ -990,10 +990,10 @@ Agents select the GitHub API or SSH transport identity for each operation while 
 
 ### Git commit identity (user.name / user.email)
 
-Commit identity stays with the real human author in the machine's global Git configuration; GitHub API review writes use reviewer credentials through the identity-checked GitHub PAT wrapper. Do not switch commit identity during a review or add a repository-local identity override shared by all worktrees.
+In local sessions, commit identity stays with the real human author in the machine's global Git configuration; GitHub API review writes use reviewer credentials through the identity-checked GitHub PAT wrapper. Do not switch commit identity during a review or add a repository-local identity override shared by all worktrees.
 
 ```bash
-# Verify configured origins, the signing key and both effective commit identities.
+# Inspect configured origins and signing key, then verify effective commit identities.
 git config --show-origin --get user.name
 git config --show-origin --get user.email
 git config --show-origin --get user.signingkey
@@ -1001,7 +1001,7 @@ git var GIT_AUTHOR_IDENT
 git var GIT_COMMITTER_IDENT
 ```
 
-Confirm both effective identities match the verified human author; environment overrides can replace configured name/email values. Provisioning the real human identity belongs to verified machine setup outside managed checkouts. If a value is absent or wrong, stop and use the approved setup flow rather than writing placeholder identities into local or global configuration. Fixture repositories retain their test identity and signing settings through explicit `git -C` targets; the shared instruction-shape guard is delivered from Mergepath under [mergepath#1195](https://github.com/nathanjohnpayne/mergepath/issues/1195).
+Confirm the effective author matches the verified human author; environment overrides can replace configured name/email values. In a local session, also confirm the effective committer matches that identity. In Claude cloud, retain the approved signed cloud committer and author environment variables described in [Cloud Agent Environments](docs/agents/cloud-environments.md); the configured `user.name` and `user.email` describe the cloud committer and are not proof of the effective author. If the effective identity or signing setup is absent or wrong for the session, stop and use the approved setup flow rather than writing placeholder identities into local or global configuration. Fixture repositories retain their test identity and signing settings through explicit `git -C` targets; the shared instruction-shape guard is delivered from Mergepath under [mergepath#1195](https://github.com/nathanjohnpayne/mergepath/issues/1195).
 
 ### SSH identity switching (push / pull)
 
@@ -1069,7 +1069,7 @@ scripts/gh-as-author.sh -- gh pr create --title "..." --body "..."
 
 - Use the item ID from the [PAT lookup table](#pat-lookup-table) for your agent identity. Do not use the 1Password item title.
 - Verify token identity with `GH_TOKEN="$OP_PREFLIGHT_REVIEWER_PAT" gh api user --jq .login` or by letting the wrapper call `identity-check.sh --expect-token-identity` before the write. Do not use `gh auth status` as an attribution proof.
-- If `op whoami` says you are not signed in, still run the `op read ...` command in an interactive TTY. That is what triggers the 1Password biometric prompt on local machines.
+- If 1Password reports a sign-in or biometric failure, stop and follow the pause-and-prompt procedure; wait for human readiness confirmation before one canonical preflight refresh.
 - If GitHub returns `Review Can not approve your own pull request`, you either the PR author is wrong, the reviewer token resolved to the author identity, or the [No-self-approve scoping](#no-self-approve-scoping) rule applies. Confirm the PR author and token identity before retrying.
 
 > **If `op read` fails with a sign-in or biometric error here**, follow the pause-and-prompt procedure in `docs/agents/operating-rules.md` under "1Password CLI authentication failures." Do not hardcode tokens, skip review, or retry in a loop.
