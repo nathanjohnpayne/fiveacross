@@ -83,6 +83,7 @@ unset EMAIL_UNSUBSCRIBE_PROJECT EMAIL_UNSUBSCRIBE_REGION EMAIL_UNSUBSCRIBE_SERVI
 [[ -x "$SCRIPT" ]] || { echo "missing or non-executable $SCRIPT" >&2; exit 1; }
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/test-deploy.XXXXXX")"
+WORKDIR="$(cd "$WORKDIR" && pwd -P)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
 READINESS_CREDENTIAL="$WORKDIR/fiveacross-deployer.json"
@@ -358,9 +359,9 @@ init_fixture_repo() {
   (
     cd "$repo"
     git init --quiet -b feature/deploy-test
-    git config user.email "test@example.com"
-    git config user.name "Test"
-    git config commit.gpgsign false
+    git -C "$repo" config user.email "test@example.com"
+    git -C "$repo" config user.name "Test"
+    git -C "$repo" config commit.gpgsign false
     echo "initial" > README.md
     printf '%s\n' '{"hosting":{"site":"fiveacross","public":"dist"},"functions":{"source":"functions"},"firestore":{"rules":"firestore.rules"},"storage":{"rules":"storage.rules"}}' > firebase.json
     # The single-service families are inventoried from the index (#1299), so
@@ -400,9 +401,9 @@ init_main_fixture_with_origin() {
   (
     cd "$repo"
     git init --quiet -b main
-    git config user.email "test@example.com"
-    git config user.name "Test"
-    git config commit.gpgsign false
+    git -C "$repo" config user.email "test@example.com"
+    git -C "$repo" config user.name "Test"
+    git -C "$repo" config commit.gpgsign false
     echo "initial" > README.md
     git add README.md
     git commit --quiet -m "initial"
@@ -540,7 +541,7 @@ fi
 # ---------------------------------------------------------------------------
 REPO4="$WORKDIR/case4-empty-args-repo"
 mkdir -p "$REPO4"
-( cd "$REPO4" && git init -q -b main && git config user.email a@b.c && git config user.name a && \
+( cd "$REPO4" && git init -q -b main && git -C "$REPO4" config user.email a@b.c && git -C "$REPO4" config user.name a && \
   echo init >README.md && printf '%s\n' '{"hosting":{"site":"fiveacross","public":"dist"}}' >firebase.json && \
   git add README.md firebase.json && git commit -q -m init )
 
@@ -2966,9 +2967,9 @@ init_public_override_repo() {
   (
     cd "$repo"
     git init --quiet -b feature/deploy-test
-    git config user.email "test@example.com"
-    git config user.name "Test"
-    git config commit.gpgsign false
+    git -C "$repo" config user.email "test@example.com"
+    git -C "$repo" config user.name "Test"
+    git -C "$repo" config commit.gpgsign false
     printf 'configured\n' > dist/which
     printf 'override\n' > other/which
     : > shared/toggle
@@ -3106,9 +3107,9 @@ init_admin_options_repo() {
   (
     cd "$repo"
     git init --quiet -b feature/deploy-test
-    git config user.email "test@example.com"
-    git config user.name "Test"
-    git config commit.gpgsign false
+    git -C "$repo" config user.email "test@example.com"
+    git -C "$repo" config user.name "Test"
+    git -C "$repo" config commit.gpgsign false
     printf '%s\n' 'functions/node_modules/' > .gitignore
     printf '%s\n' '{"name":"fixture-functions","private":true,"main":"lib/index.js"}' > functions/package.json
     # Declared as a builder call so the classifier's source pre-check offers
@@ -3229,9 +3230,9 @@ init_dir_mtime_repo() {
   (
     cd "$repo"
     git init --quiet -b feature/deploy-test
-    git config user.email "test@example.com"
-    git config user.name "Test"
-    git config commit.gpgsign false
+    git -C "$repo" config user.email "test@example.com"
+    git -C "$repo" config user.name "Test"
+    git -C "$repo" config commit.gpgsign false
     : > shared/stamp
     : > shared/toggle
     printf '%s\n' '{"name":"fixture-functions","private":true,"main":"lib/index.js"}' > functions/package.json
@@ -3529,9 +3530,9 @@ run_post_classification_guard_case() {
   git clone --quiet "$remote" "$other"
   (
     cd "$other"
-    git config user.email "test@example.com"
-    git config user.name "Test"
-    git config commit.gpgsign false
+    git -C "$other" config user.email "test@example.com"
+    git -C "$other" config user.name "Test"
+    git -C "$other" config commit.gpgsign false
     echo "later" > LATER.md
     git add LATER.md
     git commit --quiet -m "landed while the classifier ran"
@@ -3731,9 +3732,9 @@ init_detached_writer_repo() {
   (
     cd "$repo"
     git init --quiet -b feature/deploy-test
-    git config user.email "test@example.com"
-    git config user.name "Test"
-    git config commit.gpgsign false
+    git -C "$repo" config user.email "test@example.com"
+    git -C "$repo" config user.name "Test"
+    git -C "$repo" config commit.gpgsign false
     printf '%s\n' '{"name":"fixture-functions","private":true,"main":"lib/index.js"}' > functions/package.json
     printf '%s\n' \
       "import { onSchedule } from 'firebase-functions/v2/scheduler';" \
@@ -4042,9 +4043,9 @@ init_hook_chain_repo() {
   (
     cd "$repo"
     git init --quiet -b feature/deploy-test
-    git config user.email "test@example.com"
-    git config user.name "Test"
-    git config commit.gpgsign false
+    git -C "$repo" config user.email "test@example.com"
+    git -C "$repo" config user.name "Test"
+    git -C "$repo" config commit.gpgsign false
     printf '%s\n' 'functions/node_modules/' '/scripts' > .gitignore
     printf '%s\n' '{"name":"fixture-functions","private":true,"main":"lib/index.js","engines":{"node":"22"}}' > functions/package.json
     printf '%s\n' "$src_body" > functions/src/index.ts

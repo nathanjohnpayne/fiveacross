@@ -42,7 +42,7 @@ If any `op` command (`op read`, `op inject`, `op run`, `op document get`, or any
 - `authorization prompt dismissed`
 - `error initializing client: authorization`
 
-Then follow this procedure:
+In a local session, follow the recovery procedure below. Cloud sessions use their provisioned credentials and the capability probe in [Cloud Agent Environments](cloud-environments.md); they do not run local 1Password preflight. If the provisioned credential path is unavailable, stop and hand the blocked operation to a capable session rather than attempting interactive sign-in.
 
 1. **Stop immediately.** Do not retry the command, do not attempt workarounds (manual token entry, environment variable overrides, fallback credential paths, or skipping the credential step).
 2. **Check if preflight was run.** If `OP_PREFLIGHT_DONE` is not set, suggest running the preflight script:

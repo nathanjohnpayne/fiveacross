@@ -14,7 +14,7 @@ Before opening or updating a pull request, perform a structured self-review and 
 
 ## Review Workflow
 
-- All code is authored and committed as `nathanjohnpayne`.
+- All agents author code as `nathanjohnpayne`. Local sessions also use the human committer; Claude cloud sessions retain the approved signed committer described in [Cloud Agent Environments](../docs/agents/cloud-environments.md).
 - Review under your agent's reviewer identity (e.g., `nathanpayne-claude`).
 - Only `nathanjohnpayne` merges to the target branch.
 - Never approve your own PR. Self-approvals are automatically dismissed.

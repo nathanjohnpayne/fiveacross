@@ -72,14 +72,14 @@ WORKDIR=$(cd "$WORKDIR" && pwd -P)
 MAIN="$WORKDIR/main"
 git init -q -b main "$MAIN"
 cd "$MAIN"
-git config user.email "test@example.com"
-git config user.name "Test"
+git -C "$MAIN" config user.email "test@example.com"
+git -C "$MAIN" config user.name "Test"
 # Disable commit/tag signing in the fixture repo so the test is portable — CI
 # runners (and a machine whose signing key is not currently unlocked) have no
 # signing key, and an inherited global commit.gpgsign=true would otherwise make
 # every fixture `git commit` fail with "failed to write commit object".
-git config commit.gpgsign false
-git config tag.gpgsign false
+git -C "$MAIN" config commit.gpgsign false
+git -C "$MAIN" config tag.gpgsign false
 git remote add origin "$REMOTE"
 echo "hello" > README.md
 git add README.md

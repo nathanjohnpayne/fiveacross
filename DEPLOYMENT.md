@@ -316,7 +316,7 @@ gh secret set AUTHOR_MERGE_TOKEN --repo {owner}/{repo} --body "$(op read 'op://P
 
 **`REVIEWER_ASSIGNMENT_TOKEN` is the only reviewer-identity PAT stored as a repo CI secret.** It exists specifically because the Dependabot auto-merge + Agent Review Pipeline workflows run inside GitHub Actions where there's no interactive `op read`. Pick ONE of the reviewer identities (claude / cursor / codex) and use its PAT for this slot — the workflow validates the resolved identity against `available_reviewers` and rejects anything else.
 
-For Phase 2 internal self-peer review (the back-and-forth that happens during a review session), the OTHER two reviewer-identity PATs are NOT stored as repo CI secrets. Phase 2 runs in the agent's own session: the agent switches its Git identity to its reviewer account with a PAT read directly from 1Password (`op read 'op://Private/<item-id>/token'`) and posts the review with that PAT. See REVIEW_POLICY.md § Phase 2 and each repo's `CLAUDE.md` / `AGENTS.md` for the identity-switch procedure.
+For Phase 2 internal self-peer review (the back-and-forth that happens during a review session), the OTHER two reviewer-identity PATs are NOT stored as repo CI secrets. Phase 2 runs in the agent's own session: commit authorship stays with the human, while reviewer credentials select GitHub API attribution through the identity-checked `scripts/gh-as-reviewer.sh` wrapper. Local sessions use canonical credential preflight; cloud sessions use provisioned credentials under [Cloud Agent Environments](docs/agents/cloud-environments.md). Select the running agent's registered reviewer identity through the wrapper without changing Git commit identity or the gh keyring. See REVIEW_POLICY.md § Phase 2 and AGENTS.md for the governing workflow.
 
 **Do NOT add `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `CLAUDE_PAT` / `CODEX_PAT` / `CURSOR_PAT` as repo secrets.** An earlier iteration of `agent-review.yml` had an `invoke-reviewer` job that ran the Claude Code CLI headlessly as a CI-side reviewer; this was the wrong flow (parallel to the authoring session, stale-API-key failure surface, duplicate work) and was removed. Phase 2 now lives entirely inside the authoring agent's session.
 
@@ -407,7 +407,7 @@ Machine user reviewer identities (nathanpayne-claude, etc.) are **collaborators*
 
 **Use classic PATs with `repo` scope for all reviewer identities.** This is stored in 1Password with the field name `token` (not `credential` or `password`).
 
-**Canonical PAT lookup table:** see [REVIEW_POLICY.md § PAT lookup table](REVIEW_POLICY.md#pat-lookup-table). The single source of truth for agent-to-item-ID mappings lives there, alongside the cached `$OP_PREFLIGHT_*_PAT` env-var conventions. Routine work should use the cached env vars (no biometric per call); the inline `op read` form is a setup-only fallback documented in the same section.
+**Canonical PAT lookup table:** see [REVIEW_POLICY.md § PAT lookup table](REVIEW_POLICY.md#pat-lookup-table). The single source of truth for agent-to-item-ID mappings lives there, alongside the cached `$OP_PREFLIGHT_*_PAT` env-var conventions. Routine local sessions use canonical preflight and cached env vars without a biometric prompt per call; cloud sessions use the provisioned credential path in [Cloud Agent Environments](docs/agents/cloud-environments.md). The inline `op read` form is limited to initial local attended setup as documented in the policy.
 
 All 1Password items in that table are classic PATs with the `ghp_` prefix, stored with field name `token` in the `Private` vault.
 
@@ -415,7 +415,7 @@ Use the item ID (not the item title) to avoid shell issues with parentheses in 1
 
 ### Reviewer PAT quick check
 
-The canonical convention is in `REVIEW_POLICY.md` § Reviewer PAT Quick Start. Short form:
+The canonical convention is in `REVIEW_POLICY.md` § Reviewer PAT Quick Start. The `gh pr` / `gh issue` examples below are local CLI forms. Cloud sessions use only command transports confirmed by the capability probe: Claude cloud uses wrapper-invoked `gh api` REST forms in [Cloud Agent Environments](docs/agents/cloud-environments.md), or hands blocked operations to a capable local session. Short form:
 
 - **Read paths** (`gh api user`, GETs, `gh pr view`) honor `GH_TOKEN`.
 - **Core guarded writes** (`gh pr create`, `gh pr merge`, `gh pr edit`, `gh pr comment`, `gh pr review`, `gh issue comment`) use `scripts/gh-as-author.sh` or `scripts/gh-as-reviewer.sh`, which verify the effective token before the write.
@@ -425,15 +425,15 @@ The canonical convention is in `REVIEW_POLICY.md` § Reviewer PAT Quick Start. S
 GH_TOKEN="$OP_PREFLIGHT_REVIEWER_PAT" gh api user --jq '.login'
 # expected: nathanpayne-<agent>
 
-# Reviewer write path: wrapper verifies the reviewer token.
+# Local CLI reviewer write path: wrapper verifies the reviewer token.
 GH_AS_REVIEWER_IDENTITY=nathanpayne-<agent> \
   scripts/gh-as-reviewer.sh -- gh pr review <PR#> --repo <owner/repo> --comment --body "Review comment"
 
-# Author write path: wrapper verifies the author token.
+# Local CLI author write path: wrapper verifies the author token.
 scripts/gh-as-author.sh -- gh pr merge <PR#> --squash --delete-branch
 ```
 
-> **⚠️ Fallback / setup-only:** the inline `GH_TOKEN="$(op read 'op://Private/<item-id>/token')"` form triggers a biometric prompt on **every** invocation. Use only when `op-preflight.sh` is unavailable. Routine agent work should always use the cached `$OP_PREFLIGHT_REVIEWER_PAT` env var after a one-time `eval "$(scripts/op-preflight.sh --agent <agent> --mode review)"`.
+> **⚠️ Local attended setup only:** the inline `GH_TOKEN="$(op read 'op://Private/<item-id>/token')"` form may prompt for biometrics on every invocation. Use it only during initial local setup when canonical preflight is unavailable, never as a retry after an authentication failure. Routine local sessions use canonical preflight and cached credentials. Cloud sessions use provisioned credentials under [Cloud Agent Environments](docs/agents/cloud-environments.md), and CI uses explicitly configured non-interactive credentials; neither uses this interactive fallback.
 
 - Use the item ID from the table above for your agent identity. Do not use the 1Password item title.
 - Verify token identity with `GH_TOKEN="$OP_PREFLIGHT_REVIEWER_PAT" gh api user --jq .login` or by letting the wrappers call `identity-check.sh --expect-token-identity` before the write.
@@ -449,7 +449,7 @@ The current PATs are set to never expire. If you ever need to rotate a reviewer 
 3. Revoke the old token in GitHub
 4. Verify agent access still works: `GH_TOKEN="$(op read 'op://Private/<item-id>/token')" gh api user`
 
-Note: reviewer identity PATs are NOT stored as repo CI secrets. They are read from 1Password per-session by the authoring agent for the in-session identity switch, so rotation does not require updating any repo secrets.
+Note: the OTHER two reviewer-identity PATs are NOT stored as repo CI secrets. Local sessions obtain them through canonical preflight; cloud sessions use the provisioned credential path in Cloud Agent Environments. The verified reviewer wrapper selects GitHub API attribution without changing Git commit identity, so rotating those session-only PATs does not require updating repo secrets.
 
 The `REVIEWER_ASSIGNMENT_TOKEN` repo secret (a **reviewer-identity** PAT used by the Dependabot auto-merge approval + Agent Review Pipeline workflows; see "Add `REVIEWER_ASSIGNMENT_TOKEN` to repo secrets" above) follows a similar process but also needs a `gh secret set REVIEWER_ASSIGNMENT_TOKEN --repo {owner}/{repo}` call on every repo after rotating the 1Password item. The `AUTHOR_MERGE_TOKEN` repo secret (an **author-identity** PAT used by the Dependabot auto-merge `gh pr merge` step + the Agent Review Pipeline auto-merge) follows the same process with a `gh secret set AUTHOR_MERGE_TOKEN --repo {owner}/{repo}` call after rotating its 1Password item.
 
@@ -855,7 +855,7 @@ This procedure is intentionally human-only — the bootstrap wizard (#156) does 
 
 If step 5 fails (deploy doesn't pick up the new key), the most common causes are:
 - **Mistyped item title.** The script reads `op://Firebase/{project-id} — Firebase Deployer SA Key` exactly. Confirm with `op item get "${PROJECT_ID} — Firebase Deployer SA Key" --vault Firebase`.
-- **Stale `op` session.** Run `op signin` and re-try.
+- **Stale `op` session.** Stop and follow [the authentication pause-and-prompt procedure](docs/agents/operating-rules.md#1password-cli-authentication-failures). Wait for fresh human readiness before one canonical preflight refresh; do not run `op signin` or retry an individual credential command as recovery.
 - **Source credential precedence override.** A `GOOGLE_APPLICATION_CREDENTIALS` env var set outside preflight wins over the SA key. Unset it and re-run.
 
 **Roll back / recovery.** GCP does NOT let you re-download a previous key's private JSON — only `private_key_id` (which step 2 captures) is recoverable, and that's just the public identifier, not the key material. So the rollback path depends on what you retained:

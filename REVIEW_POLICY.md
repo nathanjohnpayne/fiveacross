@@ -24,7 +24,7 @@ Anything else — a green under-threshold PR, or a Phase 4a clearance where `pha
 All agents commit and push code under a single shared author identity:
 
 - **GitHub ID:** `nathanjohnpayne`
-- **Role:** Author, committer, and merger for all code changes
+- **Role:** Author and merger for all code changes; committer in local sessions. Claude cloud retains the approved signed committer described in [Cloud Agent Environments](docs/agents/cloud-environments.md).
 - **Used by:** Whichever agent is currently writing or fixing code
 
 ### Reviewer Identities
@@ -93,37 +93,37 @@ For repo work, `GH_TOKEN` is now the per-command attribution source for the guar
 
 > **A 1Password item ID is not a stable identity.** On 2026-08-21 the item `o6ekjxjjl5gq6rmcneomrjahpu` was repurposed from Codex to the `nathanpayne-robot` CI account and Codex was recreated at `etak327mpz4drd4byxszfex4vm`; every row above still pointed at the old ID, so `--agent codex` silently resolved a **robot** token and posted reviews under the CI byline. Nothing in the table catches that on its own — after any PAT rotation or item edit, re-verify each row by resolving **that row's** `op://` reference into `GH_TOKEN` and checking it: `GH_TOKEN="$(op read 'op://Private/<item-id>/token')" scripts/identity-check.sh --expect-token-identity <login>`. The bare `scripts/identity-check.sh --expect-token-identity <login>` form does **not** verify a table row: it checks whatever is already in `$GH_TOKEN`. **Origin:** the robot PAT was created that day by repurposing the existing Codex 1Password item rather than minting a fresh one, so the id every doc and lookup already named silently changed identity while nothing referencing it changed — create a new item for a new identity. The map correction (mergepath#1073) landed on the hub the same day but had not reached the consumers when a Codex session hit it ~5.5h later, so treat a canonical-manifest fix as unshipped until it reaches the consumers.
 
-**Cached-variable usage is the primary pattern.** After a single `eval "$(scripts/op-preflight.sh --agent <agent> --mode review)"` at session start, all subsequent API calls use the env var directly — no biometric burned per call:
+**Cached-variable usage is the primary local pattern.** In a local session, run `eval "$(scripts/op-preflight.sh --agent <agent> --mode review)"` once, then use the cached env vars for subsequent API calls without another biometric prompt. Cloud sessions use provisioned credentials and the capability probe in [Cloud Agent Environments](docs/agents/cloud-environments.md); they do not invoke local 1Password preflight. The identity-checked write wrappers apply to both environments, but their command transport must be supported by the session. The `gh pr` and `gh issue` CLI examples in this policy are local forms; Codex cloud may use them only when its capability probe confirms support. Claude cloud uses wrapper-invoked `gh api` REST forms documented in that guide, or hands blocked operations to a capable local session. Do not run the GraphQL-backed `gh pr` or `gh issue` forms through the Claude proxy:
 
 ```bash
 # Read-path identity check (PRIMARY — uses cached PAT, no biometric).
 GH_TOKEN="$OP_PREFLIGHT_REVIEWER_PAT" gh api user --jq '.login'
 # expected: nathanpayne-<agent>
 
-# Reviewer write path: wrapper resolves and verifies the reviewer token,
+# Local CLI reviewer write path: wrapper verifies the reviewer token,
 # then runs the command with process-local GH_TOKEN. Set the reviewer
 # explicitly when the driver environment is ambiguous.
 GH_AS_REVIEWER_IDENTITY=nathanpayne-<agent> \
   scripts/gh-as-reviewer.sh -- gh pr review <PR#> --repo <owner/repo> --comment --body "Review comment"
 
-# Author write path: wrapper resolves and verifies the author token. For
+# Local CLI author write path: wrapper verifies the author token. For
 # gh pr create it also reads the created PR author with the same token.
 scripts/gh-as-author.sh -- gh pr create --title "..." --body "..."
 ```
 
 ##### Fallback / setup-only: inline `op read`
 
-> **⚠️ This triggers a biometric prompt every call. Use only when `op-preflight.sh` is unavailable** — for example, during the initial bootstrap of a new machine before the cache directory exists, or in a CI runner that has not been wired through preflight. Routine agent work should always use the cached `$OP_PREFLIGHT_*_PAT` env vars above.
+> **⚠️ Local attended setup only:** inline `op read` may prompt for biometrics on every call. Use this form only during initial local setup when canonical preflight is unavailable, never as a retry after an authentication failure. Routine local sessions use canonical preflight and the cached env vars above. Cloud sessions use the provisioned credential path in [Cloud Agent Environments](docs/agents/cloud-environments.md); CI uses explicitly configured non-interactive credentials. Missing preflight in either environment does not authorize an interactive `op read` fallback.
 
 ```bash
-# Setup-only — every invocation prompts for Touch ID.
+# Local attended setup only — may prompt for Touch ID.
 GH_TOKEN="$(op read 'op://Private/pvbq24vl2h6gl7yjclxy2hbote/token')" \
   gh api user --jq '.login'
 ```
 
 - Use the item ID from the lookup table above for your agent identity. Do not use the 1Password item title.
 - To verify a cached PAT, use `GH_TOKEN="$OP_PREFLIGHT_REVIEWER_PAT" gh api user --jq .login` or let the wrapper perform the same check before the write. Do not use `gh auth status` as an attribution proof; it is affected by env tokens and does not replace the wrapper's effective-login check.
-- If `op whoami` says you are not signed in, still run the `op read ...` command in an interactive TTY. That is what triggers the 1Password biometric prompt on local machines.
+- If 1Password reports a sign-in or biometric failure, stop and follow the pause-and-prompt procedure; wait for human readiness confirmation before one canonical preflight refresh.
 - If GitHub returns `Review Can not approve your own pull request`, you either the PR author is not `nathanjohnpayne`, the reviewer token resolved to the author identity, or the no-self-approve scoping rule below applies. Confirm with `gh pr view <PR#> --json author` and `GH_AS_REVIEWER_IDENTITY=nathanpayne-<agent> scripts/gh-as-reviewer.sh -- gh api user --jq .login` before retrying. If you intentionally skipped `--approve` under the no-self-approve scoping rule below (Phase 4 / above-threshold PRs), post `--comment` instead and let Phase 4 carry the gate.
 
 ### SSH Signing Keys
@@ -207,7 +207,7 @@ Notes on the token-wrapper contract:
 
 ### Phase 0: Credential Preflight
 
-> Run this once at the start of every PR review or deploy session. It front-loads all 1Password credential reads and SSH key authorization into a single burst of biometric prompts (~15 seconds), so the human can step away for the rest of the session.
+> In local sessions, run this once at the start of each PR review or deploy session. It front-loads the applicable 1Password credential reads and SSH key authorization into a single burst of biometric prompts (~15 seconds). Cloud sessions use the provisioned credentials and capability probe in [Cloud Agent Environments](docs/agents/cloud-environments.md); do not invoke local 1Password preflight there.
 
 ```bash
 # Session start (one biometric burst). `--mode review` is the DEFAULT
@@ -244,7 +244,7 @@ Session-cache maintenance:
 
 The session file contains plaintext PATs guarded only by filesystem permissions (0600) and is readable by any process running as your user — equivalent to the protection `op` itself provides for its unlocked session. Rotate the PATs in 1Password and purge the cache if you suspect the machine was compromised.
 
-If any `op` command fails mid-session (rare — only if 1Password locks or the 12-hour hard limit is reached), re-run the preflight command with `--refresh` to force a fresh fetch.
+If a 1Password authentication or signing prompt fails mid-session, stop and follow the pause-and-prompt procedure in `docs/agents/operating-rules.md`. Wait for the human to confirm they are present and ready before one canonical preflight refresh; do not retry individual credential reads or refresh automatically.
 
 ### Phase 1: Authoring
 
@@ -254,9 +254,9 @@ If any `op` command fails mid-session (rare — only if 1Password locks or the 1
 
 ### Phase 2: Internal Review (Self-Peer Review)
 
-4. The agent switches its Git identity to its reviewer account (e.g., `nathanpayne-claude`).
-5. The reviewer identity checks out the PR branch, reviews the diff, and posts review comments on the PR with specific, actionable feedback.
-6. The agent switches back to `nathanjohnpayne` and addresses each comment—pushing fix commits to the same branch.
+4. For GitHub API review writes, the agent selects its reviewer PAT through the identity-checked `scripts/gh-as-reviewer.sh` wrapper (e.g., `nathanpayne-claude`). Commit author identity remains `nathanjohnpayne`; Claude cloud sessions retain the approved signed committer.
+5. The agent checks out the PR branch, reviews the diff, and posts specific, actionable review comments through that reviewer wrapper.
+6. The agent addresses each comment and pushes fix commits to the same branch as `nathanjohnpayne`; author-attributed GitHub API writes use the identity-checked `scripts/gh-as-author.sh` wrapper.
 7. Steps 4–6 repeat until the reviewer identity approves the PR with no outstanding issues. The mechanism of "approves" is scope-dependent: for under-threshold PRs (Phase 3 below), the reviewer identity posts `gh pr review --approve` to satisfy branch protection's required-approving-review check. For Phase 4 PRs (above threshold, on a protected path, or carrying the human-applied `needs-external-review` force-on label), the reviewer identity posts `gh pr review --comment` only — the cross-agent merge gate is carried by Phase 4 (anchored Codex review or affirmative verdict in branch 2 of gate (b), or external reviewer's `APPROVED` in Phase 4b). See [No-self-approve scoping](#no-self-approve-scoping) above.
 
 **All review rounds are captured as GitHub PR comments and commits.** The back-and-forth should read like two developers collaborating.
@@ -547,9 +547,9 @@ When you pull this template change into an existing repo, the new `phase_4b_defa
                              ▼
   ┌─────────────────────────────────────────────────────────┐
   │  PHASE 2: INTERNAL REVIEW                                │
-  │  Agent switches to nathanpayne-{agent}                   │
-  │  Reviews PR → posts comments                             │
-  │  Agent switches to nathanjohnpayne → fixes               │
+  │  Reviewer wrapper selects nathanpayne-{agent} for API    │
+  │  Reviews PR → posts comments; Git identity stays fixed   │
+  │  Agent fixes code with the human author identity        │
   │  ↻ Repeat until approved                                 │
   └──────────────────────────┬──────────────────────────────┘
                              │
@@ -982,23 +982,26 @@ The agent evaluates this after internal review passes, before merging. CI workfl
 
 ## Git Identity Switching
 
-Agents must automate identity switching so that commits and PR activity are attributed to the correct GitHub account. The mechanism depends on the agent's environment, but the result must be:
+Agents select the GitHub API or SSH transport identity for each operation while keeping Git commit attribution with the verified human author. The result must be:
 
-- Commits during authoring use `nathanjohnpayne`'s name and email.
+- All commits during authoring and review use the verified human author identity, `nathanjohnpayne`.
 - Review comments and PR reviews are posted via `nathanpayne-{agent}`'s GitHub credentials.
-- The switch is fully automated within the agent session—no human intervention required for internal review.
+- GitHub API identity selection uses the token-verified author/reviewer wrappers within the session; SSH transport identity selection follows the guidance below. Neither changes Git commit identity.
 
 ### Git commit identity (user.name / user.email)
 
-```bash
-# Switch to author identity
-git config user.name "nathanjohnpayne"
-git config user.email "nathan@nathanjohnpayne.example"
+In local sessions, commit identity stays with the real human author in the machine's global Git configuration; GitHub API review writes use reviewer credentials through the identity-checked GitHub PAT wrapper. Do not switch commit identity during a review or add a repository-local identity override shared by all worktrees.
 
-# Switch to reviewer identity
-git config user.name "nathanpayne-claude"
-git config user.email "claude@nathanpayne-claude.example"
+```bash
+# Inspect configured origins and signing key, then verify effective commit identities.
+git config --show-origin --get user.name
+git config --show-origin --get user.email
+git config --show-origin --get user.signingkey
+git var GIT_AUTHOR_IDENT
+git var GIT_COMMITTER_IDENT
 ```
+
+Confirm the effective author matches the verified human author; environment overrides can replace configured name/email values. In a local session, also confirm the effective committer matches that identity. In Claude cloud, retain the approved signed cloud committer and author environment variables described in [Cloud Agent Environments](docs/agents/cloud-environments.md); the configured `user.name` and `user.email` describe the cloud committer and are not proof of the effective author. If the effective identity or signing setup is absent or wrong for the session, stop and use the approved setup flow rather than writing placeholder identities into local or global configuration. Fixture repositories retain their test identity and signing settings through explicit `git -C` targets; the shared instruction-shape guard is delivered from Mergepath under [mergepath#1195](https://github.com/nathanjohnpayne/mergepath/issues/1195).
 
 ### SSH identity switching (push / pull)
 
@@ -1066,7 +1069,7 @@ scripts/gh-as-author.sh -- gh pr create --title "..." --body "..."
 
 - Use the item ID from the [PAT lookup table](#pat-lookup-table) for your agent identity. Do not use the 1Password item title.
 - Verify token identity with `GH_TOKEN="$OP_PREFLIGHT_REVIEWER_PAT" gh api user --jq .login` or by letting the wrapper call `identity-check.sh --expect-token-identity` before the write. Do not use `gh auth status` as an attribution proof.
-- If `op whoami` says you are not signed in, still run the `op read ...` command in an interactive TTY. That is what triggers the 1Password biometric prompt on local machines.
+- If 1Password reports a sign-in or biometric failure, stop and follow the pause-and-prompt procedure; wait for human readiness confirmation before one canonical preflight refresh.
 - If GitHub returns `Review Can not approve your own pull request`, you either the PR author is wrong, the reviewer token resolved to the author identity, or the [No-self-approve scoping](#no-self-approve-scoping) rule applies. Confirm the PR author and token identity before retrying.
 
 > **If `op read` fails with a sign-in or biometric error here**, follow the pause-and-prompt procedure in `docs/agents/operating-rules.md` under "1Password CLI authentication failures." Do not hardcode tokens, skip review, or retry in a loop.
