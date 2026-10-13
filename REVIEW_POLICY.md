@@ -93,20 +93,20 @@ For repo work, `GH_TOKEN` is now the per-command attribution source for the guar
 
 > **A 1Password item ID is not a stable identity.** On 2026-08-21 the item `o6ekjxjjl5gq6rmcneomrjahpu` was repurposed from Codex to the `nathanpayne-robot` CI account and Codex was recreated at `etak327mpz4drd4byxszfex4vm`; every row above still pointed at the old ID, so `--agent codex` silently resolved a **robot** token and posted reviews under the CI byline. Nothing in the table catches that on its own — after any PAT rotation or item edit, re-verify each row by resolving **that row's** `op://` reference into `GH_TOKEN` and checking it: `GH_TOKEN="$(op read 'op://Private/<item-id>/token')" scripts/identity-check.sh --expect-token-identity <login>`. The bare `scripts/identity-check.sh --expect-token-identity <login>` form does **not** verify a table row: it checks whatever is already in `$GH_TOKEN`. **Origin:** the robot PAT was created that day by repurposing the existing Codex 1Password item rather than minting a fresh one, so the id every doc and lookup already named silently changed identity while nothing referencing it changed — create a new item for a new identity. The map correction (mergepath#1073) landed on the hub the same day but had not reached the consumers when a Codex session hit it ~5.5h later, so treat a canonical-manifest fix as unshipped until it reaches the consumers.
 
-**Cached-variable usage is the primary local pattern.** In a local session, run `eval "$(scripts/op-preflight.sh --agent <agent> --mode review)"` once, then use the cached env vars for subsequent API calls without another biometric prompt. Cloud sessions use provisioned credentials and the capability probe in [Cloud Agent Environments](docs/agents/cloud-environments.md); they do not invoke local 1Password preflight. The identity-checked write wrappers apply to both environments:
+**Cached-variable usage is the primary local pattern.** In a local session, run `eval "$(scripts/op-preflight.sh --agent <agent> --mode review)"` once, then use the cached env vars for subsequent API calls without another biometric prompt. Cloud sessions use provisioned credentials and the capability probe in [Cloud Agent Environments](docs/agents/cloud-environments.md); they do not invoke local 1Password preflight. The identity-checked write wrappers apply to both environments, but their command transport must be supported by the session. The `gh pr` and `gh issue` CLI examples in this policy are local forms; Codex cloud may use them only when its capability probe confirms support. Claude cloud uses wrapper-invoked `gh api` REST forms documented in that guide, or hands blocked operations to a capable local session. Do not run the GraphQL-backed `gh pr` or `gh issue` forms through the Claude proxy:
 
 ```bash
 # Read-path identity check (PRIMARY — uses cached PAT, no biometric).
 GH_TOKEN="$OP_PREFLIGHT_REVIEWER_PAT" gh api user --jq '.login'
 # expected: nathanpayne-<agent>
 
-# Reviewer write path: wrapper resolves and verifies the reviewer token,
+# Local CLI reviewer write path: wrapper verifies the reviewer token,
 # then runs the command with process-local GH_TOKEN. Set the reviewer
 # explicitly when the driver environment is ambiguous.
 GH_AS_REVIEWER_IDENTITY=nathanpayne-<agent> \
   scripts/gh-as-reviewer.sh -- gh pr review <PR#> --repo <owner/repo> --comment --body "Review comment"
 
-# Author write path: wrapper resolves and verifies the author token. For
+# Local CLI author write path: wrapper verifies the author token. For
 # gh pr create it also reads the created PR author with the same token.
 scripts/gh-as-author.sh -- gh pr create --title "..." --body "..."
 ```

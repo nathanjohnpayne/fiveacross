@@ -415,7 +415,7 @@ Use the item ID (not the item title) to avoid shell issues with parentheses in 1
 
 ### Reviewer PAT quick check
 
-The canonical convention is in `REVIEW_POLICY.md` § Reviewer PAT Quick Start. Short form:
+The canonical convention is in `REVIEW_POLICY.md` § Reviewer PAT Quick Start. The `gh pr` / `gh issue` examples below are local CLI forms. Cloud sessions use only command transports confirmed by the capability probe: Claude cloud uses wrapper-invoked `gh api` REST forms in [Cloud Agent Environments](docs/agents/cloud-environments.md), or hands blocked operations to a capable local session. Short form:
 
 - **Read paths** (`gh api user`, GETs, `gh pr view`) honor `GH_TOKEN`.
 - **Core guarded writes** (`gh pr create`, `gh pr merge`, `gh pr edit`, `gh pr comment`, `gh pr review`, `gh issue comment`) use `scripts/gh-as-author.sh` or `scripts/gh-as-reviewer.sh`, which verify the effective token before the write.
@@ -425,11 +425,11 @@ The canonical convention is in `REVIEW_POLICY.md` § Reviewer PAT Quick Start. S
 GH_TOKEN="$OP_PREFLIGHT_REVIEWER_PAT" gh api user --jq '.login'
 # expected: nathanpayne-<agent>
 
-# Reviewer write path: wrapper verifies the reviewer token.
+# Local CLI reviewer write path: wrapper verifies the reviewer token.
 GH_AS_REVIEWER_IDENTITY=nathanpayne-<agent> \
   scripts/gh-as-reviewer.sh -- gh pr review <PR#> --repo <owner/repo> --comment --body "Review comment"
 
-# Author write path: wrapper verifies the author token.
+# Local CLI author write path: wrapper verifies the author token.
 scripts/gh-as-author.sh -- gh pr merge <PR#> --squash --delete-branch
 ```
 

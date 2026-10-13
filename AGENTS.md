@@ -38,7 +38,7 @@ This repository uses a multi-identity AI agent code review system. The full poli
 
 0. In local sessions, run credential preflight at the start of every PR session. The canonical session-loop snippet (read-path GH_TOKEN, token-verified write wrappers — full details in REVIEW_POLICY.md § Phase 0 and § PAT lookup table):
 
-   In cloud sessions, use the provisioned credentials and capability probe in [Cloud Agent Environments](docs/agents/cloud-environments.md); do not invoke local 1Password preflight. The preflight loop below is for local sessions; the identity-checked author/reviewer wrappers apply to both.
+   In cloud sessions, use the provisioned credentials and capability probe in [Cloud Agent Environments](docs/agents/cloud-environments.md); do not invoke local 1Password preflight. The preflight loop and `gh pr` / `gh issue` examples below are local forms. The identity-checked author/reviewer wrappers apply to both environments, but Claude cloud uses wrapper-invoked `gh api` REST forms from that guide or hands blocked operations to a capable local session; Codex cloud uses only command transports its capability probe confirms.
 
    ```bash
    # Session start (one biometric burst). Default --mode is `review`.
@@ -54,11 +54,11 @@ This repository uses a multi-identity AI agent code review system. The full poli
    # Read-path API call (uses cached PAT, no biometric):
    GH_TOKEN="$OP_PREFLIGHT_REVIEWER_PAT" gh api user --jq .login
 
-   # Reviewer write path (the wrapper verifies the reviewer token):
+   # Local CLI reviewer write path (the wrapper verifies the reviewer token):
    GH_AS_REVIEWER_IDENTITY=nathanpayne-{your-agent} \
      scripts/gh-as-reviewer.sh -- gh pr review <PR#> --comment --body "..."
 
-   # Author write path (the wrapper verifies the author token):
+   # Local CLI author write path (the wrapper verifies the author token):
    scripts/gh-as-author.sh -- gh pr create ...
    ```
 
