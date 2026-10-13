@@ -1,4 +1,4 @@
-// Native Chromium acceptance for #1715. Run explicitly with Node 22:
+// Native Chromium acceptance for #1715. Run explicitly with Node 24:
 // node --test src/components/admin/settings-focus.browser.test.mjs
 // Actual settings, schedule, confirm and AdminSheet DOM; only the writer
 // transport and unrelated Archive surface are fixtures. This is focus/default-

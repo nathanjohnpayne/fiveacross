@@ -2,7 +2,7 @@
 // nothing from the browser app so Node deployment tooling can validate Edition
 // metadata against the same identifiers that key the app's brand table. Keep
 // the values and their derived type in this one module: the repository's
-// Node >=22.22 floor strips these erasable types when build-target.mjs imports it.
+// Node >=24.12 floor strips these erasable types when build-target.mjs imports it.
 
 export const EDITION_IDS = Object.freeze({
   GAY_CRUISE_BINGO: 'gcb',

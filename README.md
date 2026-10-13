@@ -64,7 +64,7 @@ The Functions package carries only what needs a server: scheduled Day unlocks (p
 
 The full setup—env, seeding, deploy, and custom domains—lives in the **[app guide](docs/app/README.md)**. The short version:
 
-**Node 22.22 or newer is required** (`react-router` 8 sets the floor; `.nvmrc` pins the line, so `nvm use` selects it). On an older Node, `npm install` warns via `EBADENGINE` and then lets every command below run anyway—the failures that follow are unsupported-engine failures, not bugs.
+**Node 24.12 or newer is required.** firebase 13 sets the floor, and `.nvmrc` pins the line, so `nvm use` selects it. On an older Node, `npm install` warns via `EBADENGINE` and then lets every command below run anyway—the failures that follow are unsupported-engine failures, not bugs.
 
 ```bash
 cp .env.example .env.local     # fill from `firebase apps:sdkconfig WEB` — see app guide §2

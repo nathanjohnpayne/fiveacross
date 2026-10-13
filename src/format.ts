@@ -129,7 +129,7 @@ const EMOJI_CLUSTER_LEADING_SPACE = /^\s+/;
 
 /** The slice of Intl.Segmenter this module uses. Local because the project's
  *  `lib: ES2021` predates the built-in typings (they land in ES2022); every
- *  supported runtime (browsers, Node 22, jsdom) ships the real API and the
+ *  supported runtime (browsers, Node 24, jsdom) ships the real API and the
  *  code degrades to a single run when it is absent. */
 type GraphemeSegmenter = new (
   locale?: string,
