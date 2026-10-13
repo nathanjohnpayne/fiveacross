@@ -202,7 +202,7 @@ jobs:
       # production. The step after it switches back to Node 24 for the
       # @firebase/* emulator suites.
       - name: Use the Functions runtime (Node 22)
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: '22'
 
@@ -210,7 +210,7 @@ jobs:
         run: npm run test:functions
 
       - name: Restore the repository runtime (Node 24)
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: '24'
 
