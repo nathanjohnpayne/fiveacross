@@ -25,7 +25,9 @@ The built-ins cannot infer "claimed" or promote `Backlog → Ready` across a dep
 
 ## The manual protocol
 
-Session prelude (once): `eval "$(scripts/op-preflight.sh --agent claude --mode all)"` then `export GH_TOKEN="$OP_PREFLIGHT_AUTHOR_PAT"` (author identity `nathanjohnpayne`; `move-item.sh` verifies it). All commands assume `REPO=nathanjohnpayne/fiveacross OWNER=nathanjohnpayne PROJECT=7`.
+Local session prelude (once): run canonical review-mode preflight for the running agent, `eval "$(scripts/op-preflight.sh --agent <agent> --mode review)"`, then `export GH_TOKEN="$OP_PREFLIGHT_AUTHOR_PAT"` (author identity `nathanjohnpayne`; `move-item.sh` verifies it). The commands below assume a local session and `REPO=nathanjohnpayne/fiveacross OWNER=nathanjohnpayne PROJECT=7`.
+
+Cloud sessions follow the same board transitions using provisioned credentials and the capability probe in [Cloud Agent Environments](cloud-environments.md), without invoking local 1Password preflight. Where the probe or an operation reports a capability ceiling, hand the board update to a capable local session under that guide; do not claim a ticket until its assignment and board transition are confirmed. The local command examples below do not promise cloud support for GraphQL-backed board operations.
 
 ### 0. File a ticket (adds with no Status)
 

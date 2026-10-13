@@ -93,4 +93,4 @@ In Phase 4a specifically, the agent escalates automatically on any of three sign
 2. Add it to available_reviewers in .github/review-policy.yml.
 3. Configure the agent environment with credentials for both nathanjohnpayne and the new reviewer identity.
 
-For the complete policy including the handoff message format, post-merge issue creation rules, and git identity switching instructions, read REVIEW_POLICY.md.
+For the complete policy including the handoff message format, post-merge issue creation rules, commit identity inspection and verified GitHub API credentials, read REVIEW_POLICY.md.

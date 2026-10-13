@@ -24,7 +24,7 @@ Anything else — a green under-threshold PR, or a Phase 4a clearance where `pha
 All agents commit and push code under a single shared author identity:
 
 - **GitHub ID:** `nathanjohnpayne`
-- **Role:** Author, committer, and merger for all code changes
+- **Role:** Author and merger for all code changes; committer in local sessions. Claude cloud retains the approved signed committer described in [Cloud Agent Environments](docs/agents/cloud-environments.md).
 - **Used by:** Whichever agent is currently writing or fixing code
 
 ### Reviewer Identities
@@ -93,7 +93,7 @@ For repo work, `GH_TOKEN` is now the per-command attribution source for the guar
 
 > **A 1Password item ID is not a stable identity.** On 2026-08-21 the item `o6ekjxjjl5gq6rmcneomrjahpu` was repurposed from Codex to the `nathanpayne-robot` CI account and Codex was recreated at `etak327mpz4drd4byxszfex4vm`; every row above still pointed at the old ID, so `--agent codex` silently resolved a **robot** token and posted reviews under the CI byline. Nothing in the table catches that on its own — after any PAT rotation or item edit, re-verify each row by resolving **that row's** `op://` reference into `GH_TOKEN` and checking it: `GH_TOKEN="$(op read 'op://Private/<item-id>/token')" scripts/identity-check.sh --expect-token-identity <login>`. The bare `scripts/identity-check.sh --expect-token-identity <login>` form does **not** verify a table row: it checks whatever is already in `$GH_TOKEN`. **Origin:** the robot PAT was created that day by repurposing the existing Codex 1Password item rather than minting a fresh one, so the id every doc and lookup already named silently changed identity while nothing referencing it changed — create a new item for a new identity. The map correction (mergepath#1073) landed on the hub the same day but had not reached the consumers when a Codex session hit it ~5.5h later, so treat a canonical-manifest fix as unshipped until it reaches the consumers.
 
-**Cached-variable usage is the primary pattern.** After a single `eval "$(scripts/op-preflight.sh --agent <agent> --mode review)"` at session start, all subsequent API calls use the env var directly — no biometric burned per call:
+**Cached-variable usage is the primary local pattern.** In a local session, run `eval "$(scripts/op-preflight.sh --agent <agent> --mode review)"` once, then use the cached env vars for subsequent API calls without another biometric prompt. Cloud sessions use provisioned credentials and the capability probe in [Cloud Agent Environments](docs/agents/cloud-environments.md); they do not invoke local 1Password preflight. The identity-checked write wrappers apply to both environments:
 
 ```bash
 # Read-path identity check (PRIMARY — uses cached PAT, no biometric).
@@ -113,10 +113,10 @@ scripts/gh-as-author.sh -- gh pr create --title "..." --body "..."
 
 ##### Fallback / setup-only: inline `op read`
 
-> **⚠️ This triggers a biometric prompt every call. Use only when `op-preflight.sh` is unavailable** — for example, during the initial bootstrap of a new machine before the cache directory exists, or in a CI runner that has not been wired through preflight. Routine agent work should always use the cached `$OP_PREFLIGHT_*_PAT` env vars above.
+> **⚠️ Local attended setup only:** inline `op read` may prompt for biometrics on every call. Use this form only during initial local setup when canonical preflight is unavailable, never as a retry after an authentication failure. Routine local sessions use canonical preflight and the cached env vars above. Cloud sessions use the provisioned credential path in [Cloud Agent Environments](docs/agents/cloud-environments.md); CI uses explicitly configured non-interactive credentials. Missing preflight in either environment does not authorize an interactive `op read` fallback.
 
 ```bash
-# Setup-only — every invocation prompts for Touch ID.
+# Local attended setup only — may prompt for Touch ID.
 GH_TOKEN="$(op read 'op://Private/pvbq24vl2h6gl7yjclxy2hbote/token')" \
   gh api user --jq '.login'
 ```
@@ -207,7 +207,7 @@ Notes on the token-wrapper contract:
 
 ### Phase 0: Credential Preflight
 
-> Run this once at the start of every PR review or deploy session. It front-loads all 1Password credential reads and SSH key authorization into a single burst of biometric prompts (~15 seconds), so the human can step away for the rest of the session.
+> In local sessions, run this once at the start of each PR review or deploy session. It front-loads the applicable 1Password credential reads and SSH key authorization into a single burst of biometric prompts (~15 seconds). Cloud sessions use the provisioned credentials and capability probe in [Cloud Agent Environments](docs/agents/cloud-environments.md); do not invoke local 1Password preflight there.
 
 ```bash
 # Session start (one biometric burst). `--mode review` is the DEFAULT
