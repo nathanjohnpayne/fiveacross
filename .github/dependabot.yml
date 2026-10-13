@@ -16,6 +16,12 @@ updates:
       day: "monday"
     open-pull-requests-limit: 5
     groups:
+      # Peer-coupled family (scripts/ci/dependabot-coupled-families.json,
+      # mergepath#2162). Keep it first so its members move together.
+      firebase-sdk:
+        patterns:
+          - "firebase"
+          - "@firebase/*"
       dev-dependencies:
         dependency-type: "development"
       production-dependencies:
