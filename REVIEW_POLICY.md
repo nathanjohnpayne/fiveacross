@@ -254,7 +254,7 @@ If a 1Password authentication or signing prompt fails mid-session, stop and foll
 
 ### Phase 2: Internal Review (Self-Peer Review)
 
-4. For GitHub API review writes, the agent selects its reviewer PAT through the identity-checked `scripts/gh-as-reviewer.sh` wrapper (e.g., `nathanpayne-claude`). Git commit identity remains `nathanjohnpayne` throughout review and authoring.
+4. For GitHub API review writes, the agent selects its reviewer PAT through the identity-checked `scripts/gh-as-reviewer.sh` wrapper (e.g., `nathanpayne-claude`). Commit author identity remains `nathanjohnpayne`; Claude cloud sessions retain the approved signed committer.
 5. The agent checks out the PR branch, reviews the diff, and posts specific, actionable review comments through that reviewer wrapper.
 6. The agent addresses each comment and pushes fix commits to the same branch as `nathanjohnpayne`; author-attributed GitHub API writes use the identity-checked `scripts/gh-as-author.sh` wrapper.
 7. Steps 4–6 repeat until the reviewer identity approves the PR with no outstanding issues. The mechanism of "approves" is scope-dependent: for under-threshold PRs (Phase 3 below), the reviewer identity posts `gh pr review --approve` to satisfy branch protection's required-approving-review check. For Phase 4 PRs (above threshold, on a protected path, or carrying the human-applied `needs-external-review` force-on label), the reviewer identity posts `gh pr review --comment` only — the cross-agent merge gate is carried by Phase 4 (anchored Codex review or affirmative verdict in branch 2 of gate (b), or external reviewer's `APPROVED` in Phase 4b). See [No-self-approve scoping](#no-self-approve-scoping) above.
