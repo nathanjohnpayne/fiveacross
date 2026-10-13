@@ -993,13 +993,15 @@ Agents select the GitHub API or SSH transport identity for each operation while 
 Commit identity stays with the real human author in the machine's global Git configuration; GitHub API review writes use reviewer credentials through the identity-checked GitHub PAT wrapper. Do not switch commit identity during a review or add a repository-local identity override shared by all worktrees.
 
 ```bash
-# Verify the identity and signing key, including where each value comes from.
+# Verify configured origins, the signing key and both effective commit identities.
 git config --show-origin --get user.name
 git config --show-origin --get user.email
 git config --show-origin --get user.signingkey
+git var GIT_AUTHOR_IDENT
+git var GIT_COMMITTER_IDENT
 ```
 
-Provisioning the real human identity belongs to verified machine setup outside managed checkouts. If a value is absent or wrong, stop and use the approved setup flow rather than writing placeholder identities into local or global configuration. Fixture repositories retain their test identity and signing settings through explicit `git -C` targets; the shared instruction-shape guard is delivered from Mergepath under [mergepath#1195](https://github.com/nathanjohnpayne/mergepath/issues/1195).
+Confirm both effective identities match the verified human author; environment overrides can replace configured name/email values. Provisioning the real human identity belongs to verified machine setup outside managed checkouts. If a value is absent or wrong, stop and use the approved setup flow rather than writing placeholder identities into local or global configuration. Fixture repositories retain their test identity and signing settings through explicit `git -C` targets; the shared instruction-shape guard is delivered from Mergepath under [mergepath#1195](https://github.com/nathanjohnpayne/mergepath/issues/1195).
 
 ### SSH identity switching (push / pull)
 
