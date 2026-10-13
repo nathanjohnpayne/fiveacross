@@ -1102,3 +1102,15 @@ auto_clear_labels:
   # 15→5 minutes in mergepath#324 to close the 👍-after-last-push
   # gap (observed on 3 of 6 mergepath#250 Phase D consumer PRs).
   scheduled_sweep_interval_minutes: 5
+
+# Retained archival enrollment is separate from current review standing (#1437).
+# Keep verified retired entries when reviewer/provider configuration changes.
+# Owner decision: https://github.com/nathanjohnpayne/mergepath/issues/1437#issuecomment-6113059061
+feedback_archive:
+  identities:
+    - {login: "chatgpt-codex-connector[bot]", provider: codex, status: active}
+    - {login: "coderabbitai[bot]", provider: coderabbit, status: active}
+    - {login: "github-advanced-security[bot]", provider: ghas, status: active}
+    - {login: nathanpayne-claude, provider: reviewer, status: active}
+    - {login: nathanpayne-cursor, provider: reviewer, status: active}
+    - {login: nathanpayne-codex, provider: reviewer, status: active}
