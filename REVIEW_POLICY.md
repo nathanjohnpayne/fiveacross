@@ -254,9 +254,9 @@ If any `op` command fails mid-session (rare — only if 1Password locks or the 1
 
 ### Phase 2: Internal Review (Self-Peer Review)
 
-4. The agent switches its Git identity to its reviewer account (e.g., `nathanpayne-claude`).
-5. The reviewer identity checks out the PR branch, reviews the diff, and posts review comments on the PR with specific, actionable feedback.
-6. The agent switches back to `nathanjohnpayne` and addresses each comment—pushing fix commits to the same branch.
+4. For GitHub API review writes, the agent selects its reviewer PAT through the identity-checked `scripts/gh-as-reviewer.sh` wrapper (e.g., `nathanpayne-claude`). Git commit identity remains `nathanjohnpayne` throughout review and authoring.
+5. The agent checks out the PR branch, reviews the diff, and posts specific, actionable review comments through that reviewer wrapper.
+6. The agent addresses each comment and pushes fix commits to the same branch as `nathanjohnpayne`; author-attributed GitHub API writes use the identity-checked `scripts/gh-as-author.sh` wrapper.
 7. Steps 4–6 repeat until the reviewer identity approves the PR with no outstanding issues. The mechanism of "approves" is scope-dependent: for under-threshold PRs (Phase 3 below), the reviewer identity posts `gh pr review --approve` to satisfy branch protection's required-approving-review check. For Phase 4 PRs (above threshold, on a protected path, or carrying the human-applied `needs-external-review` force-on label), the reviewer identity posts `gh pr review --comment` only — the cross-agent merge gate is carried by Phase 4 (anchored Codex review or affirmative verdict in branch 2 of gate (b), or external reviewer's `APPROVED` in Phase 4b). See [No-self-approve scoping](#no-self-approve-scoping) above.
 
 **All review rounds are captured as GitHub PR comments and commits.** The back-and-forth should read like two developers collaborating.
@@ -982,15 +982,15 @@ The agent evaluates this after internal review passes, before merging. CI workfl
 
 ## Git Identity Switching
 
-Agents must automate identity switching so that commits and PR activity are attributed to the correct GitHub account. The mechanism depends on the agent's environment, but the result must be:
+Agents select the GitHub API or SSH transport identity for each operation while keeping Git commit attribution with the verified human author. The result must be:
 
-- Commits during authoring use `nathanjohnpayne`'s name and email.
+- All commits during authoring and review use the verified human author identity, `nathanjohnpayne`.
 - Review comments and PR reviews are posted via `nathanpayne-{agent}`'s GitHub credentials.
-- The switch is fully automated within the agent session—no human intervention required for internal review.
+- GitHub API identity selection uses the token-verified author/reviewer wrappers within the session; SSH transport identity selection follows the guidance below. Neither changes Git commit identity.
 
 ### Git commit identity (user.name / user.email)
 
-Commit identity stays with the real human author in the machine's global Git configuration; reviewer identities are used only by the GitHub PAT wrappers. Do not switch commit identity during a review or add a repository-local identity override shared by all worktrees.
+Commit identity stays with the real human author in the machine's global Git configuration; GitHub API review writes use reviewer credentials through the identity-checked GitHub PAT wrapper. Do not switch commit identity during a review or add a repository-local identity override shared by all worktrees.
 
 ```bash
 # Verify the identity and signing key, including where each value comes from.
