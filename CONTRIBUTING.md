@@ -20,7 +20,7 @@ If code conflicts with a spec, or a change would violate [`rules/repo_rules.md`]
 
 Full setup (env mapping, seeding, custom domain) lives in the [app guide §2–3](docs/app/README.md). The short version:
 
-**Node 24.12 or newer is required.** firebase 13 declares `engines.node: >=24.12.0`, above react-router 8's `>=22.22.0`, and the root `package.json` declares the same floor. `.nvmrc` pins the line so `nvm use` picks it up. npm only *warns* on a version mismatch, so an older Node lets the commands below run on an unsupported engine rather than stopping you. [`app-ci`](.github/workflows/app-ci.yml) runs on Node 24, which is what your local checks should match.
+**Node 24.12 or newer is required.** The `@firebase/*` component packages that firebase 13 resolves (app, auth, firestore, storage and rules-unit-testing) declare `engines.node: >=24.12.0`, above react-router 8's `>=22.22.0`, and the root `package.json` declares the same floor. `.nvmrc` pins the line so `nvm use` picks it up. npm only *warns* on a version mismatch, so an older Node lets the commands below run on an unsupported engine rather than stopping you. [`app-ci`](.github/workflows/app-ci.yml) runs on Node 24, which is what your local checks should match.
 
 ```bash
 cp .env.example .env.local     # fill from `firebase apps:sdkconfig WEB` — app guide §2
