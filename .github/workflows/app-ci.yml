@@ -46,7 +46,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           # 22, not 20: react-router 8 declares `engines.node: >=22.22.0`, so a
           # Node 20 runner installs it under an EBADENGINE warning and runs the
