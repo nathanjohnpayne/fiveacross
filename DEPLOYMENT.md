@@ -855,7 +855,7 @@ This procedure is intentionally human-only — the bootstrap wizard (#156) does 
 
 If step 5 fails (deploy doesn't pick up the new key), the most common causes are:
 - **Mistyped item title.** The script reads `op://Firebase/{project-id} — Firebase Deployer SA Key` exactly. Confirm with `op item get "${PROJECT_ID} — Firebase Deployer SA Key" --vault Firebase`.
-- **Stale `op` session.** Run `op signin` and re-try.
+- **Stale `op` session.** Stop and follow [the authentication pause-and-prompt procedure](docs/agents/operating-rules.md#1password-cli-authentication-failures). Wait for fresh human readiness before one canonical preflight refresh; do not run `op signin` or retry an individual credential command as recovery.
 - **Source credential precedence override.** A `GOOGLE_APPLICATION_CREDENTIALS` env var set outside preflight wins over the SA key. Unset it and re-run.
 
 **Roll back / recovery.** GCP does NOT let you re-download a previous key's private JSON — only `private_key_id` (which step 2 captures) is recoverable, and that's just the public identifier, not the key material. So the rollback path depends on what you retained:

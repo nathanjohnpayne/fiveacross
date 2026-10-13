@@ -547,9 +547,9 @@ When you pull this template change into an existing repo, the new `phase_4b_defa
                              ▼
   ┌─────────────────────────────────────────────────────────┐
   │  PHASE 2: INTERNAL REVIEW                                │
-  │  Agent switches to nathanpayne-{agent}                   │
-  │  Reviews PR → posts comments                             │
-  │  Agent switches to nathanjohnpayne → fixes               │
+  │  Reviewer wrapper selects nathanpayne-{agent} for API    │
+  │  Reviews PR → posts comments; Git identity stays fixed   │
+  │  Agent fixes code with the human author identity        │
   │  ↻ Repeat until approved                                 │
   └──────────────────────────┬──────────────────────────────┘
                              │
