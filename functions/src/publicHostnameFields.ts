@@ -1,6 +1,7 @@
 /** Owner-approved public hostname projection (#1419). Canonical routing and
  * recovery metadata stay private. One dependency-free module is compiled with
- * Functions and imported directly by Node 22 maintenance and Vite consumers. */
+ * Functions and imported directly by root maintenance scripts (Node 24.12+, the repository
+ * runtime), the Node 22 Functions runtime, and Vite consumers. */
 export const PUBLIC_HOSTNAME_FIELDS = Object.freeze({
   routing: Object.freeze(['eventId', 'canonicalHost', 'edition', 'status', 'adultContent', 'slug', 'isCanonical']),
   preview: Object.freeze(['eventName', 'dateRange', 'days', 'hostedBy']),

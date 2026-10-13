@@ -48,12 +48,15 @@ jobs:
 
       - uses: actions/setup-node@v7.1.0
         with:
-          # 22, not 20: react-router 8 declares `engines.node: >=22.22.0`, so a
-          # Node 20 runner installs it under an EBADENGINE warning and runs the
-          # jsdom suite on an engine the router does not support. 22 also lines
-          # the runner up with the Cloud Functions runtime (functions/package.json
-          # `engines.node: 22`) and the synthetic-uptime workflow.
-          node-version: '22'
+          # 24: the @firebase/* component packages firebase 13 resolves (app,
+          # auth, firestore, storage, rules-unit-testing) declare
+          # `engines.node: >=24.12.0`, above react-router 8's >=22.22.0. The
+          # `firebase` umbrella package itself declares no engines. npm only warns (EBADENGINE) on a
+          # mismatch, so this pin is what keeps CI on a supported engine. It
+          # matches .nvmrc, the root `engines.node`, and the synthetic-uptime
+          # workflow. The Functions runtime is pinned separately
+          # (`functions/package.json`).
+          node-version: '24'
           cache: npm
 
       - name: Install dependencies
@@ -193,8 +196,23 @@ jobs:
       # functions/src, whose resend / firebase-admin deps live only in
       # functions/package.json. `test:functions` runs `npm --prefix functions
       # install` first, so it is self-contained on a clean runner (no emulator).
+      # Run the notifier suite on the runtime Functions deploys to
+      # (`functions/package.json` engines.node: 22), not the repository's Node
+      # 24, so behaviour that differs on 24 can't pass here and then fail in
+      # production. The step after it switches back to Node 24 for the
+      # @firebase/* emulator suites.
+      - name: Use the Functions runtime (Node 22)
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '22'
+
       - name: Functions notifier tests
         run: npm run test:functions
+
+      - name: Restore the repository runtime (Node 24)
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24'
 
       # The Firestore emulator is a Java process; rules tests boot it via
       # `firebase emulators:exec`. Java comes from setup-java; the Firebase

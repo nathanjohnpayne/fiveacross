@@ -37,7 +37,7 @@ Map the JSON fields into the matching target file: `apiKey`→`VITE_FIREBASE_API
 
 ## 3. Install & run
 
-**Node 22.22+.** `react-router` 8 declares `engines.node: >=22.22.0` and the root `package.json` mirrors that floor; `.nvmrc` pins the major so `nvm use` selects it. npm treats an engine mismatch as a warning rather than an error, so an older Node will install and run—on an unsupported engine—instead of stopping. The same floor applies to the deploy commands in §5, which build the bundle locally.
+**Node 24.12+.** The `@firebase/*` component packages firebase 13 resolves declare `engines.node: >=24.12.0`, above react-router 8's `>=22.22.0`, and the root `package.json` mirrors that floor; `.nvmrc` pins the major so `nvm use` selects it. npm treats an engine mismatch as a warning rather than an error, so an older Node will install and run—on an unsupported engine—instead of stopping. The same floor applies to the deploy commands in §5, which build the bundle locally.
 
 ```bash
 npm install
