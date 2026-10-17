@@ -40,6 +40,8 @@
 #   --wave-scope-file structured canonical range; trusted wave code regenerates
 #                    the curated bytes after live canary byte verification.
 #   --offline-diff   preview supplied bytes with --dry-run; never posts.
+#   --retain-evidence require tripwires for a bound --dry-run whose verdict
+#                     the caller will retain (historical prefix receipts).
 #   --dry-run        do everything EXCEPT post the review; print intended
 #                    action.
 #   --force-enabled  run this one invocation even when
@@ -98,9 +100,10 @@
 #      Before dispatch, account for findings and rerun (#1000). After a posted
 #      approval, review_posted:true identifies an acknowledgment to repair
 #      without repeating the review. No handoff block is emitted.
-#   8  HUMAN_TIEBREAKER_REQUIRED — the governing Codex request cap is
-#      exhausted with no automated response path left. No adapter is run and
-#      no Phase 4b handoff is rendered; a human must decide the PR's state.
+#   8  HUMAN_TIEBREAKER_REQUIRED — a deterministic tripwire matched, or a
+#      governing Codex-cap human stop holds. Tripwires stop before adapter
+#      dispatch. No review authority or Phase 4b handoff is produced; a human
+#      must select the review/disposition path.
 #   10 BARRIER_EVIDENCE_ERROR — request-budget evidence was unreadable or the
 #      head moved. No adapter is run and no Phase 4b handoff is rendered.
 
@@ -231,7 +234,7 @@ GH_AS_AUTHOR="${P4B_GH_AS_AUTHOR:-$ROOT/gh-as-author.sh}"
 ADAPTER_TIMEOUT_ENV="${P4B_ADAPTER_TIMEOUT_SECONDS:-}"
 ADAPTER_TIMEOUT=""
 
-PR="" ; REPO="" ; REVIEWER="" ; AUTHOR="" ; HEAD="" ; EXPECTED_BASE_SHA="" ; EXPECTED_BASE_SHA_SET=false ; DIFF_FILE="" ; DRY_RUN=false ; OFFLINE_DIFF=false ; WAVE_SCOPE_FILE=""
+PR="" ; REPO="" ; REVIEWER="" ; AUTHOR="" ; HEAD="" ; EXPECTED_BASE_SHA="" ; EXPECTED_BASE_SHA_SET=false ; DIFF_FILE="" ; DRY_RUN=false ; RETAIN_EVIDENCE=false ; OFFLINE_DIFF=false ; WAVE_SCOPE_FILE=""
 INPUT_DIR=""
 INPUT_METADATA_DIGEST=""
 FORCE_ENABLED=false
@@ -240,7 +243,7 @@ case "${P4B_FORCE_ENABLED:-}" in
 esac
 
 usage() {
-  echo "usage: phase-4b-review.sh <PR#> [--repo owner/repo] [--reviewer <login>] [--author <agent>] [--head <sha>] [--expected-base-sha <40-hex>] [--diff-file <path>] [--dry-run] [--force-enabled]" >&2
+  echo "usage: phase-4b-review.sh <PR#> [--repo owner/repo] [--reviewer <login>] [--author <agent>] [--head <sha>] [--expected-base-sha <40-hex>] [--diff-file <path>] [--dry-run] [--retain-evidence] [--force-enabled]" >&2
   exit 3
 }
 
@@ -256,6 +259,7 @@ while [ $# -gt 0 ]; do
     --diff-file)     DIFF_FILE="${2:-}"; shift 2 ;;
     --wave-scope-file) WAVE_SCOPE_FILE="${2:-}"; shift 2 ;;
     --dry-run)       DRY_RUN=true; shift ;;
+    --retain-evidence) RETAIN_EVIDENCE=true; shift ;;
     --offline-diff)  OFFLINE_DIFF=true; shift ;;
     --force-enabled) FORCE_ENABLED=true; shift ;;
     -h|--help)       usage ;;
@@ -265,6 +269,11 @@ while [ $# -gt 0 ]; do
       shift ;;
   esac
 done
+
+if [ "$RETAIN_EVIDENCE" = true ]; then
+  [ "$DRY_RUN" = true ] && [ "$OFFLINE_DIFF" = false ] \
+    || p4b_die 3 "--retain-evidence requires a bound, non-offline --dry-run"
+fi
 
 if [ "$OFFLINE_DIFF" = true ]; then
   [ -z "$WAVE_SCOPE_FILE" ] || p4b_die 3 "offline input cannot request wave scope"
@@ -651,20 +660,21 @@ codex_requests_ungoverned() {
 # authority fence. A route without a snapshot re-reads the live generation and
 # refuses the approval if it moved since authorization: a request that arrived
 # after the barrier (the Phase 4a timeout route included) was never reviewed
-# and must not be recorded as covered. Runs BEFORE the final accounting read,
-# which stays the last read before the POST.
+# and must not be recorded as covered. The final mode repeats only this cheap
+# generation read after final accounting, including on request-budget routes.
 refuse_approval_if_request_generation_moved() {
-  local live_gen="" reason evidence payload
+  local mode="${1:-pre-accounting}" live_gen="" reason evidence payload
   [ "$P4B_CODEX_REQUESTS_GOVERN" = true ] || return 0
   if [ -z "$P4B_AUTHORIZED_REQUEST_GENERATION" ]; then
     evidence=request-generation-unrecorded
     reason="the approval carries no authorized Codex request generation; refusing the approval"
-  elif printf '%s' "$P4B_PRE_ADAPTER_REQUEST_BUDGET_JSON" | jq -e '.request_generation | type == "array"' >/dev/null 2>&1; then
+  elif [ "$mode" != final ] && printf '%s' "$P4B_PRE_ADAPTER_REQUEST_BUDGET_JSON" | jq -e '.request_generation | type == "array"' >/dev/null 2>&1; then
     return 0
   elif ! live_gen="$(p4b_live_request_generation "$REPO" "$PR")"; then
     evidence=request-generation-unrecorded
     reason="Codex request generation could not be re-read before the approval; refusing the approval"
-  elif [ "$live_gen" != "$P4B_AUTHORIZED_REQUEST_GENERATION" ]; then
+  elif ! p4b_same_request_generation "{\"request_generation\":$live_gen}" \
+    "{\"request_generation\":$P4B_AUTHORIZED_REQUEST_GENERATION}"; then
     evidence=request-generation-changed
     reason="Codex request generation changed since the run was authorized; refusing the approval"
   else
@@ -782,7 +792,11 @@ hold_for_external_review() {
 
 stop_for_human_tiebreaker() {
   local payload="$1"
-  p4b_warn "Codex human stop holds (spent blocking-review budget, runaway, untested rebuttal or disagreement at a spent request ceiling); stopping for a human tiebreaker without adapter dispatch or Phase 4b handoff"
+  if printf '%s' "$payload" | jq -e '.tripwire' >/dev/null 2>&1; then
+    p4b_warn "Deterministic Phase 4b tripwire requires human-mediated review; no adapter or approval dispatched"
+  else
+    p4b_warn "Codex human stop holds (spent blocking-review budget, runaway, untested rebuttal or disagreement at a spent request ceiling); stopping for a human tiebreaker without adapter dispatch or Phase 4b handoff"
+  fi
   jq -n --argjson pr "$PR" --arg repo "$REPO" --arg head "${HEAD:-}" \
         --arg direction "$DIRECTION" --arg reviewer "$REVIEWER" \
         --arg adapter "$ADAPTER" --argjson b "$payload" --arg enabled_via "$ENABLED_VIA" '
@@ -810,7 +824,7 @@ stop_for_barrier_error() {
 
 # A barrier that opened over a rate-limited CodeRabbit (#1178). Set when the
 # barrier's CodeRabbit arm classified `rate-limited` and it opened anyway on a
-# head-pinned Codex report. Read only by the review-body renderer below.
+# a Codex arm that permits adapter review. Read by the body renderer below.
 BARRIER_CODERABBIT_RATE_LIMITED=false
 # A barrier whose CodeRabbit arm CARRIED an earlier head's review forward
 # (#1335): "<source-commit> <fingerprint>" when set, empty otherwise. Read only
@@ -841,17 +855,12 @@ run_same_head_barrier() {
             jq -c 'select(.state == "available") | .request_generation // empty')"
           ;;
       esac
-      # An open barrier is normally silent — every enabled provider reported
-      # and there is nothing to say. #1178 adds one shape that opens on a
-      # PARTIAL quorum: CodeRabbit refused this head, and Codex alone carries
-      # the ordering. That is a deliberate policy trade, not a fact to leave
-      # in a JSON field nobody reads, so it is narrated here and recorded in
-      # the posted review body below. Both, because they reach different
-      # people: the warn reaches whoever ran the orchestrator, the body line
-      # reaches whoever reads the approval afterwards.
+      # #2120: disclose the missing CodeRabbit report without claiming Codex
+      # reported — its arm may be waived or disabled. The independent adapter
+      # still performs the external review, and its verdict decides the run.
       if [ "$(printf '%s' "$out" | jq -r '.coderabbit // empty' 2>/dev/null || true)" = "rate-limited" ]; then
         BARRIER_CODERABBIT_RATE_LIMITED=true
-        p4b_warn "CodeRabbit refused $HEAD as rate limited and cannot be re-asked; the barrier opened on Codex's head-pinned report alone, so this review is ordered against Codex only"
+        p4b_warn "CodeRabbit refused $HEAD as rate limited and cannot be re-asked; the Codex arm permits the independent Phase 4b adapter review"
       fi
       # #1335: the other shape that opens without CodeRabbit speaking on this
       # exact head. Narrated for the same two readers, for the same reason.
@@ -1189,14 +1198,16 @@ if [ "$DRY_RUN" = true ]; then
   export P4B_ACCT_STATE_DIR
 fi
 
+ADAPTER_MISSING=false
 if [ ! -x "$ADAPTER_SCRIPT" ]; then
+  ADAPTER_MISSING=true
   # No adapter is an infrastructure fallback, never authority to bypass the
   # governing Codex cap. This mode makes no provider-triggering writes and
-  # leaves below-cap fallback behavior unchanged. Offline dry runs stay offline.
+  # still requires authority-bearing input classification before fallback.
+  # Pure previews keep their existing offline/unavailable behavior.
   if [ "$DRY_RUN" != true ]; then
     run_same_head_barrier "pre-fallback" cap-only
   fi
-  fall_back_to_manual "no adapter for reviewer '$REVIEWER' (expected $ADAPTER_SCRIPT)"
 fi
 
 # First barrier evaluation (#814), before the adapter run — the expensive part
@@ -1215,7 +1226,9 @@ fi
 # with fake CLIs)"), which exists precisely to validate adapter dispatch and
 # verdict parsing with no network and no credentials. That workflow is also
 # how tests/test_phase_4b_automation.sh exercises the package.
-if [ "$DRY_RUN" = true ]; then
+if [ "$ADAPTER_MISSING" = true ]; then
+  : # The cap-only barrier above owns this path; no provider-triggering probe.
+elif [ "$DRY_RUN" = true ]; then
   p4b_warn "dry-run: skipping the same-head barrier — it guards the review POST, and a dry-run posts nothing (offline dry-runs stay offline)"
 else
   run_same_head_barrier "pre-adapter"
@@ -1227,7 +1240,7 @@ fi
 # its bounded wait) instead of spending an adapter run that the post-adapter
 # fence would only discard. It runs before the accounting gate below, so that
 # gate stays the last read before dispatch.
-if [ "$DRY_RUN" != true ]; then
+if [ "$DRY_RUN" != true ] && [ "$ADAPTER_MISSING" != true ]; then
   revalidate_request_ceiling_authority pre-dispatch
 fi
 
@@ -1235,41 +1248,44 @@ fi
 # unread or undispositioned. Unlike the provider-ordering barrier, this also
 # applies to dry-runs: invoking the reasoning adapter is the scarce action the
 # gate protects. The command override keeps the orchestrator hermetic in tests.
-require_feedback_accounted
+# An unavailable pure preview needs no captured input. Posting and retained
+# evidence must cross the same input fence even when no adapter can run.
+if [ "$ADAPTER_MISSING" != true ] || [ "$DRY_RUN" != true ] || [ "$RETAIN_EVIDENCE" = true ]; then
+  require_feedback_accounted
 
-# Resolve exact objects in an isolated store, never through a mutable PR diff
-# endpoint. A supplied diff is only a compatibility assertion of these bytes.
-INPUT_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/p4b-input.XXXXXX")" \
-  || p4b_die 3 "could not create protected review input"
-if [ "$OFFLINE_DIFF" = true ]; then
-  [ -f "$DIFF_FILE" ] && [ ! -L "$DIFF_FILE" ] \
-    || p4b_die 3 "offline diff must be a regular file"
-  cp "$DIFF_FILE" "$INPUT_DIR/review.diff" || p4b_die 3 "could not protect offline input"
-  chmod 400 "$INPUT_DIR/review.diff"
-  DIFF_FILE="$INPUT_DIR/review.diff"
-  OFFLINE_INPUT_DIGEST="$(p4b_input_digest "$DIFF_FILE")" || p4b_die 3 "could not fingerprint offline input"
-else
-if ! p4b_run_with_timeout 90 "$ROOT/phase-4b/immutable-input.sh" capture \
-     "$REPO" "$PR" "$EXPECTED_BASE_SHA" "$HEAD" "$INPUT_DIR"; then
-  p4b_die 3 "could not capture immutable PR base/head objects"
-fi
-if [ -n "$WAVE_SCOPE_FILE" ]; then
-  if ! p4b_run_with_timeout 180 "$ROOT/phase-4b/immutable-input.sh" wave-capture \
-      "$REPO" "$PR" "$EXPECTED_BASE_SHA" "$HEAD" \
-      "$WAVE_SCOPE_FILE" "$INPUT_DIR" "$(p4b_config)"; then
-    p4b_die 3 "could not regenerate trusted canonical wave input"
+  # Resolve exact objects in an isolated store, never through a mutable PR diff
+  # endpoint. A supplied diff is only a compatibility assertion of these bytes.
+  INPUT_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/p4b-input.XXXXXX")" \
+    || p4b_die 3 "could not create protected review input"
+  if [ "$OFFLINE_DIFF" = true ]; then
+    [ -f "$DIFF_FILE" ] && [ ! -L "$DIFF_FILE" ] \
+      || p4b_die 3 "offline diff must be a regular file"
+    cp "$DIFF_FILE" "$INPUT_DIR/review.diff" || p4b_die 3 "could not protect offline input"
+    chmod 400 "$INPUT_DIR/review.diff"
+    DIFF_FILE="$INPUT_DIR/review.diff"
+    OFFLINE_INPUT_DIGEST="$(p4b_input_digest "$DIFF_FILE")" || p4b_die 3 "could not fingerprint offline input"
+  else
+    if ! p4b_run_with_timeout 90 "$ROOT/phase-4b/immutable-input.sh" capture \
+         "$REPO" "$PR" "$EXPECTED_BASE_SHA" "$HEAD" "$INPUT_DIR"; then
+      p4b_die 3 "could not capture immutable PR base/head objects"
+    fi
+    if [ -n "$WAVE_SCOPE_FILE" ]; then
+      if ! p4b_run_with_timeout 180 "$ROOT/phase-4b/immutable-input.sh" wave-capture \
+          "$REPO" "$PR" "$EXPECTED_BASE_SHA" "$HEAD" \
+          "$WAVE_SCOPE_FILE" "$INPUT_DIR" "$(p4b_config)"; then
+        p4b_die 3 "could not regenerate trusted canonical wave input"
+      fi
+    fi
+    INPUT_METADATA_DIGEST="$(p4b_input_digest "$INPUT_DIR/input.json")" \
+      || p4b_die 3 "could not fingerprint review input metadata"
+    if [ -n "$DIFF_FILE" ]; then
+      SUPPLIED_DIGEST="$(p4b_input_digest "$DIFF_FILE")" \
+        || p4b_die 3 "supplied diff is unreadable or unprotected"
+      [ "$SUPPLIED_DIGEST" = "$(jq -er '.diff_sha256' "$INPUT_DIR/input.json")" ] \
+        || p4b_die 3 "supplied diff differs from captured immutable objects"
+    fi
+    DIFF_FILE="$INPUT_DIR/review.diff"
   fi
-fi
-INPUT_METADATA_DIGEST="$(p4b_input_digest "$INPUT_DIR/input.json")" \
-  || p4b_die 3 "could not fingerprint review input metadata"
-if [ -n "$DIFF_FILE" ]; then
-  SUPPLIED_DIGEST="$(p4b_input_digest "$DIFF_FILE")" \
-    || p4b_die 3 "supplied diff is unreadable or unprotected"
-  [ "$SUPPLIED_DIGEST" = "$(jq -er '.diff_sha256' "$INPUT_DIR/input.json")" ] \
-    || p4b_die 3 "supplied diff differs from captured immutable objects"
-fi
-DIFF_FILE="$INPUT_DIR/review.diff"
-
 fi
 
 revalidate_immutable_input() {
@@ -1280,6 +1296,23 @@ revalidate_immutable_input() {
   [ "$(p4b_input_digest "$INPUT_DIR/input.json")" = "$INPUT_METADATA_DIGEST" ] \
     && p4b_revalidate_input "$REPO" "$PR" "$INPUT_DIR"
 }
+
+# #1757: the complete immutable PR input, before trimming or model dispatch,
+# owns deterministic egregious-case escalation. Existing barrier stops above
+# remain authoritative. Pure previews retain their exemption; historical
+# callers retaining reusable review evidence request the same tripwire fence.
+if [ "$OFFLINE_DIFF" != true ] && { [ "$DRY_RUN" != true ] || [ "$RETAIN_EVIDENCE" = true ]; }; then
+  escalation="$(node "$ROOT/phase-4b/escalation.cjs" "$INPUT_DIR")" \
+    || p4b_die 3 "could not verify deterministic Phase 4b escalation input"
+  if ! printf '%s' "$escalation" | jq -e '.decision == "model-review" and .tripwires == []' >/dev/null; then
+    stop_for_human_tiebreaker "$(jq -nc --argjson escalation "$escalation" \
+      '{decision:"human-tiebreaker",reason:"Deterministic Phase 4b tripwire requires human-mediated review",tripwire:$escalation}')"
+  fi
+fi
+
+if [ "$ADAPTER_MISSING" = true ]; then
+  fall_back_to_manual "no adapter for reviewer '$REVIEWER' (expected $ADAPTER_SCRIPT)"
+fi
 
 # --- run the adapter (reasoning plane; never posts) ------------------------
 ADAPTER_ARGS=( --pr "$PR" )
@@ -1626,12 +1659,10 @@ BODY_FILE="$(mktemp "${TMPDIR:-/tmp}/p4b-body.XXXXXX")"
     printf -- '- Token usage: not exposed by adapter/CLI\n'
   fi
   printf -- '- Model-internal turn count: not exposed by the adapter contract\n'
-  # #1178: an approval posted over a refusing provider must say so on the PR
-  # itself. The barrier opened on a partial quorum, and a reader who assumes
-  # the usual both-providers ordering would draw a stronger conclusion from
-  # this review than it supports.
+  # #2120: report the refusal without inventing a Codex report. This adapter
+  # is the independent external reviewer even when Codex is waived/disabled.
   if [ "$BARRIER_CODERABBIT_RATE_LIMITED" = true ]; then
-    printf -- '- Provider ordering: CodeRabbit was **rate limited** on this head and could not be re-asked, so the same-head barrier opened on Codex'"'"'s head-pinned report alone (#1178)\n'
+    printf -- '- Provider ordering: CodeRabbit was **rate limited** on this head and could not be re-asked; the Codex arm permitted this independent Phase 4b adapter review (#2120)\n'
   fi
   # #1560 slice 3: a review dispatched over a spent Codex request ceiling ran
   # without a Codex report on this head. Say so, and that no human stop held.
@@ -1918,23 +1949,21 @@ post_review() {
   # This is a bounded consumer fence, not an atomic GitHub read/write protocol;
   # a residual network interval remains between this observation and the POST.
   revalidate_codex_request_budget_authority pre-post
-  # #1598: the approval body records the Codex request generation it was
-  # authorized under; verify it has not moved. A request that lands during the
-  # final accounting read below predates the approval but is outside the
-  # record, so the substitute merge gate holds the approval until Codex
-  # answers it. Verified here, BEFORE that read, which stays the last one.
+  # Preserve the early generation fence before the immutable-input and final
+  # feedback reads; snapshot routes were just re-proved by the budget fence.
   [ "$event" != "APPROVE" ] || refuse_approval_if_request_generation_moved
-  # That revalidation rebuilds the Codex ledger, a slow read, so a finding can
-  # land during it. Account once more after it so the window left for a late
-  # finding is only the POST itself (#1584 Phase 4b P1). A request that lands
-  # during this read is outside the recorded generation, and the merge gate
-  # holds the approval until Codex answers it or Phase 4b reruns (#1598).
+  # That budget revalidation rebuilds the Codex ledger, a slow read, so account
+  # once more after immutable-input validation for late findings (#1584).
   if ! revalidate_immutable_input; then
     cleanup_pre_post_refusal_side_effects "immutable review input changed before POST" true \
       "The PR input" "the reviewed input of ${REPO}#${PR}"
     p4b_die 3 "immutable review input changed before POST"
   fi
   [ "$event" != "APPROVE" ] || refuse_approval_if_feedback_unaccounted
+  # #1598: a request can arrive during final accounting. Compare only the live
+  # generation with the original authorization; never rebuild the ledger or
+  # treat that late request as covered. Drift/unreadability uses pre-POST cleanup.
+  [ "$event" != "APPROVE" ] || refuse_approval_if_request_generation_moved final
   payload_file="$(mktemp "${TMPDIR:-/tmp}/p4b-review-payload.XXXXXX")"
   jq -n --arg commit_id "$HEAD" --arg event "$event" --rawfile body "$BODY_FILE" \
     '{commit_id:$commit_id,event:$event,body:$body}' > "$payload_file"

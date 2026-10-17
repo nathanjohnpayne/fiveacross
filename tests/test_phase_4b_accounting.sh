@@ -489,7 +489,11 @@ for arg in "$@"; do
     fetch) exit 0 ;;
     rev-parse) value="${!#}"; printf '%s\n' "${value%\^\{commit\}}"; exit 0 ;;
     merge-base) prev=''; for value in "$@"; do previous="$prev"; prev="$value"; done; printf '%s\n' "$previous"; exit 0 ;;
-    diff) cat "$P4B_FIXTURE_DIFF"; exit 0 ;;
+    diff)
+      for option in "$@"; do
+        if [ "$option" = --name-only ]; then printf 'x.js\0'; exit 0; fi
+      done
+      cat "$P4B_FIXTURE_DIFF"; exit 0 ;;
   esac
 done
 exit 99
@@ -2219,6 +2223,28 @@ out_t="$(p4b_acct_safe_truncate "$BLK_U" $(( ${#BLK_U} - 2 )))"
 # ===========================================================================
 echo "orchestrator — accounting hook (fail-open, exit codes preserved)"
 # ===========================================================================
+# #1618: no-snapshot request-generation capture and revalidation materialize
+# governing policy. Keep each accounting orchestration case hermetic by
+# resolving its own fixture policy, rather than trying to read a real PR.
+cat > "$BIN/fake-resolve-base-policy" <<'SH'
+#!/bin/sh
+set -eu
+default=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --default-config) default=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -r "$default" ] || exit 2
+tmp=$(mktemp "${TMPDIR:-/tmp}/p4b-acct-policy.XXXXXX")
+cp "$default" "$tmp"
+printf '%s\n' "$tmp"
+SH
+chmod +x "$BIN/fake-resolve-base-policy"
+# Direct orchestration cases below share the same governing-policy fixture.
+export P4B_RESOLVE_BASE_POLICY="$BIN/fake-resolve-base-policy"
+
 run_orch() { # run_orch <state-dir> <policy> <codex-fake> <pr> [extra env as VAR=VAL...] -- [extra args...]
   # Extra env vars come LAST so a test can override the defaults below (env
   # takes the last assignment); extra args land after the defaults, and the
