@@ -217,12 +217,9 @@ feedback_policy:
 # paused because it was the dominant source of latency and stalls, and is back
 # on from 2026-09-11. Nothing about that cost profile has changed, so expect:
 #
-#   * The PROVIDER never retries itself after a rate-limit window elapses; our
-#     tooling does the retrying. `coderabbit-wait.sh` parses the published
-#     window, sleeps it and re-triggers (#138). So an operator does not restart
-#     a rate-limited review by hand while the wait script is running — but a
-#     stall outside that script stays stalled, because nothing on CodeRabbit's
-#     side will pick it back up.
+#   * A published CodeRabbit refusal immediately requests Codex through the
+#     canonical waiter. It preserves ordinary review budgets for other states
+#     and posts no CodeRabbit retry.
 #   * Measured review latency p50 414s / p99 1136s, 1245s poll ceiling (#623),
 #     paid on every PR that waits on Phase 2.5.
 #   * One invocation of the per-developer hourly allowance per review run,
@@ -568,7 +565,7 @@ codex:
   #   true  → Mergepath posts the `@codex review` trigger on every PR,
   #           independent of `external_review_threshold` /
   #           `external_review_paths`. An under-threshold PR gets a Codex
-  #           review too. This is the full-automation default (#483).
+  #           review too. This is the explicit advisory opt-in (#2240).
   #   false → pre-#486 behavior: the trigger fires only when the PR
   #           independently qualifies for Phase 4a (lines ≥ threshold OR a
   #           protected-path match).
@@ -580,9 +577,9 @@ codex:
   #
   # Parsed by `scripts/codex-review-request.sh` (the Phase 4a entry
   # decision) via the same `codex_field` helper the rest of the codex:
-  # block uses. Absent ⇒ true. The script learns whether a PR is
+  # block uses. Absent ⇒ false. The script learns whether a PR is
   # threshold-gated from the caller's `MERGEPATH_PHASE_4A_GATED` env, so
-  # it does not recompute the threshold itself.
+  # it derives the threshold/label/path gate when the caller flag is absent.
   request_by_default: true
 
   # GitHub login of the Codex GitHub App bot. Reviews posted by this login
@@ -911,7 +908,7 @@ phase_4b_automation:
   # `observation` issue per finding (author identity, assigned to it) and
   # posts the APPROVED with the references appended — instead of the
   # pre-#672 behavior of refusing AND discarding the verdict, which
-  # stranded the caller without the findings step 9 needs. Absent ⇒ true.
+  # stranded the caller without the findings step 9 needs. Absent ⇒ false.
   # Set false to restore the refusal (e.g. a consumer repo without the
   # post-review/observation labels; note any issue-filing failure already
   # degrades to the refusal fail-closed).
