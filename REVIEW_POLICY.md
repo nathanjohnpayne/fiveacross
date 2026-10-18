@@ -327,6 +327,8 @@ Phase 2.5 is non-blocking (#2166): nothing here holds the agent before Phase 3 (
 - [ ] Substantive findings fixed or dismissed with reasoning
 - [ ] Recorded each finding's disposition (fixed / rebutted / permitted deferral) via `scripts/coderabbit-record-feedback.sh` (disposition-logging only — no reaction posted; #584)
 
+Trusted per-head CodeRabbit status selection uses numeric status IDs, including the polling clearance refresh: a later refusal supersedes an older completion with the same whole-second timestamp. Unusable trusted ordering evidence fails closed (#2360).
+
 ### Pre-Merge Review Conversation Gate
 
 Every merge path must pass this gate immediately before calling `gh pr merge`, and must repeat it after any push or review-thread reply that can change GitHub conversation state.
