@@ -217,12 +217,9 @@ feedback_policy:
 # paused because it was the dominant source of latency and stalls, and is back
 # on from 2026-09-11. Nothing about that cost profile has changed, so expect:
 #
-#   * The PROVIDER never retries itself after a rate-limit window elapses; our
-#     tooling does the retrying. `coderabbit-wait.sh` parses the published
-#     window, sleeps it and re-triggers (#138). So an operator does not restart
-#     a rate-limited review by hand while the wait script is running — but a
-#     stall outside that script stays stalled, because nothing on CodeRabbit's
-#     side will pick it back up.
+#   * A published CodeRabbit refusal immediately requests Codex through the
+#     canonical waiter. It preserves ordinary review budgets for other states
+#     and posts no CodeRabbit retry.
 #   * Measured review latency p50 414s / p99 1136s, 1245s poll ceiling (#623),
 #     paid on every PR that waits on Phase 2.5.
 #   * One invocation of the per-developer hourly allowance per review run,
@@ -357,8 +354,8 @@ coderabbit:
   # only when CodeRabbit is slow-but-reviewing — exactly the case worth waiting
   # for. Genuinely-stuck rounds (paused / rate-limited / non-base-branch /
   # draft) short-circuit earlier via their own fast-paths, and timeout
-  # stays advisory (the caller proceeds). Rate-limited rounds are handled
-  # by max_rate_limit_retries below, not this budget.
+  # stays advisory (the caller proceeds). Rate-limit refusals immediately
+  # hand off to Codex without spending this grace budget (#2139).
   #
   # NOTE: consumers bootstrapped with an explicit max_wait_seconds override
   # (e.g. the pre-retune 300) keep it — review-policy.yml is per-consumer
@@ -398,29 +395,17 @@ coderabbit:
   # `max_wait_seconds` grace window has already elapsed.
   status_probe_wait_seconds: 60
 
-  # Maximum number of times `scripts/coderabbit-wait.sh` will parse a
-  # "Rate limit exceeded" comment, sleep the published window + 30s
-  # buffer, and post `@coderabbitai, try again.` to re-trigger.
-  # CodeRabbit does not auto-retry after its rate-limit window elapses;
-  # the wait helper does. Set to 0 to disable retries entirely (the
-  # caller will see exit code 5 / rate_limit_stalled on the first
-  # rate-limit comment). See nathanjohnpayne/mergepath#138.
+  # Canonical source for this rule: mergepath/REVIEW_POLICY.md (#2139).
+  # Deprecated compatibility field: the waiter never sleeps out a rate-limit
+  # window or posts a retry; this value no longer changes behavior.
   max_rate_limit_retries: 2
 
-  # #489: when CodeRabbit reports rate-limited, automatically request
-  # `@codex review` (once, HEAD-pinned) so the PR advances via Codex — the
-  # real blocking gate — instead of idling on the advisory bot's hourly
-  # allowance. `scripts/coderabbit-wait.sh` fires
-  # `scripts/codex-review-request.sh --trigger-only` on the first rate-limit
-  # notice; it is time-boxed and self-reverting (a single trigger per run, no
-  # permanent Codex pin) and composes with `codex.request_by_default` (#486)
-  # without forking it. In the auto-merge workflow, a `rate_limit_stalled`
-  # (exit 5) downgrades only when the JSON carries
-  # `codex_failover_requested: true` AND merge-clearance's rate-limit
-  # protection query proves either an active external gate or already-
-  # satisfied current-head Codex/Phase-4b clearance (#713). Set to false to
-  # opt out (e.g. a repo with `codex.enabled: false`, where there is nothing
-  # to fail over to).
+  # Canonical source for this rule: mergepath/REVIEW_POLICY.md (#2139).
+  # A published or trusted per-head refusal requests Codex immediately.
+  # Under-threshold approval requires full exact-head clearance followed by
+  # a new approval carrying the provider/full-SHA audit. A later Codex block
+  # stops the substitution wait with human_attention_required.
+  # Normal Phase 4 gates apply; false opts out and requires attention.
   codex_failover_on_rate_limit: true
 
   # Maximum number of times `scripts/coderabbit-wait.sh` will post
@@ -580,7 +565,7 @@ codex:
   #   true  → Mergepath posts the `@codex review` trigger on every PR,
   #           independent of `external_review_threshold` /
   #           `external_review_paths`. An under-threshold PR gets a Codex
-  #           review too. This is the full-automation default (#483).
+  #           review too. This is the explicit advisory opt-in (#2240).
   #   false → pre-#486 behavior: the trigger fires only when the PR
   #           independently qualifies for Phase 4a (lines ≥ threshold OR a
   #           protected-path match).
@@ -592,9 +577,9 @@ codex:
   #
   # Parsed by `scripts/codex-review-request.sh` (the Phase 4a entry
   # decision) via the same `codex_field` helper the rest of the codex:
-  # block uses. Absent ⇒ true. The script learns whether a PR is
+  # block uses. Absent ⇒ false. The script learns whether a PR is
   # threshold-gated from the caller's `MERGEPATH_PHASE_4A_GATED` env, so
-  # it does not recompute the threshold itself.
+  # it derives the threshold/label/path gate when the caller flag is absent.
   request_by_default: true
 
   # GitHub login of the Codex GitHub App bot. Reviews posted by this login
@@ -923,7 +908,7 @@ phase_4b_automation:
   # `observation` issue per finding (author identity, assigned to it) and
   # posts the APPROVED with the references appended — instead of the
   # pre-#672 behavior of refusing AND discarding the verdict, which
-  # stranded the caller without the findings step 9 needs. Absent ⇒ true.
+  # stranded the caller without the findings step 9 needs. Absent ⇒ false.
   # Set false to restore the refusal (e.g. a consumer repo without the
   # post-review/observation labels; note any issue-filing failure already
   # degrades to the refusal fail-closed).

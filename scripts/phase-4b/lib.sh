@@ -193,7 +193,7 @@ p4b_top_field() {
 # is a bounded, self-clearing wait; `escalate` goes to the human immediately.
 # `rate-limited` is the one class the CLASSIFIER cannot resolve on its own —
 # it names the provider's state and the composer decides, because the answer
-# depends on whether the OTHER provider reported. See p4b_same_head_barrier.
+# depends on whether the Codex arm independently blocks. See p4b_same_head_barrier.
 #
 # `waived` is deliberately a separate class rather than reuse of `reported`,
 # which would claim a report that never happened, or of `will-not-report`,
@@ -652,11 +652,11 @@ p4b_codex_request_budget_state() {
   fi
 }
 
-# p4b_governing_codex_enabled <repo> <pr>
-# Prints true or false for codex.enabled in the PR's GOVERNING base policy,
-# the policy the substitute merge gate applies, rather than the local
-# checkout's (#1598). Returns 2 when the policy cannot be resolved.
-p4b_governing_codex_enabled() {
+# p4b_governing_policy_json <repo> <pr>
+# Materialize the PR's governing base policy, even when the caller's trusted
+# checkout has another author or targets another repository (#1618). Returns
+# 2 on an unreadable policy; removes only the resolver's materialized copy.
+p4b_governing_policy_json() {
   local repo="$1" pr="$2" config resolver base_cfg base_json rc=0
   command -v policy_yaml_to_json >/dev/null 2>&1 || return 2
   config="$(p4b_config)"
@@ -668,23 +668,32 @@ p4b_governing_codex_enabled() {
   base_json=$(policy_yaml_to_json "$base_cfg" 2>/dev/null) || rc=$?
   [ "$base_cfg" = "$config" ] || rm -f "$base_cfg" 2>/dev/null || true
   [ "$rc" -eq 0 ] && [ -n "$base_json" ] || return 2
-  printf '%s' "$base_json" | jq -er '
-    if type != "object" then error("policy")
-    elif ((.codex | type) == "object") and (.codex.enabled == false) then "false"
+  printf '%s' "$base_json" | jq -ce 'select(type == "object")' 2>/dev/null || return 2
+}
+
+# p4b_governing_codex_enabled <repo> <pr>
+# Prints true or false for codex.enabled in the PR's GOVERNING base policy,
+# the policy the substitute merge gate applies, rather than the local
+# checkout's (#1598). Returns 2 when the policy cannot be resolved.
+p4b_governing_codex_enabled() {
+  local policy
+  policy=$(p4b_governing_policy_json "$1" "$2") || return 2
+  printf '%s' "$policy" | jq -er '
+    if ((.codex | type) == "object") and (.codex.enabled == false) then "false"
     else "true" end' 2>/dev/null || return 2
 }
 
 # p4b_live_request_generation <repo> <pr>
-# The configured author's Codex request generation as it stands now: a sorted
+# The governing base policy author's Codex request generation: a sorted
 # array of request comment ids (#1598). An approval records the generation it
 # was authorized under, and the substitute merge gate refuses it once the live
 # generation holds a request outside that record. Returns 2 when the read or
 # the selector fails.
 p4b_live_request_generation() {
-  local repo="$1" pr="$2" author comments
+  local repo="$1" pr="$2" policy author comments
   command -v crqe_trigger_generation gh_api_array >/dev/null 2>&1 || return 2
-  author="$(p4b_top_field author_identity)"
-  author="${author:-nathanjohnpayne}"
+  policy=$(p4b_governing_policy_json "$repo" "$pr") || return 2
+  author=$(crqe_policy_author "$policy" 2>/dev/null) || return 2
   comments=$(gh_api_array "repos/$repo/issues/$pr/comments" "Codex request generation for the approval record") \
     || return 2
   crqe_trigger_generation "$comments" "$author" 2>/dev/null | jq -ce 'select(type == "array")' 2>/dev/null \
@@ -1904,7 +1913,7 @@ p4b_barrier_ceiling_route() { # <repo> <pr> <head> <clear-evidence> <stop-eviden
 # p4b_same_head_barrier <repo> <pr> <head> <reviewer> [dry_run]
 #
 # Emits one JSON object on stdout and returns:
-#   0  open      — every ENABLED provider is terminal on this exact head
+#   0  open      — provider ordering permits the independent adapter review
 #   1  pending   — at least one is not yet, still inside the bound
 #   2  escalate  — a provider needs the ordinary manual Phase 4b fallback
 #   3  tiebreak  — Codex request ceiling spent and a human stop holds
@@ -1951,22 +1960,30 @@ p4b_same_head_barrier() {
     initial_cls_cx="$cls_cx"
     case "$initial_cls_cx" in
       reported)
-        live_report_head=$(gh_api_scalar --shape sha "Codex reported-signal live PR head" \
-          "repos/$repo/pulls/$pr" --jq '.head.sha') || live_report_head=""
-        if [ -z "$live_report_head" ]; then
+        if ! command -v gh_api_scalar >/dev/null 2>&1; then
           cls_cx="escalate"
-          cx_evidence="head-read-failed"
+          cx_evidence="scalar-reader-unavailable"
           budget_unsafe=true
-          cx_budget_json='{"state":"unreadable","reason":"reported-signal-head-read-failed"}'
-          why="Codex reported, but the live PR head could not be verified; refusing authority for the reviewed head"
-        elif [ "$live_report_head" != "$head" ]; then
-          cls_cx="escalate"
-          cx_evidence="drift"
-          budget_unsafe=true
-          cx_budget_json="$(jq -nc --arg h "$head" --arg l "$live_report_head" '{state:"drift",reason:"head-moved",reviewed_head:$h,live_head:$l}')"
-          why="PR head moved after the Codex report check (reviewing $head, live $live_report_head) — rerun on the new head"
+          cx_budget_json='{"state":"unreadable","reason":"scalar-reader-unavailable"}'
+          why="Codex reported, but the scalar reader is unavailable; refusing authority for the reviewed head"
         else
-          cx_evidence="signal"
+          live_report_head=$(gh_api_scalar --shape sha "Codex reported-signal live PR head" \
+            "repos/$repo/pulls/$pr" --jq '.head.sha') || live_report_head=""
+          if [ -z "$live_report_head" ]; then
+            cls_cx="escalate"
+            cx_evidence="head-read-failed"
+            budget_unsafe=true
+            cx_budget_json='{"state":"unreadable","reason":"reported-signal-head-read-failed"}'
+            why="Codex reported, but the live PR head could not be verified; refusing authority for the reviewed head"
+          elif [ "$live_report_head" != "$head" ]; then
+            cls_cx="escalate"
+            cx_evidence="drift"
+            budget_unsafe=true
+            cx_budget_json="$(jq -nc --arg h "$head" --arg l "$live_report_head" '{state:"drift",reason:"head-moved",reviewed_head:$h,live_head:$l}')"
+            why="PR head moved after the Codex report check (reviewing $head, live $live_report_head) — rerun on the new head"
+          else
+            cx_evidence="signal"
+          fi
         fi
         ;;
       *)
@@ -2103,6 +2120,15 @@ p4b_same_head_barrier() {
     esac
   fi
 
+  # Disabled Codex also depends on the substitute path to clear gate (c).
+  # Reject an explicitly forbidden substitute before probing/triggering
+  # CodeRabbit or dispatching an adapter that could never clear that gate.
+  if [ "$cls_cx" = disabled ] \
+     && [ "$(p4b_policy_block_field codex allow_phase_4b_substitute)" = false ]; then
+    cls_cx=escalate
+    why="Codex is disabled and codex.allow_phase_4b_substitute=false, so no Phase 4b review could clear gate (c)"
+  fi
+
   # CodeRabbit arm: probe (read-only, zero allowance) -> conditional trigger
   # -> bounded retry. The probe resolves the live head itself, so classifying
   # against "$head" is also what catches a push landing mid-run.
@@ -2149,33 +2175,13 @@ p4b_same_head_barrier() {
       case "$cls_cr" in
         reported|will-not-report|waived|carried) ;;
         rate-limited)
-          # #1178. The classifier has established that CodeRabbit REFUSED
-          # this head and that no wait available to this run lifts the
-          # refusal. That is exactly the question the rc-5 arm already
-          # answers for the polling mode — waived when the #489 Codex
-          # failover engaged, escalate otherwise — and the reason it was
-          # unreachable here is only that --probe never returns rc 5 and
-          # never sets codex_failover_requested.
-          #
-          # Resolve it against the Codex arm THIS run already classified,
-          # which is the same claim the failover flag makes and is better
-          # evidence: the flag says a request was sent, cls_cx == reported
-          # says Codex actually spoke on the exact head about to be
-          # approved. That, and not CodeRabbit's participation, is what the
-          # barrier's ordering guarantee requires — see the rc-5 note on
-          # why waived is the right class for a stall the other provider
-          # has already covered.
-          #
-          # A Codex arm still `not-yet` is the one case that keeps waiting,
-          # and the wait is honest because it is a wait on CODEX: that arm
-          # is self-clearing, and the next probe can find it reported and
-          # open the barrier on it. Escalating here instead would page a
-          # human on a PR whose Codex round was about to land — the #835
-          # objection to escalating a rate limit unconditionally, which
-          # holds just as well when the failover's role is played by the
-          # barrier's own Codex arm. What the head-anchored budget already
-          # bounds, it keeps bounding; only the reason it escalates with
-          # changes, below.
+          # #2120: a bare provider refusal cannot stop the independent
+          # Phase 4b adapter review. The adapter is itself the external
+          # reviewer; a Codex report is not required to corroborate it.
+          # Reported, waived and disabled Codex arms therefore let it run.
+          # A still-active Codex arm owns its existing bounded wait; its
+          # human stops, unreadable budgets and escalation are decided
+          # above and cannot be overridden by this refusal.
           #
           # WHAT MAKES THE OPEN ARM SAFE, and where that safety lives:
           # `observed: rate_limit` has to mean "refused, with nothing unread
@@ -2192,25 +2198,18 @@ p4b_same_head_barrier() {
           # precondition for this arm — a probe without the guard must not be
           # paired with it.
           #
-          # Every OTHER cls_cx escalates now, `waived` and `disabled`
-          # included: in those states nothing will read this head at all, so
-          # opening would post an approval with no external corroboration
-          # and waiting would spend a budget with nothing to wait on. That
-          # is the routing #839 gave the account-blocked Codex, for the same
-          # reason — no marker is written, so no budget starts.
-          #
-          # (`escalate` is unreachable: the Codex arm sets `why`, and this
-          # whole block is guarded on `why` being empty.)
+          # Recognized included-review quota notices use the same rate_limit
+          # class; unfamiliar quota text is not promoted to a bare refusal.
           #
           # No trigger and no resume on any of these paths: should_trigger
           # declines on rate_limit anyway, and a resume answers a pause, not
           # a limit. The class spends no CodeRabbit allowance in either
           # direction.
           case "$cls_cx" in
-            reported) ;;
+            reported|will-not-report|waived|disabled) ;;
             not-yet)  pending=true ;;
             *)
-              why="CodeRabbit refused to review $head (rate limited) and no wait this run can make lifts that, while Codex is '$cls_cx' rather than reported — nothing has read this head, so a human must review it or clear the limit"
+              why="Codex arm '$cls_cx' does not permit the independent Phase 4b review on $head"
               ;;
           esac
           ;;
@@ -2293,7 +2292,7 @@ p4b_same_head_barrier() {
               why="$coderabbit_cause"
             else
               case "$cls_cr" in
-                not-yet|rate-limited) why="external review did not reach the current head within ${budget}s" ;;
+                not-yet) why="external review did not reach the current head within ${budget}s" ;;
               esac
             fi
             ;;
@@ -2312,7 +2311,7 @@ p4b_same_head_barrier() {
                 why="$coderabbit_cause"
               else
                 case "$cls_cr" in
-                  not-yet|rate-limited) why="external review did not reach the current head within ${budget}s" ;;
+                  not-yet) why="external review did not reach the current head within ${budget}s" ;;
                 esac
               fi
             fi
@@ -2339,7 +2338,9 @@ p4b_same_head_barrier() {
       # below is appended to it for the same reason.
       case "$cls_cr:$cls_cx" in
         rate-limited:reported) ;;
-        rate-limited:*) why="$why (CodeRabbit refused this head as rate limited and cannot be re-asked; the wait was on Codex, which stayed '$cls_cx')" ;;
+        rate-limited:*)
+          [ -z "$why" ] || why="$why (CodeRabbit refused this head as rate limited and cannot be re-asked; the wait was on Codex, which stayed '$cls_cx')"
+          ;;
       esac
       # The recovery this same run just sent must survive into the manual
       # fallback, whose renderer carries only the reason — an operator who
@@ -2536,6 +2537,9 @@ p4b_feedback_policy_mode() {
 # p4b_feedback_priority_value <p0|p1|p2|p3|nitpick>
 # Returns the configured disposition value under feedback_policy.priorities,
 # or the parser default if absent: P0/P1 required, lower tiers discretionary.
+# This answers disposition policy, not the legacy merge-gate blocking set.
+# See the resolve_required_tiers header in scripts/lib/feedback-policy-helpers.sh:
+# its absent-block p1-only default is intentional; keep these parsers separate.
 p4b_feedback_priority_value() {
   local tier="$1" cfg value
   cfg="$(p4b_config)"
