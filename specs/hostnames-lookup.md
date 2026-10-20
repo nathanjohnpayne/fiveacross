@@ -111,6 +111,22 @@ Merge the reviewed migration code before applying it. Keep the script afterward 
 
 **An unknown host is a missing document, not a denial.** `get` succeeds against a non-existent path and returns `exists() == false`, so a client renders an Event-not-found state instead of a permission error it would otherwise have to distinguish from a network failure.
 
+## Join codes (#1934)
+
+A native app has no Event hostname, so it needs a second way in: a **join code**, which is the Event's Slug (PRD *Native App Expansion* § Decision 2). The owner [decided](https://github.com/nathanjohnpayne/fiveacross/issues/1934#issuecomment-6298028413) on 2026-10-20 that a join code gets **no record of its own**. A code `x` names the hostname `x.fiveacross.app` in the canonical Namespace, and the native client resolves it through that hostname's existing `publicHostnames/{host}` document.
+
+`joinCodeHostname` (`src/joinCode.ts`) is the one mapping. It folds a player's typing with `normalizeSlug` (trim, lowercase), then applies the same strict `validateSlug` the Event-setup wizard and the edge router use. A code the router would refuse as a first label is refused before any read: a reserved label from either floor, an `r2-` rehearsal label, a pasted hostname (its dots are `invalid-characters`) or any other malformed Slug. The result is already a `hostnameKey`-shaped document key.
+
+Everything else follows from the decision rather than from new code:
+
+- **One read contract.** A join-code lookup is a single `get` of `publicHostnames/{host}` under the Rules contract above: allowed before sign-in, whole-document field allowlist, `list` denied, so a guessable code never turns the collection into a directory. A code with no hostname record is a missing document, rendered as not-found, never a permission error.
+- **One posture writer.** `raiseAdultContentForEvent` already stamps every `hostnames` row whose `eventId` matches, `<slug>.fiveacross.app` included, together with its paired public copy, and `reconcileHostnameAdultContent` stamps a hostname created for an Event that is already adult. No join-code writer exists to drift from them.
+- **One watched document.** The record that resolved a code-joined Event and the record a native live posture watcher subscribes to are the same `publicHostnames/{host}` document, so a posture rise reaches the session through the path that admitted it (#1937).
+
+The accepted constraint: **an Event is joinable by code only if it has a `<slug>.fiveacross.app` hostname record.** The Event-setup wizard checks and presents every new Event's canonical address as `<slug>.fiveacross.app` in that Namespace, whatever the Edition (`CANONICAL_NAMESPACE_APEX` in `src/editions.ts`, `checkEventAddressAvailability` in `src/data/hostnames.ts`), so the constraint matches how addresses are already provisioned rather than adding a requirement. No join-code backfill exists to run. Checking that each existing Five Across Event has this hostname is a read-only production audit, and provisioning a missing one goes through the lifecycle helper; both stay separate owner rollout actions.
+
+Out of scope here: the join screen and its resolution UI (#1936), keying the native watcher (#1937), and whether a pasted invite URL is also accepted (an open PRD question).
+
 ## Acceptance criteria
 
 - **Given** an unauthenticated client, **when** it `get`s a valid public hostname projection, **then** the read succeeds. (Test: unauth-get.)
@@ -118,10 +134,15 @@ Merge the reviewed migration code before applying it. Keep the script afterward 
 - **Given** any client, authenticated or not, **when** it queries either hostname collection, **then** the read is denied. (Test: list-denied.)
 - **Given** an unknown hostname, **when** a client `get`s its public projection, **then** the read succeeds and the document does not exist—a not-found path, never an error. (Test: unknown-host.)
 - **Given** any client, **when** it attempts to create, update, or delete a hostname document, **then** the write is denied—including a signed-in user and an Event admin. (Test: writes-denied, admin-write-denied.)
+- **Given** a typed join code, **when** it is mapped, **then** it names `<slug>.fiveacross.app` after trimming and lowercasing, and a code that is reserved, rehearsal-prefixed, dotted or otherwise not a valid Slug is refused before any read. (Test: joinCodeHostname.)
+- **Given** an unauthenticated client holding a join code, **when** it `get`s the public projection the code names, **then** the read succeeds and carries only allowlisted fields; a non-allowlisted field denies the whole read; a code with no hostname is a missing document; listing stays denied. (Test: join code resolves through publicHostnames.)
+- **Given** an Event joinable by code, **when** its first explicit Prompt is approved, its adult override is enabled, or its code hostname is created after it is already adult, **then** the public projection the code names reads `adultContent: true`. (Test: the record a join code resolves through.)
 
 ## Test coverage
 
 `tests/rules/hostnames-lookup.test.ts` (rules emulator, `npm run test:rules`)—its own `projectId` so `clearFirestore()` cannot race the other rules suites under Vitest's file parallelism, matching the convention in `w1-attestation.test.ts`. Seeds fixture documents through `withSecurityRulesDisabled` (the Admin-SDK stand-in), then exercises each arm above.
+
+Join codes (#1934): `src/joinCode.test.ts` (unit, `npm test`) pins the mapping, its typing fold and every refusal; the `join code resolves through publicHostnames` block in `tests/rules/hostnames-lookup.test.ts` pins the pre-auth read contract on the document a code names; and `the record a join code resolves through` in `tests/functions/adult-content-derivation.test.ts` (`npm run test:functions`) drives the real stamp through both posture triggers and reconciliation and reads the code's public projection.
 
 ## Deployment acceptance for the public projection
 
