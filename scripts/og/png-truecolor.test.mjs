@@ -48,7 +48,11 @@ describe('encodePng (#887)', () => {
       expect(Buffer.from(readPngPixels(encoded).data).equals(Buffer.from(image.data)), file).toBe(true);
       expect(encoded.length, `${file} grew`).toBeLessThanOrEqual(original.length);
     }
-  });
+    // Decoding and re-encoding every committed card is about 2 s of CPU-bound
+    // work on its own, and a full parallel run on a contended host pushes it
+    // past the 5 s default (#1955). The budget covers the work; the
+    // assertions are unchanged.
+  }, 30_000);
 
   it('writes colour type 6 when handed four channels', () => {
     expect(readPngHeader(encodePng(rgbaCard({ width: 4, height: 3 }))).colorType).toBe(6);
