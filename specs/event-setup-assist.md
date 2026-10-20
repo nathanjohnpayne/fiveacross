@@ -1,0 +1,234 @@
+---
+spec_id: event-setup-assist
+status: proposed
+tested: false
+reason: "proposed design for #1958; the test files named in § Test coverage are created by the implementing PR, which removes this flag and flips status to accepted"
+---
+
+# Event setup assists—Drafting with Claude inside Steps 3 and 4 (`event-setup-assist`)
+
+The contract for [#1958](https://github.com/nathanjohnpayne/fiveacross/issues/1958), a child of the setup-wizard epic [#786](https://github.com/nathanjohnpayne/fiveacross/issues/786): four credit-backed assists that write words into the organizer wizard—squares, a top-up of squares, a spicy verdict on a typed square, and each Day's Place, Tonight pair and Free Space—behind one callable, `draftWithClaude`, and one authorship rule: nothing a model writes enters the draft until the organizer keeps it. It extends [`specs/event-setup-wizard.md`](event-setup-wizard.md) and changes none of it; every row an assist offers is judged by that spec's § Validation predicates and enters the draft through the transforms that spec already names.
+
+Design shape comes from `plans/daily-cards-wireframes.html` § "Five Across · Drafting with Claude" (`#sec-setup-assist`: frames `#frame-setup-assist-brief`, `-review`, `-landed`, `-look`, the states table `#sec-setup-assist-states`, and the dashed ✦ entry rows on `#frame-setup-squares` and `#frame-setup-look`), which is explicitly exploratory. Every binding fact below comes from the code the wizard spec cites or from the Claude API as documented at the time of writing; where the frames and this spec disagree, this spec wins and the deviation is recorded here.
+
+**Status is `proposed` because five decisions in § Open decisions are the owner's**, and because the plumbing has not been built. The code constraints under § Contract are what the implementing PR is checked against; the v1 default named under each open decision is what it builds unless the owner rules otherwise first.
+
+Why this exists: the occasion matrix binds no starter pack (every `OccasionDef.starterPackId` in `src/data/occasions.ts` is `null`), #786 Decision 2 (2026-10-02) made the owner the editorial gate for any pack that gets authored, and the platform holds a $200 Claude developer-credit grant that nothing spends. Per-Event drafting with organizer approval is the PRD's own later opportunity ("AI-assisted prompt drafting with organizer approval", PRD § Later opportunities), pulled forward because the pack problem it solves is what stands between Step 3 and the under-15-minutes goal. These assists add nothing to, and remove nothing from, the platform blockers Step 5 lists.
+
+## Glossary
+
+- **Assist**: an offer inside an existing wizard step—a sheet or a row—never a step of its own. Five steps stay the ceiling.
+- **Brief**: the organizer's free-text description of the group, typed on the brief sheet. Optional. Sent to the callable, forwarded to the API, kept nowhere (§ Open decisions 1 and 4).
+- **Row**: one proposed Prompt, `{ pool, text, spicy? }`, streamed back by the `squares` or `top-up` task. A row is not in the draft. It is undecided until kept or dropped.
+- **Keep**: the authorship act. A kept row commits through `addPrompt` (`src/data/draftSquares.ts`) the moment it is tapped; a kept Day proposal commits through the Look transforms in `src/data/draftLook.ts`. There is no other way into the draft.
+- **Task**: the callable's discriminator—`squares`, `top-up`, `spicy-check`, `day-copy`. One callable, four behaviours.
+- **Draft unit**: what the per-account daily allowance counts. `squares`, `top-up` and `day-copy` each spend one; `spicy-check` spends none.
+- **Allowance**: the per-signed-in-account, per-UTC-day cap on draft units, enforced server-side and returned on every response as `remaining`.
+- **Ledger**: the server-only monthly usage document `aiUsage/{yyyy-mm}` that sums tokens and estimated spend across every account, with a dollar ceiling.
+- **Register**: the Edition's own vocabulary (`editionLexicon` in `src/editions.ts`—Vacay says *trip*, *stop*, *the whole group*), restated for the prompt so squares read as the players' Edition rather than the platform's.
+
+## Contract
+
+### The callable
+
+`draftWithClaude` is an `onCall` exported from `functions/src/index.ts` beside `submitPrompt` and `approvePrompts`, with the handler in `functions/src/draftWithClaude.ts` taking injected deps (`{ db, now, anthropic, logger }`, the `submitPrompt` posture, so the unit suite runs with a fake Firestore and a fake Anthropic stream and no runtime). Options: `serviceAccount: ADMIN_SDK_SERVICE_ACCOUNT` (it reads and writes the allowance and ledger documents), `secrets: [ANTHROPIC_API_KEY]`, `timeoutSeconds: 120`, `maxInstances: 10`. It is registered in `scripts/callable-invoker-families.mjs`, because the #1283 predeploy hook refuses an HTTPS export that belongs to no invoker family.
+
+It requires `request.auth`—a signed-in caller—before anything else, and refuses `unauthenticated` otherwise. The allowance is per account, a device-local draft id is a trivial thing to reset, and the organizer must be signed in to be granted Admin at launch anyway. With `DRAFT_WITH_CLAUDE_APP_CHECK` true it also requires `request.app` (`failed-precondition`), the same off-by-default posture as `SUBMIT_PROMPT_APP_CHECK`.
+
+It writes no Event document and no draft. Drafts are device-local (#786 Decision 1); the callable takes a slice of one and returns words. Its only Firestore writes are `aiAllowances/{uid}` and `aiUsage/{yyyy-mm}`.
+
+### Request
+
+The wire types live in `src/domainTypes.d.ts` (`DraftWithClaudeRequest`, `DraftWithClaudeChunk`, `DraftWithClaudeResponse`) and are imported type-only by `functions/`, as `SubmitPromptRequest` is. The shape, with the bounds the server enforces (`invalid-argument` on any violation, before any admission or model work):
+
+```ts
+interface DraftWithClaudeRequest {
+  task: 'squares' | 'top-up' | 'spicy-check' | 'day-copy';
+  /** What the draft already knows. Never the slug, never unlock times, never Themes. */
+  draft: {
+    occasion: OccasionId;           // must resolve in the matrix
+    edition: string;                // must be a known Edition id
+    name: string;                   // 1–80, trimmed
+    startsOn: string;               // ISO date
+    endsOn: string;                 // ISO date, >= startsOn
+    forceAdult: boolean;            // the Basics audience choice
+    claimMode: EventDoc['claimMode'];
+    cardFormat: DraftCardFormat;
+    days: Array<{ index: number; date: string; pool: PoolId; tutorial: boolean }>; // <= MAX_DAYS, contiguous
+  };
+  brief?: string;                   // <= 600 characters after trim; may be empty
+  tone?: 'gentle' | 'playful' | 'unhinged';   // default 'playful'
+  spicyShare?: number;              // 0–1; honoured only when draft.forceAdult is true
+  targets?: Partial<Record<PoolId, number>>;  // squares / top-up: 1–40 per pool, assigned pools only
+  existing: Record<PoolId, string[]>;         // texts already in each pool: each 1–80, <= 200 per pool
+  examples?: string[];              // top-up 'more-like-these': kept texts, <= 40
+  angle?: 'more-like-these' | 'top-up-pool' | 'different-angle';  // top-up only
+  pool?: PoolId;                    // top-up 'top-up-pool': the one pool to fill
+  text?: string;                    // spicy-check: the typed square, 1–80
+}
+```
+
+`draft.days` is accepted only as `{ index, date, pool, tutorial }`: the model is told which Day deals which pool (an arrival Day writes arrival squares, a closing Day farewell squares, a `tutorial` Day warm-up ones) and nothing else about the schedule. `targets` may name only pools in `assignedPools(draft)` (`src/data/draftValidation.ts`); a target for a pool no Day deals from is `invalid-argument`, matching the sheet, which does not offer it. `spicyShare` under `forceAdult: false` is ignored and the request forbids sexual content outright; the client never sends it in that case, and the server ignores it if it does.
+
+### Response and chunks
+
+With `request.acceptsStreaming` the callable forwards each validated row through `response.sendChunk` as it is parsed out of the model's streamed JSON array, and the client reads `httpsCallable(functions, 'draftWithClaude', { timeout: 90_000 }).stream(request, { signal })`, consuming `stream` for chunks and `data` for the final response. A non-streaming caller gets the same final response with every row in it. Chunks are `{ row: SquareRow }` for `squares` and `top-up`, `{ day: DayCopy }` for `day-copy`; `spicy-check` streams nothing.
+
+```ts
+type SquareRow =
+  | { pool: 'main'; text: string; spicy: boolean }
+  | { pool: 'easy' | 'closing'; text: string };          // no spicy key: unrepresentable, as DraftCuratedPrompt says
+interface DayCopy { index: number; place: string; placeEmoji: string; tonight: [string, string]; freeText: string }
+type DraftWithClaudeResponse =
+  | { task: 'squares' | 'top-up'; rows: SquareRow[]; skipped: number; stopReason: 'end_turn' | 'max_tokens' | 'refusal'; remaining: number }
+  | { task: 'spicy-check'; spicy: boolean; reason: string; remaining: number }
+  | { task: 'day-copy'; days: DayCopy[]; skipped: number; stopReason: 'end_turn' | 'max_tokens' | 'refusal'; remaining: number };
+```
+
+`remaining` is on every response, including the final response of a run that was stopped early: it is `12 − drafts` after this call's charge, read from `aiAllowances/{uid}`, and the only number the sheet ever prints for the allowance. `stopReason` is a field, not an error: `refusal` is the Declined state and `max_tokens` the Partial state in § States, and neither throws. `skipped` counts rows the server dropped before sending (§ Validation); the client keeps its own count of rows it refused on top.
+
+### Errors
+
+`HttpsError` codes, in the order the handler checks them: `unauthenticated` (no uid); `failed-precondition` (App Check enforced and no app); `invalid-argument` (any request bound above); `resource-exhausted` with `details: { reason: 'allowance' | 'spicy-checks' | 'platform-ceiling', remaining }` from the admission transaction; `unavailable` when the Anthropic SDK fails after its own retries (connection errors, 429, 5xx) or the stream ends with no `message_start`; `deadline-exceeded` when the handler's own budget runs out; `internal` otherwise, with the bounded code logged (`firestoreErrorCodeForLog`) and the thrown value never echoed. A refusal is not an error (above). The thrown message never contains the brief or any row text.
+
+### Model and prompt
+
+Claude Opus 5.5, `claude-opus-5-5`, through `@anthropic-ai/sdk` from `functions/package.json`. Thinking is the model's default (adaptive; the `thinking` parameter is omitted) at `output_config.effort: 'low'`—squares are not a hard reasoning task, and effort is the one depth control on this model. Output is constrained with `output_config.format` to the task's JSON schema (`SquareRow[]`, `DayCopy[]`, `{ spicy, reason }`), so a row's shape is a schema fact: `text` has `maxLength: 80`, a main row requires `spicy: boolean`, a curated row has no `spicy` property and `additionalProperties: false`, `tonight` has `minItems: 2, maxItems: 2`. `fallbacks: 'default'` with the `server-side-fallback-2026-07-01` beta is on, so a safety-classifier decline is re-run on a fallback model inside the same call and only a whole-chain `stop_reason: 'refusal'` reaches the organizer. `max_tokens` is a per-task spend bound rather than headroom—8192 for `squares` and `top-up`, 2048 for `day-copy`, 256 for `spicy-check`—because hitting it is the Partial state the sheet already handles, and a runaway response is money. Requests stream (`client.beta.messages.stream`); the handler parses complete array elements as they arrive and validates each before `sendChunk`.
+
+The prompt is a module, `functions/src/prompts/draftWithClaude.ts`, exporting the system block per task and the schemas. Its path is deliberate: `REVIEW_POLICY.md` § Phase 4b trigger 3 routes `**/prompts/**` to full review, so the editorial gate Decision 2 gave the owner over packs lands on the system prompt, once, rather than on every Event's squares. The fixed part—the register rules per Edition, the pool definitions (what an arrival, main, closing and warm-up Day deal), the audience rule, the format—is one system block carrying `cache_control: { type: 'ephemeral' }`, so repeat drafts pay for it once; everything volatile (the brief, the existing texts, the examples, the targets) comes after it in the user turn. `functions/` cannot import `src/` at runtime, so the registers are restated in the module and `tests/functions/draft-with-claude-prompt-parity.test.ts` pins them to `editionLexicon` in `src/editions.ts`, the `communityPromptRouting.generated.ts` posture without the generator.
+
+The prompt tells the model three things the schema cannot: under `forceAdult: false` write nothing sexual and set no `spicy` (tone is a register knob—Gentle, Playful, Unhinged shape voice and dare level—and none of them means sexual); under `forceAdult: true` write about `spicyShare` of the main rows explicit and flag them; and steer clear of the `existing` texts, which are sent so a second draft does not repeat the first. The `squares` prompt writes for each assigned pool its target count in that pool's register; `top-up` carries the angle (`more-like-these` with the kept texts as the taste to match, `top-up-pool` for one named pool, `different-angle` for the opposite register); `spicy-check` asks whether one text reads as sexual to a stranger and for one line of reason; `day-copy` asks, per Day and in the register, for a Place, one emoji, exactly two Tonight entries and a Free Space motto, with the kept squares as the voice to match.
+
+### Secret, params and deploy surface
+
+`ANTHROPIC_API_KEY` is `defineSecret('ANTHROPIC_API_KEY')` in `functions/src/params.ts`, exactly as `RESEND_API_KEY` is: a Secret Manager secret set per project with `firebase functions:secrets:set`, never an env var, never in `functions/.env*`, bound to the one function that uses it through `secrets:`. It is a key from a dedicated Anthropic Console workspace for Five Across with its own spend limit—the third cap in § Allowance and ledger, and the one that holds if the other two have a bug. `DRAFT_WITH_CLAUDE_APP_CHECK` (`defineBoolean`, default `false`) and `AI_MONTHLY_USD_CEILING` (`defineInt`, default `40`) are declared beside it, and both get assigned lines in `functions/.env.example` and, before the deploy that creates the callable, in the real `functions/.env.<projectId>` files—an omitted line, not an empty value, is what makes a non-interactive deploy hang on a prompt (#767). The ceiling default is a fifth of the grant per month, chosen so that a month of unexpected traffic cannot spend more than that without a human changing a number; it is a param so the owner changes it per project without a code change.
+
+### Allowance and ledger
+
+Two server-only documents, both `allow read, write: if false` in `firestore.rules` beside `bugReportRateLimits`, both leaf-only (no subcollection), both written only by the callable through the Admin SDK:
+
+- `aiAllowances/{uid}`: `{ day: 'YYYY-MM-DD', drafts: number, checks: number, updatedAt }`. `day` is the UTC calendar day of the server clock; a document whose `day` is not today reads as zero. `drafts` counts draft units (cap 12); `checks` counts `spicy-check` calls (cap 120—ten per draft unit, so a typed-square habit cannot exhaust the drafts and a loop cannot run free). The copy says "back tomorrow" and never names a local midnight.
+- `aiUsage/{yyyy-mm}`: `{ calls, inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, estimatedUsd, updatedAt }`, summed across every account for the UTC month from each response's `usage`, priced by a test-pinned table in `functions/src/aiUsage.ts` (`$4` input, `$20` output, `$0.20` cache read, `$5` cache write per million tokens, Opus 5.5's list prices at the time of writing; the ledger is an estimate and the Console limit is the truth).
+
+Admission is one Firestore transaction before any model work: read both documents; refuse `platform-ceiling` if `estimatedUsd >= AI_MONTHLY_USD_CEILING`; refuse `allowance` if the task spends a unit and `drafts >= 12`, or `spicy-checks` if `checks >= 120`; otherwise increment and commit. The unit is charged before the send, because a charge persisted before the call is the only one that survives a crash mid-stream. It is refunded (decremented in a second transaction) in exactly one case: the SDK failed before any `message_start`, so nothing was generated and the organizer sees Unreachable. A refusal, a Stop and a `max_tokens` stop all keep their unit. The ledger is incremented after the stream ends, from the final message's `usage`, or from the last `message_delta` usage the handler saw when the stream was aborted; two concurrent calls can both pass admission and overshoot the ceiling by one call each, which is why the Console limit exists.
+
+### Analytics and logs
+
+Two names join `GA4_EVENTS` in `src/analytics.ts` and go through the one `track` seam (#96): `ai_draft_requested` with `{ task, main, easy, closing }` (the targets, or the Day count) and `ai_draft_kept` with `{ task, kept, dropped, edited, skipped }`. Counts only, never the brief, never a square, never a Place. Function logs follow the same rule: task, codes, counts, token totals, the bounded error code—no request or response text at any level.
+
+## Behaviour per task
+
+### Squares
+
+The dashed ✦ row on Step 3 ("Draft squares with Claude · From the occasion, the place and a line about the group · you keep each one") opens the brief sheet, a sheet in the `AdminSheet` lineage, not a step. Its top band prints what the draft already knows—the occasion and the register its Edition binds, the name, the dates, the audience, the marking mode, the card format, the Day list with each Day's pool, the count of squares already typed—and asks for the one thing no field holds: who these people are. The brief is optional; an empty brief still writes a competent occasion, a full one writes *this* one. Beside the field, one privacy sentence in the sheet's own words (§ Open decisions 4): first names are fine, the brief goes to Claude through Five Across's own server, is used for this draft, and is not kept there.
+
+Tone is Gentle / Playful / Unhinged. The spicy row reads the audience from Basics: under All ages it is static ("Spicy squares off · All ages, set in Basics") and the request forbids sexual content; under 18+ it is a share control. The sheet never claims the 18+ gate stays off either way—the posture is derived server-side from the flags (ADR 0012) and Step 5 shows the resolved result.
+
+"How many" is per pool, because the gate is per pool: each assigned pool gets a target defaulting a few above `MIN_POOL`—`MIN_POOL + 8` (32) for main, `MIN_POOL + 4` (28) for the curated pools, so rows can be dropped without dipping under—capped at 40, beside the pool's current count from the same `countPrompts` the launch gate uses ("2 there · 24 needed"). A pool no Day deals from is not offered, the same idle state Step 3's counter shows. Below the targets, the allowance line prints the server's `remaining` from the last response this session, and "12 drafts a day" before any; it never counts for itself. Offline, Write is disabled with "needs a connection"; signed out, the ✦ row itself reads "Sign in to draft with Claude" and the add bar works as before.
+
+Write calls the `squares` task. The review sheet replaces the brief sheet and fills as rows arrive under per-pool headings—"main · 26 kept · 24 needed ✓", "easy · 15 kept · 24 needed · still writing", "closing · waiting"—where the kept count is `countPrompts` over the pool as it stands, the organizer's own earlier squares included, so the heading says the moment a pool clears its minimum. Each row offers ✓ and ✕, and an edit that opens the text with Claude's original beneath it; the kept text is what enters the draft. A ✓ commits that row through `addPrompt(draft, pool, text, spicy)` immediately—a reload mid-review loses nothing kept—and so passes the same trim, the same 80-character refusal and the same main-only `spicy` drop a typed square does. A ✕ leaves the row visible, struck through, because a vanished row is indistinguishable from one never written and the organizer may change their mind. "Keep all remaining" commits every undecided row through the same transform, one by one; it is explicit, never the default. "Stop writing" aborts the stream and keeps what is there. "Done" closes the sheet with the running count and commits nothing.
+
+A near-duplicate sub-line ("near your 'Windblown group selfie'") appears under a row whose normalized text—trimmed, `toLocaleLowerCase()`, the same key `duplicatePromptTexts` uses—matches a text already in the pool or already kept this session. It is advisory, as the wizard spec makes duplicates advisory: keep is still allowed. The skipped line ("1 skipped · over 80 characters") counts rows the client refused before showing them (§ Validation).
+
+### Top-up
+
+After a keep, the ✦ row on Step 3 survives as "More from Claude · More like these · Top up one pool · A different angle", because drafting appends and seeding replaces: `seedPack` swaps every pool for the pack and says so before the tap, a draft is a set of rows the organizer chose one by one, and a second draft never deletes a first. The three angles call the `top-up` task with `angle` set: `more-like-these` carries the kept rows as `examples`, so the second batch is written to the organizer's demonstrated taste rather than the brief alone; `top-up-pool` names one `pool`, because the shortfall the gate reports is per pool and writing 88 rows across three pools to fix a shortage of six closing squares spends the allowance badly; `different-angle` asks for the opposite register, for an organizer who kept too little to know what they want yet. The review sheet, the keep, the counts and the allowance are the ones § Squares describes; all three angles share the one allowance.
+
+### Spicy check
+
+The smallest assist and the most careful. When the organizer adds a main-pool square under All ages, the add bar calls the `spicy-check` task with the typed text and, on `spicy: true`, turns the answer into a question rather than a change: "✦ Reads as 18+. Flag it spicy? That turns on the 18+ acknowledgement for everyone who joins." "Flag it" sets the flag through `setMainPromptSpicy` on the row just added, exactly as the organizer's own tap would; "Keep it off" leaves the square unflagged, which is the organizer's right and the derivation's problem—the acknowledgement is theirs to under-state, as it already is by hand. The question says what the flag costs in the derivation's own terms, because an organizer who picked All ages in Basics is about to learn that the choice was half the verdict (ADR 0012).
+
+It runs only for a main-pool add: `spicy` is unrepresentable on the curated pools (`DraftCuratedPrompt.spicy?: never`) and a verdict there would be a toggle that looks honoured and is silently dropped (#785). It does not run under 18+ where the toggle is already offered, nor while offline or signed out, and it never delays the add—the square is in the draft before the answer arrives, and the question is attached to its row. It spends no draft unit (§ Allowance and ledger) and runs on the same model at the same low effort for now (§ Open decisions 3).
+
+### Day copy
+
+The dashed ✦ row on Step 4 ("Fill in the Days with Claude · Place, two Tonight entries and a free space per Day · keep or change each") calls the `day-copy` task once per schedule, carrying the kept squares as `existing`, the brief, the Days with their pools and dates, and the register. It renders only for a daily-cards draft with at least one Day: a one-card Event has no Days, and a Custom draft that reaches Look with none gets `dayCountIssues`' "Add a Day" first, as it does today. The response answers against a schema whose `tonight` is an array of exactly two strings, so the "exactly two" rule `DayDef` and `firestore.rules` share is a schema fact the client re-checks rather than a hope.
+
+Each Day renders Claude's Place, emoji, Tonight pair and Free Space as a proposal with its own keep and change: "change" opens the field with the suggestion as the starting text, and every keep commits through the Look transforms the step already has—`setDayPlace`, `setDayPlaceEmoji`, `setDayTonight` (slot 0 and slot 1), `setDayFreeText`—so a kept value is stored as typed and judged trimmed exactly as a hand-entered one. A Day the organizer has already filled by hand is not overwritten: the proposal renders beside the typed value and only a keep replaces it.
+
+What is deliberately not suggested: unlock times (a clock decision with a reviewed 06:00 default and a zone the organizer chose in Basics) and Themes (`applyProposedDayThemes` already fills every unthemed Day from the occasion's `dayThemes`, the list is three registered palettes long per Edition, and a model picking among three contrast-audited token sets would be theatre dressed as help). The Free Space is the exception that proves it: it is copy—each Day's motto, the cheapest personality lever the organizer has—so it is written with the rest. The call is small (four Days of short strings, about $0.03) and spends one draft unit.
+
+## States, refusals and caps
+
+Every state the frames imply but do not draw. A row is a contract: what the organizer sees, what the system did, and why that rather than the obvious alternative.
+
+| State | The organizer sees | What happened | Why this, not the obvious thing |
+|---|---|---|---|
+| Signed out | The ✦ row reads "Sign in to draft with Claude"; the add bar works as before | The callable requires `request.auth`; allowances are per account | A device-local draft id is free to mint; an account is the only thing worth metering, and the organizer must be signed in before Launch anyway |
+| Offline | Write / Draft disabled, "needs a connection" | No call is made | Everything else in the wizard is device-local and works in a dead zone; this one honest exception says so instead of spinning |
+| Writing | Rows land as written; per-pool "kept · needed" ticks; Stop is available | Streamed chunks, one validated row each; Stop aborts the upstream stream | A twenty-second spinner for 88 rows reads as broken; rows arriving reads as working, and lets the organizer start keeping at row one |
+| Partial | "Claude wrote 21 of 28 closing squares" · Top up offered | `stopReason: 'max_tokens'`, or the stream ended short | Each pool's count stands on its own; the sheet never pads a pool with rows it did not receive |
+| Declined | "Claude didn't write these. Try a different brief, or add your own." | `stopReason: 'refusal'` after `fallbacks: 'default'` also declined | A classifier decline is retried server-side inside the same call; only a whole-chain refusal is shown, once, with no automatic retry loop spending the allowance |
+| Unreachable | "Couldn't reach Claude. Nothing changed—try again." | `unavailable` / `deadline-exceeded`; client timeout 90 s | Fail closed and say so: no rows were kept, so there is nothing to undo; the draft unit is refunded only when nothing was generated |
+| Allowance spent | "12 of 12 drafts used today—back tomorrow"; the ✦ row stays, disabled | Per-account daily cap, enforced server-side, `resource-exhausted` with `reason: 'allowance'` | The number on the sheet is always the server's `remaining`, never a client count; the cap is generous for an organizer and useless to a scraper |
+| Platform ceiling | "Drafting is resting until next month—add squares by hand" | The monthly ledger `aiUsage/{yyyy-mm}` crossed `AI_MONTHLY_USD_CEILING`; `resource-exhausted` with `reason: 'platform-ceiling'` | The grant is finite and shared; a ceiling in the ledger plus a spend limit on the Console workspace means one bug cannot drain it |
+| All ages, spicy returned | The row carries 🔞; keeping it says "turns on the 18+ acknowledgement" | The request forbade it; the schema still allows the flag; the client shows what came back | The posture is derived from the flags, whoever set them (ADR 0012); hiding the flag would be the one way to get an explicit square onto an All-ages card |
+| Near-duplicate | Sub-line "near your '…'"; keep still allowed | Client compare against existing and kept rows on the `duplicatePromptTexts` key | Advisory, as the wizard spec makes duplicates advisory: a repeat breaks no contract and can be deliberate on a long schedule |
+| Skipped | "1 skipped · over 80 characters" | The client refused the row before showing it: over 80 as persisted, blank after trim, `spicy` on a curated pool, a `tonight` not of length two | A response is data; the schema makes these rare and the client checks anyway, with the same predicates the launch gate uses |
+| Brief privacy | One sentence on the sheet, where the text is typed | The brief is sent to the callable and forwarded to the API, not stored; analytics carry counts only | A first name in a brief is personal data leaving the device; the sentence sits beside the field, not behind a link |
+| Reload mid-draft | Kept rows are in the draft; undecided rows are gone; the brief is gone (v1) | Keeps commit through `addPrompt` immediately; the stream is not resumable | Persisting undecided suggestions would need draft fields that do not exist; losing a half-read list costs one re-draft, losing kept rows would cost trust |
+
+## Validation
+
+No new predicate joins the launch gate, and no new `DraftIssueCode` exists. The wizard spec's § Validation runs unchanged over a draft that kept assisted rows, because the rows entered through `addPrompt` and the Look transforms and are `{ text, spicy }` and Day fields like any other. What this spec adds is admission—what a row must satisfy to be *shown*—applied twice, on the server before `sendChunk` and on the client before render, because a response is data and the schema is a strong hint rather than a proof:
+
+- **`admitSquareRow`** (`src/data/draftAssist.ts`, mirrored in `functions/src/draftWithClaude.ts`): `text` is a string whose trimmed length is at least 1 and whose raw length is at most `MAX_PROMPT_TEXT` (80)—raw, because `firestore.rules` applies `text.size()` to the value as persisted and `promptTextIssues` measures the same way; `pool` is one of `POOL_ORDER`; `spicy` is a boolean when `pool` is `main` and absent otherwise. A row failing any of these is dropped and counted as skipped. The client additionally drops a row for a pool the draft does not assign, which the schema cannot know.
+- **`admitDayCopy`**: `index` names a Day in the draft; `place` and both `tonight` entries are non-blank after trim and at most 60 characters raw; `placeEmoji` is exactly one grapheme (`Intl.Segmenter`); `tonight.length === 2`; `freeText` is non-blank and at most `MAX_PROMPT_TEXT`. A Day failing is skipped whole, never partially kept.
+- **Near-duplicate key**: `text.trim().toLocaleLowerCase()`, the same normalization as `duplicatePromptTexts`, compared against the pool's existing texts and the rows kept this session. Advisory.
+- **Keep paths**: a kept square goes through `addPrompt`; a kept Day field through the one Look transform for that field. Neither path is bypassed by "Keep all remaining", which iterates the same call, and neither is reachable by a row that was not admitted.
+- **Server-side request bounds** (§ Request) are the only validation the callable performs on the draft slice; it does not re-run the launch gate, because it launches nothing.
+
+## Open decisions (owner)
+
+Each is the owner's call, not this spec's; v1 builds the default named unless the owner rules first.
+
+1. **Does the brief persist in the draft across a reload?** `EventDraft` has no field for it, so keeping it is a `DRAFT_SCHEMA_VERSION` bump in `src/data/eventDraft.ts` (#787's forward-migration lever) plus a `brief` field with its own 600-character bound in `parseEventDraft`. v1 default: not persisted; the brief lives in sheet state and a reload costs retyping a sentence.
+2. **Per-Prompt provenance.** A kept row is an ordinary `{ text, spicy }`, indistinguishable afterwards from a typed one; recording "written by Claude" is a `DraftMainPrompt`/`DraftCuratedPrompt` change behind a `DRAFT_SCHEMA_VERSION` bump, and the provisioner would have to decide whether to carry it onto `ItemDoc`. v1 default: none—the organizer's keep is the authorship, so there is nothing a provenance flag would entitle anyone to do differently, and the Launch checklist needs no "written by Claude" row for the same reason the 18+ row needs none.
+3. **Does `spicy-check` move to a cheaper model?** It runs on `claude-opus-5-5` at low effort for now. Measured against a few hundred typed squares, it is the one task here `claude-haiku-5-5` could carry without anyone noticing; that is a measurement to make, not a default to assume. The model id is a per-task constant in the prompt module so the switch is one line.
+4. **The privacy sentence versus a policy page.** A first name in a brief is personal data leaving the device: it travels to Five Across's callable and on to Anthropic's API under Five Across's key and that API's commercial data terms, and the callable keeps a count, not a copy. v1 default: one sentence on the sheet, beside the field, in the words § Squares gives.
+5. **Does Step 3 require sign-in today?** The ✦ row needs an account (the allowance is per account) and reads "Sign in to draft with Claude" when signed out, while the add bar keeps working. Whether the step itself should gate on sign-in—which would make every draft an account's draft well before Launch—is the owner's call. v1 default: the row gates, the step does not.
+
+## Deliberately not in scope
+
+- **Persisting undecided rows or resuming a stream.** Both need draft fields that do not exist (§ States, Reload mid-draft).
+- **Starter packs.** `STARTER_PACKS` stays empty and every `starterPackId` stays `null`; the assists are the per-Event alternative, not a pack authoring tool. A pack, when the owner authors one, seeds through `seedPack` as before.
+- **Anything structural.** The schedule shape, Day count, pool assignment, `tutorial`, unlock times, Themes, the slug, the marking mode, the audience, the Daily mix. The assists write words.
+- **Moderation of kept text beyond the spicy verdict.** The Community Prompt admission queue and Cloud Vision are different surfaces for different authors; an organizer's own squares are theirs.
+- **Post-launch assists.** Nothing here reaches Admin; the callable takes a draft slice and nothing else.
+- **An Event-wide Free Space.** The wizard spec records that `EventDoc` has no field for it; `day-copy` writes the per-Day `freeText` that exists.
+- **A cheaper model, a persisted brief, provenance.** Each is an open decision above, not a silent default.
+- **Server-side drafts.** Still modelled as a seam only (#786 Decision 1); the callable writes no draft.
+
+## Acceptance criteria
+
+- **Given** a streamed row, **when** it arrives, **then** it is undecided and enters the draft only on ✓ (through `addPrompt`) or "Keep all remaining"—never on arrival, never on Done. (Tests: "renders a streamed row undecided and adds nothing to the draft until it is kept"; "Done closes the sheet without committing undecided rows".)
+- **Given** a row over 80 characters as stored, blank after trim, carrying `spicy` on a curated pool, or for a pool no Day deals from, **when** the client receives it, **then** it is counted as skipped and never shown. (Tests: "refuses an over-long, blank, curated-spicy or unassigned-pool row before showing it, and counts it as skipped".)
+- **Given** kept rows, **when** the launch gate runs, **then** `assignedPoolIssues`, `promptTextIssues` and `promptPoolIssues` see ordinary Prompts and `validateEventDraft` raises no new code. (Tests: "a draft that kept every row is launchable exactly as a typed one"; "no DraftIssueCode is added by this module".)
+- **Given** a signed-out organizer, **when** Step 3 renders, **then** the ✦ row reads "Sign in to draft with Claude" and the add bar works as before; **given** no connection, **then** Write is disabled with "needs a connection" and no call is made. (Tests: "gates the ✦ row on sign-in and leaves the add bar alone"; "disables Write offline and makes no call".)
+- **Given** a draft under All ages, **when** the request is built, **then** it forbids sexual content and carries no `spicyShare`; **given** a spicy main row returned anyway, **then** it is shown carrying 🔞 and keeping it says it turns on the 18+ acknowledgement. (Tests: "builds an All-ages request with the prohibition and no share"; "shows a returned spicy flag rather than hiding it, and says what keeping it costs".)
+- **Given** a main-pool add under All ages, **when** `spicy-check` answers true, **then** the bar asks "Flag it / Keep it off" and "Flag it" goes through `setMainPromptSpicy` on that row; **given** an easy or closing add, or an 18+ draft, **then** no check runs. (Tests: "asks, never changes, on a positive spicy verdict"; "runs no check for a curated add or under 18+".)
+- **Given** the twelfth draft of the UTC day is spent, **when** Write is tapped, **then** the callable refuses `resource-exhausted` with `remaining: 0`, the sheet prints "12 of 12 drafts used today—back tomorrow", and the ✦ row stays, disabled. (Tests: "refuses the thirteenth draft unit of a day with remaining 0"; "resets the count on the next UTC day"; "renders the spent state with the server's number".)
+- **Given** the ledger at its ceiling, **when** any task is called, **then** it refuses with `reason: 'platform-ceiling'` and the copy says drafting is resting until next month. (Tests: "refuses every task once estimatedUsd reaches the ceiling"; "renders the resting copy".)
+- **Given** the unit was charged and the SDK fails before any `message_start`, **then** the unit is refunded; **given** a refusal, a Stop or `max_tokens`, **then** it is not. (Tests: "charges before the send and refunds only when nothing was generated".)
+- **Given** `stop_reason: 'refusal'` after the fallback chain, **then** the response carries `stopReason: 'refusal'` with no rows and the sheet shows the Declined copy once, with no automatic retry. (Tests: "surfaces a whole-chain refusal as a stopReason, not an error"; "shows Declined once and does not retry".)
+- **Given** `stop_reason: 'max_tokens'` or a Stop, **then** each pool's count stands on what arrived and Top up is offered. (Tests: "reports a short pool honestly and offers a top-up"; "Stop aborts the upstream stream and keeps what arrived".)
+- **Given** any client, **then** `get`, `list`, `create`, `update` and `delete` on `aiUsage/{month}` and `aiAllowances/{uid}` are denied for an anonymous, a signed-in and an Event-admin caller. (Tests: "denies every client operation on aiUsage and aiAllowances".)
+- **Given** a `day-copy` response, **then** every Day's `tonight` has exactly two entries by schema and by the client, keeps commit through the Look transforms, a hand-filled Day is not overwritten without a keep, and no unlock time or Theme is proposed. (Tests: "re-checks tonight.length === 2 and skips a Day that fails"; "commits a kept Day through setDayPlace/setDayPlaceEmoji/setDayTonight/setDayFreeText"; "never proposes unlock times or Themes".)
+- **Given** any call, **then** `ai_draft_requested` / `ai_draft_kept` carry task and counts only, and no log line contains the brief or any row text. (Tests: "tracks counts only"; "logs no request or response text".)
+- **Given** the Edition registers in the prompt module, **then** they equal `editionLexicon` for every Edition; **given** the price table, **then** it is the pinned list price. (Tests: "pins the prompt registers to src/editions.ts"; "pins the price table".)
+
+## Test coverage
+
+To be created by the implementing PR, which removes `tested: false` above and flips `status` to `accepted`:
+
+- `tests/functions/draft-with-claude.test.ts` (Vitest, in-memory Firestore fake with an injected clock and a fake Anthropic stream—no runtime, the `submit-prompt.test.ts` posture): the `HttpsError` mapping in check order (`unauthenticated` before App Check; `failed-precondition` only with enforcement on and no app; `invalid-argument` for every request bound in § Request including an unassigned-pool target and a 41 target; `resource-exhausted` with each of the three reasons and the right `remaining`); the admission transaction (the unit charged before the send, the UTC-day reset, `checks` counted separately from `drafts`, the ceiling read in the same transaction); the refund rule; one validated row per `sendChunk` and the server-side drop of a schema-violating row counted in `skipped`; `stopReason` for `end_turn`, `max_tokens` and `refusal` with no throw; the ledger increment from `usage` including cache fields, and from the last `message_delta` on an aborted stream; abort of the upstream stream on client close; `remaining` on every final response; and no brief or row text in any logged line or thrown message.
+- `tests/functions/draft-with-claude-prompt-parity.test.ts` (Vitest, pure): the registers in `functions/src/prompts/draftWithClaude.ts` equal `editionLexicon(edition)` from `src/editions.ts` for every Edition; the price table is the pinned list; the All-ages system text contains the prohibition and the 18+ text contains the share instruction; the JSON schemas carry `maxLength: 80`, the main/curated `spicy` split with `additionalProperties: false`, and `tonight` `minItems`/`maxItems` of 2; the per-task `max_tokens` and the model ids.
+- `tests/rules/ai-usage.test.ts` (Vitest, Firestore emulator—`npm run test:rules`): `aiUsage/{month}` and `aiAllowances/{uid}` deny `get`, `list`, `create`, `update` and `delete` to an anonymous caller, a signed-in caller reading their own uid's document, and an Event admin; the Admin SDK (bypassing rules) can write both, pinning that the only writer is the callable.
+- `src/data/draftAssist.test.ts` (Vitest, pure—no React, no Firebase): the request builder (sends occasion, edition, name, dates, audience, marking, card format and `{ index, date, pool, tutorial }` per Day and nothing else—no slug, no `unlockAt`, no Theme; targets default to 32 for main and 28 for the curated pools and omit unassigned pools; `spicyShare` absent under All ages; `existing` as trimmed texts per pool; `examples` for `more-like-these`); `admitSquareRow` and `admitDayCopy` over every refusal in § Validation; the near-duplicate key agreeing with `duplicatePromptTexts` on case and whitespace; a keep committing through `addPrompt` with `spicy` dropped for curated pools; a kept Day committing through each Look transform; and the allowance line taking `remaining` from the response rather than counting.
+- `src/data/assistCallable.test.ts` (Vitest, `firebase/functions` mocked): the `.stream()` wrapper yielding one row per chunk and resolving the final response; the 90 s timeout; an `AbortSignal` propagated to the call; and each `HttpsError` code mapped to its § States row.
+- `src/components/setup/assist/BriefSheet.test.tsx` (Vitest + RTL/jsdom): the top band from the draft, the optional brief with its 600-character bound and the privacy sentence, tone, the audience-driven spicy row in both states, per-pool targets with `countPrompts` beside them and unassigned pools absent, the allowance line before and after a response, and the offline and signed-out states.
+- `src/components/setup/assist/ReviewSheet.test.tsx` (Vitest + RTL/jsdom, a fake stream): rows arriving under per-pool headings with live kept-vs-needed counts, ✓ committing immediately through `addPrompt`, ✕ leaving a struck-through row, edit-then-keep storing the edited text, "Keep all remaining" iterating `addPrompt`, "Stop writing" aborting and keeping, Done committing nothing, the near-duplicate sub-line, the skipped line, and the Partial, Declined, Unreachable, Allowance-spent and Platform-ceiling states.
+- `src/components/setup/assist/SpicyCheckPrompt.test.tsx` (Vitest + RTL/jsdom): the question on a positive verdict, "Flag it" through `setMainPromptSpicy` on the right row, "Keep it off" leaving the flag off, no question on a negative verdict, no call for a curated add or under 18+, and the add never waiting on the answer.
+- `src/components/setup/assist/DayCopyRow.test.tsx` (Vitest + RTL/jsdom): the row absent for a one-card draft and for a Day-less draft, proposals per Day with keep and change, a hand-filled Day shown beside its proposal and untouched until kept, each keep through its Look transform, a skipped Day on a bad `tonight`, and no unlock or Theme control anywhere in it.
+- `src/components/setup/StepSquares.test.tsx` (existing suite, extended): the ✦ entry row in its signed-out, offline and spent states; the post-keep "More from Claude" row with its three angles; and the add bar's spicy question wired to the row it added.
+- `src/analytics.dual-dispatch.test.ts` (existing suite, extended): `ai_draft_requested` and `ai_draft_kept` are members of `GA4_EVENTS` and dispatch with counts only.

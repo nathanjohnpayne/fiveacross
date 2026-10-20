@@ -217,6 +217,7 @@ The exception: a candidate that on mount ALREADY equals `draft.slugCandidate` (a
 - **Monotonic unlock times across the schedule.** A Day whose unlock precedes its predecessor's is a real defect, but it is a schedule-authoring concern with a schedule-authoring fix; #792 owns it.
 - **Duplicate Prompt text within a pool.** Twenty-four identically worded Prompts clear `MIN_POOL` and deal a legal but miserable card. Not a `DraftIssue`, so not part of the shared launch gate; it landed in Step 3 (#791) as an advisory instead — see § Squares.
 - **Server-side drafts.** Modelled as a seam only, per epic Decision 1.
+- **Drafting with Claude** ([#1958](https://github.com/nathanjohnpayne/fiveacross/issues/1958)) is specified in [`specs/event-setup-assist.md`](event-setup-assist.md), `status: proposed`: its assists enter the draft only through `addPrompt` and the Look transforms and are judged by § Validation unchanged, so nothing in this contract moves for them.
 
 ## Acceptance criteria
 
