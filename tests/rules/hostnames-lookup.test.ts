@@ -9,6 +9,7 @@ import {
 } from '@firebase/rules-unit-testing';
 import { PUBLIC_HOSTNAME_FIELDS, hasOnlyPublicHostnameFields, projectPublicHostname } from '../../functions/src/publicHostnameFields.ts';
 import { collection, deleteDoc, doc, getDoc, getDocs, setDoc, updateDoc } from 'firebase/firestore';
+import { joinCodeHostname } from '../../src/joinCode';
 
 // Covers specs/hostnames-lookup.md — the pre-auth Event lookup (ADR 0009).
 //
@@ -236,5 +237,46 @@ describe('firestore.rules — publicHostnames/{host} pre-auth lookup (hostnames-
     await assertFails(
       updateDoc(doc(authed('kim'), `publicHostnames/${CANONICAL}`), { eventId: 'some-other-event' }),
     );
+  });
+});
+
+// specs/hostnames-lookup.md § Join codes (#1934): a native join code has no
+// record of its own. It resolves through its Slug's canonical-Namespace
+// hostname, so these cases pin that the document a typed code lands on carries
+// the same pre-auth contract as any other hostname lookup.
+describe('firestore.rules — join code resolves through publicHostnames (hostnames-lookup § Join codes)', () => {
+  function codeHost(code: string): string {
+    const check = joinCodeHostname(code);
+    if (!check.ok) throw new Error(`fixture code ${code} refused: ${check.reason}`);
+    return check.hostname;
+  }
+
+  it('an UNAUTHENTICATED client may get the document a typed code names', async () => {
+    const host = codeHost(' Bodega-Bay ');
+    expect(host).toBe(CANONICAL);
+    const snap = await assertSucceeds(getDoc(doc(anon(), `publicHostnames/${host}`)));
+    expect(snap.data()?.eventId).toBe('bodega-bay-2026');
+    expect(snap.data()?.slug).toBe('bodega-bay');
+  });
+
+  it('the readable document carries only allowlisted fields', async () => {
+    const snap = await assertSucceeds(getDoc(doc(anon(), `publicHostnames/${codeHost('bodega-bay')}`)));
+    expect(hasOnlyPublicHostnameFields(snap.data())).toBe(true);
+  });
+
+  it('a non-allowlisted field on that document denies the whole anonymous read', async () => {
+    await testEnv.withSecurityRulesDisabled(async ctx => {
+      await updateDoc(doc(ctx.firestore(), `publicHostnames/${CANONICAL}`), { contactEmail: 'private@example.test' });
+    });
+    await assertFails(getDoc(doc(anon(), `publicHostnames/${codeHost('bodega-bay')}`)));
+  });
+
+  it('a code with no hostname record is a missing document, not a denial', async () => {
+    const snap = await assertSucceeds(getDoc(doc(anon(), `publicHostnames/${codeHost('no-such-event')}`)));
+    expect(snap.exists()).toBe(false);
+  });
+
+  it('a code cannot become a directory: listing stays denied', async () => {
+    await assertFails(getDocs(collection(anon(), 'publicHostnames')));
   });
 });

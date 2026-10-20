@@ -12,6 +12,7 @@ import {
   stampAdultHostname,
   type AdultFirestore,
 } from '../../functions/src/adultContent';
+import { joinCodeHostname } from '../../src/joinCode';
 
 // Resolve the actual Admin SDK from Functions' existing dependency graph.
 const { Timestamp } = createRequire(new URL('../../functions/package.json', import.meta.url))('firebase-admin/firestore') as typeof import('firebase-admin/firestore');
@@ -483,5 +484,63 @@ describe('reconcileHostnameAdultContent', () => {
         },
       ),
     ).rejects.toThrow(/having a day/);
+  });
+});
+
+// specs/hostnames-lookup.md § Join codes (#1934). A join code has no record of
+// its own: it resolves through its Slug's `<slug>.fiveacross.app` hostname, so
+// the posture a code-joined native session watches is that hostname's public
+// projection. These cases drive the real stamp end to end and read the
+// document the typed code names, so a code-joined session cannot watch a
+// stale `false` after either posture-raising event.
+describe('the record a join code resolves through', () => {
+  const code = ' Bodega-Bay ';
+  function codeHost(): string {
+    const check = joinCodeHostname(code);
+    if (!check.ok) throw new Error(`fixture code refused: ${check.reason}`);
+    return check.hostname;
+  }
+  function eventHosts() {
+    return fakeDb({
+      [codeHost()]: { eventId: 'e1', status: 'active', slug: 'bodega-bay' } as { eventId: string },
+      'bodega-bay.vacaybingo.com': { eventId: 'e1', status: 'active', slug: 'bodega-bay' } as { eventId: string },
+    });
+  }
+
+  it('is raised when an Admin approves the first explicit Prompt', async () => {
+    const { db, values } = eventHosts();
+    expect(values[`publicHostnames/${codeHost()}`]).toBeUndefined();
+    await applyItemAdultContent(
+      'e1',
+      { status: 'active', spicy: true, pool: 'main' },
+      { raiseAdultContent: eventId => raiseAdultContentForEvent(db, eventId) },
+    );
+    expect(values[`hostnames/${codeHost()}`]).toMatchObject({ adultContent: true });
+    expect(values[`publicHostnames/${codeHost()}`]).toMatchObject({ eventId: 'e1', slug: 'bodega-bay', adultContent: true });
+  });
+
+  it('is raised when an Admin enables the adult override', async () => {
+    const { db, values } = eventHosts();
+    await applyEventAdultContent(
+      'e1',
+      { settings: { forceAdult: true } },
+      { raiseAdultContent: eventId => raiseAdultContentForEvent(db, eventId) },
+    );
+    expect(values[`publicHostnames/${codeHost()}`]).toMatchObject({ eventId: 'e1', adultContent: true });
+  });
+
+  it('is stamped by reconciliation when it is created for an Event that is already adult', async () => {
+    const { db, values } = eventHosts();
+    expect(
+      await reconcileHostnameAdultContent(
+        codeHost(),
+        { eventId: 'e1', status: 'active', slug: 'bodega-bay' },
+        {
+          eventIsAdult: async () => true,
+          stampHost: (host, eventId, mode) => stampAdultHostname(db, host, eventId, mode),
+        },
+      ),
+    ).toBe(true);
+    expect(values[`publicHostnames/${codeHost()}`]).toMatchObject({ eventId: 'e1', adultContent: true });
   });
 });
