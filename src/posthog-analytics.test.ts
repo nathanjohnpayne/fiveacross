@@ -14,7 +14,7 @@ vi.mock('posthog-js', () => ({
   },
 }));
 
-import posthog, { type CaptureResult } from 'posthog-js';
+import posthog, { type BeforeSendFn, type CaptureResult } from 'posthog-js';
 import {
   POSTHOG_INIT_OPTIONS,
   POSTHOG_BRAND_PROXY_HOST,
@@ -1256,7 +1256,7 @@ describe('PostHog init with a key', () => {
     vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
     const ph = (await import('posthog-js')).default;
     vi.mocked(ph.get_property).mockReturnValue(undefined); // anonymous SDK identity
-    let beforeSend: ((event: CaptureResult | null) => CaptureResult | null) | undefined;
+    let beforeSend: BeforeSendFn | undefined;
     vi.mocked(ph.init).mockImplementationOnce(((_key: string, config: typeof POSTHOG_INIT_OPTIONS) => {
       beforeSend = Array.isArray(config.before_send) ? config.before_send[0] : config.before_send;
     }) as never);
@@ -1352,7 +1352,7 @@ describe('PostHog init with a key', () => {
     vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
     const ph = (await import('posthog-js')).default;
     vi.mocked(ph.get_property).mockImplementation((key) => (key === '$user_id' ? 'account-A' : undefined));
-    let beforeSend: ((event: CaptureResult | null) => CaptureResult | null) | undefined;
+    let beforeSend: BeforeSendFn | undefined;
     vi.mocked(ph.init).mockImplementationOnce(((_key: string, config: typeof POSTHOG_INIT_OPTIONS) => {
       beforeSend = Array.isArray(config.before_send) ? config.before_send[0] : config.before_send;
     }) as never);
@@ -1382,7 +1382,7 @@ describe('PostHog init with a key', () => {
     vi.stubEnv('VITE_POSTHOG_KEY', 'phc_test');
     vi.stubEnv('VITE_POSTHOG_HOST', 'https://us.i.posthog.com');
     const ph = (await import('posthog-js')).default;
-    let beforeSend: ((event: CaptureResult | null) => CaptureResult | null) | undefined;
+    let beforeSend: BeforeSendFn | undefined;
     vi.mocked(ph.init).mockImplementationOnce(((_key: string, config: typeof POSTHOG_INIT_OPTIONS) => {
       beforeSend = Array.isArray(config.before_send) ? config.before_send[0] : config.before_send;
     }) as never);
