@@ -425,6 +425,15 @@ export default defineConfig(({ command, mode }) => {
       // Overriding `exclude` replaces vitest's defaults, so the dependency and
       // build directories are restated here.
       exclude: ['**/node_modules/**', '**/dist/**', 'scripts/fiveacross-origin.integration.test.mjs'],
+      // vitest 5.0.5 turned the filesystem module cache on by default, writing
+      // `node_modules/.vitest-cache` from every worker for the whole run. The
+      // deploy-filter guard watches `node_modules` one level deep in the live
+      // checkout, so `scripts/single-endpoint-deploy-scope.test.mjs` — which
+      // rehearses against this very checkout — read the other workers' cache
+      // writes as a hook writing into the live tree and refused. Keep the
+      // pre-5.0.5 behavior: no shared on-disk cache mutating the checkout
+      // underneath a suite that asserts nothing does.
+      fsModuleCache: false,
       setupFiles: ['./src/test/setup.ts']
     }
   };
