@@ -11,8 +11,12 @@ afterEach(() => roots.splice(0).forEach(root => rmSync(root, { recursive: true, 
 function fixture({ failUpload = false, strayMap = false, visibleAppMap = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'private-maps-build-')); roots.push(root);
   mkdirSync(join(root, 'node_modules', '.bin'), { recursive: true });
+  // Packages only: Vite's own scratch dirs (`.vite`, `.vite-temp`, `.vitest-cache`) stay
+  // per-fixture. Linking them made this build bundle its config INTO the live checkout's
+  // `node_modules/.vite-temp`, which the deploy-filter guard tests running in parallel
+  // (scripts/single-endpoint-deploy-scope.test.mjs) correctly refuse as live-tree drift.
   for (const name of readdirSync(join(repo, 'node_modules'))) {
-    if (name !== '.bin') symlinkSync(join(repo, 'node_modules', name), join(root, 'node_modules', name));
+    if (name !== '.bin' && !name.startsWith('.vite')) symlinkSync(join(repo, 'node_modules', name), join(root, 'node_modules', name));
   }
   for (const name of ['src', 'functions']) symlinkSync(join(repo, name), join(root, name));
   for (const name of ['package.json', 'tsconfig.json']) copyFileSync(join(repo, name), join(root, name));
