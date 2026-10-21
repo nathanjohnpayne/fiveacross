@@ -593,29 +593,37 @@ codex:
   # Phase 4b handoff. Must be a member of `available_reviewers` above.
   cli_login: nathanpayne-codex
 
-  # Maximum number of `@codex review` rounds before escalating as runaway.
-  # The 6th round trips the guard. Normal termination is either approval,
+  # The per-PR Codex request ceiling: the 11th request is refused (exit 7,
+  # kind "request-ceiling"). Normal termination is either approval,
   # disagreement (repeat-after-rebuttal), or timeout → Phase 4b fallback.
-  max_review_rounds: 5
+  # This is the request CEILING (cost), not the runaway meter: the
+  # blocking-review budget below is. A spent ceiling enters the Phase 4b
+  # barrier, which dispatches automated Phase 4b only when no human stop
+  # holds and otherwise stops for the human (exit 8). A verified CodeRabbit
+  # rate-limit failover trigger spends no slot (REVIEW_POLICY.md,
+  # Disagreements and Tiebreaking). Set to 10 fleetwide by mergepath#2665
+  # (epic mergepath#2657); previously 5.
+  max_review_rounds: 10
+
+  # Blocking-review budget. Before every new request the requester counts the
+  # PR's SOLICITED Codex responses that are blocking (a finding at p0 or a
+  # feedback_policy-required tier), unknown-tier, or conflicting, across every
+  # head, and refuses the request once that count reaches this budget (exit 7,
+  # kind "blocking-reviews"). Clean and discretionary-only rounds spend
+  # nothing. Checked BEFORE max_review_rounds, so when both are spent the
+  # blocking-budget stop (human-tiebreaker route) wins. Absent, it defaults to
+  # 10; set explicitly by mergepath#2665 so the runaway meter is visible.
+  max_blocking_reviews: 10
 
   # Poll timeout per round, in seconds, for `codex-review-request.sh`.
   # If Codex has not posted a review within this window, treat as timeout
   # and exit with code 4. Silence is NEVER treated as implicit approval;
   # see issue #27 for the explicit-review-required decision.
   #
-  # 840s is measured, not folklore (#623). The mined trigger→verdict
-  # distribution is p50 217s / p90 426s / p99 630s / max 830s (n=100), and the
-  # 👍-clearance endpoint the poll also breaks on is p99 829s (n=60, #646) —
-  # committed extract docs/audits/data/codex-latency-2026-07/. The prior 600s
-  # sat below p99(verdict)=630s, so the slowest ~1% of clean rounds (and the
-  # 830s max) timed out and fell to Phase 4b needlessly. 840s = 56 × the 15s
-  # poll interval (final poll lands on the deadline), covers the full observed
-  # clean-verdict tail, and stays under the 900s phase-4b adapter ceiling. The
-  # ~19–21% dropped/rate-limited non-response tail (#570) is out of scope by
-  # design — no foreground wait can catch it; --trigger-only is its escape
-  # path (#489). The "Codex takes 15–40 min" belief is contradicted: no
-  # completed round in the recorded history reached 15 min.
-  review_timeout_seconds: 840
+  # 1800s is the hub's measured window (mergepath#1550: trigger→first Codex
+  # response p95 982s, max 1723s, none after 1800s) and the mergepath#2657
+  # active-run ceiling. Set fleetwide by mergepath#2665; previously 840s.
+  review_timeout_seconds: 1800
 
   # Short acknowledgment window for `@codex review` trigger comments
   # (#419). The Codex GitHub integration reacts with 👀 to the comment
@@ -892,10 +900,15 @@ phase_4b_automation:
   # future follow-up (not implemented in the reference).
   mode: local
 
-  # Declarative cap for callers that loop this one-review-round helper after
-  # CHANGES_REQUESTED. The reference orchestrator performs one adapter pass per
-  # invocation and does not persist round state.
-  max_review_rounds: 5
+  # Completed Phase 4b round cap (mergepath#2665, epic mergepath#2657).
+  # DECLARATIVE ONLY until the round ledger (mergepath#2663) is installed in
+  # this repo: the installed orchestrator performs one adapter pass per
+  # invocation, does not persist round state and does not read this value,
+  # so setting 3 here has NO enforcement effect yet. Once the ledger is synced,
+  # refs/mergepath/p4b-rounds/pr-<N> becomes the sole reservation and cap
+  # authority and a 4th completed round is refused for an owner decision.
+  # Previously 5.
+  max_review_rounds: 3
 
   # Fail closed: an ambiguous / non-schema-conformant adapter verdict must
   # NEVER become an APPROVED. The orchestrator falls back to the manual
