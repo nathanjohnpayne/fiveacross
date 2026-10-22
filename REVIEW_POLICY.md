@@ -525,11 +525,11 @@ The `phase_4b_default` field in `.github/review-policy.yml` controls when 4b fir
 
 | Value | Behavior (intended; full wiring lands in #186 + #187) |
 |-------|---------|
-| `fallback-only` | Current behavior. 4b only on 4a unavailability/escalation/timeout. |
-| `complex-changes` | Run `scripts/phase-4b-classifier.sh` AFTER 4a clears; if any trigger matches, post the 4b handoff before merging. |
-| `always` | Skip the classifier; post the 4b handoff for every external-review-threshold PR. |
+| `fallback-only` | Current behavior. 4b only on 4a unavailability, timeout or a spent request ceiling (4a escalations go to the human). |
+| `complex-changes` | Run `scripts/phase-4b-classifier.sh` AFTER 4a clears; if any trigger matches, run Phase 4b before merging (automated first via `scripts/phase-4b-review.sh`; the manual handoff only on its fallback). |
+| `always` | Skip the classifier; run Phase 4b (automated first) for every external-review-threshold PR. |
 
-**Operating instructions:** the runtime branching that consumes `phase_4b_default` is documented in [CLAUDE.md step 8.5](CLAUDE.md) (and summarized in AGENTS.md § Workflow Summary). Agents read the field via `scripts/codex-review-check.sh` (which parses and exports `PHASE_4B_DEFAULT`), then on `complex-changes` run `scripts/phase-4b-classifier.sh <PR#>` between Phase 4a clearance and merge. The classifier's exit code is load-bearing: 0 (no 4b → merge), 1 (invoke 4b → post handoff per § Handoff Message Format), 2 (config/API error → stop), 3 (bad args → fix invocation).
+**Operating instructions:** the runtime branching that consumes `phase_4b_default` is documented in [CLAUDE.md step 8.5](CLAUDE.md) (and summarized in AGENTS.md § Workflow Summary). Agents read the field via `scripts/codex-review-check.sh` (which parses and exports `PHASE_4B_DEFAULT`), then on `complex-changes` run `scripts/phase-4b-classifier.sh <PR#>` between Phase 4a clearance and merge. The classifier's exit code is load-bearing: 0 (no 4b → merge), 1 (invoke 4b → run `scripts/phase-4b-review.sh` first; post the handoff per § Handoff Message Format only if it falls back), 2 (config/API error → stop), 3 (bad args → fix invocation).
 
 **Default for new repos:** `complex-changes` (the empirically validated middle ground). **Default for existing repos** that haven't added the field: `fallback-only` (no behavior change without explicit opt-in — see [Migration for existing consumers](#migration-for-existing-consumers) below).
 
