@@ -386,7 +386,7 @@ Worked example: in a `--sync-all` wave, the pure-mirror consumer PRs verify clea
 Phase 4 has two sub-phases that together cover the two ways external review can run:
 
 - **Phase 4a — Automated external review** via the ChatGPT Codex Connector GitHub App. This is the default happy path. The authoring agent drives the review loop without human intervention until Codex signals clearance, then runs a merge-gate check and merges.
-- **Phase 4b — Manual CLI fallback** via a different agent's CLI session (e.g., Codex CLI as `nathanpayne-codex`, or Cursor, or Claude Code). This is the escape hatch when 4a escalates (disagreement or runaway), times out, or is unavailable because `codex.enabled: false`. The human mediates the handoff.
+- **Phase 4b — External review** by a different agent's reviewer CLI (e.g., Codex CLI as `nathanpayne-codex`, or Claude Code). It applies when 4a times out, spends its request ceiling, or is unavailable because `codex.enabled: false`. Automated Phase 4b (`scripts/phase-4b-review.sh`) runs first in this repository; the human-mediated manual handoff applies only when that run falls back. Phase 4a disagreement and runaway do not enter Phase 4b: they go to the human (see [Disagreements and Tiebreaking](#disagreements-and-tiebreaking)).
 
 An agent proceeds to 4a first. If 4a escalates, times out, or is disabled, the agent falls back to 4b and surfaces the handoff to the human per [Handoff Message Format](#handoff-message-format).
 
@@ -622,11 +622,11 @@ When you pull this template change into an existing repo, the new `phase_4b_defa
                  │ clearance              │ escalate / fallback
                  ▼                        ▼
   ┌──────────────────────────┐  ┌────────────────────────────┐
-  │  MERGE GATE:             │  │  PHASE 4b: MANUAL CLI      │
-  │  codex-review-check.sh   │  │  FALLBACK                  │
+  │  MERGE GATE:             │  │  PHASE 4b: AUTOMATED FIRST │
+  │  codex-review-check.sh   │  │  (phase-4b-review.sh);     │
   │                          │  │                            │
-  │  • gh pr checks = green  │  │  Post handoff message;     │
-  │  • internal reviewer     │  │  alert human.              │
+  │  • gh pr checks = green  │  │  on fallback only: post    │
+  │  • internal reviewer     │  │  handoff; alert human.     │
   │    identity APPROVED     │  │                            │
   │  • Codex cleared on HEAD │  │  Human takes handoff to    │
   │    via COMMENTED-no-P0/1 │  │  different agent CLI       │
