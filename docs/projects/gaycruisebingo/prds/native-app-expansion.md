@@ -12,7 +12,7 @@ generated_by: scripts/project-doc-sync.sh
 do_not_edit: true
 source_repo: nathanjohnpayne/docs
 source_path: projects/gaycruisebingo/prds/native-app-expansion.md
-source_ref: 97b0479
+source_ref: 97b047905979e37021e99964fdd56562c26841a4
 project: gaycruisebingo
 document_class: prd
 document_slug: native-app-expansion

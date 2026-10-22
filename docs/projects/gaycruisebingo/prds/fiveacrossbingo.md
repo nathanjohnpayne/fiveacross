@@ -11,7 +11,7 @@ generated_by: scripts/project-doc-sync.sh
 do_not_edit: true
 source_repo: nathanjohnpayne/docs
 source_path: projects/gaycruisebingo/prds/fiveacrossbingo.md
-source_ref: ae89224
+source_ref: ae892243ddf52b13fd93b188576474881fdd54f1
 project: gaycruisebingo
 document_class: prd
 document_slug: fiveacrossbingo
