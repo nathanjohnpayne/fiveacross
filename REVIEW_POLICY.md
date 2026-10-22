@@ -969,8 +969,9 @@ codex:
   request_by_default: true                    # post `@codex review` on EVERY PR, not just above-threshold (#486)
   bot_login: "chatgpt-codex-connector[bot]"   # REST API form, with [bot] suffix
   cli_login: nathanpayne-codex                # manual CLI fallback (Phase 4b)
-  max_review_rounds: 5                        # request ceiling; the 6th request is refused and routes through the Phase 4b barrier
-  review_timeout_seconds: 840                 # per-round poll timeout (measured verdict p99/max, #623)
+  max_review_rounds: 10                       # request ceiling; the 11th request is refused and routes through the Phase 4b barrier
+  max_blocking_reviews: 10                    # blocking-review budget; a request is refused once 10 solicited blocking reviews exist (mergepath#1560)
+  review_timeout_seconds: 1800                # per-round poll timeout (measured response p95/max, mergepath#1550)
   require_ci_green: true                      # merge gate
   allow_phase_4b_substitute: true             # accept Phase 4b APPROVED on HEAD as gate (c) clearance (#218)
   p1_gate:
