@@ -8,7 +8,7 @@ generated_by: scripts/project-doc-sync.sh
 do_not_edit: true
 source_repo: nathanjohnpayne/docs
 source_path: projects/gaycruisebingo/prds/gaycruisebingo.md
-source_ref: 023a69b
+source_ref: 023a69bc1632085ddaae168af06a95101f1ad756
 project: gaycruisebingo
 document_class: prd
 document_slug: gaycruisebingo
