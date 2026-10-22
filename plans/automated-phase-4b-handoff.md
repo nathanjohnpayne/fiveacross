@@ -272,6 +272,8 @@ The single most consequential difference: **Codex gives you reasoning text and n
 
 ## 10. Review round loop and fail-closed degradation
 
+> **Superseded on the cap (mergepath#2663, mergepath#2665).** `phase_4b_automation.max_review_rounds` is now enforced through the per-PR Git-ref round ledger, and this repository sets it to 3 in `.github/review-policy.yml`. The declarative cap of 2 described in this section is the original design, kept as a record; the live policy file is the configuration reference.
+
 The reference orchestrator performs one exhaustive adapter pass per invocation: the prompt uses "Exhaustive code review" and asks the reviewer to keep looking for additional findings until it stops finding new issues, then return the full verdict object. `max_review_rounds` is a declarative cap for the outer review flow that re-runs this helper after `CHANGES_REQUESTED`; this first ship does not persist round state inside the helper itself. The key safety property: **the system only ever posts `APPROVED` when an adapter returns an unambiguous approval with no findings at all.** The shared validator still reads the repo's `feedback_policy` (#574; absent policy defaults to P0/P1 required) so blocking findings cannot masquerade as approvals, and the orchestrator adds a stricter posting rule: advisory findings on an approving verdict route to the manual handoff until the required post-review issue filing path has been handled. A parse failure, adapter error, or approval that still carries any finding never becomes an automated approval.
 
 ```mermaid

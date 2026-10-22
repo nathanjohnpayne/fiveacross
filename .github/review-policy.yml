@@ -913,7 +913,9 @@ phase_4b_automation:
   # ledger (refs/mergepath/p4b-rounds/pr-<N>) before any adapter run, and a
   # 4th completed round is refused for an owner decision. Enforcement covers
   # only publishers that reserve through the ledger; the manual handoff does
-  # not. Set to 3 by mergepath#2665 (epic mergepath#2657).
+  # not. A slot stays occupied from its reservation onward, including after a
+  # crash or an uncertain review POST, so fewer than 3 posted reviews can spend
+  # the cap. Set to 3 by mergepath#2665 (epic mergepath#2657).
   # Previously 5.
   max_review_rounds: 3
 
