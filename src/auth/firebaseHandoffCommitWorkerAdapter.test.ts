@@ -202,7 +202,7 @@ describe('Firebase handoff commit Worker adapter', () => {
   // these literals to match a dependency PR. Diff the two `@firebase/auth`
   // builds, confirm each property, then record the new audit in
   // `specs/auth-handoff-client.md` (the pinned-SDK paragraphs in § Leg 3) in the
-  // same edit, so the next bump inherits the trail. Last audited under #PRNUM
+  // same edit, so the next bump inherits the trail. Last audited under #1996
   // (13.0.0 / 1.13.7 -> 13.1.0 / 1.13.8); previously under #1898 and #1230.
   it('pins the Firebase Auth implementation whose persistence boundary is audited', () => {
     const lock = JSON.parse(readFileSync('package-lock.json', 'utf8')) as {
