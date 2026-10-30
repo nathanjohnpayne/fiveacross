@@ -20,10 +20,9 @@ EMAIL_REPLY_TO=
 # Conventional Gen2 Cloud Functions URL for the gaycruisebingo project.
 EMAIL_UNSUBSCRIBE_URL={{ op://Private/nxo3433p725mqz2a4gz7wru4ve/functions-gaycruisebingo/EMAIL_UNSUBSCRIBE_URL }}
 
-# Added 2026-08-18 (#671): per-Edition EMAIL_FROM overrides. Left blank —
-# none of gaycruisebingo.com/vacaybingo.com/fiveacross.app are Resend-verified
-# yet, so every send keeps falling back to EMAIL_FROM above until a brand's
-# domain is verified and this project's copy of the matching line is set.
+# Added 2026-08-18 (#671): per-Edition EMAIL_FROM overrides, set for all three
+# Editions. A blank override is treated as absent, so that Edition's sends fall
+# back to EMAIL_FROM above and lose the Edition-specific display name.
 EMAIL_FROM_GCB={{ op://Private/nxo3433p725mqz2a4gz7wru4ve/functions-gaycruisebingo/EMAIL_FROM_GCB }}
 EMAIL_FROM_VACAY={{ op://Private/nxo3433p725mqz2a4gz7wru4ve/functions-gaycruisebingo/EMAIL_FROM_VACAY }}
 EMAIL_FROM_FIVEACROSS={{ op://Private/nxo3433p725mqz2a4gz7wru4ve/functions-gaycruisebingo/EMAIL_FROM_FIVEACROSS }}
