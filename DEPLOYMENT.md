@@ -793,9 +793,8 @@ op-firebase-deploy <project-id> --only hosting   # or whatever target
 
 ### Rotating a Firebase deploy SA key
 
-The SA key is the standard day-to-day deploy credential per [Deploy credential precedence (canonical)](#deploy-credential-precedence-canonical). Rotate it on a calendar cadence and on demand for any of these triggers:
+The SA key is the standard day-to-day deploy credential per [Deploy credential precedence (canonical)](#deploy-credential-precedence-canonical). Rotate it on demand for any of these triggers:
 
-- **Calendar rotation** — target every 90 days. Track the last-rotation timestamp in the 1Password item's notes field so the next rotation is auditable.
 - **Compromise indicator** — key leaked in logs/screenshots, exposed by a misconfigured CI runner, or invalidated by org policy. Rotate immediately and audit downstream usage.
 - **Personnel change affecting key custody** — a maintainer with 1Password vault access leaves, or vault membership changes.
 
@@ -851,7 +850,7 @@ fi
 #    notes field from step 3 is the primary record.
 ```
 
-This procedure is intentionally human-only — the bootstrap wizard (#156) does NOT automate rotation. Rotation cadence is low enough (quarterly) that the manual path is fine, and the cost of a botched automation (silently invalidating production deploy auth across multiple consumers) exceeds the benefit. If a maintainer wants to rotate keys for several projects in a single sitting, run the procedure above once per project — `PROJECT_ID` is the only thing that changes between iterations.
+This procedure is intentionally human-only — the bootstrap wizard (#156) does NOT automate rotation. Rotation happens rarely enough (only on a compromise indicator or a custody change) that the manual path is fine, and the cost of a botched automation (silently invalidating production deploy auth across multiple consumers) exceeds the benefit. If a maintainer wants to rotate keys for several projects in a single sitting, run the procedure above once per project — `PROJECT_ID` is the only thing that changes between iterations.
 
 If step 5 fails (deploy doesn't pick up the new key), the most common causes are:
 - **Mistyped item title.** The script reads `op://Firebase/{project-id} — Firebase Deployer SA Key` exactly. Confirm with `op item get "${PROJECT_ID} — Firebase Deployer SA Key" --vault Firebase`.
