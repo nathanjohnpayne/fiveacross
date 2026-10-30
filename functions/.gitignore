@@ -5,3 +5,5 @@ lib
 .env
 .env.*
 !.env.example
+# op:// templates restored by scripts/bootstrap.sh; they hold references, not values.
+!.env.*.tpl

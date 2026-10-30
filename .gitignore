@@ -28,6 +28,8 @@ dist-marketing/
 # negation even though no .env.tpl exists yet, or a fresh checkout can't
 # stage the template once that workflow is turned on.
 !/.env.tpl
+# Per-target op:// templates (scripts/bootstrap-config.sh INJECT_FILES).
+!/.env.*.tpl
 *.pem
 *.key
 

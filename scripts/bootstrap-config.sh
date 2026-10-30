@@ -10,5 +10,11 @@
 #   3. Run ./scripts/bootstrap.sh --force.
 
 INJECT_FILES=(
-  # ".env.tpl:.env.local"
+  # Item "fiveacross env" (Private vault), one section per output file.
+  ".env.tpl:.env.local"
+  ".env.fiveacross.tpl:.env.fiveacross"
+  ".env.gaycruisebingo.tpl:.env.gaycruisebingo"
+  "functions/.env.local.tpl:functions/.env.local"
+  "functions/.env.fiveacross.tpl:functions/.env.fiveacross"
+  "functions/.env.gaycruisebingo.tpl:functions/.env.gaycruisebingo"
 )
