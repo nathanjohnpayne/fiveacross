@@ -67,7 +67,7 @@ There is no `npm run lint` in this repo. An `eslint.config.js` flat config is pr
 - **Commits follow [Conventional Commits](https://www.conventionalcommits.org/):** `type(scope): summary`, e.g. `fix(auth): time out stalled online bootstrap` or `feat(board): define the free space visually`. Common types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`.
 - **Open a PR** and let the [PR template](.github/pull_request_template.md) structure it — a Summary, a Testing checklist, and a Self-Review checklist. Fill them in honestly; if tests failed or a step was skipped, say so.
 - **Link the issue** with `Closes #<num>` in the PR body so the merge closes it (and the Project #7 board can auto-advance the card — [`docs/agents/ticket-workflow.md`](docs/agents/ticket-workflow.md)).
-- Keep the title and description about the *final state of the change*, not the session that produced it (no "originally tried X, then switched"). See [`docs/agents/operating-rules.md`](docs/agents/operating-rules.md) § PR and issue titles.
+- Keep the title and description about the *final state of the change*, not the session that produced it (no "originally tried X, then switched"). See [`docs/agents/shared-operating-rules.md`](docs/agents/shared-operating-rules.md) § PR and issue titles/descriptions: describe the work, not the session.
 
 ## Review and merge
 

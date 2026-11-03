@@ -1,5 +1,7 @@
 # Agent Operating Rules
 
+> This file is this repository's **local overlay**. The fleet-wide shared core lives in [`docs/agents/shared-operating-rules.md`](shared-operating-rules.md) --- read that first (`AGENTS.md` § Sections orders them). Where the two overlap, the shared file is the baseline; this file adds repo-specific detail and does not restate it.
+
 Read in this order before taking any action:
 
 1. `README.md`—understand the project
@@ -17,85 +19,9 @@ Conflict resolution:
 - If a tool folder contains instructions that conflict with `AGENTS.md` or these sub-files: follow the canonical docs and flag the duplication for removal.
 - If `AGENTS.md` or its sub-files are missing required sections: flag the gap and do not assume behavior for missing sections.
 
-## Always paginate PR comment / review / check-run list reads
+## Prose sweep when a review round changes a claim
 
-Any `gh api` list read against a PR's comments, reviews, or check-runs MUST use `--paginate` (or, for a GraphQL connection, a cursor loop). This is not optional past round 1 of a Phase 4a review loop. `gh api` without `--paginate` fetches exactly one page --- 30 items by default, at most 100 with `per_page=100` --- and returns cleanly with no error or warning that more data exists. On a long-lived PR that has been through many review rounds, the current data routinely sits past that boundary, so an unpaginated read silently returns a stale or empty result that reads as "no new activity" or "no findings" when the opposite is true. This has repeatedly produced false all-clear conclusions and can silently defeat a merge gate (#691).
-
-This applies to every hand-rolled, mid-session investigative query, not just the shipped helper scripts. An agent manually inspecting a PR's live state is the common case, and it is exactly the query that skips the paginated helpers. The endpoints that truncate, and the correct form:
-
-- Inline diff comments --- `gh api --paginate "repos/OWNER/REPO/pulls/PR/comments"`. By round 4+ a PR easily exceeds 30 of these (findings, plus replies, plus resolve-tool tag-replies), so the newest findings land on page 2 and an unpaginated read returns nothing for them.
-- PR-level (issue) comments --- `gh api --paginate "repos/OWNER/REPO/issues/PR/comments"`. This is where a Codex clean verdict lands.
-- Review objects --- `gh api --paginate "repos/OWNER/REPO/pulls/PR/reviews"`. This is where a Codex findings round lands.
-- Check-runs / commit statuses --- `gh api --paginate "repos/OWNER/REPO/commits/SHA/check-runs"` and `.../statuses`. A single head commit can accumulate 100+ check-runs from repeated scheduled-sweep re-evaluations (194 observed on #687), so even `per_page=100` without `--paginate` silently drops a live failure onto page 2.
-
-`gh pr view --json comments|reviews|statusCheckRollup` has the same trap and CANNOT be fixed with `--paginate`: the `--json` GraphQL shape caps each connection at the first 100 entries and strips the `pageInfo` you would need even to detect the truncation. For any connection that can exceed 100 (check-runs above all), read the REST endpoint with `gh api --paginate`, or walk the GraphQL connection with a Relay cursor loop --- see the `statusCheckRollup` cursor loops in `scripts/codex-review-check.sh` and `scripts/admin-merge-codeowners-blocked.sh`. A single-item read (`repos/.../issues/comments/ID`, `repos/.../pulls/PR`) is not a list and does not need `--paginate`.
-
-The shipped gate scripts already bake this in --- `fetch_api_array` wraps `gh api --paginate` for the REST arrays, and the GraphQL reads use cursor loops --- so this rule is aimed at the ad-hoc queries those helpers do not cover. When in doubt, add `--paginate`: it is a no-op on a short list and the only safe default on a long one.
-
-## 1Password CLI authentication failures
-
-If any `op` command (`op read`, `op inject`, `op run`, `op document get`, or any script that wraps them) fails with a sign-in or authentication error—including but not limited to:
-
-- `[ERROR] ... not currently signed in`
-- `session expired`
-- `biometric unlock ... timed out`
-- `authorization prompt dismissed`
-- `error initializing client: authorization`
-
-In a local session, follow the recovery procedure below. Cloud sessions use their provisioned credentials and the capability probe in [Cloud Agent Environments](cloud-environments.md); they do not run local 1Password preflight. If the provisioned credential path is unavailable, stop and hand the blocked operation to a capable session rather than attempting interactive sign-in.
-
-1. **Stop immediately.** Do not retry the command, do not attempt workarounds (manual token entry, environment variable overrides, fallback credential paths, or skipping the credential step).
-2. **Check if preflight was run.** If `OP_PREFLIGHT_DONE` is not set, suggest running the preflight script:
-   > "1Password auth failed. Would you like to run credential preflight to cache all credentials at once? `eval \"$(scripts/op-preflight.sh --agent claude --mode review)\"`"
-   >
-   > (Use `--mode deploy` or `--mode all` instead if a deploy is in scope; the default is now `review` per #282.)
-3. **If preflight was already run** but credentials expired (rare—only after 1Password locks or the 12-hour hard limit), prompt the human and suggest re-running preflight:
-   > "Preflight credentials appear to have expired. Could you re-run preflight when you're back? I need to resume the review."
-4. **Wait for the human to confirm** they are present and ready before re-running preflight (not individual `op read` commands).
-5. After confirmation, re-run preflight. If it fails again, report the full error output and wait—do not loop.
-
-This rule applies only to 1Password CLI sign-in and authentication errors. Other `op` failures (wrong item ID, missing field, network errors, vault permission errors) should be diagnosed and resolved normally.
-
-## Bug fix escalation policy
-
-These rules prevent agents from repeatedly patching symptoms of a structural defect. They are derived from a real failure where one agent made six unsuccessful fix attempts on the same issue because every attempt preserved the same broken architectural assumption.
-
-### Two-strike audit rule
-
-If an agent has made **two or more failed fix attempts** on the same issue (i.e., two merged PRs that were each intended to resolve the issue but did not), the next attempt **must** begin with a written audit of all prior attempts before any code changes. The audit must:
-
-1. List every prior PR that targeted this issue.
-2. For each, state what it changed and why it was insufficient.
-3. Identify the **shared assumption** across all prior attempts.
-4. Propose a fix that addresses that assumption directly, not another symptom within it.
-
-The audit should appear in the PR description under a section titled "Audit Of Prior Failed Fixes."
-
-If the agent cannot identify a shared assumption, it must flag the issue to the human rather than filing another incremental fix.
-
-### Agent rotation for retries
-
-When an agent's fixes are not resolving an issue after two attempts, **hand the problem to a different agent**. A fresh agent without the prior context is less likely to inherit implicit assumptions about the system's architecture. The new agent should be given:
-
-- The issue description
-- Links to all prior fix PRs
-- No additional narrative framing (let it form its own model)
-
-This is a recommendation, not a hard rule. The human decides when to rotate.
-
-### Serialization layer review requirement
-
-When reviewing a PR that introduces or modifies a **serialization or deserialization layer**—any code that converts structured data to a flat format (strings, JSON, markdown, plain text) and back—the reviewer must verify:
-
-1. **Losslessness:** Does the round-trip preserve all semantically meaningful information? If not, what is discarded?
-2. **Consumer parity:** Do all consumers of the serialized format produce identical output from identical input? If there are multiple parsers/renderers, are they tested for equivalence?
-3. **Necessity:** Is the intermediate format required, or can consumers read the structured format directly?
-
-If the round-trip is lossy, the reviewer must flag the information loss as a design risk and require either:
-- An explicit justification for why the loss is acceptable, or
-- A plan to eliminate the intermediate format
-
-### Prose sweep when a review round changes a claim
+The bug-fix escalation policy (two-strike audit, agent rotation, serialization-layer review) is fleet-wide and lives in [`shared-operating-rules.md`](shared-operating-rules.md) § *Bug fix escalation policy*. This section is this repository's own addition to it and is not restated there.
 
 When a review round changes a claim—a behavior, an ordering, or a guarantee that any repo-owned prose surface (a comment, a docstring, a spec sentence, README prose, a `plans/**` caption) asserts about the system—the author sweeps every repo-owned prose surface that restates it in the same commit (code comments and docstrings, `specs/**`, `plans/**` captions, README prose) and updates the PR body in the same review round, since a PR body is GitHub metadata and cannot be part of any commit. Generated and synced mirrors are outside the sweep, because a direct edit there is overwritten on the next sync: a restatement that lives in a `do_not_edit` PRD mirror under `docs/projects/**` or in a surface `.mergepath-sync.yml` propagates is corrected at its canonical source and re-materialized by the sync, per the generated-mirror boundary in [documentation-rules.md](documentation-rules.md). Grep the tree for the claim's key terms rather than trusting the current diff to surface every place it lives, because the trigger is "this round changed a claim," not "this round changed behavior"—a prose restatement can go stale with no code change ever touching the line it sits on, since it was accurate for the round that wrote it and nothing after that round had reason to look at it again. PR #1207 is the motivating example: an inventory taken on that PR while it was still open found five separate instances of exactly this staleness across its sixteen review rounds, each accurate when written and each caught only because a later round—or a review outside the PR's own rounds—happened to re-read the surrounding prose rather than the diff (#1212). A reviewer who finds a leftover restatement of a claim a later round already retracted treats it as a P1, not a nit.
 
@@ -132,17 +58,13 @@ This helper is intentionally local-only—worktree state is machine-local and sh
 
 Two complementary automations catch unaddressed review feedback at different time horizons. Agents should know which one fires when, so triage work isn't duplicated and missed-signal classes are surfaced at the right cadence.
 
-### Daily rollup—deferred-and-forgotten class
+### Daily rollup
 
-**`.github/workflows/daily-feedback-rollup.yml`** runs daily at `55 23 * * *` UTC. It scans yesterday's MERGED PRs and surfaces bot review threads that were RESOLVED **without** an associated fix commit or substantive reply. The output splits into two clearly-labeled tracks (substantive / polish) so the high-severity stream stays high-signal even on days with a lot of nit volume.
-
-This catches the class that motivated #234 / #286 / #287: a CodeRabbit Major or Codex P2 the agent resolved as "non-blocking, will fix in a follow-up"—and then nobody wrote down. Captured while the resolving agent's context is still hot.
-
-See `scripts/daily-feedback-rollup.sh` (workhorse) + `scripts/lib/daily-feedback-rollup-helpers.sh` (classifier helpers) + `scripts/resolve-pr-threads.sh --auto-resolve-bots` (the upstream emit-side that tags each resolve with `[mergepath-resolve:<class>]` so the classifier prefers agent-recorded rationale over heuristics).
+The daily rollup (deferred-and-forgotten class) is fleet-wide: see [`shared-operating-rules.md`](shared-operating-rules.md) § *Daily feedback rollup — the deferred-and-forgotten class*. Only the weekly sweep below is local to this overlay.
 
 ### Weekly sweep—longer-tail residuals
 
-**`.github/workflows/weekly-feedback-sweep.yml`** runs Mondays at `09:00` UTC. It enumerates UNRESOLVED review threads on closed PRs across the org (by default a 90-day lookback). Captures items that slipped past the merge gate AND remained unresolved through the daily rollup's 24h window—typically because the resolving agent's day rolled over before triage.
+**`.github/workflows/weekly-feedback-sweep.yml`** runs Mondays at `09:00` UTC. It enumerates UNRESOLVED review threads on closed PRs across the repositories in `target-repos.txt` (by default a 90-day lookback). Captures items that slipped past the merge gate AND remained unresolved through the daily rollup's 24h window—typically because the resolving agent's day rolled over before triage.
 
 The sweep keys purely on GitHub review-thread state (`isResolved == false && isOutdated == false`), so a finding that was fixed during the PR but whose thread was left open re-surfaces here as if it were unactioned. Resolving actioned threads during the PR—`scripts/resolve-pr-threads.sh <PR#> --resolve-actioned`, which resolves only demonstrably-actioned threads and confirms each with an `isResolved: true` readback—keeps this backlog focused on feedback that still needs attention (#564).
 
@@ -150,19 +72,7 @@ See `scripts/sweep-unresolved-feedback/enumerate.sh` + `scripts/sweep-unresolved
 
 ### Which one to act on
 
-- Routine end-of-day triage → the substantive `deferred-feedback-rollup YYYY-MM-DD` issue from the daily cron. Items aged 0-7 days, context fresh.
-- Polish/nit batch triage → the `polish-feedback-rollup YYYY-MM-DD` issue from the same daily cron. Lower urgency; can batch across multiple days.
+- Daily-rollup triage (substantive and polish issues) → see the shared section above.
 - Quarterly backlog review → the weekly sweep's rollup issue. Items aged 7+ days, context decayed but pattern recognition still possible.
 
-Both surfaces are per-repo (each consumer has its own daily + weekly rollup issues). Cross-repo aggregation is explicit non-goal for v1 of both workflows; the per-repo design preserves operator focus on the repo whose context they're currently in.
-
-## PR and issue titles/descriptions: describe the work, not the session
-
-Titles and descriptions—for both pull requests and issues—must describe the final state of the change (what it does and why) for a reader who arrives with no knowledge of the session that produced it.
-
-- Do not narrate the session's path: no pivots, abandoned approaches, "originally did X, then switched to Y," or commentary on how the plan evolved.
-- When a pivot changes what the work is, update the title/description to reflect the new end state—not the fact that a pivot happened.
-- Once a title or description already describes the work accurately, treat it as read-only. Do not reword or "refresh" it to fold in later session context.
-- This bans narrating the session, not documenting the work. Design rationale, an "Alternatives considered" section, or contrasting the change with the prior committed code (e.g. "replaces the hard-coded `null` with a threaded value") all describe the end state for a cold reader and are fine. The test: would the text help someone who never saw the session? Rationale and prior-code contrast pass; "I first tried X, then switched" does not.
-
-This is advisory guidance for judgment, not a `repo_lint`/CI gate—the narration-vs-rationale distinction is not reliably lintable, and a reviewer (human or bot) should apply it as judgment rather than minting false-positive findings from words like "originally" or "instead." See #654.
+The daily rollup is per-repo; the weekly sweep is not. It reads the repositories listed in `scripts/sweep-unresolved-feedback/target-repos.txt` and `render.sh` posts one rollup issue to `SWEEP_TARGET_REPO`, which defaults to `nathanjohnpayne/mergepath` (it does not open a weekly issue per consumer). Look for the weekly rollup there, not in this repository.
