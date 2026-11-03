@@ -197,14 +197,17 @@ jobs:
       # functions/package.json. `test:functions` runs `npm --prefix functions
       # install` first, so it is self-contained on a clean runner (no emulator).
       # Run the notifier suite on the runtime Functions deploys to
-      # (`functions/package.json` engines.node: 22), not the repository's Node
-      # 24, so behaviour that differs on 24 can't pass here and then fail in
-      # production. The step after it switches back to Node 24 for the
-      # @firebase/* emulator suites.
-      - name: Use the Functions runtime (Node 22)
+      # (`firebase.json` functions.runtime: nodejs24, mirrored by
+      # `functions/package.json` engines.node: 24), so behaviour that differs
+      # on another major can't pass here and then fail in production. Today
+      # that is the repository's Node 24 too; the step stays separate so a
+      # future Functions runtime bump changes this pin and nothing else. The
+      # step after it restores the repository runtime for the @firebase/*
+      # emulator suites.
+      - name: Use the Functions runtime (Node 24)
         uses: actions/setup-node@v7.1.0
         with:
-          node-version: '22'
+          node-version: '24'
 
       - name: Functions notifier tests
         run: npm run test:functions

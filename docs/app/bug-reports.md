@@ -33,7 +33,7 @@ scripts/smoke-bug-report-callable.sh
 
 It sends a single load-and-assert request (no auth ⇒ no side effect) and fails loudly if the callable returns HTTP 403—the signal that the request was blocked at the Cloud Run invoker layer and the invoker configuration has regressed. This is the check that would have flagged the original outage class.
 
-**Functions runtime.** The Functions package targets the Node.js 22 runtime (`functions/package.json` `engines.node`). Node.js 20 is deprecated on Cloud Functions with a 2026-10-30 decommission date; the runtime bump takes effect on the next `npm run deploy:<target> -- --only functions`.
+**Functions runtime.** The Functions package targets the Node.js 24 runtime (`nodejs24`), set by `functions.runtime` in `firebase.json`, which the Firebase CLI reads before `functions/package.json` `engines.node` (also `24`). Node.js 22 is deprecated on Cloud Functions from 2027-04-30; a runtime change takes effect on the next `npm run deploy:<target> -- --only functions`.
 
 ## Pull reports locally
 
