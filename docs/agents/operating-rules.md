@@ -64,7 +64,7 @@ The daily rollup (deferred-and-forgotten class) is fleet-wide: see [`shared-oper
 
 ### Weekly sweep—longer-tail residuals
 
-**`.github/workflows/weekly-feedback-sweep.yml`** runs Mondays at `09:00` UTC. It enumerates UNRESOLVED review threads on closed PRs across the org (by default a 90-day lookback). Captures items that slipped past the merge gate AND remained unresolved through the daily rollup's 24h window—typically because the resolving agent's day rolled over before triage.
+**`.github/workflows/weekly-feedback-sweep.yml`** runs Mondays at `09:00` UTC. It enumerates UNRESOLVED review threads on closed PRs across the repositories in `target-repos.txt` (by default a 90-day lookback). Captures items that slipped past the merge gate AND remained unresolved through the daily rollup's 24h window—typically because the resolving agent's day rolled over before triage.
 
 The sweep keys purely on GitHub review-thread state (`isResolved == false && isOutdated == false`), so a finding that was fixed during the PR but whose thread was left open re-surfaces here as if it were unactioned. Resolving actioned threads during the PR—`scripts/resolve-pr-threads.sh <PR#> --resolve-actioned`, which resolves only demonstrably-actioned threads and confirms each with an `isResolved: true` readback—keeps this backlog focused on feedback that still needs attention (#564).
 
@@ -75,4 +75,4 @@ See `scripts/sweep-unresolved-feedback/enumerate.sh` + `scripts/sweep-unresolved
 - Daily-rollup triage (substantive and polish issues) → see the shared section above.
 - Quarterly backlog review → the weekly sweep's rollup issue. Items aged 7+ days, context decayed but pattern recognition still possible.
 
-Both surfaces are per-repo (each consumer has its own daily + weekly rollup issues). Cross-repo aggregation is an explicit non-goal for the weekly sweep too; the per-repo design preserves operator focus on the repo whose context they are currently in.
+The daily rollup is per-repo; the weekly sweep is not. It reads the repositories listed in `scripts/sweep-unresolved-feedback/target-repos.txt` and `render.sh` posts one rollup issue to `SWEEP_TARGET_REPO`, which defaults to `nathanjohnpayne/mergepath` (it does not open a weekly issue per consumer). Look for the weekly rollup there, not in this repository.
