@@ -30,6 +30,7 @@
   },
   "functions": {
     "source": "functions",
+    "runtime": "nodejs24",
     "predeploy": [
       "npm --prefix \"$RESOURCE_DIR\" run build",
       "node scripts/check-callable-families-predeploy.mjs \"$RESOURCE_DIR\""
