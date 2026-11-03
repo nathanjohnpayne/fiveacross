@@ -103,7 +103,7 @@ fi
 if ! op vault list &>/dev/null; then
   echo "Error: Cannot access 1Password."
   echo "For a sign-in or biometric failure, stop and wait for fresh human readiness; then run one canonical local preflight refresh."
-  echo "Follow docs/agents/operating-rules.md; do not retry authentication or use an inline credential fallback. Diagnose other failures normally."
+  echo "Follow docs/agents/shared-operating-rules.md (1Password CLI authentication failures); do not retry authentication or use an inline credential fallback. Diagnose other failures normally."
   exit 1
 fi
 
