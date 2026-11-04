@@ -15,7 +15,7 @@
     "@google-cloud/vision": "^4.3.0",
     "firebase-admin": "^13.10.0",
     "firebase-functions": "^7.3.2",
-    "resend": "^4",
+    "resend": "^6.37.0",
     "sharp": "^0.35.5"
   },
   "devDependencies": {
