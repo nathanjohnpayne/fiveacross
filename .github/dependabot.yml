@@ -6,6 +6,15 @@ updates:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 5
+    groups:
+      # Every other minor and patch update shares one PR. Majors open as
+      # individual PRs (mergepath#1802).
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
     commit-message:
       prefix: "ci"
 
@@ -22,10 +31,14 @@ updates:
         patterns:
           - "firebase"
           - "@firebase/*"
-      dev-dependencies:
-        dependency-type: "development"
-      production-dependencies:
-        dependency-type: "production"
+      # Every other minor and patch update shares one PR. Majors open as
+      # individual PRs (mergepath#1802).
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
     commit-message:
       prefix: "deps"
     # Hold breaking major upgrades that require a deliberate, manual migration
@@ -65,7 +78,13 @@ updates:
       day: "monday"
     open-pull-requests-limit: 5
     groups:
-      worker-dependencies:
-        patterns: ["*"]
+      # Every other minor and patch update shares one PR. Majors open as
+      # individual PRs (mergepath#1802).
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
     commit-message:
       prefix: "deps"
