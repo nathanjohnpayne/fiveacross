@@ -17,7 +17,7 @@ export interface EmailPayload {
   text?: string;
   /**
    * `Reply-To`. The Resend Node SDK spells this `replyTo` (camelCase) on the
-   * SEND options — verified against the installed `resend@4.8.0` types, where
+   * SEND options — verified against the installed `resend@6.37.0` types, where
    * `CreateEmailOptions.replyTo?: string | string[]`. Do not "correct" it to
    * the `reply_to` that appears elsewhere in those same typings: that is the
    * RESPONSE shape (the `Email` object the API returns), and sending it as a
