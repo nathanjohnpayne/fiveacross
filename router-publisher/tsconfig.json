@@ -1,5 +1,6 @@
 {
   "// emit": "This program EMITS — `npm run build` is what `gcp-build` runs in Cloud Build, and `lib/` is the deployed artifact. That is why the spec is excluded rather than merely unreferenced: leaving `src/**/*.test.ts` in would compile a Vitest spec into the deployed function, and `rootDir: \"src\"` would refuse it anyway the moment the spec imported the canonical `src/slug.ts` it exists to compare against. The spec is typechecked by the sibling `tsconfig.test.json`, which emits nothing, and is RUN by the repo-root Vitest layer (`vite.config.ts` `include` covers `router-publisher/**`).",
+  "// resolution": "TypeScript 7 removed `moduleResolution: node` (node10). `bundler` is the replacement that still pairs with `module: commonjs`: it emits the same CommonJS (relative imports stay extensionless, `import()` still lowers to `require`) while reading package `exports` maps. `types` is explicit because TypeScript 6+ no longer auto-includes every `@types/*` package.",
   "compilerOptions": {
     "module": "commonjs",
     "target": "es2021",
@@ -8,7 +9,8 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "moduleResolution": "node"
+    "moduleResolution": "bundler",
+    "types": ["node"]
   },
   "include": ["src"],
   "exclude": ["src/**/*.test.ts"]
