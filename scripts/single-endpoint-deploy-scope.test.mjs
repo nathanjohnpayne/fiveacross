@@ -185,7 +185,8 @@ const DEFAULT_TSCONFIG = {
     rootDir: "src",
     esModuleInterop: true,
     skipLibCheck: true,
-    moduleResolution: "node",
+    moduleResolution: "bundler",
+    types: ["node"],
   },
   // As this repository's own functions/tsconfig.json does. It also keeps a
   // fixture's spare `.ts` payload (the file a pre/predeploy step copies over
