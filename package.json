@@ -79,7 +79,7 @@
     "dotenv": "^18.0.10",
     "esbuild": "0.28.2",
     "fake-indexeddb": "^6.2.8",
-    "firebase-admin": "^13.10.0",
+    "firebase-admin": "^14.5.1",
     "firebase-tools": "^15.35.0",
     "google-auth-library": "^11.3.4",
     "ignore": "7.0.14",

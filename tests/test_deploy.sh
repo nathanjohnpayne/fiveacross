@@ -3138,10 +3138,10 @@ init_admin_options_repo() {
 # `marker` is not one of the options this classifier cannot supply, so nothing
 # here is recorded as a consultation: what decides the classification is purely
 # the surface the artifact exports.
-ADMIN_OPTIONS_MUTATED_BRANCH='const snapshot = admin.app().options;
+ADMIN_OPTIONS_MUTATED_BRANCH='const snapshot = admin.getApp().options;
 snapshot.marker = true;
-exports.daily = admin.app().options.marker ? endpoint() : { submitBugReport: endpoint() };'
-ADMIN_OPTIONS_CONTROL_BRANCH='const snapshot = admin.app().options;
+exports.daily = admin.getApp().options.marker ? endpoint() : { submitBugReport: endpoint() };'
+ADMIN_OPTIONS_CONTROL_BRANCH='const snapshot = admin.getApp().options;
 exports.daily = snapshot.marker ? { submitBugReport: endpoint() } : endpoint();'
 
 if ! needs_write_containment "admin-options-snapshot (28a) and its control (28b)"; then
@@ -3324,7 +3324,7 @@ run_dir_mtime_case 29b shared/stamp branch-taken
 # reading app.options without consulting a value this classifier cannot supply,
 # which really is exempted.
 # ---------------------------------------------------------------------------
-ADMIN_OPTIONS_LOCATION_BRANCH='const options = admin.app().options;
+ADMIN_OPTIONS_LOCATION_BRANCH='const options = admin.getApp().options;
 exports.daily = options.locationId === "nam5" ? { submitBugReport: endpoint() } : endpoint();'
 
 if ! needs_write_containment "admin-options-location (30), whose control is 28b"; then
@@ -3609,7 +3609,7 @@ run_post_classification_guard_case 33b hold
 # `FirebaseApp`'s `get options()` is `deepCopy(this.options_)`, so the pinned
 # firebase-admin keeps the real configuration in `options_` — an own property of
 # the app the artifact can read directly. With only the accessor watched, an
-# artifact reading `admin.app().options_.locationId` matched the real project
+# artifact reading `admin.getApp().options_.locationId` matched the real project
 # while the minimal probe supplied no `locationId` and the populated one invented
 # `us-central1`: both rehearsals reported the direct endpoint, agreed, and the
 # scope was proved exact while Firebase's own discovery exported the protected
@@ -3622,7 +3622,7 @@ run_post_classification_guard_case 33b hold
 # that reads the options without consulting an unsupplied value really is
 # exempted and reconciles nothing.
 # ---------------------------------------------------------------------------
-ADMIN_OPTIONS_BACKING_BRANCH='const options = admin.app().options_;
+ADMIN_OPTIONS_BACKING_BRANCH='const options = admin.getApp().options_;
 exports.daily = options.locationId === "nam5" ? { submitBugReport: endpoint() } : endpoint();'
 
 if ! needs_write_containment "admin-options-backing (34), whose controls are 28b and 30"; then
