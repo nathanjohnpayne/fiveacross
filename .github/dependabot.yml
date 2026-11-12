@@ -27,6 +27,15 @@ updates:
     groups:
       # Peer-coupled family (scripts/ci/dependabot-coupled-families.json,
       # mergepath#2162). Keep it first so its members move together.
+      vite-toolchain:
+        patterns:
+          - "vite"
+          - "vitest"
+          - "@vitest/*"
+          - "@vitejs/*"
+          - "vite-plugin-pwa"
+      # Peer-coupled family (scripts/ci/dependabot-coupled-families.json,
+      # mergepath#2162). Keep it first so its members move together.
       firebase-sdk:
         patterns:
           - "firebase"
@@ -43,24 +52,19 @@ updates:
       prefix: "deps"
     # Hold breaking major upgrades that require a deliberate, manual migration
     # rather than an automated bump. These were bundled into the dev-dependencies
-    # group PR (#255) and broke CI: TypeScript 7 is the preview native compiler,
-    # plugin-react 6 removes Babel, and Vite 8 / Vitest 4 / jsdom 29 each cross
-    # a major boundary. firebase-admin 14 has since been adopted on purpose, so
-    # its majors are no longer held. Dependabot still proposes
-    # minor and patch updates for these packages; remove an entry here when we
-    # are ready to adopt that major on purpose.
+    # group PR (#255) and broke CI. The Vite toolchain (vite 8, vitest 5,
+    # @vitejs/plugin-react 6, vite-plugin-pwa 2) and jsdom 31 have since been
+    # adopted on purpose, so their majors are no longer held: the toolchain's
+    # move together through the vite-toolchain group above, and jsdom's open as
+    # their own PR. firebase-admin 14 has also been adopted on purpose, so its
+    # majors are no longer held either. TypeScript 7 is held at the root: the
+    # 7.0 package ships no JavaScript compiler API, and the root uses it
+    # (scripts/e2e-functions-env.mjs and three specs call ts.createSourceFile),
+    # so the root cannot take TypeScript 7 until it ships one. Dependabot still
+    # proposes minor and patch updates for these packages; remove an entry here
+    # when we are ready to adopt that major on purpose.
     ignore:
       - dependency-name: "typescript"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "vite"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "vitest"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "@vitejs/plugin-react"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "jsdom"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "vite-plugin-pwa"
         update-types: ["version-update:semver-major"]
 
   # The worker/ manifest was outside every update lane: `directory: "/"` above
