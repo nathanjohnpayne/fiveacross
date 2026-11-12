@@ -1396,7 +1396,7 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
       [
         'const admin = require("firebase-admin");',
         "admin.initializeApp();",
-        "const options = admin.app().options;",
+        "const options = admin.getApp().options;",
         "const grouped = Boolean(",
         '  options.storageBucket && options.storageBucket.indexOf(options.projectId + ".") === 0,',
         ");",
@@ -1423,7 +1423,7 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
       [
         'const admin = require("firebase-admin");',
         "admin.initializeApp();",
-        "const options = admin.app().options;",
+        "const options = admin.getApp().options;",
         'const grouped = options.locationId === "nam5";',
         "exports.daily = grouped ? { submitBugReport: endpoint() } : endpoint();",
       ].join("\n"),
@@ -1446,7 +1446,7 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
       [
         'const admin = require("firebase-admin");',
         "admin.initializeApp();",
-        'const grouped = admin.app().options_.locationId === "nam5";',
+        'const grouped = admin.getApp().options_.locationId === "nam5";',
         "exports.daily = grouped ? { submitBugReport: endpoint() } : endpoint();",
       ].join("\n"),
       async (configPath) => {
@@ -1467,7 +1467,7 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
       [
         'const admin = require("firebase-admin");',
         "admin.initializeApp();",
-        "const app = admin.app();",
+        "const app = admin.getApp();",
         'const shadowed = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(app), "options");',
         'const grouped = shadowed.get.call(app).locationId === "nam5";',
         "exports.daily = grouped ? { submitBugReport: endpoint() } : endpoint();",
@@ -1489,7 +1489,7 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
       [
         'const admin = require("firebase-admin");',
         "admin.initializeApp();",
-        "const held = admin.app().INTERNAL.credential_;",
+        "const held = admin.getApp().INTERNAL.credential_;",
         'const grouped = Boolean(held && held.projectId === "gaycruisebingo");',
         "exports.daily = grouped ? { submitBugReport: endpoint() } : endpoint();",
       ].join("\n"),
@@ -1511,7 +1511,7 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
       [
         'const admin = require("firebase-admin");',
         "admin.initializeApp();",
-        'const grouped = admin.app().options_.projectId === "not-this-project";',
+        'const grouped = admin.getApp().options_.projectId === "not-this-project";',
         "exports.daily = grouped ? { submitBugReport: endpoint() } : endpoint();",
       ].join("\n"),
       async (configPath) => {
@@ -1539,9 +1539,9 @@ describe("the artifact decides even when no hook rebuilds it", RUNS_A_BUILD, () 
       [
         'const admin = require("firebase-admin");',
         "admin.initializeApp();",
-        "const snapshot = admin.app().options;",
+        "const snapshot = admin.getApp().options;",
         "snapshot.marker = true;",
-        "exports.daily = admin.app().options.marker",
+        "exports.daily = admin.getApp().options.marker",
         "  ? endpoint()",
         "  : { submitBugReport: endpoint() };",
       ].join("\n"),
