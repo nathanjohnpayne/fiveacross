@@ -27,7 +27,7 @@
  *    project's `adminSdkConfig` and comes from an authenticated lookup;
  *  - the firebase-admin APP OPTIONS, which are the same values read back
  *    through the SDK: `initializeApp()` loads `FIREBASE_CONFIG` itself, so a
- *    codebase reading `admin.app().options.storageBucket` never touches
+ *    codebase reading `getApp().options.storageBucket` never touches
  *    `process.env` at all. The watch there wraps what the SDK's OWN accessor
  *    answers, once per read, so it observes those reads without changing what
  *    a second read returns — see `watchApp`.
@@ -364,8 +364,9 @@ const ADMIN_ENTRYPOINTS = new Set(["firebase-admin", "firebase-admin/app"]);
  *
  * `initializeApp`, `getApp` and `getApps` are the modular API; `app` and `apps`
  * are the same two under the older namespaced export, which is what
- * `admin.app().options` reaches. Wrapping both spellings costs nothing and
- * missing either would leave the options unwatched.
+ * `admin.app().options` reached. firebase-admin 14 dropped that namespace (its
+ * root export now carries the modular names), but wrapping both spellings costs
+ * nothing and keeps a codebase on an older SDK watched too.
  */
 const APP_FACTORIES = ["initializeApp", "getApp", "getApps", "app", "apps"];
 
@@ -486,12 +487,13 @@ if (watching) {
 
   // THE ALIASES. `get options()` is not the only way to the values it answers
   // with, and an alias this module leaves alone is a way around every watch
-  // above it: an artifact reading `admin.app().options_.locationId` matched the
+  // above it: an artifact reading `getApp().options_.locationId` matched the
   // real project while both synthetic probes reported the direct endpoint, and
   // nothing recorded a consultation (Codex P1, round 27 on #1107).
   //
-  // The pinned firebase-admin (12.7.0, `lib/app/firebase-app.js`) exposes the
-  // same configuration at three reachable names, and the three helpers below
+  // The pinned firebase-admin (14.5; `lib/app/firebase-app.js` is unchanged
+  // here since 12.7.0) exposes the same configuration at three reachable
+  // names, and the three helpers below
   // guard them so that a read through any one is the same consultation as a
   // read of `app.options`:
   //
@@ -712,7 +714,7 @@ if (watching) {
    * class as the `process.env` Proxy installed above and answered the same way:
    * a program written to detect the rehearsal can already do so from
    * `$PROJECT_DIR` alone, while withholding this leaves the whole
-   * `admin.app().options` path unwatched.
+   * `getApp().options` path unwatched.
    *
    * An ESM artifact that imports `firebase-admin` reaches the CommonJS module
    * through this loader too. One that imports an ESM build of it would not, and

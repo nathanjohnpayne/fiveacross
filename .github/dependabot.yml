@@ -56,8 +56,8 @@ updates:
     # @vitejs/plugin-react 6, vite-plugin-pwa 2) and jsdom 31 have since been
     # adopted on purpose, so their majors are no longer held: the toolchain's
     # move together through the vite-toolchain group above, and jsdom's open as
-    # their own PR. firebase-admin 14 crosses a major boundary that is still
-    # held here. TypeScript 7 is held at the root for a different reason: the
+    # their own PR. firebase-admin 14 has also been adopted on purpose, so its
+    # majors are no longer held either. TypeScript 7 is held at the root: the
     # 7.0 package ships no JavaScript compiler API, and the root uses it
     # (scripts/e2e-functions-env.mjs and three specs call ts.createSourceFile),
     # so the root cannot take TypeScript 7 until it ships one. Dependabot still
@@ -65,8 +65,6 @@ updates:
     # when we are ready to adopt that major on purpose.
     ignore:
       - dependency-name: "typescript"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "firebase-admin"
         update-types: ["version-update:semver-major"]
 
   # The worker/ manifest was outside every update lane: `directory: "/"` above
