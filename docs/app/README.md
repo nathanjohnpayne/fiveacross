@@ -37,7 +37,7 @@ Map the JSON fields into the matching target file: `apiKey`→`VITE_FIREBASE_API
 
 ## 3. Install & run
 
-**Node 24.12+.** The `@firebase/*` component packages firebase 13 resolves declare `engines.node: >=24.12.0`, above react-router 8's `>=22.22.0`, and the root `package.json` mirrors that floor; `.nvmrc` pins the major so `nvm use` selects it. npm treats an engine mismatch as a warning rather than an error, so an older Node will install and run—on an unsupported engine—instead of stopping. The same floor applies to the deploy commands in §5, which build the bundle locally.
+**Node 24.15+.** The `@firebase/*` component packages firebase 13 resolves declare `engines.node: >=24.12.0`, above react-router 8's `>=22.22.0`, and jsdom 31 (the unit suite's DOM) raises the Node 24 floor to `^24.15.0`; the root `package.json` declares that higher floor, and `.nvmrc` pins the major so `nvm use` selects it. npm treats an engine mismatch as a warning rather than an error, so an older Node will install and run—on an unsupported engine—instead of stopping. The same floor applies to the deploy commands in §5, which build the bundle locally.
 
 ```bash
 npm install
@@ -183,4 +183,4 @@ Phase 1 is scaffolded in this same repo and wired into the client: proof system 
 
 ## Verified
 
-Phase 0 snapshot: `npm run typecheck` clean · `npm test` 10/10 passing · `npm run build` produces a PWA-enabled `dist/`. (Built then against firebase 10.14.1, Vite 5, React 18, TypeScript 5.6; `package.json` now pins firebase 12, Vite 6, and React 19.)
+Phase 0 snapshot: `npm run typecheck` clean · `npm test` 10/10 passing · `npm run build` produces a PWA-enabled `dist/`. (Built then against firebase 10.14.1, Vite 5, React 18, TypeScript 5.6; `package.json` now pins firebase 13, Vite 8, and React 19.)
