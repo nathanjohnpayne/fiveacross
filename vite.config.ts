@@ -166,7 +166,12 @@ function precacheExclusionGuard(): Plugin {
 
 /** Inject before hashing, but upload only after all nested builds and Workbox. */
 function mapInjection(options: NonNullable<ReturnType<typeof posthogSourceMapOptions>>, visible = false): Plugin {
-  const plugin = posthog({ ...options, sourcemaps: { ...options.sourcemaps, deleteAfterUpload: !visible } });
+  // The plugin is typed against Rollup's `Plugin`; Vite 8 bundles with Rolldown,
+  // whose plugin-context types differ even though the hooks this plugin uses
+  // (buildStart, config, outputOptions, renderChunk, augmentChunkHash,
+  // generateBundle) run unchanged. scripts/posthog-build.test.mjs drives the
+  // real build through this pipeline, so the cast is checked at runtime.
+  const plugin = posthog({ ...options, sourcemaps: { ...options.sourcemaps, deleteAfterUpload: !visible } }) as unknown as Plugin;
   // Worker bundles are generated in memory, and Workbox subsequently rewrites
   // the SW and its map. A single final upload must see those final bytes.
   delete plugin.writeBundle;
@@ -300,6 +305,13 @@ export default defineConfig(({ command, mode }) => {
       __BUILD_STAMP__: JSON.stringify(new Date().toISOString()),
     },
     worker: { plugins: () => maps ? [mapInjection(maps)] : [] },
+    // Keep the browser floor this app has always shipped to. Vite 7 moved the
+    // default `build.target` from the 'modules' list below to
+    // 'baseline-widely-available' (Safari 16.4 / Chrome 111 under Vite 8), which
+    // would silently stop transpiling for the iOS 14-16.3 phones players bring
+    // aboard. Raising the floor is a product decision, not a toolchain side
+    // effect, so it stays pinned to Vite 6's default until someone makes it.
+    build: { target: ['es2020', 'edge88', 'firefox78', 'chrome87', 'safari14'] },
     plugins: [
       react(),
       ...(maps ? [mapInjection(maps)] : []),
