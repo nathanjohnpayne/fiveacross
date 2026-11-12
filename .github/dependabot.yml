@@ -44,8 +44,9 @@ updates:
     # Hold breaking major upgrades that require a deliberate, manual migration
     # rather than an automated bump. These were bundled into the dev-dependencies
     # group PR (#255) and broke CI: TypeScript 7 is the preview native compiler,
-    # plugin-react 6 removes Babel, and Vite 8 / Vitest 4 / jsdom 29 /
-    # firebase-admin 14 each cross a major boundary. Dependabot still proposes
+    # plugin-react 6 removes Babel, and Vite 8 / Vitest 4 / jsdom 29 each cross
+    # a major boundary. firebase-admin 14 has since been adopted on purpose, so
+    # its majors are no longer held. Dependabot still proposes
     # minor and patch updates for these packages; remove an entry here when we
     # are ready to adopt that major on purpose.
     ignore:
@@ -58,8 +59,6 @@ updates:
       - dependency-name: "@vitejs/plugin-react"
         update-types: ["version-update:semver-major"]
       - dependency-name: "jsdom"
-        update-types: ["version-update:semver-major"]
-      - dependency-name: "firebase-admin"
         update-types: ["version-update:semver-major"]
       - dependency-name: "vite-plugin-pwa"
         update-types: ["version-update:semver-major"]
